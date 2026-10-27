@@ -1,0 +1,147 @@
+/**
+ * Install the Codex-made props of world-kit as the `codex-craft/` collection, the town-craft way:
+ * designs (authoring/codex-craft/designs/*.py) -> Blender build (source/*.glb, geometry.json) -> packed onto the SHARED
+ * town-craft atlas page (one texture with the 48 town-craft props: the renderer uploads it once) -> prefabs + catalogue
+ * rows + dressing sidecar, registered in authoring/prop-catalogs.json -> review cards from the runtime glTFs.
+ * The town-craft models re-emitted by the pack must come out byte-identical (checked; a changed page is an error).
+ */
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { applyOps, createScene, ComponentRegistry, registerCoreComponents, dressingSchema, prefabFromSubtree, type Op } from "@hitreg/core";
+import { BLENDER, blenderBuild, type GeometryRecord } from "./check.mts";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ENGINE = path.resolve(HERE, "../../../..");
+export const COLLECTION = "codex-craft";
+const sha = (p: string) => crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
+const readJson = (p: string) => JSON.parse(fs.readFileSync(p, "utf8").replace(/^﻿/, ""));
+const write = (p: string, x: unknown) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, JSON.stringify(x, null, 2) + "\n"); };
+
+/** What filled each prop: the request it answers (authoring/codex-craft/requests.json, written when a design lands). */
+export interface Origin { request: string; project: string; for: string; culture: string; scale: string; tokens?: number | null; seconds?: number; attempts?: number; at?: string }
+export const dir = (worldKit: string) => path.join(worldKit, "authoring", COLLECTION);
+export function readOrigins(worldKit: string): Record<string, Origin> {
+  const f = path.join(dir(worldKit), "requests.json");
+  return fs.existsSync(f) ? readJson(f).props ?? {} : {};
+}
+export function writeOrigin(worldKit: string, name: string, o: Origin): void {
+  const all = readOrigins(worldKit); all[name] = o;
+  write(path.join(dir(worldKit), "requests.json"), { version: 1, about: "Codex-made props: the prop request each answers (props codex).", props: all });
+}
+
+/** The shared calm-pool water a Codex prop's `water` disc draws with (world-kit, written once; the shader is the engine's `water`). */
+export const POOL_WATER = `${COLLECTION}/pool-water`;
+function ensurePoolWater(worldKit: string): string {
+  const f = path.join(worldKit, "assets/materials", POOL_WATER + ".json");
+  if (!fs.existsSync(f)) write(f, { shader: "water", color: "#3d4a40", transparent: true, opacity: 0.9, water: { depthFadeDistance: 0.5, foamWidth: 0.06, waveAmplitude: 0.003, waveFrequency: 0.6, edgeFadeStart: 200, edgeFadeEnd: 300 } });
+  return f;
+}
+const USE: Record<string, string> = { storage: "storage", tool: "work", trade: "work", light: "light", furniture: "table", bedding: "bed" };
+
+/** The dressing declaration of a built design. */
+export function declaration(g: GeometryRecord, o: Origin) {
+  return dressingSchema.parse({
+    mount: g.mount, origin: g.mount === "wall" ? "back" : g.mount === "ceiling" ? "top" : "foot", contact: g.mount === "wall" ? "wall" : g.mount === "ceiling" ? "hang" : "base", against: g.against ?? "free",
+    size: g.size, scale: o.scale, cultures: [...new Set(g.cultures?.length ? g.cultures : [o.culture])], solid: g.solid, setting: g.setting,
+    category: g.category, use: g.use ?? [USE[g.category!] ?? "decor"], rooms: g.rooms ?? [], wealth: ["destitute", "poor", "comfortable"],
+    themes: [o.culture], fire: false, ...(g.centrepiece ? { centrepiece: true } : {}),
+  });
+}
+
+export interface InstallResult { built: GeometryRecord[]; failed: GeometryRecord[]; cards: string[]; sheet?: string; packLog: string }
+
+export function install(worldKit: string, opts: { cards?: string[]; sheet?: string; sheetLabels?: string[]; log?: (s: string) => void } = {}): InstallResult {
+  const log = opts.log ?? (() => {});
+  const D = dir(worldKit), designs = path.join(D, "designs"), source = path.join(D, "source");
+  const files = fs.readdirSync(designs).filter((f) => f.endsWith(".py")).sort().map((f) => path.join(designs, f));
+  if (!files.length) throw Error(`no designs in ${designs}`);
+  // a removed design must not linger as a source the pack re-reads
+  if (fs.existsSync(source)) for (const f of fs.readdirSync(source)) if (f.endsWith(".glb") && !files.some((d) => path.basename(d, ".py") === path.basename(f, ".glb"))) fs.rmSync(path.join(source, f));
+  log(`build ${files.length} design(s) in Blender`);
+  const records = blenderBuild(worldKit, files, source, path.join(D, "geometry.json"));
+  const failed = records.filter((r) => r.error), built = records.filter((r) => !r.error);
+  for (const f of failed) { log(`  BUILD FAILED ${f.name}: ${f.error}`); fs.rmSync(path.join(source, f.name + ".glb"), { force: true }); }
+
+  // pack onto the shared town-craft page; the town-craft models it re-emits must not change
+  const tcDir = path.join(worldKit, "assets/models/town-craft");
+  const before = new Map(fs.readdirSync(tcDir).map((f) => [f, sha(path.join(tcDir, f))]));
+  const pack = spawnSync(process.execPath, [path.join(ENGINE, "tools/wfc-3d/kit.mjs"), "pack", source, "--project", path.basename(worldKit), "--atlas", "town-craft", "--out", `models/${COLLECTION}`], { encoding: "utf8", cwd: path.resolve(worldKit, "../.."), maxBuffer: 1 << 26 });
+  const packLog = `${pack.stdout ?? ""}${pack.stderr ?? ""}`;
+  if (pack.status !== 0) throw Error(`kit.mjs pack failed:\n${packLog.slice(-2000)}`);
+  const changed = [...before].filter(([f, h]) => sha(path.join(tcDir, f)) !== h).map(([f]) => f);
+  if (changed.length) throw Error(`the pack changed ${changed.length} town-craft model(s) (${changed.slice(0, 4).join(", ")}): the shared page moved; restore them from git and investigate`);
+  const atlas = readJson(path.join(worldKit, "assets/textures/atlas/town-craft.atlas.json"));
+  if (atlas.pages !== 1) throw Error(`town-craft atlas now has ${atlas.pages} pages; a Codex prop must sample the existing role sheet only`);
+
+  // prefabs, catalogue, sidecar
+  const reg = new ComponentRegistry(); registerCoreComponents(reg);
+  const anyWater = built.some((g) => g.water);
+  if (anyWater) ensurePoolWater(worldKit);
+  const origins = readOrigins(worldKit), rows: any[] = [], assets: any[] = [], sidecar: any = { version: 1, props: {} };
+  for (const g of built) {
+    const o = origins[g.name]; if (!o) throw Error(`${g.name}: no request origin in ${COLLECTION}/requests.json`);
+    const id = `${COLLECTION}/${g.name}`, model = `${id}.gltf`, d = declaration(g, o);
+    const mesh: any = { transform: {}, mesh: { source: { kind: "asset", assetId: model, textureFilter: "nearest" }, castShadow: true, receiveShadow: true, static: true, renderMode: "instanced", lod: false } };
+    if (g.solid) mesh.collider = { shape: "trimesh", friction: 0.7 };
+    const ops: Op[] = [
+      { op: "add-entity", id: "root", entity: { name: g.name, parent: null, tags: [COLLECTION], components: { transform: {}, dressing: d } } },
+      { op: "add-entity", id: "art", entity: { name: `${g.name} mesh`, parent: "root", tags: [], components: mesh } },
+    ];
+    if (g.water) {
+      // a flat engine water disc (the authored-water way: a `water` component beside the mesh that draws the surface)
+      const w = g.water, dia = +(w.radius * 2).toFixed(3);
+      ops.push({ op: "add-entity", id: "water", entity: { name: `${g.name} water`, parent: "root", tags: ["water"], components: {
+        transform: { position: [w.centre[0]!, w.centre[1]! - 0.01, w.centre[2]!] },
+        mesh: { source: { kind: "primitive", shape: "cylinder", size: [dia, 0.02, dia], segments: [12, 1] }, material: POOL_WATER, castShadow: false, receiveShadow: false },
+        water: { depth: w.depth, swim: false },
+      } } });
+    }
+    const scene = applyOps(createScene(g.name), ops, reg), file = path.join(worldKit, "assets/prefabs", `${id}.json`);
+    write(file, prefabFromSubtree(scene.doc, "root", id, g.name).prefab);
+    sidecar.props[id] = d;
+    const runtime = path.join(worldKit, "assets/models", model);
+    rows.push({
+      id, status: "provisional", model: `assets/models/${model}`, source: `authoring/${COLLECTION}/designs/${g.name}.py`, sourceSha256: sha(path.join(designs, g.name + ".py")),
+      recipe: "apps/playground/tools/prop-codex/build.py (town-craft helpers + role sheet)", sourceModel: `authoring/${COLLECTION}/source/${g.name}.glb`, sourceModelSha256: sha(path.join(source, g.name + ".glb")),
+      request: o.request, requestProject: o.project, for: o.for, design: g.design, size: g.size,
+      frame: `glTF Y-up metres; ${g.mount === "wall" ? "wall-contact rear, vertically centred" : "bottom-centre foot"} root; front +Z`,
+      parts: g.parts, textureRoles: [...new Set((g.parts ?? []).map((p) => p.role))].sort(), triangles: g.triangles, materials: 1, atlas: "town-craft", filter: "nearest",
+      texelsPerMetre: g.texel, alpha: "opaque; openings are actual geometry", instancing: "one body mesh/material, static instancing", lod: "none",
+      collision: g.solid ? "exact static trimesh from published model" : "none (soft)", ...(g.water ? { water: `engine water disc r ${g.water.radius} m, depth ${g.water.depth} m (${POOL_WATER})` } : {}), behavior: "Static decoration; no gameplay.", effects: [],
+      review: `authoring/${COLLECTION}/reports/prop-${g.name}.png`, madeBy: "Codex design via props codex (tools/prop-codex)", sha256: sha(file),
+    });
+    assets.push({ id: model, path: `assets/models/${model}`, sha256: sha(runtime), source: `authoring/${COLLECTION}/source/${g.name}.glb` });
+  }
+  if (anyWater) assets.push({ id: POOL_WATER, path: `assets/materials/${POOL_WATER}.json`, sha256: sha(path.join(worldKit, "assets/materials", POOL_WATER + ".json")), source: "tools/prop-codex/install.mts (engine water shader, calm pool)" });
+  write(path.join(D, "catalog.json"), {
+    version: 1, about: "Props designed by Codex from open prop requests (props codex), built on the town-craft helpers and packed on the town-craft atlas page.",
+    source: { builder: "apps/playground/tools/prop-codex/build.py", helpers: "authoring/town-craft/build.py (helper section)", meshHelper: "authoring/crockin-river-culture/mesh.py", roleSheet: "assets/textures/town-craft/materials.png", restrictions: "Generated geometry only; town-craft role art (see town-craft/art-provenance.json)." },
+    props: rows, assets,
+  });
+  write(path.join(D, "dressing.json"), sidecar);
+  const indexFile = path.join(worldKit, "authoring/prop-catalogs.json"), index = readJson(indexFile);
+  for (const row of [
+    { path: `authoring/${COLLECTION}/catalog.json`, entries: "props", prefabIds: true, dressing: `authoring/${COLLECTION}/dressing.json`, shared: true },
+    { path: `authoring/${COLLECTION}/catalog.json`, entries: "assets", pathFields: ["path"], shared: true },
+  ]) if (!index.catalogs.some((x: any) => x.path === row.path && x.entries === row.entries)) index.catalogs.push(row);
+  write(indexFile, index);
+
+  // review cards (+ the batch sheet) from the runtime models
+  const cardNames = (opts.cards ?? built.map((g) => g.name)).filter((n) => built.some((g) => g.name === n));
+  const cards: string[] = [];
+  if (cardNames.length) {
+    const models = cardNames.map((n) => path.join(worldKit, "assets/models", COLLECTION, n + ".gltf"));
+    const args = ["--background", "--factory-startup", "--python", path.join(HERE, "render.py"), "--", "--models", models.join(","), "--cards", path.join(D, "reports")];
+    const waters = built.filter((g) => g.water && cardNames.includes(g.name)).map((g) => `${g.name}:${[...g.water!.centre, g.water!.radius].join(",")}`);
+    if (waters.length) args.push("--water", waters.join(";"));
+    if (opts.sheet) args.push("--sheet", opts.sheet, "--labels", (opts.sheetLabels ?? cardNames).join(","));
+    log(`render ${cardNames.length} card(s)${opts.sheet ? " + sheet" : ""}`);
+    const r = spawnSync(BLENDER, args, { encoding: "utf8", maxBuffer: 1 << 26 });
+    for (const n of cardNames) { const c = path.join(D, "reports", `prop-${n}.png`); if (fs.existsSync(c)) cards.push(c); }
+    if (cards.length !== cardNames.length) log(`  render: ${cards.length}/${cardNames.length} cards (exit ${r.status}) ${(r.stderr ?? "").slice(-600)}`);
+  }
+  return { built, failed, cards, sheet: opts.sheet && fs.existsSync(opts.sheet) ? opts.sheet : undefined, packLog };
+}

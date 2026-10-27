@@ -130,6 +130,12 @@
     "masonryNote": "a built room is MASONRY (detailMinMasonry) when its wallRole is one of masonryRoles or unset (a DC dungeon's default wall is stone); plastered, panelled or papered rooms take detailMin",
     "lightClusterM": 1.5,
     "sourceRadiusM": 1.5,
+    "environmentLightTags": [
+      "sky-source",
+      "water-source"
+    ],
+    "environmentLightsMax": 12,
+    "environmentLightNote": "a point/spot light whose source is the place itself, not a prop (daylight down an oculus or skylight, light off water, a glowing pool) carries one of environmentLightTags and needs no fixture; at most environmentLightsMax per dungeon so the tag is never a blanket exemption. Its visible source should be architecture or a catalogued environment effect (fixtures/light-shaft).",
     "structuralKinds": [
       "wall",
       "wallL",
@@ -190,12 +196,16 @@
       "^\\d+$"
     ],
     "bonePattern": "bone|skull|ribcage|skeleton",
+    "skullCompanionPattern": "(^|/)skull(-surface)?$",
+    "skullCompanionM": 1.5,
+    "skullCompanionNote": "owner rule 2026-10-21: every bone pile has skulls on or beside it; a skull within skullCompanionM of a pile is that pile's dressing and does not count as another pile against bonesMax",
     "mobPattern": "^(mobs|characters|npcs)/",
     "allowedLoosePrefabs": [
       "^characters/player$",
       "^mobs/",
       "^npcs/",
-      "portal"
+      "portal",
+      "^fixtures/light-shaft$"
     ],
     "ruling": "Coordinator ruling 2026-10-05 (owner delegated: \"you need to ultimately decide\"): per-room floors are set near the MEDIAN room of the owner-approved references (Barrow detail 17 / props 3; Hall detail 23 / props 6), raised where the owner explicitly asked for more (props, decals, visible light sources). Decals stay required although neither reference has any (owner: \"you also need decals and more props\"). Tombs/ossuaries may exceed bonesMax through a reasoned authoring/quality-exceptions.json entry (dungeons.md: more bones in a tomb)."
   },
@@ -450,5 +460,18 @@
     "itemDirs": [
       "../foundation/assets/items"
     ]
+  },
+  "zfight": {
+    "about": "one mesh owns each plane (apps/playground/tools/zfight.mts, packages/core/src/zfight.ts): two draws (different mesh, or one mesh's different materials) facing the same way within maxAngleDeg, closer than maxGap m, overlapping in-plane fight at close range. Clusters from minClusterArea m2 are reported; one at failClusterArea m2 or more fails the gate. decals: of a grid x grid ray sheet from each decal box's front plane, at most maxBlocked share stopped by geometry more than layerTol m in front of the painted surface, at most maxEmpty share with no facing surface in the box.",
+    "maxGap": 0.02,
+    "maxAngleDeg": 3,
+    "minClusterArea": 0.01,
+    "failClusterArea": 0.05,
+    "decals": {
+      "grid": 12,
+      "layerTol": 0.12,
+      "maxBlocked": 0.1,
+      "maxEmpty": 0.25
+    }
   }
 }

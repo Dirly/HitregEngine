@@ -50,12 +50,14 @@ import {
   type WorldRecipe,
 } from "@hitreg/core";
 import { readJson, sceneGeometry } from "./_prop-geometry.mts";
+import { uphillRibbonRows } from "./_moving-water.mts";
 import { encodePng } from "./_png.mjs";
 import { findAsset, PROJECTS } from "./_closure.mjs";
 import { fieldOfScene } from "./float.mts";
+import { applyOpsToSceneFile } from "./_scene-write.mts";
 
 export interface WaterEdgeRow {
-  kind: "edge" | "curtain";
+  kind: "edge" | "curtain" | "uphill" | "foam";
   id: string;
   what: string;
   x: number;
@@ -129,6 +131,8 @@ export function sheetTriangles(source: any, m: number[]): number[] {
  * face the air, so this holds for closed shells and open floor sheets alike. A dungeon (no world field) is rock
  * wherever no shell reaches (`emptyIsSolid`).
  */
+/** Metres within which two opposite-facing surfaces of a column are one internal seam (facingColumns). */
+export const SEAM_EPS = 2e-3;
 export function facingColumns(soup: readonly number[], emptyIsSolid = false, cell = 1): (x: number, y: number, z: number) => boolean {
   const buckets = new Map<string, number[]>();
   const n = Math.floor(soup.length / 9);
@@ -145,8 +149,7 @@ export function facingColumns(soup: readonly number[], emptyIsSolid = false, cel
       }
   }
   return (x, y, z) => {
-    let above: [number, number] | null = null; // [height, normal y]
-    let below: [number, number] | null = null;
+    const hits: [number, number][] = []; // [height, normal y] of every face over/under the column
     for (const t of buckets.get(`${Math.floor(x / cell)},${Math.floor(z / cell)}`) ?? []) {
       const o = t * 9;
       const ax = soup[o]!, az = soup[o + 2]!, bx = soup[o + 3]!, bz = soup[o + 5]!, cx = soup[o + 6]!, cz = soup[o + 8]!;
@@ -159,9 +162,15 @@ export function facingColumns(soup: readonly number[], emptyIsSolid = false, cel
       const h = u * soup[o + 1]! + v * soup[o + 4]! + w * soup[o + 7]!;
       // the face's normal y: (b - a) x (c - a), y component
       const ny = (soup[o + 5]! - az) * (soup[o + 6]! - ax) - (soup[o + 3]! - ax) * (soup[o + 8]! - az);
-      if (h >= y) { if (!above || h < above[0]) above = [h, ny]; }
-      else if (!below || h > below[0]) below = [h, ny];
+      hits.push([h, ny]);
     }
+    // an INTERNAL seam (stacked kit parts: a wall face's top and its coping's underside at one height, facing apart)
+    // is no boundary: coincident opposite-facing surfaces cancel, so the answer never hangs on triangle order
+    // (RETTING 2026-10-23: a pit kerb's columns read 'open' wherever the coping's underside came first)
+    hits.sort((p, q) => p[0] - q[0]);
+    const real: [number, number][] = [];
+    for (const hit of hits) { const last = real[real.length - 1]; if (last && Math.abs(last[0] - hit[0]) < SEAM_EPS && Math.sign(last[1]) === -Math.sign(hit[1])) real.pop(); else real.push(hit); }
+    const above = real.find((p) => p[0] >= y) ?? null, below = [...real].reverse().find((p) => p[0] < y) ?? null;
     if (above) return above[1] > 0;
     if (below) return below[1] < 0;
     // a column with no surface at all: outside every shell — rock in a dungeon (its shells bound the void), air in a world
@@ -178,10 +187,20 @@ function withInside(probe: SolidProbe, inside: (x: number, y: number, z: number)
   };
 }
 
+/** The scene plus the world's baked landmarks (features.landmarks) as prefab instances: the solid a sheet may be buried in. */
+export function withLandmarks(doc: SceneDoc, recipe: unknown): SceneDoc {
+  const marks = ((recipe as any)?.features?.landmarks ?? []) as { id: string; prefab: string; position: number[]; rotation?: number[] }[];
+  if (!marks.length) return doc;
+  return { ...doc, entities: { ...(doc.entities as Record<string, unknown>), ...Object.fromEntries(marks.map((m) => [`landmark:${m.id}`, { name: m.id, parent: null, tags: ["landmark"], components: { transform: { position: m.position, rotation: m.rotation ?? [0, 0, 0, 1], scale: [1, 1, 1] }, prefab: { prefabId: m.prefab, props: {}, overrides: [] } } }])) } } as SceneDoc;
+}
+
 /** The solid of a scene: every non-water object's triangles, plus the world's field when there is one. */
 export function sceneSolid(assets: string, doc: SceneDoc, field: WorldField | null): { probe: SolidProbe; bodies: SceneBody[] } {
-  const ents = doc.entities as Record<string, any>;
-  const geo = sceneGeometry(assets, doc as never);
+  // the world's baked LANDMARKS (built walls: a basin's stone kerb, a quay, a bridge) are solid too: a sheet buried in
+  // a kerb wall is finished, not open (RETTING 2026-10-23: every pit's edge in its kerb read 'water edge in open air')
+  const withMarks = withLandmarks(doc, field?.recipe);
+  const ents = withMarks.entities as Record<string, any>;
+  const geo = sceneGeometry(assets, withMarks as never);
   const soup: number[] = [];
   const bodies: SceneBody[] = [];
   for (const g of geo) {
@@ -241,6 +260,8 @@ export function sceneWaterEdges(assets: string, doc: SceneDoc, field: WorldField
       rows.push({ kind: "edge", id: b.id, what: b.name, x: r2(run.mid[0]), y: r2(b.surfaceY), z: r2(run.mid[1]), issue: `water edge in open air (${run.why}), ${run.length.toFixed(1)} m`, length: r2(run.length), why: run.why });
     }
   }
+  // moving water runs downhill: a channel/fall ribbon whose points climb shows water flowing up the rock (_moving-water.mts)
+  for (const u of uphillRibbonRows(doc as never)) rows.push({ kind: "uphill", id: u.id, what: u.what, x: r2(u.at[0]!), y: r2(u.at[1]!), z: r2(u.at[2]!), issue: `moving water climbs ${u.rise} m along its flow (entity-local point): thread the builder's points through downhillRibbon` });
   return { rows, bodies, samples };
 }
 
@@ -661,8 +682,7 @@ export function main(argv: string[]): void {
       const { ops, notes } = waterFixOps(t.assets, t.project, t.doc, t.field, { grow: Number(opt(argv, "grow") ?? 8), finish: !argv.includes("--no-finish") });
       for (const n of notes) console.log(`  ${n}`);
       if (!ops.length) { console.log("water-edges --fix: nothing to do (idempotent: already applied)"); return; }
-      const res = applyOps(t.doc, ops as never, registry());
-      fs.writeFileSync(t.file, JSON.stringify(res.doc, null, 2));
+      const res = applyOpsToSceneFile(t.file, ops, (d, o) => applyOps(d, o as never, registry()), { label: "water-edges --fix", trailer: "" }); // fresh read under the scene lock
       const inv = opt(argv, "inverse") ?? path.join(PROJECTS, t.project, "authoring", "sweeps", "water-fix.inverse.json");
       fs.mkdirSync(path.dirname(inv), { recursive: true });
       fs.writeFileSync(inv, JSON.stringify(res.inverse, null, 1));
@@ -680,8 +700,7 @@ export function main(argv: string[]): void {
     const t = sceneTarget(argv, fail);
     const inv = opt(argv, "inverse");
     if (!inv || !fs.existsSync(inv)) fail("undo needs --inverse <file>");
-    const { doc: next } = applyOps(t.doc, readJson(inv!) as never, registry());
-    fs.writeFileSync(t.file, JSON.stringify(next, null, 2));
+    applyOpsToSceneFile(t.file, readJson(inv!) as any[], (d, o) => applyOps(d, o as never, registry()), { label: "water-edges undo", trailer: "" });
     console.log(`water-edges undo: applied ${inv}`);
     return;
   }

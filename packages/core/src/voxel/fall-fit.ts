@@ -188,6 +188,19 @@ export function profileFace(col: { from: number; step: number; g: Float64Array }
   return { face, landed: col.g[i1]! >= y };
 }
 
+/**
+ * Does a curtain column `across` metres off the lip line (lx, lz) drop to the pool? True when the ground within `out`
+ * metres past the line comes down to the fall's foot (bottom + 1.5, the curtain gate's landing tolerance). The curtain
+ * only widens past its solved width over such columns: where a river's upper water runs on along a bank that has no
+ * full drop under it (another river's channel, a ledge), a column there would land on rock high above the pool.
+ */
+export function columnReachesPool(field: FallFitField, fall: Pick<RiverFall, "dirX" | "dirZ" | "bottom">, lx: number, lz: number, across: number, out = 8): boolean {
+  const col = fallColumn(field, fall, lx, lz, across, 0, out);
+  let low = Infinity;
+  for (const g of col.g) low = Math.min(low, g);
+  return low <= fall.bottom + 1.5;
+}
+
 /** The ground height at `s` metres past the line in a column profile (linear between samples). */
 export function groundAtProfile(col: { from: number; step: number; g: Float64Array }, s: number): number {
   const t = Math.max(0, Math.min(col.g.length - 1.000001, (s - col.from) / col.step));

@@ -21,11 +21,21 @@
  *                               do not own: the page blocks every dev-server write, but it still loads the scene.
  *     [--distance 4] [--gap 2]  camera-to-characters metres, metres between the two characters
  *     [--keep-mobs] [--headed] [--pick-only]   (--pick-only: write the auto spots and stop)
+ *     [--spot-timeout 90]       seconds one spot may take; a stalled spot prints `TIMEOUT spot <name>` and is skipped
  *     [--ab]                    per spot, time the cheap world extras OFF vs ON in the same session (vsync off)
+ *     [--diag]                  print each phase as it starts, dev-server error lines and the browser processes every 2 s
+ *     [--scope [250]]           scene-scoped load (a place shot on a big world): the dev app opens with ?at=<first spot>
+ *                               &streamRadius=<m> (src/scene-scope.ts: every streaming ring clamped to that many metres)
+ *                               and the served scene's player spawn moved to the first spot, so boot loads only the
+ *                               place's chunks (the whole skelmorrow world timed out at 240 s headless)
+ *     [--watchdog-min 10]       exit 3 (browser + own vite killed) when no frame lands within this many minutes of the start
+ *                               or of a spot's start (a hung browser once held a heavy slot 61 min with 0 frames)
  * spots.json: [{ "name": "zone-3", "x": 1200, "z": -1500, "facing": 180 }]  (optional "pitch" radians and "distance" m — past the rig's zoom cap = an aerial, the cap is widened for the run;
  *   raise the camera on its orbit for an over-the-roofs view)  — x/z = midpoint between the two
  *   characters; `facing` = compass degrees the CAMERA looks (0 = north/-Z, 90 = east/+X; default 180 = south, so at
  *   noon the sun, whose arc leans north, lights the characters' faces). Optional "y" for interiors (floor height).
+ *   Optional "camera" [x,y,z] + "target" [x,y,z]: a FIXED camera (a contract shot list): the body still stands at x/z
+ *   (streaming centre), the rig is held off and the camera put at "camera" looking at "target" for the spot.
  *
  * Out: <out>/<scene>[-<label>]-sheet.png (rows = spots, columns = times; each tile labelled with the clock and the
  * luma read off it), every frame as <scene>[-<label>]/<spot>-<hh>.png, and <scene>[-<label>].json with per frame:
@@ -42,10 +52,14 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createWorldField, worldRecipeSchema, regionAt, type WorldField, type WorldRecipe } from "@hitreg/core";
+// @ts-expect-error plain JS module
+import { loadPlaywright as loadPlaywrightModule } from "./_playwright.mjs";
+import { READ_ONLY_POSTS } from "./_readonly-posts.mjs";
+import { frameWatchdog } from "./_frame-watchdog.mts";
+import { SHOT_SPOT_TIMEOUT_S, withSpotTimeout } from "./_run-capped.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -86,7 +100,7 @@ const W = 1280, H = 720;
 const stem = `${SCENE}${LABEL ? `-${LABEL}` : ""}`;
 fs.mkdirSync(path.join(OUT, stem), { recursive: true });
 
-type Spot = { name: string; x: number; z: number; facing?: number; y?: number; pitch?: number; distance?: number };
+type Spot = { name: string; x: number; z: number; facing?: number; y?: number; pitch?: number; distance?: number; camera?: [number, number, number]; target?: [number, number, number] };
 type V3 = [number, number, number];
 
 // -- scene + world (read-only) -------------------------------------------------------------------
@@ -186,6 +200,10 @@ function autoSpots(): Spot[] {
 }
 
 let spots: Spot[];
+/** --scope [m]: scene-scoped load radius in metres (null = the whole world as authored). */
+const SCOPE: number | null = (() => { const i = argv.indexOf("--scope"); if (i < 0) return null; const v = Number(argv[i + 1]); return Number.isFinite(v) && v > 0 ? v : 250; })();
+/** The dev-app query for a scene-scoped load (src/scene-scope.ts), or "". */
+const scopeQuery = (): string => (SCOPE !== null && spots[0] ? `&at=${Math.round(spots[0].x)},${Math.round(spots[0].z)}&streamRadius=${SCOPE}` : "");
 const spotsArg = arg("spots");
 if (spotsArg) spots = JSON.parse(fs.readFileSync(spotsArg, "utf8")) as Spot[];
 else {
@@ -195,6 +213,13 @@ else {
   console.log(`auto-picked ${spots.length} spots -> ${f} (pass --spots ${f} on the AFTER run)`);
 }
 if (argv.includes("--pick-only")) { console.log(JSON.stringify(spots)); process.exit(0); }
+// under the heavy-lock wrapper (it exports HEAVY_LOCK): the slot's label carries the spot count, so `heavy status` shows the size of the run
+if (process.env.HEAVY_LOCK) {
+  try {
+    const of = path.join(process.env.HEAVY_LOCK, "owner.json"), o = JSON.parse(fs.readFileSync(of, "utf8"));
+    if (!/\[light-shots /.test(o.label)) { o.label = `${o.label} [light-shots ${spots.length} spot(s)]`; fs.writeFileSync(of, JSON.stringify(o)); }
+  } catch { /* not ours to fix */ }
+}
 const regionOf = (x: number, z: number) => {
   if (!recipe) return null;
   const r = regionAt(recipe.regions ?? [], x, z);
@@ -267,43 +292,118 @@ function mobRemovalOps(): unknown[] {
   return [...pick].filter((id) => !under(id)).map((id) => ({ op: "remove-entity", id }));
 }
 
+/**
+ * The scene file as this run serves it to the page: mobs + spawn areas (and everything under them) taken out and the
+ * reference entities put in, BEFORE the page loads it. SHOTS-FIX 2026-10-21: the old way applied them as one ops
+ * batch after boot; a structural batch is a full scene rebuild, which on skelmorrow (6000 entities, a voxel world)
+ * ran 85 s and took the renderer from 2.2 to 9.3 GB — "Data cannot be cloned, out of memory" — after which the page
+ * answered nothing and the run sat until the watchdog. Served this way the page builds the scene once.
+ */
+function servedSceneText(): string {
+  const raw = JSON.parse(fs.readFileSync(sceneFile!, "utf8")) as { entities: Record<string, Ent> };
+  const E = raw.entities;
+  // --scope: the player spawns at the first spot (served copy only), so play mode streams there and nowhere else
+  if (SCOPE !== null && spots[0]) {
+    const pl = Object.values(E).find((e) => e.tags.includes("player"));
+    const s = spots[0], gy = s.y ?? (field ? field.height(s.x, s.z) : spawnAt[1] - 0.9);
+    if (pl?.components["transform"]) pl.components["transform"] = { ...pl.components["transform"], position: [s.x, gy + 1.5, s.z] };
+  }
+  const roots = new Set((mobRemovalOps() as Array<{ id: string }>).map((o) => o.id));
+  const gone = new Set<string>();
+  for (const id of Object.keys(E)) {
+    for (let p: string | null = id; p; p = E[p]?.parent ?? null) if (roots.has(p)) { gone.add(id); break; }
+  }
+  for (const id of gone) delete E[id];
+  for (const op of refOps([spawnAt[0], spawnAt[1] + 40, spawnAt[2]]) as Array<{ id: string; entity: Ent }>) E[op.id] = op.entity;
+  servedRemoved = roots.size;
+  return JSON.stringify(raw);
+}
+let servedRemoved = 0;
+
 // -- browser ---------------------------------------------------------------------------------------
 async function loadPlaywright(): Promise<any> {
-  const env = process.env["HITREG_PLAYWRIGHT"];
-  if (env) return createRequire(path.join(env, "package.json"))(env);
-  try { return await import("playwright"); } catch { /* fall through */ }
-  for (const dir of [process.cwd(), PG, path.join(PG, "..", "..")]) {
-    try { return createRequire(path.join(dir, "noop.js"))("playwright"); } catch { /* next */ }
-  }
-  console.error("STOP: playwright is not resolvable — `npm i playwright` (PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1) or set HITREG_PLAYWRIGHT=<playwright package dir>");
-  process.exit(2);
+  // the apps/playground devDependency (tools/_playwright.mjs); HITREG_PLAYWRIGHT / PLAYWRIGHT_MODULE still override
+  try { return await loadPlaywrightModule(); } catch (e) { console.error(`STOP: ${(e as Error).message}`); process.exit(2); }
 }
 let vite: ReturnType<typeof spawn> | null = null;
+/** Page errors, crashes and dev-server error lines (client errors land in the dev-server log). */
+const logs: string[] = [];
+/** --diag: print each phase as it starts and sample the browser's processes every 2 s (pid, type, cpu s) to stdout. */
+const DIAG = argv.includes("--diag");
 let base = arg("url").replace(/\/$/, "");
-const stopVite = () => { if (vite?.pid) { try { process.platform === "win32" ? spawn("taskkill", ["/pid", String(vite.pid), "/t", "/f"]) : process.kill(vite.pid); } catch { /* gone */ } } };
+const stopVite = () => { if (vite?.pid) { try { process.platform === "win32" ? spawnSync("taskkill", ["/pid", String(vite.pid), "/t", "/f"]) : process.kill(vite.pid); } catch { /* gone */ } } };
 if (!base) {
   const port = arg("port", "5291");
   vite = spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["vite", "--config", "vite.agent-test.config.ts", "--port", port, "--strictPort"], { cwd: PG, shell: process.platform === "win32", stdio: ["ignore", "pipe", "pipe"] });
   base = `http://localhost:${port}`;
   await new Promise<void>((res, rej) => {
     const t = setTimeout(() => rej(new Error("vite did not start in 60 s")), 60000);
-    const on = (b: Buffer) => { if (/ready in|Local:/.test(b.toString())) { clearTimeout(t); res(); } };
+    const on = (b: Buffer) => {
+      // a port still held (by an earlier run whose vite is not gone yet) must stop the run, not hand it someone else's server
+      if (/already in use/i.test(b.toString())) { clearTimeout(t); rej(new Error(`port ${port} is already in use (pass another --port)`)); return; }
+      if (/ready in|Local:/.test(b.toString())) { clearTimeout(t); res(); }
+    };
+    const errs = (b: Buffer) => { for (const l of b.toString().split("\n")) if (/error|exception|crash/i.test(l)) { logs.push("dev-server: " + l.trim().slice(0, 300)); if (DIAG) console.log("  dev-server: " + l.trim().slice(0, 300)); } };
+    vite!.stdout!.on("data", errs); vite!.stderr!.on("data", errs);
     vite!.stdout!.on("data", on); vite!.stderr!.on("data", on);
     vite!.on("exit", (c) => rej(new Error(`vite exited ${c} (port ${port} taken? pass --port)`)));
   }).catch((e) => { console.error("STOP:", (e as Error).message); stopVite(); process.exit(2); });
 }
 const t0 = Date.now();
+/** The phase the run is in (printed by the watchdog: a hang names where it hung). */
+let lastStep = "start";
+const step = (what: string) => { lastStep = `${what} (at ${((Date.now() - t0) / 1000).toFixed(0)} s)`; if (DIAG) console.log(`  [${((Date.now() - t0) / 1000).toFixed(0)} s] ${what}`); };
+// WATCHDOG (tools/_frame-watchdog.mts): no frame within 10 min of the start or of a spot's start = the browser hung
+// (2026-10-21: 61 min, 0 frames, 0 CPU, a heavy slot held). Exit 3 and take the browser + our vite with us.
+const WATCH_MIN = Number(arg("watchdog-min", "10"));
+const watchdog = frameWatchdog({ limitMs: WATCH_MIN * 60_000 });
+let browserRef: { close(): Promise<void> } | null = null;
+setInterval(() => {
+  const why = watchdog.check();
+  if (!why) return;
+  console.error(`STOP (watchdog): ${why}; last step: ${lastStep}; killing the browser and exiting
+  page/dev-server errors: ${logs.slice(-8).join(" || ") || "none"}`);
+  const done = () => { stopVite(); process.exit(3); };
+  setTimeout(done, 10_000).unref();
+  (browserRef?.close() ?? Promise.resolve()).catch(() => {}).finally(done);
+}, 5000).unref();
 const { chromium } = await loadPlaywright();
 const AB = argv.includes("--ab");
 /** --no-refs: hide the reference characters and sphere (clean read shots / loading art; the frame then has no ref numbers). */
 const NO_REFS = argv.includes("--no-refs");
 const browser = await chromium.launch({ channel: "chrome", headless: !argv.includes("--headed"), args: ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist", ...(AB ? ["--disable-gpu-vsync", "--disable-frame-rate-limit"] : [])] });
+browserRef = browser;
+if (DIAG) {
+  // the browser process answers SystemInfo even while a renderer's main thread is stuck: a hang vs. a dead renderer
+  const cdp = await browser.newBrowserCDPSession();
+  setInterval(async () => {
+    try {
+      const { processInfo } = await cdp.send("SystemInfo.getProcessInfo");
+      // working set per process (MB), where the OS answers cheaply
+      const mem = new Map<number, number>();
+      if (process.platform === "win32") {
+        const out = spawnSync("tasklist", ["/fo", "csv", "/nh", "/fi", "IMAGENAME eq chrome.exe"], { encoding: "utf8" }).stdout ?? "";
+        for (const l of out.split("\n")) { const c = l.split('","'); if (c.length >= 5) mem.set(Number(c[1]), Math.round(Number(c[4].replace(/[^0-9]/g, "")) / 1024)); }
+      }
+      console.log(`  [${((Date.now() - t0) / 1000).toFixed(0)} s] procs ${processInfo.map((p: any) => `${p.type}:${p.id}:cpu${p.cpuTime.toFixed(0)}s${mem.has(p.id) ? `:${mem.get(p.id)}MB` : ""}`).join(" ")}`);
+    } catch (e) { console.log(`  procs: ${(e as Error).message.split("\n")[0]}`); }
+  }, 2000).unref();
+}
 const ctx = await browser.newContext({ viewport: { width: W, height: H } });
 // nothing this run does may reach disk: scene autosave, player data, pins, context
 await ctx.route(/\/__hitreg\//, (route: any) => {
   const r = route.request();
-  if (r.method() !== "GET" && !/\/__hitreg\/log\b/.test(r.url())) return route.fulfill({ status: 200, contentType: "application/json", body: "{\"ok\":true}" });
+  if (r.method() !== "GET" && !READ_ONLY_POSTS.test(r.url())) return route.fulfill({ status: 200, contentType: "application/json", body: "{\"ok\":true}" });
   return route.continue();
+});
+// the scene file, served with the mobs out and the references in (servedSceneText): no rebuild after boot
+const sceneUrl = (u: URL) => u.pathname === "/__hitreg/asset-file" && u.searchParams.get("file") === `scenes/${SCENE}.scene.json`;
+let servedText: string | null = null;
+let servedHits = 0;
+await ctx.route(sceneUrl, (route: any) => {
+  servedText ??= servedSceneText();
+  servedHits++;
+  return route.fulfill({ status: 200, contentType: "application/json", body: servedText });
 });
 // freeze the page at the code it booted with (other sessions edit the tree; HMR would reload mid-run)
 await ctx.route(/\/@vite\/client(\?.*)?$/, (route: any) => route.fulfill({ contentType: "application/javascript", body: `const styles = new Map();
@@ -322,7 +422,6 @@ await ctx.addInitScript(() => {
   } catch { /* private */ }
 });
 let page: any = null;
-const logs: string[] = [];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const H_ = <T,>(fn: (h: any, ...a: any[]) => T, ...a: unknown[]) => page.evaluate(([src, args]: [string, unknown[]]) => {
   const h = (window as any).__hitreg; return new Function("h", "args", `return (${src})(h, ...args)`)(h, args);
@@ -369,16 +468,36 @@ async function openSession(): Promise<void> {
 if (page) await page.close().catch(() => {});
 page = await ctx.newPage();
 page.on("pageerror", (e: Error) => logs.push("pageerror: " + e.message));
-page.on("crash", () => logs.push("page crashed"));
-await page.goto(`${base}/?scene=${encodeURIComponent(SCENE)}`, { waitUntil: "load" });
-await waitFor(() => page.evaluate(() => !!(window as any).__hitreg?.playerId), 240000, "the dev app (__hitreg)");
+page.on("crash", () => { logs.push("page crashed"); console.error("  PAGE CRASHED (renderer process died) during: " + lastStep); });
+page.on("console", (m: any) => { if (m.type() === "error") logs.push("console: " + String(m.text()).slice(0, 300)); });
+// L (place-build batch 2026-10-20: 4 of 6 shot runs died "timed out waiting for the dev app" with nothing said): a boot
+// that never brings __hitreg up prints the page's errors and a screenshot, and is retried once on a fresh load
+step("boot: load the dev app");
+for (let boot = 0; ; boot++) {
+  await page.goto(`${base}/?scene=${encodeURIComponent(SCENE)}${scopeQuery()}`, { waitUntil: "load", timeout: 180000 }).catch((e: Error) => logs.push(`goto: ${e.message.split("\n")[0]}`));
+  try { await waitFor(() => page.evaluate(() => !!(window as any).__hitreg?.playerId), 240000, "the dev app (__hitreg)"); break; }
+  catch (e) {
+    const shot = path.join(OUT, `${stem}-boot-failed.png`); await page.screenshot({ path: shot }).catch(() => {});
+    console.warn(`  boot ${boot + 1}: no __hitreg after 240 s; page errors: ${logs.slice(-6).join(" || ") || "none"}; picture ${shot}`);
+    if (boot >= 1) throw new Error(`timed out waiting for the dev app (__hitreg) twice; last page errors: ${logs.slice(-3).join(" || ") || "none"}`);
+  }
+}
+step(`boot: wait for scene ${SCENE}`);
 await waitFor(() => H_((h, s: string) => h.sceneName() === s, SCENE), 240000, `scene ${SCENE}`);
 await sleep(2000);
 // the reference entities, in edit mode (an edit during play would restart the session)
-const mobOps = mobRemovalOps();
-await H_((h, ops: unknown[]) => h.apply(ops), [...mobOps, ...refOps([spawnAt[0], spawnAt[1] + 40, spawnAt[2]])]);
-if (mobOps.length) console.log(`  removed ${mobOps.length} mob/spawn-area roots for the run (--keep-mobs to keep them)`);
+// the references came in with the served scene file; if the page loaded the scene some other way, fall back to the
+// ops batch (a full rebuild: slow on a big world, see servedSceneText)
+if (servedHits && await H_((h) => !!h.object("lightref-light"))) {
+  if (servedRemoved) console.log(`  served the scene without ${servedRemoved} mob/spawn-area roots (--keep-mobs to keep them)`);
+} else {
+  const mobOps = mobRemovalOps();
+  step(`scene not served by the harness (${servedHits} hits): apply ${mobOps.length} mob removals + references as ops`);
+  console.warn("  the page did not load the served scene file; applying mobs/references as an ops batch (a full rebuild)");
+  await H_((h, ops: unknown[]) => h.apply(ops), [...mobOps, ...refOps([spawnAt[0], spawnAt[1] + 40, spawnAt[2]])]);
+}
 await sleep(1500);
+step("enter play mode");
 // enter play with the key a player uses; a press can land before the canvas takes keys, so press again while still in edit
 for (let tries = 0; ; tries++) {
   if (await H_((h) => h.playMode.get() === "edit")) {
@@ -387,11 +506,19 @@ for (let tries = 0; ; tries++) {
   }
   try { await waitFor(() => H_((h) => h.playMode.get() === "playing" && !!h.sim && !!h.playerId() && !h.travelling()), 60000, "play mode"); break; }
   catch (e) {
-    const st = await H_((h) => ({ mode: h.playMode.get(), sim: !!h.sim, pid: h.playerId(), travelling: h.travelling(), loading: h.chunkManager?.stats?.loading ?? null })).catch(() => null);
+    const st = await H_((h) => {
+      // what the arrival gate waits on: simulation cells wanted but not loaded, and what the loader holds
+      const cm = h.chunkManager; const simNotLoaded: string[] = [];
+      try { for (const [k, r] of cm.desiredCells) if (r === "simulation" && cm.hasCell(k) && !cm.loaded.has(k)) simNotLoaded.push(k); } catch { /* */ }
+      return { mode: h.playMode.get(), sim: !!h.sim, pid: h.playerId(), travelling: h.travelling(), loading: cm?.stats?.loading ?? null,
+        lastFocus: cm?.lastFocus, focus: [Math.round(cm?.focusX), Math.round(cm?.focusZ)], simNotLoaded, inFlight: cm ? [...cm.inFlight].slice(0, 12) : null,
+        pending: cm ? [...cm.pending.keys()].slice(0, 12) : null, queue: cm?.cellQueue?.length, gltf: h.gltfLoading?.() ?? null };
+    }).catch(() => null);
     console.warn(`  still not playing after ${(tries + 1) * 60} s: ${JSON.stringify(st)}`);
     if (tries >= 4) { await page.screenshot({ path: path.join(OUT, `${stem}-play-failed.png`) }).catch(() => {}); throw e; }
   }
 }
+step("play: overlays off, weather, clock");
 await H_(() => document.exitPointerLock?.());
 await sleep(1500);
 // every overlay off (HUD, chat, map, nameplates, console): only the canvas draws
@@ -415,12 +542,16 @@ const shots: Shot[] = [];
 const spotInfo: Array<Record<string, unknown>> = [];
 
 async function shootSpot(spot: Spot): Promise<void> {
-  const facing = spot.facing ?? 180;
+  // a fixed-camera spot holds the rig off; every spot first gives it back
+  await H_((h) => { const c = h.camera; if (c.__lsUmw) { c.updateMatrixWorld = c.__lsUmw; delete c.__lsUmw; } });
+  const facing = spot.facing ?? (spot.camera && spot.target ? (Math.atan2(spot.target[0] - spot.camera[0], -(spot.target[2] - spot.camera[2])) * 180) / Math.PI : 180);
   const [dx, dz] = lookDir(facing);
   const groundGuess = spot.y ?? (field ? field.height(spot.x, spot.z) : spawnAt[1] - 0.9);
+  step(`${spot.name}: travel`);
   const travel = await H_((h, p: V3) => h.travelTo(p[0], p[1], p[2]), [spot.x, groundGuess + 1.5, spot.z] as V3);
   if (travel !== "ok") { console.warn(`  ${spot.name}: travel refused (${travel})`); return; }
   await sleep(1500);
+  step(`${spot.name}: settle after travel`);
   await settle(4000);
   // hide the player, aim the rig along `facing` at head height
   await H_((h, yaw: number, dist: number, pitch: number) => {
@@ -432,6 +563,13 @@ async function shootSpot(spot: Spot): Promise<void> {
     h.cameraRig.setDistance(dist);
     h.cameraRig.setOrbit(yaw, pitch);
   }, Math.atan2(dx, dz) + Math.PI, spot.distance ?? DIST, spot.pitch ?? 0.03);
+  // the pose is forced where the renderer reads it (camera.updateMatrixWorld, before every draw), whatever drove the
+  // camera this frame (the rig, camera-controls): a patched rig.update alone did not hold (HERO-BRIDGE 2026-10-21)
+  if (spot.camera && spot.target) await H_((h, c: V3, t: V3) => {
+    const cam = h.camera, orig = cam.updateMatrixWorld;
+    cam.__lsUmw = orig;
+    cam.updateMatrixWorld = function (force: boolean) { this.position.set(c[0], c[1], c[2]); this.lookAt(t[0], t[1], t[2]); return orig.call(this, force); };
+  }, spot.camera, spot.target);
   await sleep(2500);
   // stand the references in front of the camera, on the ground, facing it
   const placed = await H_((h, gap: number, useField: boolean, hide: boolean) => {
@@ -524,6 +662,7 @@ async function shootSpot(spot: Spot): Promise<void> {
     const tag = Number.isFinite(hour) ? String(hour).padStart(2, "0") : "interior";
     const file = path.join(OUT, stem, `${spot.name}${MULTI_WEATHER ? `-${weatherName}` : ""}-${tag}.png`);
     await page.screenshot({ path: file });
+    watchdog.frame();
     const cam = await H_((h) => [h.camera.position.x, h.camera.position.y, h.camera.position.z]);
     shots.push({ spot: spot.name, row, weather: weatherName, weatherLine, time: Number.isFinite(hour) ? hour : null, clock, mood, rig, file, boxes, camera: { pos: cam as V3, target: placed.pivot as V3, distance: placed.dist } });
   }
@@ -568,9 +707,12 @@ async function abSpot(name: string): Promise<void> {
 }
 
 // a long run across a whole world can lose the tab (GPU/memory): reopen the session and retry that spot once
+// a spot that stalls past --spot-timeout s (default 90) is skipped with a TIMEOUT line and the run goes on (Exiles' Bell 2026-10-24)
+const SPOT_MS = +arg("spot-timeout", String(SHOT_SPOT_TIMEOUT_S)) * 1000;
 for (const spot of spots) {
+  watchdog.spot(spot.name);
   const keep = shots.length, keepInfo = spotInfo.length;
-  try { await shootSpot(spot); }
+  try { if ((await withSpotTimeout(shootSpot(spot), SPOT_MS)) === "timeout") { shots.length = keep; spotInfo.length = keepInfo; console.warn(`TIMEOUT spot ${spot.name} (${SPOT_MS / 1000} s, --spot-timeout) — skipped`); await openSession().catch(() => {}); } }
   catch (e) {
     shots.length = keep; spotInfo.length = keepInfo;
     console.warn(`  ${spot.name}: ${(e as Error).message.split(String.fromCharCode(10))[0]} — reopening the session and retrying once`);

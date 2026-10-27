@@ -12,6 +12,7 @@ frame just before render, against the camera actually drawing.
 | **behind terrain** | streamed render-only cells, HLOD parts, POIs, `culling` entities | main pass skips it; **shadows keep it** |
 | **too small on screen** | `culling.minScreenPx` subtrees; every instanced prop (engine default 1.5 px) | gone from every pass |
 | **interior** | `culling.interior` subtrees | drawn only within `reveal` m of its bounds; never in HLOD bakes |
+| **over unloaded ground** | base-scene units in a streamed world (POIs, dressings, each batch cell's merged buildings) | gone from every pass while the cell under its centre has no drawn terrain |
 
 A **unit** is a subtree hidden whole. Units come from:
 
@@ -27,6 +28,21 @@ A unit's static meshes are batched apart from the rest of its cell
 (`batchStaticMeshes`' `groupOf`), and its instanced props in the world prop
 pool are hidden with it, so a hidden POI costs no draw and no vertices.
 
+## Over unloaded ground
+
+Base-scene content (towns, place-build structures, stairs, POIs, dressings) is built at scene load, but the terrain
+it stands on streams in around the focus. Without a gate it drew at any distance — towns and stairs hanging in the
+haze kilometres off, over cells that had not streamed in (owner, 2026-10-21). Every base-scene unit is `grounded`:
+hidden while `ChunkManager.coversGround` says no cell (full, HLOD or far proxy) is resident under the centre of its
+bounds. That includes the static batch's `cell:x,z` groups, where poi-only roots' meshes merge (they were in no
+unit before). Meshes wider than a batch cell (an ocean plane) merge into `wide` and are never gated. Content that
+streams with its cell, and HLOD parts (their own terrain), need no gate.
+
+Cost: none per frame. Units are re-judged only when `ChunkManager.groundVersion` moves (a cell or HLOD part
+published or dropped). Stats HUD: `N unloaded ground`. A/B: `__hitreg.culling.groundGate = false`.
+Probe: `tools/far-draw-probe.mts --scene <world>` lists what the camera draws over unloaded ground from fixed
+spots, gate off vs on, with pictures; it exits 1 when anything is left with the gate on.
+
 ## Authoring a POI or a building
 
 - The root needs nothing: `poi` tag = a unit that hides behind terrain.
@@ -38,6 +54,14 @@ pool are hidden with it, so a hidden POI costs no draw and no vertices.
   `culling: { interior: true, reveal: 12 }` — the shell outside it. Raise
   `reveal` for wide doors or windows you can see into from further out.
 - `occlusion: false` only for what must never pop behind a ridge — a beacon.
+- **Landmarks through fog**: put `landmark: { fogReach: 700, silhouette: 0.6 }` on the landmark's own root (the
+  shell, not the POI root with its clutter); a world `landmark` operator takes the same object as `fog` (placed on
+  its streamed entity, outside the bake digest). It draws with its own fog curve — never more fog than the ground, an even
+  haze reaching opaque at `fogReach`, fogging toward a darker silhouette tone — while terrain, props and plants keep
+  the zone fog (`packages/render/src/landmark-fog.ts`). It is its own culling unit, never hidden by size, carried
+  into HLOD/far bakes as real geometry with the same curve (never an impostor, even with `mesh.hlod: false`); behind
+  terrain still hides it, and a streamed landmark ends at the world's `farTerrain` ring. Cost: one fog variant per
+  (material, reach, silhouette), no extra draws.
 
 Pixels are **render** pixels, after pixelation: a 480-line frame drops a
 crate at a shorter distance than native 1440p, because it could not show it.

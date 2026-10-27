@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { SceneDoc } from "@hitreg/core";
 import {
+  acceptSceneGrant,
   connectionView,
   INITIAL_LINK,
   linkAfter,
@@ -225,4 +226,34 @@ test("pending grant survives a reload once, and only while its ticket is young",
   assert.equal(takePendingGrant(null), null);
   s.map.set("hitreg:pending-grant", "{broken");
   assert.equal(takePendingGrant(s), null);
+});
+
+test("Play from a dungeon loads the gateway's outdoor scene before accepting the connection", () => {
+  const storage = store();
+  const grant = { scene: "skelmorrow", url: "ws://layer", ticket: "join-ticket" };
+  const character = { id: "c1" };
+  let destination: string | null = null;
+  assert.equal(acceptSceneGrant("fieldfast-hall", grant, character, storage, (scene) => {
+    destination = scene;
+    // The ticket must already be saved when navigation starts.
+    assert.deepEqual(JSON.parse(storage.getItem("hitreg:pending-grant")!).grant, grant);
+  }), false);
+  assert.equal(destination, "skelmorrow");
+  const pending = takePendingGrant<typeof grant, typeof character>(storage)!;
+  assert.deepEqual(pending.character, character);
+  assert.equal(acceptSceneGrant(destination!, pending.grant, pending.character, storage, () => {
+    assert.fail("an aligned scene must not reload");
+  }), true);
+  assert.equal(takePendingGrant(storage), null);
+});
+
+test("a scene mismatch never accepts a connection when the reload ticket cannot be saved", () => {
+  for (const storage of [null, { setItem: () => { throw new Error("storage disabled"); } }]) {
+    assert.throws(() => acceptSceneGrant("dungeon", { scene: "world" }, { id: "c1" }, storage, () => {
+      assert.fail("must not navigate without the ticket");
+    }), /session storage is unavailable/);
+  }
+  assert.equal(acceptSceneGrant("world", { scene: "world" }, { id: "c1" }, null, () => {
+    assert.fail("the current scene needs no navigation");
+  }), true);
 });

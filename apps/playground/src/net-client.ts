@@ -17,6 +17,7 @@ import * as THREE from "three/webgpu";
 import {
   registerCharacterNetState,
   registerTransferLockNetState,
+  registerCooldownNetState,
   type CharacterCreation,
   type NetStateStore,
   type SceneDoc,
@@ -213,6 +214,7 @@ export function registerSessionNetState(netState: NetStateStore): void {
   // character/<bodyId> sheets (character-sheet builtin) — validated, in the spec
   registerCharacterNetState(netState);
   registerTransferLockNetState(netState); // transferLock/<bodyId> — combat holds a body on its server
+  registerCooldownNetState(netState); // cooldown/<bodyId>.<abilityId> — ability ready times (hotbar sweeps)
 }
 
 // -- sign in, pick a character, Play ----------------------------------------------------

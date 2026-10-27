@@ -11,6 +11,7 @@ const { createScene } = await tsImport("../../packages/core/src/scene.ts", impor
 const { applyOps } = await tsImport("../../packages/core/src/ops.ts", import.meta.url);
 const { prefabDocSchema, validatePrefab } = await tsImport("../../packages/core/src/prefab.ts", import.meta.url);
 const { normaliseNoiseTable, roleNoiseNodes, floorGrid } = await import(new URL("./noise.mjs", import.meta.url).href);
+const { ownerCutNode } = await import(new URL("./plane-owner.mjs", import.meta.url).href);
 const componentRegistry = new ComponentRegistry();
 registerCoreComponents(componentRegistry);
 
@@ -132,6 +133,22 @@ export function convertMeshStamp(source, options = {}) {
     if (!groups.some(({ mesh }) => mesh.name === wanted)) throw new Error(`Selected mesh group does not exist: ${wanted}`);
   }
   const selected = groups.filter(({ mesh }) => !requested || requested.includes(mesh.name));
+  // One mesh owns each plane (plane-owner.mjs): groups own shared stone in priority order (`ownerOrder`: the named
+  // groups first, in that order, then the rest in stamp order); a group is cut by the crisp solids of every group ranked
+  // before it. A group that may be swapped for a BUILT mesh goes first, so its neighbours already stop at its surface.
+  // `ownPlanes: false` turns it off (debugging, the before picture).
+  const ownPlanes = options.ownPlanes !== false && groups.length > 1;
+  const ownerOrder = options.ownerOrder ?? source.ownerOrder ?? [];
+  if (!Array.isArray(ownerOrder) || ownerOrder.some((n) => !groups.some((g) => g.mesh.name === n))) throw new Error(`ownerOrder names a group the stamp does not have: ${JSON.stringify(ownerOrder)}`);
+  const rank = (mesh) => { const i = ownerOrder.indexOf(mesh.name); return i >= 0 ? i : ownerOrder.length + groups.findIndex((g) => g.mesh === mesh); };
+  const crispCache = new Map();
+  const crispOf = (mesh) => {
+    if (!crispCache.has(mesh.name)) {
+      const node = roleNoiseNodes(mesh, palette, noiseTable, mesh.name, floors).nodes.find((n) => !n.noise);
+      crispCache.set(mesh.name, node ? node.mesh : null);
+    }
+    return crispCache.get(mesh.name);
+  };
   const reports = [];
   const volumes = selected.map(({ mesh, id }) => {
     if (!Array.isArray(mesh.indices) || !mesh.indices.length || mesh.indices.length % 3) throw new Error(`Mesh group ${mesh.name} indices must contain whole triangles`);
@@ -141,6 +158,13 @@ export function convertMeshStamp(source, options = {}) {
     }
     const split = roleNoiseNodes(mesh, palette, noiseTable, mesh.name, floors);
     const measurement = meshBounds(mesh, voxelSize, maxCells, split.maxAmount);
+    let planeOwners = null;
+    if (ownPlanes) {
+      // owners in stamp order (a reordering that keeps a group's owner set keeps its volume byte for byte)
+      const owners = groups.filter((g) => rank(g.mesh) < rank(mesh)).map((g) => ({ name: g.mesh.name, mesh: crispOf(g.mesh) })).filter((o) => o.mesh);
+      const cut = ownerCutNode(owners, measurement.sourceBounds.min, measurement.sourceBounds.max, { margin: split.maxAmount + 3 * voxelSize });
+      if (cut) { split.nodes.push(cut.node); planeOwners = cut.from; }
+    }
     const doc = {
       name: mesh.name, voxelSize, bounds: measurement.bounds, palette: palette.map(p => p.id),
       nodes: split.nodes,
@@ -154,7 +178,7 @@ export function convertMeshStamp(source, options = {}) {
       throw new Error(`Mesh group ${mesh.name} is not a valid closed solid: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
     reports.push({ id, name: mesh.name, sourceVertices: mesh.positions.length / 3, sourceTriangles: triangles,
-      declaredSolids: mesh.solidTriangleCounts?.length ?? null, ...measurement, ...(noiseTable ? { noiseNodes: split.report } : {}), sourceValidation: "passed", extraction: "pending" });
+      declaredSolids: mesh.solidTriangleCounts?.length ?? null, ...measurement, ...(planeOwners ? { planeOwners } : {}), ...(noiseTable ? { noiseNodes: split.report } : {}), sourceValidation: "passed", extraction: "pending" });
     return { id, name: mesh.name, doc, bounds: measurement.bounds, cellCount: measurement.cellCount };
   });
   const ops = [{
@@ -180,7 +204,7 @@ export function convertMeshStamp(source, options = {}) {
   const report = {
     version: 1, source: source.name, name, voxelSize, maxCells, materialId,
     anchor: [0, 0, 0], coordinates: "engine-y-up", palette: palette.map(p => p.id),
-    sourceGroups: groups.length, selectedGroups: selected.length,
+    sourceGroups: groups.length, selectedGroups: selected.length, ownPlanes,
     ...(noiseTable ? { roleNoise: { roles: noiseTable.roles, protectZones: noiseTable.protect.length, floorCap: noiseTable.floorCap, band: noiseTable.band } } : {}),
     totalCells: volumes.reduce((sum, v) => sum + v.cellCount, 0),
     volumes: reports, extraction: "pending",

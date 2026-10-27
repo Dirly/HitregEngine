@@ -47,6 +47,25 @@ export interface WalkResult {
 }
 
 const CLIMB_TAN = Math.tan((40 * Math.PI) / 180);
+/**
+ * The standing height of one planner cell. `lo` is the down-ray from 3 m over the terrain; `up` the first surface
+ * straight above that foot; `sky` the down-ray from high over the cell. A built solid whose buried bottom faces the
+ * bake dropped (a stair, a terrace, a plinth more than 3 m over the terrain) puts the 3 m ray INSIDE it: `lo` lands
+ * on the terrain under it, and the first face above is that solid's own top. When the face above the foot and the
+ * face under the sky are the same surface (no underside between: not a roof, not a lintel), stand on it.
+ */
+export function cellFoot(lo: number, up: number | null, sky: number | null): number {
+  if (up === null || sky === null) return lo;
+  return Math.abs(up - sky) < 0.05 && sky > lo + 0.3 ? sky : lo;
+}
+/**
+ * A* edge penalty for a cell whose steepest neighbour differs by m metres. A built stair's risers (0.25 m rise per
+ * 0.45 m tread) climb up to ~0.78 m across a 1 m cell diagonal: on built cells that is a stair, not an edge, or the
+ * planner prefers any smooth ramp beside the stair (the King's Gate side strips). A kerb or cheek wall (>= 1 m) still counts.
+ */
+export function edgeCost(m: number, built: boolean): number {
+  return m > (built ? 0.8 : 0.5) ? 4 : 0;
+}
 const LEG = 140;
 const dist = (a: P2, b: P2): number => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
@@ -63,7 +82,7 @@ export function densify(points: P2[], step: number): P2[] {
 
 /** One A* leg (town-walk's planner). `snapGoal` m: an unwalkable goal moves to the nearest open cell within it. */
 function planLeg(d: WalkDeps, from: P2, to: P2, pad: number, snapGoal: number): P2[] | null {
-  const { world, terrain, field } = d;
+  const { world, field } = d;
   const recipe = field.recipe;
   const x0 = Math.floor(Math.min(from[0], to[0]) - pad);
   const z0 = Math.floor(Math.min(from[1], to[1]) - pad);
@@ -72,11 +91,9 @@ function planLeg(d: WalkDeps, from: P2, to: P2, pad: number, snapGoal: number): 
   const H = new Float32Array(w * h);
   const ok = new Uint8Array(w * h);
   const built = new Uint8Array(w * h);
-  const cells = new Set<string>();
-  for (let cz = Math.floor(z0 / recipe.cellSize); cz <= Math.floor((z0 + h) / recipe.cellSize); cz++)
-    for (let cx = Math.floor(x0 / recipe.cellSize); cx <= Math.floor((x0 + w) / recipe.cellSize); cx++)
-      if (!cells.has(`${cx},${cz}`)) { cells.add(`${cx},${cz}`); terrain.ensureAround((cx + 0.5) * recipe.cellSize, (cz + 0.5) * recipe.cellSize, 0); }
-  d.tick(); // colliders of freshly ensured cells join the query world
+  // The planner reads ONLY what the server already holds around the body (its own ring). Ensuring every cell of the
+  // leg's box here loaded colliders (a landmark's origin cell) that the real server never streams for a body standing
+  // there (QA-B R1), so a walk could pass over a ramp a player falls through. Outside the ring it plans on the field.
   for (let j = 0; j < h; j++)
     for (let i = 0; i < w; i++) {
       const x = x0 + i;
@@ -84,8 +101,11 @@ function planLeg(d: WalkDeps, from: P2, to: P2, pad: number, snapGoal: number): 
       const g = field.height(x, z);
       const top = field.surfaceCast(x, z, g + 40, g - 40) ?? g;
       const down = world.sim.raycast([x, top + 3, z], [0, -1, 0], 8, { solid: true, exclude: [d.bodyId] });
-      const foot = down ? down.point[1] : top;
-      if (down && !down.entityId.includes("/terrain")) built[i + j * w] = 1;
+      const lo = down ? down.point[1] : top;
+      const up = world.sim.raycast([x, lo + 0.05, z], [0, 1, 0], 40, { solid: true, exclude: [d.bodyId] });
+      const sky = up ? world.sim.raycast([x, top + 43, z], [0, -1, 0], 43 - 0.05, { solid: true, exclude: [d.bodyId] }) : null;
+      const foot = cellFoot(lo, up ? up.point[1] : null, sky ? sky.point[1] : null);
+      if ((down && !down.entityId.includes("/terrain")) || foot !== lo) built[i + j * w] = 1;
       const head = world.sim.raycast([x, foot + 0.3, z], [0, 1, 0], 1.5, { solid: true, exclude: [d.bodyId] });
       H[i + j * w] = foot;
       const water = field.waterY(x, z);
@@ -104,7 +124,7 @@ function planLeg(d: WalkDeps, from: P2, to: P2, pad: number, snapGoal: number): 
       const k = i + j * w;
       let m = 0;
       for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) m = Math.max(m, Math.abs(H[k + di + dj * w]! - H[k]!));
-      edge[k] = m > 0.5 ? 4 : 0;
+      edge[k] = edgeCost(m, built[k] === 1);
     }
   const idx = (p: P2): number => Math.round(p[0] - x0) + Math.round(p[1] - z0) * w;
   const start = idx(from);
@@ -217,8 +237,7 @@ export function walkPoints(d: WalkDeps, points: P2[], to: P2, stop?: (p: P3) => 
       if (dist([p[0], p[2]], pts[k]!) < 1.6 && k > best) { if (k > best + 2) { sidesTried = 0; pendingStuck = null; } best = k; bestAt = t; jumps = 0; jumpedHere = false; }
     }
     if (best >= pts.length - 2) break;
-    // streaming: keep the ground ahead loaded (the server's own residency pass runs every 10 ticks)
-    if (Math.round(t / dt) % 30 === 0) { const a = pts[Math.min(pts.length - 1, best + 20)]!; d.terrain.ensureAround(a[0], a[1], 1); }
+    // streaming is the server's own residency pass (every 10 ticks, around the body): nothing is ensured ahead of it
     const aim = pts[Math.min(pts.length - 1, best + 3)]!;
     let dx = aim[0] - p[0];
     let dz = aim[1] - p[2];
@@ -335,6 +354,30 @@ export function walkOut(d: WalkDeps, toward: P2, joined: (p: P3) => string | nul
   return { ...total, unplanned: { at: [Math.round(p0[0]), Math.round(p0[2])], why: "walk-out gave up (too many legs)" } };
 }
 
+/**
+ * The last metres, as a player finishes: walkPoints stops a point or two short of its goal (it ends within 1.6 m of
+ * the second-last densified point, and the last leg's goal snaps up to 3 m to walkable ground), so a body walked to a
+ * waypoint stood ~3 m off it — exactly a 3 m arrival bar. Steer straight at `to` until within `arrive` m; give up
+ * after 1.5 s without 0.3 m of progress (a wall, a drop: the miss stays a miss) or `maxSeconds`. Returns the XZ
+ * distance left. Height is never touched: a body that falls short of the goal's level still fails its dy check.
+ */
+export function finishAt(d: WalkDeps, to: P2, arrive = 0.6, maxSeconds = 8): number {
+  const dt = d.world.fixedDt;
+  let best = Infinity, bestT = 0;
+  for (let t = 0; t < maxSeconds; t += dt) {
+    const p = d.world.positionOf(d.bodyId);
+    if (!p) break;
+    const dx = to[0] - p[0], dz = to[1] - p[2], l = Math.hypot(dx, dz);
+    if (l < arrive) break;
+    if (l < best - 0.3) { best = l; bestT = t; }
+    if (t - bestT > 1.5) break;
+    d.stepWith([(dx / l) * d.runSpeed, (dz / l) * d.runSpeed], false);
+  }
+  for (let i = 0; i < 10; i++) d.stepWith([0, 0], false);
+  const p = d.world.positionOf(d.bodyId)!;
+  return Math.hypot(to[0] - p[0], to[1] - p[2]);
+}
+
 /** Plan and walk from where the body stands to `to`. */
 export function walkTo(d: WalkDeps, to: P2): WalkResult {
   const p = d.world.positionOf(d.bodyId)!;
@@ -344,4 +387,20 @@ export function walkTo(d: WalkDeps, to: P2): WalkResult {
     return { from: [+p[0].toFixed(1), +p[1].toFixed(1), +p[2].toFixed(1)], to, metres: Math.round(dist(from, to)), finished: false, reached: 0, stuck: [], seconds: 0, unplanned: planned };
   }
   return walkPoints(d, planned.points, to);
+}
+
+/**
+ * Where a body starts its walk into a trigger portal, best first. A known floor (the anchor the body landed on, the
+ * portal's way-back anchor) is used only when it is NEAR the trigger: an instance's arrival can be 200 m from its exit,
+ * and a straight walk from there runs into the first wall. Out of reach it falls back to the points out along the
+ * portal's facing (in front, then behind) — the body is placed there as an instance's targets are, by teleport, and
+ * walks only the last metres in.
+ */
+export function portalApproaches(centre: P3, half: readonly [number, number, number], known: Array<P3 | null | undefined>, facing: P3[]): { at: P3; known: boolean }[] {
+  const reach = Math.max(half[0], half[2]) * 2 + 25;
+  const near = (p: P3): boolean => Math.hypot(p[0] - centre[0], p[2] - centre[2]) <= reach && Math.abs(p[1] - centre[1]) <= 10;
+  const out: { at: P3; known: boolean }[] = [];
+  for (const p of known) if (p && near(p)) out.push({ at: p, known: true });
+  for (const p of facing) out.push({ at: p, known: false });
+  return out;
 }

@@ -6,6 +6,8 @@
  *   node tools/float.mts scene <project> [--scene <id|file>] [--world <recipe id>] [--near x,z,r] [--json] [--out f]
  *   node tools/float.mts scene <project> ... --fix [--drop-unsupported | --drop-unsupported-rocks] [--inverse f.json]   (writes the scene)
  *   node tools/float.mts undo <project> --inverse f.json [--scene ...]                       (applies an inverse)
+ *   The inverse is keyed to the scene build it was written for ({ scene, digest, ops }): after a rebuild the old one is
+ *   stale — --fix drops it and re-seats the new build, undo refuses it.
  *
  * Objects: every prefab instance in the scene (props, fires, torches, lanterns, baskets, rocks, structures) with
  * its contact kind from the catalogue (`dressing.contact`, else `defaultSeatContact`), its footprint from its own
@@ -13,14 +15,16 @@
  * Solid: the voxel field's density (edits, cuts, carves, planar treads, buttes — not the drawn heightfield, which
  * misses cuts: `seated`'s old blind spot) plus every other object's triangles (DC dungeon meshes, decks, stairs,
  * box colliders). One rule decides (`seatObject`, packages/core/src/voxel/seat.ts). A fault is a contact off by
- * more than `--tol` (5 cm): floating, an embed not embedded, a hang not touching, a wall piece off its wall — or
+ * more than `--tol` (5 cm): floating, a rock not embedded (under ROCK_EMBED_MIN, 10% of its height, below its lowest ground), a hang not touching, a wall piece off its wall — or
  * no support at all. Exit 1 on any fault. `--fix` re-seats what can be re-seated through applyOps (inverse kept);
  * unsupported objects are listed (and removed only with --drop-unsupported).
  */
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  rockSetInstances,
   applyOps,
   ComponentRegistry,
   registerCoreComponents,
@@ -29,6 +33,8 @@ import {
   fieldSolidProbe,
   scatterCell,
   scatterContact,
+  scatterEmbed,
+  ROCK_EMBED,
   scatterSeatSize,
   seatObject,
   triangleSolidProbe,
@@ -44,6 +50,7 @@ import {
 } from "@hitreg/core";
 import { prefabFile, readJson, sceneGeometry, type SceneEntityGeometry } from "./_prop-geometry.mts";
 import { findAsset, PROJECTS } from "./_closure.mjs";
+import { applyOpsToSceneFile, removalsOf, updateJsonFile } from "./_scene-write.mts";
 
 export interface FloatRow {
   kind: "scene" | "scatter";
@@ -78,8 +85,44 @@ const inArea = (a: Area, x: number, z: number): boolean =>
 const r3 = (v: number): number => Math.round(v * 1000) / 1000;
 const r2 = (v: number): number => (Number.isFinite(v) ? Math.round(v * 100) / 100 : v);
 
-/** Ids a scene check skips: the player, NPCs, creatures, portals — things that move or are not set down. */
-const SKIP_PREFAB = /^(characters|npcs?|creatures|mobs)\//;
+/** Ids a scene check skips: the player, NPCs, creatures, portals — things that move or are not set down — and light
+ * shafts (a beam of light hangs in the air by design). */
+const SKIP_PREFAB = /^(characters|npcs?|creatures|mobs)\/|^fixtures\/light-shaft$/;
+
+/** Support only: the world's baked landmark prefabs (`landmarks/<opId>-<digest>`, drawn by the voxel world at their
+ *  operator's pose and never in the scene doc) — a built deck or plaza holds up what stands on it. The newest bake per op,
+ *  placed at the op's `at` / `y` (the bake is already turned and scaled; only the origin is applied); an op without an
+ *  explicit `y` is skipped (its foot is solved at bake). */
+export const LANDMARK_SUPPORT = "__landmark:";
+export function withLandmarkSupport(assets: string, doc: SceneDoc, operators: readonly any[] = [], landmarks: readonly any[] = []): SceneDoc {
+  const dir = path.join(assets, "prefabs", "landmarks");
+  if (!fs.existsSync(dir)) return doc;
+  const newest = new Map<string, { f: string; t: number }>();
+  for (const f of fs.readdirSync(dir)) {
+    const m = /^(.+)-[0-9a-f]{8}\.json$/.exec(f);
+    if (!m) continue;
+    const t = fs.statSync(path.join(dir, f)).mtimeMs, cur = newest.get(m[1]!);
+    if (!cur || t > cur.t) newest.set(m[1]!, { f, t });
+  }
+  if (!newest.size) return doc;
+  const entities = { ...(doc as any).entities };
+  for (const [op, { f }] of newest) {
+    const o = operators.find((d) => d?.id === op && d?.op === "landmark");
+    if (!o || typeof o.y !== "number" || !Array.isArray(o.at)) continue;
+    
+    entities[`${LANDMARK_SUPPORT}${op}`] = { name: `landmark ${op}`, parent: null, tags: [], components: { transform: { position: [o.at[0], o.y, o.at[1]] }, prefab: { prefabId: `landmarks/${f.slice(0, -5)}` } } };
+  }
+  // every OTHER operator that bakes to a recipe landmark (`wall`: a ramp stair's decks and parapets, a quay) stands where
+  // the voxel world draws it: the recipe entry's prefab at its position (lanterns on a wall-ramp stair read "nothing above
+  // or beside to hang from": the wall-baked stair was never support)
+  for (const l of landmarks) {
+    const op = /^op:(.+):landmark$/.exec(String(l?.id ?? ""))?.[1] ?? String(l?.id ?? "");
+    if (!op || entities[`${LANDMARK_SUPPORT}${op}`] || typeof l?.prefab !== "string" || !Array.isArray(l?.position)) continue;
+    if (!fs.existsSync(path.join(assets, "prefabs", `${l.prefab}.json`))) continue;
+    entities[`${LANDMARK_SUPPORT}${op}`] = { name: `landmark ${op}`, parent: null, tags: [], components: { transform: { position: [l.position[0], l.position[1], l.position[2]] }, prefab: { prefabId: l.prefab } } };
+  }
+  return { ...(doc as any), entities } as SceneDoc;
+}
 
 /** The catalogue's dressing entry of a prefab (compiled onto its root by `props sync`), or undefined. */
 function dressingOf(assets: string, prefabId: string): { contact?: SeatContact; mount?: string; category?: string } | undefined {
@@ -93,10 +136,36 @@ function dressingOf(assets: string, prefabId: string): { contact?: SeatContact; 
   }
 }
 
-/** Footprint of an object from its root-frame bounds and world matrix (yaw-only objects; tilt ignored). */
+/** A generated chain link of a hanging prop (`<placement>--chain-<n>` / `.../chain-<n>: ...`, dress.mts). */
+const CHAIN_LINK = /(--|\/)chain-\d+(:|$)/;
+
+/**
+ * The contact a scene object is measured by. A HANGING piece is checked for its hook, never for ground contact: a
+ * prop whose dressing mount is `ceiling` (or `hang`), and every link of a hanging prop's chain (the prefab a ceiling
+ * prop names as its `chain`, mount `part`; or an entity the dresser named `.../chain-<n>`) — chandelier chain links
+ * read "floating 0.06 m" when floor-tested.
+ */
+export function contactOf(dressing: { contact?: SeatContact; mount?: string; category?: string } | undefined, prefabId: string, entityId = "", entityName = "", chains: ReadonlySet<string> = new Set()): SeatContact {
+  if (dressing?.contact) return dressing.contact;
+  if (dressing?.mount === "ceiling" || dressing?.mount === "hang") return "hang";
+  if (chains.has(prefabId) || CHAIN_LINK.test(entityId) || CHAIN_LINK.test(entityName)) return "hang";
+  return defaultSeatContact(dressing, prefabId);
+}
+
+/**
+ * Footprint of an object from its root-frame bounds and world matrix (a yawed object). A TILTED one (its up axis off
+ * vertical: a book laid on its side, a toppled barrel) is measured by its world bounds instead: its base is its lowest
+ * point, not the root frame's bottom (a ledger laid flat was seated by its spine's mid-line, half its thickness and the
+ * sink down into the desk).
+ */
 function footprintOf(g: SceneEntityGeometry): { x: number; y: number; z: number; halfX: number; halfZ: number; yaw: number; height: number } {
   const m = g.m;
   const sx = Math.hypot(m[0]!, m[1]!, m[2]!), sy = Math.hypot(m[4]!, m[5]!, m[6]!), sz = Math.hypot(m[8]!, m[9]!, m[10]!);
+  if (sy > 0 && m[5]! / sy < 0.98 && g.world.length >= 9) {
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (let k = 0; k < g.world.length; k += 3) for (let a = 0; a < 3; a++) { const v = g.world[k + a]!; if (v < lo[a]!) lo[a] = v; if (v > hi[a]!) hi[a] = v; }
+    return { x: (lo[0]! + hi[0]!) / 2, y: lo[1]!, z: (lo[2]! + hi[2]!) / 2, halfX: (hi[0]! - lo[0]!) / 2, halfZ: (hi[2]! - lo[2]!) / 2, yaw: 0, height: hi[1]! - lo[1]! };
+  }
   const cx = (g.min[0] + g.max[0]) / 2, cz = (g.min[2] + g.max[2]) / 2, by = g.min[1];
   return {
     x: m[0]! * cx + m[4]! * by + m[8]! * cz + m[12]!,
@@ -107,6 +176,26 @@ function footprintOf(g: SceneEntityGeometry): { x: number; y: number; z: number;
     yaw: Math.atan2(-m[2]!, m[0]!),
     height: (g.max[1] - g.min[1]) * sy,
   };
+}
+
+/**
+ * Heights above `baseY` of the object's own up-facing level faces in its lowest `reach` metres (a box's inner floor, a
+ * barrel's bottom), not its top: what a `base` seat keeps off the floor's plane (seat.ts `flats`; the zfight gate).
+ * A face counts from 0.002 m² (a 1 mm height band summed), so a sliver never moves a prop.
+ */
+export function flatsOf(world: ArrayLike<number>, baseY: number, height: number, reach = 0.1): number[] {
+  const bands = new Map<number, number>();
+  for (let k = 0; k + 8 < world.length; k += 9) {
+    const ux = world[k + 3]! - world[k]!, uy = world[k + 4]! - world[k + 1]!, uz = world[k + 5]! - world[k + 2]!;
+    const vx = world[k + 6]! - world[k]!, vy = world[k + 7]! - world[k + 1]!, vz = world[k + 8]! - world[k + 2]!;
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, l = Math.hypot(nx, ny, nz);
+    if (!(l > 0) || ny / l < 0.99) continue;
+    const h = (world[k + 1]! + world[k + 4]! + world[k + 7]!) / 3 - baseY;
+    if (h <= 0.002 || h > reach || h >= height - 0.005) continue;
+    const b = Math.round(h * 1000);
+    bands.set(b, (bands.get(b) ?? 0) + l / 2);
+  }
+  return [...bands].filter(([, a]) => a >= 0.002).map(([b]) => b / 1000);
 }
 
 /** The object's own lowest point in the world column at (x, z) from its world triangles; null where none of it is there. */
@@ -131,7 +220,7 @@ export function floatScene(assets: string, doc: SceneDoc, field: WorldField | nu
   const t0 = performance.now();
   // only what can hold up an object in the area: geometry whose world points come within 30 m of it
   const box = area.near ? [area.near[0] - area.near[2] - 30, area.near[1] - area.near[2] - 30, area.near[0] + area.near[2] + 30, area.near[1] + area.near[2] + 30] : area.rect ? [area.rect[0] - 30, area.rect[1] - 30, area.rect[2] + 30, area.rect[3] + 30] : null;
-  const geo = sceneGeometry(assets, doc as never).filter((g) => {
+  const geo = sceneGeometry(assets, (field ? withLandmarkSupport(assets, doc, (field as any).recipe?.features?.operators ?? [], (field as any).recipe?.features?.landmarks ?? []) : doc) as never).filter((g) => {
     if (!box) return true;
     for (let k = 0; k < g.world.length; k += 3) if (g.world[k]! >= box[0]! && g.world[k]! <= box[2]! && g.world[k + 2]! >= box[1]! && g.world[k + 2]! <= box[3]!) return true;
     return false;
@@ -147,19 +236,25 @@ export function floatScene(assets: string, doc: SceneDoc, field: WorldField | nu
   const rows: FloatRow[] = [];
   let checked = 0, unsized = 0;
   const contactCache = new Map<string, SeatContact>();
+  const dressCache = new Map<string, ReturnType<typeof dressingOf>>();
+  const dressing = (id: string): ReturnType<typeof dressingOf> => { if (!dressCache.has(id)) dressCache.set(id, dressingOf(assets, id)); return dressCache.get(id); };
+  // the chain prefabs the scene's hanging props hang by: their links are hangs too
+  const chains = new Set<string>();
+  for (const g of geo) if (g.prefabId) { const c = (dressing(g.prefabId) as { chain?: string } | undefined)?.chain; if (c) chains.add(c); }
   geo.forEach((g, i) => {
-    if (!g.prefabId || SKIP_PREFAB.test(g.prefabId) || (only && !only.has(g.id))) return;
+    if (!g.prefabId || SKIP_PREFAB.test(g.prefabId) || g.id.startsWith(LANDMARK_SUPPORT) || (only && !only.has(g.id))) return;
     const fp = footprintOf(g);
     if (!inArea(area, fp.x, fp.z)) return;
     if (!(fp.height > 0.01) || !(fp.halfX > 0) || !(fp.halfZ > 0)) { unsized++; return; }
-    let contact = contactCache.get(g.prefabId);
-    if (!contact) contactCache.set(g.prefabId, (contact = defaultSeatContact(dressingOf(assets, g.prefabId), g.prefabId)));
+    let contact: SeatContact | undefined = CHAIN_LINK.test(g.id) || CHAIN_LINK.test(g.name ?? "") ? "hang" : contactCache.get(g.prefabId);
+    if (!contact) contactCache.set(g.prefabId, (contact = contactOf(dressing(g.prefabId), g.prefabId, "", "", chains)));
     const own = tris.excluding(i);
     const probe: SolidProbe = fieldProbe ? unionSolidProbe(fieldProbe, own) : own;
     // a structure (anything over 4 m across) is seated by its base like a building: the probe reaches further down
     const big = Math.max(fp.halfX, fp.halfZ) > 2;
     // a seated figure rests where its own underside touches (hips on the seat, feet on a step)
-    const r = seatObject(probe, contact === "seated" ? { ...fp, underside: undersideOf(g.world) } : fp, contact, { tol, reachDown: big ? 8 : 4, ...seatOpts });
+    // a base keeps its own low faces (inner floor, barrel bottom) off the floor's plane: flats
+    const r = seatObject(probe, contact === "seated" ? { ...fp, underside: undersideOf(g.world) } : contact === "base" ? { ...fp, flats: flatsOf(g.world, fp.y, fp.height) } : fp, contact, { tol, reachDown: big ? 8 : 4, ...seatOpts });
     checked++;
     if (r.status === "ok") return;
     rows.push({
@@ -199,12 +294,28 @@ export function floatScatter(field: WorldField, area: Area, tol: number, legacy:
         const q = inst.rotation;
         const yaw = Math.atan2(2 * (q[3] * q[1] + q[0] * q[2]), 1 - 2 * (q[1] * q[1] + q[2] * q[2]));
         const s = scatterSeatSize(rule, inst.scale);
-        const r = seatObject(probe, { x, z, y, yaw, ...s, align: rule.alignToNormal }, "embed", { tol, embed: Math.max(0.05, -rule.yOffset * 0.5), reachDown: Math.max(4, s.height * 2) });
+        const r = seatObject(probe, { x, z, y, yaw, ...s, align: rule.alignToNormal }, "embed", { tol, embed: scatterEmbed(rule), reachDown: Math.max(4, s.height * 2) });
         checked++;
         if (r.status === "ok") continue;
         rows.push({ kind: "scatter", id: inst.id, what: rule.id, contact: "embed", x: r2(x), y: r2(y), z: r2(z), status: r.status, gap: r2(r.gap), support: r.support, ...(r.reason ? { reason: r.reason } : {}) });
       }
     }
+  // operator boulders (features.rockSets: a scree fan's), stood once per set like fall-site rocks
+  for (const set of recipe.features.rockSets ?? []) {
+    for (const inst of rockSetInstances(field, set)) {
+      const rule = recipe.scatter[inst.ruleIndex];
+      if (!rule || !rocks[inst.ruleIndex]) continue;
+      const [x, y, z] = inst.position;
+      if (x < rect[0] || x > rect[2] || z < rect[1] || z > rect[3] || !inArea(area, x, z)) continue;
+      const q = inst.rotation;
+      const yaw = Math.atan2(2 * (q[3] * q[1] + q[0] * q[2]), 1 - 2 * (q[1] * q[1] + q[2] * q[2]));
+      const sz = scatterSeatSize(rule, inst.scale);
+      const r = seatObject(probe, { x, z, y, yaw, ...sz, align: rule.alignToNormal }, "embed", { tol, embed: scatterEmbed(rule), reachDown: Math.max(4, sz.height * 2) });
+      checked++;
+      if (r.status === "ok") continue;
+      rows.push({ kind: "scatter", id: inst.id, what: `${rule.id} (${set.id})`, contact: "embed", x: r2(x), y: r2(y), z: r2(z), status: r.status, gap: r2(r.gap), support: r.support, ...(r.reason ? { reason: r.reason } : {}) });
+    }
+  }
   return { rows, checked, ms: performance.now() - t0, cells, skipped };
 }
 
@@ -257,6 +368,24 @@ export function fixOps(doc: SceneDoc, rows: readonly FloatRow[], drop: boolean |
     ops.push({ op: "set-component", id: r.id, component: "transform", data: { ...t, position: [p[0] + local[0], p[1] + local[1], p[2] + local[2]] } });
   }
   return ops;
+}
+
+/** Digest of a scene build: what a `--fix` inverse is keyed to (a rebuilt scene is a new digest). */
+export function sceneDigest(doc: SceneDoc): string {
+  return createHash("sha1").update(JSON.stringify(doc)).digest("hex").slice(0, 16);
+}
+
+/**
+ * A `--fix` inverse file against the scene as it is now: `current` when it was written for this very build (the fix is
+ * applied; undo is safe), `stale` when the scene was rebuilt since (an older build's inverse — dropped by the next
+ * --fix, refused by undo), `none` when there is no file. A legacy bare-array inverse is `stale` once the scene file is
+ * newer than it.
+ */
+export function inverseState(file: string, doc: SceneDoc, sceneFile?: string): "none" | "current" | "stale" {
+  if (!fs.existsSync(file)) return "none";
+  const j = readJson(file);
+  if (Array.isArray(j)) return sceneFile && fs.statSync(sceneFile).mtimeMs > fs.statSync(file).mtimeMs ? "stale" : "current";
+  return j?.digest === sceneDigest(doc) ? "current" : "stale";
 }
 
 function toLocal(doc: SceneDoc, parent: string | null | undefined, d: [number, number, number]): [number, number, number] {
@@ -385,8 +514,28 @@ export function fieldOfScene(project: string, doc: SceneDoc, worldId?: string): 
  */
 export function seatPlaced(project: string, doc: SceneDoc, ids: ReadonlySet<string>, tol = 0.05, seatOpts: SeatOptions = {}): { ops: any[]; rows: FloatRow[]; unsupported: FloatRow[] } {
   const assets = path.join(PROJECTS, project, "assets");
-  const { rows } = floatScene(assets, doc, fieldOfScene(project, doc), {}, tol, ids, seatOpts);
+  // a PLACER: a rock is re-seated unless already ROCK_EMBED (15%) in, so the gate (10%) holds with margin
+  const { rows } = floatScene(assets, doc, fieldOfScene(project, doc), {}, tol, ids, { embedMin: ROCK_EMBED, ...seatOpts });
   return { ops: fixOps(doc, rows, false), rows, unsupported: rows.filter((r) => r.status === "unsupported") };
+}
+
+/**
+ * The scene to WRITE after a long fix: a world sweep measures for minutes while other jobs edit the same scene, and
+ * writing the doc loaded at the start would undo their edits. When the file changed since `loaded`, the fix's ops are
+ * re-applied to the file as it is now (atomic: an entity they move that is gone, or moved by someone else in the
+ * meantime, refuses the whole write — re-run). Returns the doc to write and its inverse.
+ */
+export function fixOnCurrent(file: string, loaded: SceneDoc, fixed: { doc: SceneDoc; ops: any[]; inverse: any[] }): { doc: SceneDoc; inverse: any[]; rebased: boolean } {
+  const now = readJson(file) as SceneDoc;
+  if (sceneDigest(now) === sceneDigest(loaded)) return { doc: fixed.doc, inverse: fixed.inverse, rebased: false };
+  const touched = new Set(fixed.ops.map((o) => String(o.entity ?? o.id ?? "")).filter(Boolean));
+  for (const id of touched) {
+    const was = JSON.stringify((loaded.entities as Record<string, any>)[id]?.components?.transform ?? null);
+    const is = JSON.stringify((now.entities as Record<string, any>)[id]?.components?.transform ?? null);
+    if (was !== is) throw new Error(`the scene changed under the fix: ${id} was moved or removed meanwhile — nothing written; re-run the fix`);
+  }
+  const res = applyOps(now, fixed.ops as never, registry());
+  return { doc: res.doc, inverse: res.inverse, rebased: true };
 }
 
 export function main(argv: string[]): void {
@@ -402,19 +551,35 @@ export function main(argv: string[]): void {
       // a few passes: a book seated on a table that itself moved is re-seated on the table's new top
       const drop = argv.includes("--drop-unsupported") ? true : argv.includes("--drop-unsupported-rocks") ? "rocks" : false;
       let next = t.doc, rows = rep.rows, inverse: any[] = [], total = 0;
+      const allOps: any[] = [];
       for (let pass = 0; pass < 4; pass++) {
         const ops = fixOps(next, rows, drop);
         if (!ops.length) break;
         const res = applyOps(next, ops as never, registry());
-        next = res.doc; inverse = [...res.inverse, ...inverse]; total += ops.length;
+        next = res.doc; inverse = [...res.inverse, ...inverse]; total += ops.length; allOps.push(...ops);
         rows = floatScene(t.assets, next, t.field, area, tol).rows;
       }
-      if (!total) { console.log("float --fix: nothing to re-seat (idempotent: already applied)"); return; }
-      fs.writeFileSync(t.file, JSON.stringify(next, null, 2));
-      console.log(`float --fix: ${rows.length} still off or unsupported after re-seating (listed by the next plain run)`);
       const inv = opt(argv, "inverse") ?? path.join(path.dirname(t.file), `../../authoring/sweeps/float-fix.inverse.json`);
+      if (!total) {
+        // the inverse is keyed to the scene build it was written for: a rebuilt scene's old inverse says nothing
+        const st = inverseState(inv, t.doc, t.file);
+        if (st === "stale") { fs.rmSync(inv); console.log(`float --fix: dropped ${inv} (written for an earlier build of this scene)`); }
+        if (!rows.length) console.log(`float --fix: nothing to re-seat: every contact within ${tol} m${st === "current" ? " (this build's fix is applied)" : ""}`);
+        else {
+          const unsup = rows.filter((r) => r.status === "unsupported").length;
+          console.log(`float --fix: nothing re-seatable, ${rows.length} still faulty: ${unsup} unsupported (moved by their owner, or --drop-unsupported), ${rows.length - unsup} with no seat found (listed by a plain run)`);
+          process.exitCode = 1;
+        }
+        return;
+      }
+      let out!: ReturnType<typeof fixOnCurrent>;
+      // the rebase check and the write happen under the scene's lock (tools/_scene-write.mts)
+      try { updateJsonFile(t.file, (fresh) => { out = fixOnCurrent(t.file, t.doc, { doc: next, ops: allOps, inverse }); return { doc: out.doc, removed: removalsOf(allOps, fresh) }; }, { label: "float --fix", trailer: "" }); } catch (e) { console.error(`float --fix: ${(e as Error).message}`); process.exitCode = 1; return; }
+      next = out.doc; inverse = out.inverse;
+      if (out.rebased) console.log("float --fix: the scene changed while it was measured — the fix was re-applied to the current file");
+      console.log(`float --fix: ${rows.length} still off or unsupported after re-seating (listed by the next plain run)`);
       fs.mkdirSync(path.dirname(inv), { recursive: true });
-      fs.writeFileSync(inv, JSON.stringify(inverse, null, 1));
+      fs.writeFileSync(inv, JSON.stringify({ scene: path.basename(t.file), digest: sceneDigest(next), ops: inverse }, null, 1));
       console.log(`float --fix: ${total} ops applied to ${t.file}; inverse ${inv}`);
       return;
     }
@@ -444,8 +609,9 @@ export function main(argv: string[]): void {
     const t = sceneTarget(argv, fail);
     const inv = opt(argv, "inverse");
     if (!inv || !fs.existsSync(inv)) fail("undo needs --inverse <file>");
-    const { doc: next } = applyOps(t.doc, readJson(inv!) as never, registry());
-    fs.writeFileSync(t.file, JSON.stringify(next, null, 2));
+    if (inverseState(inv!, t.doc, t.file) === "stale") fail(`undo: ${inv} was written for an earlier build of ${path.basename(t.file)} (scene rebuilt since); not applied`);
+    const j = readJson(inv!);
+    applyOpsToSceneFile(t.file, (Array.isArray(j) ? j : j.ops) as any[], (d, o) => applyOps(d, o as never, registry()), { label: "float undo", trailer: "" });
     console.log(`float undo: applied ${inv}`);
     return;
   }

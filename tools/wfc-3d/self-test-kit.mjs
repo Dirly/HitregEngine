@@ -14,6 +14,7 @@ import { importKit, solveKit, packProps, fitFloorUv, rotateDirection, stripCopyS
 import { writeSyntheticKit, partDoc, boxGeometry, stripesPng } from "./synthetic-kit.mjs";
 import { faceCompatibility, parseTileset, uvCounterRotation } from "./wfc.mjs";
 import { run } from "./run.mjs";
+import { partColliderBoxes } from "./collider.mjs";
 
 import { CELL } from "./synthetic-kit.mjs";
 
@@ -33,6 +34,28 @@ import { CELL } from "./synthetic-kit.mjs";
   assert.ok(!strict.vertical.some(pair => pair[0].includes("roof@") && pair[1].includes("floor@")));
   assert.throws(() => learnFromExamples(ex, parts, () => {}, "typo"), /unknown adjacency mode/);
   assert.deepEqual(learnFromExamples(ex, parts, () => {}), learnFromExamples(ex, parts, () => {}, "profiles"));
+}
+
+// part colliders from geometry: a doorway leaves its hole, a deck on stilts is a slab on posts (no block to the water)
+{
+  const boxTris = (min, max) => {
+    const g = boxGeometry(min, max), out = [];
+    for (let t = 0; t < g.indices.length; t += 3) out.push([0, 1, 2].flatMap((k) => Array.from(g.positions.slice(g.indices[t + k] * 3, g.indices[t + k] * 3 + 3))));
+    return out;
+  };
+  const clear = (boxes, min, max) => boxes.every((b) => [0, 1, 2].some((a) => b.max[a] <= min[a] + 1e-6 || b.min[a] >= max[a] - 1e-6));
+  // a reed doorway on the +Z edge: 1.6 x 2.5 m opening between jambs, a lintel over it, 0.28 m thick
+  const door = [...boxTris([-2, 0, 1.71], [-0.8, 2.75, 1.99]), ...boxTris([0.8, 0, 1.71], [2, 2.75, 1.99]), ...boxTris([-0.8, 2.5, 1.71], [0.8, 2.75, 1.99])];
+  const db = partColliderBoxes(door);
+  assert.ok(clear(db, [-0.5, 0.02, 1.5], [0.5, 2.0, 2.2]), "a doorway leaves a 1 x 2 m hole clear");
+  assert.ok(!clear(db, [-1.5, 0.5, 1.75], [-1.0, 1.5, 1.95]), "the jamb is solid");
+  assert.ok(!clear(db, [-0.5, 2.55, 1.75], [0.5, 2.7, 1.95]), "the lintel is solid");
+  // a 4 m deck (0.12 m planks at y 0) on four 3 m posts
+  const deck = [...boxTris([-2, -0.12, -2], [2, 0, 2]), ...[[-1.8, -1.8], [1.6, -1.8], [-1.8, 1.6], [1.6, 1.6]].flatMap(([x, z]) => boxTris([x, -3, z], [x + 0.2, -0.12, z + 0.2]))];
+  const kb = partColliderBoxes(deck);
+  assert.ok(Math.abs(Math.max(...kb.map((b) => b.max[1]))) < 1e-6, "the deck top stays at y 0");
+  assert.ok(clear(kb, [-1.4, -2.9, -1.4], [1.4, -0.4, 1.4]), "under the deck is open between the posts");
+  assert.ok(!clear(kb, [-1.75, -2, -1.75], [-1.65, -1, -1.65]), "the posts are solid");
 }
 
 assert.equal(quarterTurnSymmetric([[-2,0,-2],[2,0,-2],[2,0,2],[-2,0,2]]), true);
@@ -153,7 +176,15 @@ try {
     assert.ok(prefab.entities.floor, "floor child keeps a stable id");
     assert.equal(prefab.entities.floor.components.mesh.source.assetId, "wfc/cabin/floor.gltf");
     assert.equal(prefab.entities.floor.components.mesh.renderMode, "instanced");
-    assert.equal(prefab.entities.floor.components.collider.shape, "box");
+    // the collider comes from the part geometry (collider.mjs), on a hidden child, never the bounding box
+    assert.equal(prefab.entities.floor.components.collider, undefined);
+    const col = prefab.entities["floor-collider"];
+    assert.ok(col, "floor has its collider child");
+    assert.equal(col.parent, "floor");
+    assert.equal(col.components.collider.shape, "trimesh");
+    assert.equal(col.components.visibility.visible, false);
+    assert.equal(col.components.mesh.source.assetId, "wfc/cabin/floor.collider.gltf");
+    assert.ok(fs.existsSync(path.join(assetsDir, "models", "wfc", "cabin", "floor.collider.gltf")));
   }
 
   // solve: enclosed, and every rotated floor carries its counter-rotation

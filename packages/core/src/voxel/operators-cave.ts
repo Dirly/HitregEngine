@@ -107,7 +107,10 @@ function compileCave(p: CaveOperatorParams, reader: OperatorFieldReader, ctx: { 
   const seed = (reader.seed * 7919 + p.seed * 104729) | 0;
   const out: [number, number] = [-Math.cos(best.heading), -Math.sin(best.heading)];
   const outside = reader.height(p.entry[0] + out[0] * 1.5 * r, p.entry[1] + out[1] * 1.5 * r);
-  const m = mouthPieces("mouth", [p.entry[0], y0, p.entry[1]], out, r, seed, Math.max(y0 - 2 * r, outside), best.floor);
+  // a mouth floor above the sea that opens onto ground under it (a sea-cave landing, a quay): the flare ramps down to
+  // just above the sea, never under it, or the sea floods the first metres of the bore
+  const dry = y0 > reader.seaLevel ? Math.min(y0, reader.seaLevel + 0.2 * r) : -Infinity;
+  const m = mouthPieces("mouth", [p.entry[0], y0, p.entry[1]], out, r, seed, Math.max(y0 - 2 * r, outside, dry), best.floor);
   const blobs: OperatorPiece[] = [...m.blobs];
   const end = best.floor[best.floor.length - 1]!;
   if (p.chamber) {

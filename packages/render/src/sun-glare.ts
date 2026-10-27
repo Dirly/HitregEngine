@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
-import { exp, float, length, max, mix, screenUV, smoothstep, step, uniform, vec2, vec3, vec4 } from "three/tsl";
+import { exp, float, length, max, mix, screenUV, select, smoothstep, step, uniform, vec2, vec3, vec4 } from "three/tsl";
+import { isSkyDepth } from "./depth.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type N = any;
@@ -8,7 +9,7 @@ type N = any;
  * Glare when you look toward the sun: a wide soft bloom of its light over the
  * screen and a faint ghost mirrored through the centre — gone the moment a
  * roof, a cliff or a cloud deck stands in the way. Visibility is five taps of
- * the scene depth around the sun's screen position (sky = far plane), so it
+ * the scene depth around the sun's screen position (sky = the far plane: depth 1, or 0 when reversed), so it
  * is a handful of ALU per pixel plus five texture reads, inside the post
  * chain that already runs; no pass, no draw.
  */
@@ -56,7 +57,7 @@ export function applySunGlare(color: N, depth: N, scene: N): N {
   let open: N = float(0);
   for (const [dx, dy] of [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]] as const) {
     const at: N = sun.add(vec2(dx, dy));
-    open = open.add(step(0.9999, depth.sample(at).r));
+    open = open.add(select(isSkyDepth(depth.sample(at).r), float(1), float(0)));
   }
   open = open.div(5);
   // the dome draws cloud at the far plane too: only a BRIGHT sun pixel (the

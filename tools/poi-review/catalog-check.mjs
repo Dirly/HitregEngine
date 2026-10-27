@@ -48,9 +48,29 @@ export function checkDressing({ id, owners, prefabDoc, readSidecar }) {
   return { status: 'declared', mount: d.mount, source: found.source, failures };
 }
 
+/**
+ * The project folder, then the folders of its project.json `dependsOn` closure (siblings in the same projects folder,
+ * depth-first, each once): the runtime loads an asset from whichever of them holds it, so a dependency is met there too.
+ */
+export function closureRoots(root) {
+  const out = [];
+  const visit = dir => {
+    if (out.includes(dir)) return;
+    out.push(dir);
+    let deps = [];
+    try { deps = read(path.join(dir, 'project.json')).dependsOn ?? []; } catch { /* no manifest: no dependencies */ }
+    for (const dep of deps) visit(path.join(path.dirname(dir), dep));
+  };
+  visit(root);
+  return out;
+}
+
 /** Coverage/dependency check only. Metadata completeness and art acceptance remain review gates. */
 export function checkCatalog({ project, assets, index = 'authoring/prop-catalogs.json' }) {
   const root = path.resolve(project), failures = [], results = [];
+  const roots = closureRoots(root);
+  /** A dependency's file in the first closure project that has it (the project's own path when none does). */
+  const resolveDep = relative => { const own = local(relative); for (const r of roots) { const f = path.join(r, path.relative(root, own)); if (fs.existsSync(f)) return f; } return own; };
   function local(relative) {
     if (typeof relative !== 'string' || !relative) throw Error('Expected a project-relative path');
     const file = path.resolve(root, relative), rel = path.relative(root, file);
@@ -92,14 +112,14 @@ export function checkCatalog({ project, assets, index = 'authoring/prop-catalogs
     }
     const visited = new Set();
     function dependency(relative) {
-      const target = local(relative), normalized = slash(path.relative(root, target));
+      const target = resolveDep(relative), normalized = slash(path.relative(root, local(relative)));
       if (!result.dependencies.includes(normalized)) result.dependencies.push(normalized);
       if (!fs.existsSync(target)) { fail(`Missing dependency: ${normalized}`); return false; }
       return true;
     }
     function prefab(relative) {
       const id = key(relative); if (visited.has(id)) return; visited.add(id);
-      const doc = read(local(relative));
+      const doc = read(resolveDep(relative));
       if (!doc.entities || typeof doc.entities !== 'object') { fail(`Invalid prefab document: ${relative}`); return; }
       for (const entity of Object.values(doc.entities)) {
         const c = entity.components ?? {};
@@ -123,7 +143,7 @@ export function checkCatalog({ project, assets, index = 'authoring/prop-catalogs
         const { failures: dressingFailures, ...dressing } = checkDressing({ id, owners: matches, prefabDoc: read(file), readSidecar });
         result.dressing = dressing;
         for (const message of dressingFailures) fail(message);
-        const models = result.dependencies.filter(d => /.glb$/i.test(d)).map(d => path.join(root, d));
+        const models = result.dependencies.filter(d => /.glb$/i.test(d)).map(d => resolveDep(d));
         const seeThrough = seeThroughProp({ id, size: dressing.declaration?.size, models, root });
         if (seeThrough) fail(seeThrough);
       }

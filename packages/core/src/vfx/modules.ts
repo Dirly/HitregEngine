@@ -737,6 +737,14 @@ export const vfxEffectSchema = z.object({
       feel: z.array(feelSchema).default([]),
     })
     .prefault({}),
+  smoke: z
+    .enum(["chimney", "kiln", "fire", "pyre"])
+    .optional()
+    .describe(
+      "The smoke SOURCE class of this effect's smoke layers (normal-blended particles), capped by the smoke standard " +
+        "(core vfx/smoke.ts SMOKE_CLASSES; tools/smoke-check.mts gates it): chimney/hearth a thin column, kiln/forge a " +
+        "thread, fire a small wisp, pyre/burnt ruin a moderate column. Unset = fire when the effect has a smoke layer.",
+    ),
   modules: z.array(vfxModuleSchema).default([]),
 });
 export type VfxEffect = z.infer<typeof vfxEffectSchema>;

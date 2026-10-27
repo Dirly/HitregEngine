@@ -48,11 +48,42 @@ export function compositeFaults(recipe: { declare?: PartDressing; parts?: Part[]
   return [...new Set(out)];
 }
 
-export interface PropRequest { id: string; name: string; culture: string; scale: string; for: string; why: string; at: string; status: "open" | "made" | "dropped" }
+export interface PropRequest { id: string; name: string; culture: string; scale: string; for: string; why: string; at: string; status: "open" | "made" | "dropped"; made?: string; closedAt?: string;
+  /** A LANDMARK structure (a headframe, a beacon frame): its height in metres. The Codex gate then allows that size and
+   *  LANDMARK_TRIANGLES (LANDMARKS 2026-10-22: an 18 m headframe could only be a 6 m prop scaled x3 at 13 tx/m). */
+  landmark?: number;
+  /** HERO size (`request add --size <m>`): the finished prop's height in metres, made at that size and never scaled up after
+   *  (Exiles' Bell 2026-10-24: the bell and the winch were made small and stood in the layout at x1.15-1.2). */
+  size?: number }
 export const requestsFile = (project: string): string => path.join(project, "authoring/dressing/prop-requests.json");
 export function readRequests(project: string): PropRequest[] {
   const f = requestsFile(project);
   return fs.existsSync(f) ? ((JSON.parse(fs.readFileSync(f, "utf8")) as { requests?: PropRequest[] }).requests ?? []) : [];
+}
+/** Close a request: `made` names the catalogued prop that now fills it; `dropped` says why it is not wanted. */
+export function closeRequest(project: string, id: string, status: "made" | "dropped", note: string): PropRequest {
+  const list = readRequests(project);
+  const row = list.find((x) => x.id === id) ?? list.find((x) => x.id.startsWith(id));
+  if (!row) throw Error(`no prop request "${id}" in ${requestsFile(project)} (props request --all lists them)`);
+  row.status = status; row.made = note; row.closedAt = new Date().toISOString();
+  writeRequests(project, list);
+  return row;
+}
+/** Reopen a closed request (its filler was rejected on review): back to open, the reason kept in `reopened`. */
+export function reopenRequest(project: string, id: string, why: string): PropRequest & { reopened?: string[] } {
+  const list = readRequests(project) as (PropRequest & { reopened?: string[] })[];
+  const row = list.find((x) => x.id === id) ?? list.find((x) => x.id.startsWith(id));
+  if (!row) throw Error(`no prop request "${id}" in ${requestsFile(project)} (props request --all lists them)`);
+  if (row.status === "open") throw Error(`prop request ${row.id} is already open`);
+  row.reopened = [...(row.reopened ?? []), `${new Date().toISOString().slice(0, 10)} was ${row.status}${row.made ? ` (${row.made})` : ""}: ${why}`];
+  row.status = "open"; delete row.made; delete row.closedAt;
+  writeRequests(project, list);
+  return row;
+}
+function writeRequests(project: string, list: PropRequest[]): void {
+  const f = requestsFile(project);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify({ about: "Props places need that the catalogue lacks, by culture and scale (props request add). A place leaves the spot for it and names it in its handoff; nobody composes a stand-in.", requests: list }, null, 1) + "\n");
 }
 /** Log a request (merged into an open one for the same thing, culture and scale). */
 export function addRequest(project: string, r: Omit<PropRequest, "id" | "at" | "status">): PropRequest {
@@ -60,6 +91,7 @@ export function addRequest(project: string, r: Omit<PropRequest, "id" | "at" | "
   const slug = r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   const dup = list.find((x) => x.status === "open" && x.name.toLowerCase() === r.name.toLowerCase() && x.culture === r.culture && x.scale === r.scale);
   if (dup && !dup.for.split(", ").includes(r.for)) dup.for = `${dup.for}, ${r.for}`;
+  if (dup && r.size) dup.size = r.size;
   const row: PropRequest = dup ?? { id: `${r.culture}/${slug}`, ...r, at: new Date().toISOString(), status: "open" };
   if (!dup) list.push(row);
   const f = requestsFile(project);

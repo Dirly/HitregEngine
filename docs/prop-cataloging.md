@@ -216,7 +216,12 @@ From `apps/playground`: `npx tsx tools/props.mts <cmd> --project <name>`.
 `measure` and `suggest` read the geometry; `status [--next]` checks every catalogued
 prefab (declared or exempt, schema, size and origin against the measured bounds,
 sockets inside the mesh and resting on it, slot hosts, known-failure heuristics, prefab
-in sync) and exits 1 on anything not ok; `sync` writes sidecars onto prefab roots
+in sync) and exits 1 on anything not ok. A building shell whose mesh runs below its
+origin plane on purpose (a kit ruin: floor top at y=0, footing down to -3.2 m so it
+seats on a slope) declares `footing: <m>` and its origin still counts as `foot`;
+place-build layouts place such shells as `{kind: "structure"}` pieces, never a
+dressing plan, but they are declared (size, mount, scale, cultures), never exempt,
+because the layout's footprint and overlap checks read the catalogue size; `sync` writes sidecars onto prefab roots
 (through ops) and refreshes catalog hashes it invalidated; `index` writes
 `authoring/dressing/prop-index.json`; `menu` is the only view a placing agent reads. It prints FULL ids (folder
 included), each prop's rooms and, for a wrapper, variant or composite, its source; `menu --setting outdoor

@@ -23,6 +23,7 @@ arrangement as `apps/playground/projects/`. No submodule, no gitlink.
 | `statue-maker/`   | `hitreg.statue-maker`   | Bakes character or creature poses into smooth static sculptures with anchored collision prefabs; CLI and registered host share one recipe implementation. |
 | `dungeon-pipeline/` | — | Shared stage runner + standard stage list for Blender-to-DC dungeons, with the quality gates (noise, originality, atlas, recipe, compare) that block `--next`. CLI library imported by each dungeon's `authoring/pipeline.mjs`. |
 | `poi-review/` | `hitreg.poi-review` | Agent-agnostic POI work plans and construction handoffs; terrain access planning, meshed-terrain reachability, headroom, support and assembly checks. Requires a separate visual review. |
+| `place-build/` | `hitreg.place-build` | Builds small/medium outdoor places from place archetypes (world-kit `authoring/place-archetypes/`): plan, lab build, every install gate, shots, install with inverse. Runner over `apps/playground/tools/place-build.mts`; see `docs/place-builder.md`. |
 
 These are tracked because they are the reference implementations of the
 contract and because the engine's own test and spec depend on them: root

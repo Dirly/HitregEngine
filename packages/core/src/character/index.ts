@@ -20,6 +20,7 @@ import { HAND_NETSTATE, handStateSchema } from "./hand.js";
 import { BADGE_NETSTATE, CAST_NETSTATE, castBarSchema, plateBadgesSchema } from "./cast.js";
 import { PET_NETSTATE, TARGET_NETSTATE, petStateSchema, targetStateSchema } from "./target.js";
 import { questJournalSchema } from "../game-ui.js";
+import { ESCORT_NETSTATE, escortStateSchema } from "../quest-blocks.js";
 import { registerNpcNetState } from "../npc/index.js";
 import { registerPortalNetState } from "../portal.js";
 
@@ -100,6 +101,7 @@ export function registerCharacterNetState(store: NetStateStore): void {
   store.define(PET_NETSTATE, petStateSchema); // pet/<petId> — a creature fighting for a player
   registerNpcNetState(store);
   registerPortalNetState(store); // portal/<bodyId> — a portal trip's arrival + way back, saved with the character
+  store.define(ESCORT_NETSTATE, escortStateSchema); // escort/<npcId> — an escort step's claim on a shared NPC and its walk
   store.define("quests", questJournalSchema.describe("Authority-owned quest journal keyed quests/<actorId>. Tracking requests validate body ownership; objective progress never accepts peer assertions."));
   store.define(
     CHARACTER_NETSTATE,

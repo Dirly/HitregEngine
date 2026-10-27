@@ -36,6 +36,8 @@ its manual (`apps/playground/tools/portal-*.mts`). Run from `apps/playground`.
 - cover `TRIGGER` fails: a body can step past the sides or jump over the box (the box must catch the body CENTRE:
   0.9 m up walking, ~2.9 m at a jump apex, 0.4 m off each wall) -> `--fit`.
 - cover `VEIL` gap / protrusion: opening shows past the veil, or veil shows over rock -> `--fit`.
+- cover ARRIVALS fails (an anchor's overflow spot in the rock / over air: a sloped passage) -> `--fit` measures `portalAnchor.queue`
+  (kept in portal-veils.json); never hand-set the queue or nudge the anchor.
 - cover section OPEN: box/veil plane stands outside the mouth and can be walked round -> move the portal anchor
   onto a closed cross-section within ~1.5 m; `--fit` only RESIZES where it stands (a portal behind its doorway, in a
   wide hall, cannot be fitted: move it to the narrowest section first).

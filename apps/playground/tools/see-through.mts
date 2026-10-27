@@ -21,6 +21,8 @@
  *   --batch k/n             this run does every n-th sample from k (1-based); parts merge when all n are present
  *   --out <report.json>     default <project>/reports/see-through.json (prop: reports/see-through-prop-<entity>.json)
  *   --port 5284 | --url <dev app>     --force (ignore the cache)   --headed
+ *   --within 40             scene mode: a site on world meshes only (scatter, terrain — no scene entity) farther than
+ *                           this (XZ) from every route sample is OUT OF PLACE: listed, not counted (_see-through-scope.mts)
  *
  * Cached: the report records an inputs hash (scene file, the project's models, routes, openings, options, this tool and
  * the probe); a re-run with the same hash prints the cached verdict and exits. Exit 1 when holes were found.
@@ -29,8 +31,11 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+// @ts-expect-error plain JS module
+import { loadPlaywright as loadPlaywrightModule } from "./_playwright.mjs";
+import { READ_ONLY_POSTS } from "./_readonly-posts.mjs";
+import { OUT_OF_PLACE_M, outOfPlace, ropeRailOpening, routeDistanceXZ } from "./_see-through-scope.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ROOT = path.resolve(PG, "..", "..");
@@ -64,6 +69,7 @@ const FAR = Number(arg("far", "600"));
 const HOUR = arg("hour", "12");
 const ENTITY = arg("entity");
 const ANGLES = Number(arg("angles", "12"));
+const WITHIN = Number(arg("within", String(OUT_OF_PLACE_M)));
 const [BATCH_K, BATCH_N] = (arg("batch", "1/1").split("/").map(Number) as [number, number]);
 const OUT = path.resolve(arg("out", path.join(projectDir, "reports", MODE_CMD === "prop" ? `see-through-prop-${ENTITY.replace(/[^\w-]+/g, "_")}.json` : "see-through.json")));
 const OUT_DIR = path.join(path.dirname(OUT), path.basename(OUT, ".json"));
@@ -124,7 +130,7 @@ function hashInputs(): string {
   const models = path.join(projectDir, "assets", "models");
   const walk = (d: string) => { if (!fs.existsSync(d)) return; for (const n of fs.readdirSync(d).sort()) { const f = path.join(d, n); fs.statSync(f).isDirectory() ? walk(f) : add(f); } };
   walk(models);
-  h.update(JSON.stringify({ MODE_CMD, RULE_MODE, STEP, SIZE, MIN_PX, FAR, HOUR, ENTITY, ANGLES, lodFull: argv.includes("--lod-full"), lodNear: argv.includes("--lod-near"), only: arg("samples") }));
+  h.update(JSON.stringify({ MODE_CMD, RULE_MODE, STEP, SIZE, MIN_PX, FAR, HOUR, ENTITY, ANGLES, WITHIN, lodFull: argv.includes("--lod-full"), lodNear: argv.includes("--lod-near"), only: arg("samples") }));
   return h.digest("hex").slice(0, 16);
 }
 const inputsHash = hashInputs();
@@ -137,11 +143,8 @@ fs.mkdirSync(OUT_DIR, { recursive: true });
 
 // -- browser --------------------------------------------------------------------------------------------------------
 async function loadPlaywright(): Promise<any> {
-  const env = process.env["HITREG_PLAYWRIGHT"];
-  if (env) return createRequire(path.join(env, "package.json"))(env);
-  try { return await import("playwright"); } catch { /* fall through */ }
-  for (const dir of [process.cwd(), PG, ROOT]) { try { return createRequire(path.join(dir, "noop.js"))("playwright"); } catch { /* next */ } }
-  console.error("STOP: playwright is not resolvable — set HITREG_PLAYWRIGHT=<playwright package dir>"); process.exit(2);
+  // the apps/playground devDependency (tools/_playwright.mjs); HITREG_PLAYWRIGHT / PLAYWRIGHT_MODULE still override
+  try { return await loadPlaywrightModule(); } catch (e) { console.error(`STOP: ${(e as Error).message}`); process.exit(2); }
 }
 let vite: ReturnType<typeof spawn> | null = null;
 let base = arg("url").replace(/\/$/, "");
@@ -164,7 +167,7 @@ const { chromium } = await loadPlaywright();
 const browser = await chromium.launch({ channel: "chrome", headless: !argv.includes("--headed"), args: ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist"] });
 const ctx = await browser.newContext({ viewport: { width: 960, height: 600 } });
 // nothing this run does may reach disk; freeze the page at the code it booted with
-await ctx.route(/\/__hitreg\//, (route: any) => { const r = route.request(); return r.method() !== "GET" && !/\/__hitreg\/log\b/.test(r.url()) ? route.fulfill({ status: 200, contentType: "application/json", body: "{\"ok\":true}" }) : route.continue(); });
+await ctx.route(/\/__hitreg\//, (route: any) => { const r = route.request(); return r.method() !== "GET" && !READ_ONLY_POSTS.test(r.url()) ? route.fulfill({ status: 200, contentType: "application/json", body: "{\"ok\":true}" }) : route.continue(); });
 await ctx.route(/\/@vite\/client(\?.*)?$/, (route: any) => route.fulfill({ contentType: "application/javascript", body: `export const createHotContext = () => ({ data: {}, accept() {}, acceptExports() {}, dispose() {}, prune() {}, invalidate() {}, decline() {}, on() {}, off() {}, send() {} });
 export const updateStyle = (id, css) => { const s = document.createElement("style"); s.textContent = css; document.head.appendChild(s); };
 export const removeStyle = () => {}; export const injectQuery = (u) => u; export class ErrorOverlay extends HTMLElement {}` }));
@@ -319,15 +322,25 @@ if (parts.every((p) => p && (p.inputsHash === inputsHash || MERGE))) {
     sites.push({ id: sites.length + 1, at: h.at ? h.at.map((v) => +v.toFixed(2)) as V3 : null, cause: h.cause, causes: { [h.cause]: 1 }, entities: [...h.entities], views: 1, maxPixels: h.pixels, worst: h });
   }
   for (const s of sites) s.cause = Object.entries(s.causes).sort((a, b) => b[1] - a[1])[0]![0];
+  // world meshes far outside the place (a scatter tree 60-100 m off) are listed, not counted
+  const sceneIds = new Set(Object.keys(doc.entities));
+  const away = MODE_CMD === "scene" ? sites.filter((s) => outOfPlace(s, samples, sceneIds, WITHIN)) : [];
+  if (away.length) sites.splice(0, sites.length, ...sites.filter((s) => !away.includes(s)));
   const names = (id: string) => doc.entities[id]?.name ?? id;
+  // rope rails: the gaps between a rail's strands are deliberate — an allowed opening, listed, never counted
+  const ropes = sites.filter((s) => ropeRailOpening(s, names));
+  if (ropes.length) sites.splice(0, sites.length, ...sites.filter((s) => !ropes.includes(s)));
   const counts: Record<string, number> = { sites: sites.length, holeViews: all.length };
   for (const s of sites) counts[s.cause] = (counts[s.cause] ?? 0) + 1;
+  if (away.length) counts["outOfPlace"] = away.length;
+  if (ropes.length) counts["ropeRailOpenings"] = ropes.length;
   const report = {
     tool: "see-through", scene: SCENE, mode: MODE_CMD, rule: MODE_CMD === "prop" ? "enclosed" : RULE_MODE, entity: ENTITY || undefined, at: new Date().toISOString(), inputsHash,
     ok: sites.length === 0, passed: sites.length === 0, counts, ...(parts.some((p) => p.inputsHash !== inputsHash) ? { mixedInputs: parts.map((p) => p.inputsHash) } : {}), samples: parts.reduce((s, p) => s + p.samples, 0), seconds: parts.reduce((s, p) => s + p.seconds, 0),
     options: { step: STEP, size: SIZE, minPixels: MIN_PX, hour: HOUR, openings: declared.map((o) => o.name), portals: portalIds.map((p) => p.id) },
     sites: sites.map((s) => ({ id: s.id, cause: s.cause, causes: s.causes, entities: s.entities.map((e) => `${e}${names(e) !== e ? ` (${names(e)})` : ""}`), at: s.at, views: s.views, maxPixels: s.maxPixels,
       worst: { sample: s.worst.sample, leg: s.worst.leg, view: s.worst.view, eye: s.worst.eye.map((v) => +v.toFixed(2)), dir: s.worst.dir.map((v) => +v.toFixed(3)), depth: s.worst.depth && +s.worst.depth.toFixed(2), crop: s.worst.crop } })),
+    outOfPlace: away.map((s) => ({ id: s.id, cause: s.cause, entities: s.entities, at: s.at, views: s.views, maxPixels: s.maxPixels, routeDistanceM: +routeDistanceXZ(s.at!, samples).toFixed(1), withinM: WITHIN })),
     sheet: sites.length ? path.relative(path.dirname(OUT), path.join(OUT_DIR, "sheet.png")).replace(/\\/g, "/") : null,
   };
   // the contact sheet: the 24 worst sites, labelled
@@ -347,6 +360,7 @@ if (parts.every((p) => p && (p.inputsHash === inputsHash || MERGE))) {
   fs.writeFileSync(OUT, JSON.stringify(report, null, 1));
   for (let k = 1; k <= BATCH_N; k++) fs.rmSync(partFile(k), { force: true });
   console.log(`see-through ${SCENE}: ${report.ok ? "ok" : "FAILED"} — ${sites.length} hole site(s) from ${all.length} hole views over ${report.samples} samples; ${JSON.stringify(counts)}  ${OUT}`);
+  for (const s of report.outOfPlace) console.log(`  out of place (not counted): ${s.cause} ${s.maxPixels} px at ${JSON.stringify(s.at)} on ${s.entities.slice(0, 2).join(" | ")}, ${s.routeDistanceM} m from the route (${s.routeDistanceM > s.withinM ? `> ${s.withinM}` : "a cutout on world meshes only"})`);
   for (const s of report.sites.slice(0, 8)) console.log(`  #${s.id} ${s.cause.padEnd(12)} ${String(s.maxPixels).padStart(5)} px x${s.views}  at ${JSON.stringify(s.at)}  ${s.entities.slice(0, 3).join(" | ")}`);
   process.exitCode = report.ok ? 0 : 1;
 } else console.log(`  waiting for the other batches (${parts.filter((p) => p && p.inputsHash === inputsHash).length}/${BATCH_N} present)`);

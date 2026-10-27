@@ -24,7 +24,7 @@ import type { RegionDoc } from "./regions.js";
 export interface ZoneGroundRecipe {
   seed: number;
   surfaces: readonly { name: string; role?: string | undefined }[];
-  regions: readonly Pick<RegionDoc, "id" | "polygon" | "within" | "ground">[];
+  regions: readonly (Pick<RegionDoc, "id" | "polygon" | "within" | "ground"> & { palette?: unknown; groundBand?: number })[];
   zoneGround?: { band: number; jitter: number };
 }
 
@@ -37,6 +37,14 @@ export interface ZoneGroundZone {
   parent: number;
   /** Palette index per role (SURFACE_ROLES order), -1 where the zone keeps the base surface. */
   targets: Int16Array;
+  /**
+   * A zone with a declared `palette` (one palette per role; the slope decides the role): the palette index its CLIFF-role
+   * weight goes to on ground flatter than ~25 deg (its accent, else its ground) instead of the cliff tile, so a biome's
+   * rock flats (badlands redrock, moor rock) draw the zone's stony ground rather than its strata wall laid flat; -1 = keep.
+   */
+  flatCliff: number;
+  /** This zone's own blend band (m; `regions[].groundBand`), else undefined = the world's `zoneGround.band`. */
+  band?: number;
 }
 
 export interface ZoneGroundRoles {
@@ -92,11 +100,22 @@ export function zoneGroundRoles(recipe: ZoneGroundRecipe): ZoneGroundRoles {
       minZ = Math.min(minZ, z);
       maxZ = Math.max(maxZ, z);
     }
-    zones.push({ id: region.id, polygon: region.polygon, bbox: [minX, minZ, maxX, maxZ], parent: -1, targets });
+    zones.push({ id: region.id, polygon: region.polygon, bbox: [minX, minZ, maxX, maxZ], parent: -1, targets, flatCliff: -1, ...(region.groundBand !== undefined ? { band: region.groundBand } : {}) });
   }
   for (const zone of zones) {
     const region = recipe.regions.find((r) => r.id === zone.id);
     if (region?.within) zone.parent = zones.findIndex((z) => z.id === region.within);
+    // a region nested in a palette zone (a corridor restyling its zone's cliff) keeps the zone's rule: its cliff weight
+    // on the flat goes to its own accent/ground, as the zone's does
+    let paletted = false;
+    for (let r: (typeof recipe.regions)[number] | undefined = region, hop = 0; r && hop < 6 && !paletted; hop++) {
+      paletted = !!r.palette;
+      r = r.within ? recipe.regions.find((q) => q.id === r!.within) : undefined;
+    }
+    if (paletted) {
+      const accent = zone.targets[surfaceRoleIndex("accent")]!;
+      zone.flatCliff = accent >= 0 ? accent : zone.targets[surfaceRoleIndex("ground")]!;
+    }
   }
   // A surface some zone uses as its override is never itself a base member:
   // remapping it again would move one zone's cobble into the next zone's.
@@ -156,10 +175,12 @@ export function createZoneMembership(
   const zones = roles.zones;
   const K = zones.length;
   const band = recipe.zoneGround?.band ?? 150;
-  const half = band / 2;
-  const jitterAmp = band * (recipe.zoneGround?.jitter ?? 0.35);
+  const jitterShare = recipe.zoneGround?.jitter ?? 0.35;
+  // per zone: a corridor region may blend over a narrower band of its own (regions[].groundBand)
+  const halves = zones.map((z) => (z.band ?? band) / 2);
+  const amps = zones.map((z) => (z.band ?? band) * jitterShare);
   const jitterSpec: FbmSpec = { frequency: 1 / 260, amplitude: 1, octaves: 3, lacunarity: 2.1, gain: 0.5, ridged: false, seed: 4409 };
-  const reach = half + jitterAmp + LATTICE * 2;
+  const reaches = zones.map((_, k) => halves[k]! + amps[k]! + LATTICE * 2);
   const seed = recipe.seed;
 
   const raw = new Float32Array(Math.max(1, K));
@@ -168,14 +189,15 @@ export function createZoneMembership(
     for (let k = 0; k < K; k++) {
       const zone = zones[k]!;
       const [minX, minZ, maxX, maxZ] = zone.bbox;
+      const reach = reaches[k]!;
       if (x < minX - reach || x > maxX + reach || z < minZ - reach || z > maxZ + reach) {
         raw[k] = 0;
         continue;
       }
-      if (Number.isNaN(jitter)) jitter = jitterAmp > 0 ? fbm2(jitterSpec, x, z, seed) * jitterAmp : 0;
+      if (Number.isNaN(jitter)) jitter = fbm2(jitterSpec, x, z, seed);
       const d = polygonEdgeDistance(x, z, zone.polygon);
-      const signed = (pointInPolygon(x, z, zone.polygon) ? d : -d) + jitter;
-      raw[k] = smoothstep(-half, half, signed);
+      const signed = (pointInPolygon(x, z, zone.polygon) ? d : -d) + jitter * amps[k]!;
+      raw[k] = smoothstep(-halves[k]!, halves[k]!, signed);
     }
     for (let k = 0; k < K; k++) {
       const p = zones[k]!.parent;
@@ -189,12 +211,12 @@ export function createZoneMembership(
   let minZ = Infinity;
   let maxX = -Infinity;
   let maxZ = -Infinity;
-  for (const zone of zones) {
-    minX = Math.min(minX, zone.bbox[0] - reach);
-    minZ = Math.min(minZ, zone.bbox[1] - reach);
-    maxX = Math.max(maxX, zone.bbox[2] + reach);
-    maxZ = Math.max(maxZ, zone.bbox[3] + reach);
-  }
+  zones.forEach((zone, k) => {
+    minX = Math.min(minX, zone.bbox[0] - reaches[k]!);
+    minZ = Math.min(minZ, zone.bbox[1] - reaches[k]!);
+    maxX = Math.max(maxX, zone.bbox[2] + reaches[k]!);
+    maxZ = Math.max(maxZ, zone.bbox[3] + reaches[k]!);
+  });
 
   const tiles = new Map<number, Float32Array>();
   const side = TILE + 1;

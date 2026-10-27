@@ -190,17 +190,18 @@ function fireEffect(size, { s, light, flicker, embers, smoke }) {
     });
   }
 
-  // Smoke: normal-blended pixel blobs above the flame, thin enough never to hide
-  // it, on a coarser grid and a slower tick than the flame.
+  // Smoke: a small pale wisp above the flame, on the smoke standard (core vfx/smoke.ts, class fire; Derek
+  // 2026-10-22 "smoke is far too big"): gone within ~3x the fire's height, pale grey (never near-black), leaning
+  // with the live wind (windDrift), darkened at night (nightDim, particles are unlit). tools/smoke-check.mts gates it.
   if (smoke) {
-    const rate = r3(2.5 * grow(0.6));
-    const life = [r3(2.2 * grow(0.3)), r3(3.6 * grow(0.3))];
+    const rate = r3(1.6 * grow(0.5));
+    const life = [r3(2.0 * grow(0.25)), r3(3.0 * grow(0.25))];
     modules.push({
       kind: "particles",
       id: "smoke",
       stream: true,
-      color: "#2b2622",
-      colorEnd: "#57504a",
+      color: "#8c8985",
+      colorEnd: "#a9a6a2",
       blend: "normal",
       anchor: { at: "origin", offset: [0, r3(0.4 * s), 0] },
       emitter: {
@@ -208,20 +209,23 @@ function fireEffect(size, { s, light, flicker, embers, smoke }) {
         max: maxFor(rate, life[1]),
         lifetime: life,
         shape: "sphere",
-        shapeSize: [r3(0.08 * s), r3(0.05 * s), r3(0.08 * s)],
+        shapeSize: [r3(0.06 * s), r3(0.04 * s), r3(0.06 * s)],
         direction: [0, 1, 0],
-        speed: [r3(0.35 * grow(0.6)), r3(0.6 * grow(0.6))],
-        spread: 10,
-        turbulence: r3(0.5 * grow(0.5)),
+        speed: [r3(0.35 * grow(0.5)), r3(0.55 * grow(0.5))],
+        spread: 4,
+        turbulence: r3(0.06 * grow(0.5)),
         turbulenceSpeed: 0.8,
+        windDrift: 0.2,
+        nightDim: 0.8,
         drag: 0.3,
-        sizeCurve: [[0, r3(0.2 * s)], [1, r3(0.9 * s)]],
-        opacityCurve: [[0, 0], [0.2, 0.25], [1, 0.05]],
+        sizeCurve: [[0, r3(0.12 * Math.min(s, 3.5))], [1, r3(0.36 * Math.min(s, 3.5))]],
+        opacityCurve: [[0, 0], [0.2, 0.22], [0.7, 0.1], [1, 0]],
         sprite: "pixel",
         steps: 3,
         snap: r3(grid * 1.5),
         frameRate: SMOKE_FPS,
         blending: "normal",
+        space: "world",
       },
     });
   }

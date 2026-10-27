@@ -43,6 +43,10 @@ keep interactive entities separate and retain the editable town plan.
 ## Ground, wall, wear and lights (engine side, from apps/playground)
 - **Wall**: site it from `zonegen sites` `wall-gap` (`site-finder` skill): one short heavy wall across the narrowest
   neck between cliff and water, not a ring from the brief. Lots respect wall and gate lines; trails leave by a gate.
+  **Wall clear**: `npx tsx tools/town-wall-clear.mts --project <p> --town <t>` after the wall is baked and the buildings
+  installed: every SHIPPED model (its glb bounds, as placed) clear of every wall body by >= 0.5 m; a wall that reaches
+  into a building fails. Draw the wall line round the shipped models, not the layout envelopes (Cindermoot 2026-10-25:
+  chapel, smoke tower and smithy were 2.4-6 m larger than their envelopes and the ring ran through them).
 - **Program fits the ground**: measure buildable area (slope under ~20 % inside the wall line) against the planned
   envelopes before the freeze; resize the program or the wall, never terrace the town to fit.
 - **Settle the FULL footprint**: `npx tsx tools/town-settle.mts --project <p> --town <t>` after pads, lanes and road

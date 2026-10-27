@@ -40,8 +40,9 @@ import {
   placeTokens,
   type Places,
 } from "@hitreg/core";
-import { interiorUnitFor, placeUnder, RESIDENT_CULLING } from "./town-npc-placement.mts";
+import { insideFloorY, interiorUnitFor, placeUnder, RESIDENT_CULLING } from "./town-npc-placement.mts";
 import { assetIds, assetPath, findAsset } from "./_closure.mjs";
+import { readJsonTracked, writeJsonFile } from "./_scene-write.mts";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const arg = (name: string, fallback: string): string => {
@@ -351,6 +352,24 @@ const placesTable: Places = { origin: [0, 0], places: {} };
   for (const [k, t] of [["what", doc.story.what], ["why", doc.story.why], ["now", doc.story.now], ...doc.story.hooks.map((h, i) => [`hook ${i + 1}`, h])] as Array<[string, string]>) lint(`story ${k}`, t);
 }
 
+// Resident ids are SCENE-WIDE entity ids: two towns of one world sharing an id ("smith-garrow" in Hagsend and Reedholt)
+// make the second town's NPC overwrite the first's entity on install. Checked against every other town doc of this
+// project and of the projects it depends on (a lab sees the live world's towns); the same town id elsewhere (the
+// live copy of a lab's town) is the same town, not a clash.
+{
+  const pj = readJson(path.join(project, "project.json")) as { dependsOn?: string[] };
+  const dirs = [project, ...(pj.dependsOn ?? []).map((d) => path.resolve(here, "..", "projects", d))].map((d) => path.join(d, "authoring", "towns"));
+  const mine = new Set(doc.residents.map((r) => r.id));
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    for (const f of fs.readdirSync(dir).filter((n) => n.endsWith(".json"))) {
+      let other: { town?: string; world?: string; name?: string; residents?: { id: string }[] };
+      try { other = readJson(path.join(dir, f)) as typeof other; } catch { continue; }
+      if (!Array.isArray(other.residents) || !other.world || !other.town || other.town === doc.town) continue; // town docs only (a plan has no world)
+      for (const r of other.residents) if (mine.has(r.id)) problems.push(`resident ${r.id}: the id is already a resident of ${other.name ?? other.town} (${path.relative(process.cwd(), path.join(dir, f))}); resident ids are scene-wide entity ids: rename one`);
+    }
+  }
+}
 for (const w of warn) console.warn(`  warn  ${w}`);
 if (problems.length) {
   for (const p of problems) console.error(`  ERROR ${p}`);
@@ -478,11 +497,12 @@ const recipe = worldRecipeSchema.parse(readJson(path.join(assets, "worlds", `${d
 const field = createWorldField(recipe);
 const ground = (x: number, z: number): number => field.surfaceCast(x, z) ?? field.height(x, z);
 const sceneFile = path.join(assets, "scenes", `${doc.scene}.scene.json`);
-const scene = readJson(sceneFile) as SceneDoc;
+const scene = readJsonTracked(sceneFile) as SceneDoc; // tracked: the write below refuses if another tool wrote the scene since
 clearTown(scene);
 for (const r of doc.residents) {
   const [x, z] = r.place.at;
-  const y = ground(x, z);
+  // indoors: the building's floor (a stilted or raised floor stands metres over the terrain under it)
+  const y = (r.place.inside ? insideFloorY(scene.entities, r.place.inside) : null) ?? ground(x, z);
   const face = r.place.face;
   const yaw = r.place.yaw ?? (face ? Math.atan2(face[0] - x, face[1] - z) : 0);
   const wear = addResident(scene, r, [x, y + 0.9, z], yaw);
@@ -493,7 +513,7 @@ ensureUi(scene);
 const placesFile = path.join(assets, "places", `${placesId}.json`);
 fs.mkdirSync(path.dirname(placesFile), { recursive: true });
 fs.writeFileSync(placesFile, `${JSON.stringify(placesTable, null, 2)}\n`);
-fs.writeFileSync(sceneFile, `${JSON.stringify(scene, null, 2)}\n`);
+writeJsonFile(sceneFile, scene, { label: "town-npcs" }); // under the scene lock (tools/_scene-write.mts)
 console.log(`wrote ${doc.residents.length} NPCs into ${path.relative(project, sceneFile)}`);
 
 // --lineup <scene>: every resident in an arc on a lit floor, facing the player's start — a review

@@ -6,13 +6,15 @@
  * the world is actually ready to play:
  *
  *   1. the server link is up (networked play) and this tab's body has arrived;
- *   2. streaming has gone quiet: no terrain cell or sub-scene still loading;
- *   3. the frame rate has SETTLED: no frame longer than SETTLE_FRAME_MS for
- *      SETTLE_SECONDS in a row. Shader compiles, GPU uploads and first-draw
- *      stalls all show up as long frames, so this one signal covers them all
- *      without hooking each.
+ *   2. the playable neighbourhood's ground is ready;
+ *   3. first-draw work gets a brief settling window: no frame longer than
+ *      SETTLE_FRAME_MS for SETTLE_SECONDS in a row, or MAX_SETTLE_SECONDS
+ *      after local readiness if background work keeps hitching.
  *
- * It never waits forever (MAX_SECONDS), shows at least MIN_SECONDS so it does
+ * Distant scenery continues streaming after entry. Once local ground is ready,
+ * background hitches may delay entry by at most MAX_SETTLE_SECONDS. A host that
+ * supplies explicit ground readiness never times out into missing ground.
+ * It shows at least MIN_SECONDS so it does
  * not flash, and fades out. It re-arms itself whenever the world goes away
  * again (a scene switch, a server transfer, the body lost) so a portal or a
  * zone hop gets the same treatment. Skinned with the game's own art: the
@@ -26,8 +28,10 @@ export const SETTLE_FRAME_MS = 50;
 export const SETTLE_SECONDS = 1.0;
 /** The screen shows at least this long, so a fast load does not flash. */
 export const MIN_SECONDS = 1.2;
-/** ...and never longer than this: a world that never settles is let through. */
+/** Legacy hosts without ground readiness retain their load timeout. */
 export const MAX_SECONDS = 45;
+/** Background streaming may keep hitching after the playable area is ready. */
+export const MAX_SETTLE_SECONDS = 5;
 
 export interface LoadSignals {
   /** The player means to be in the world now (playing; a networked tab with a grant). */
@@ -38,6 +42,8 @@ export interface LoadSignals {
   hasBody(): boolean;
   /** Streaming work still in flight (terrain cells, sub-scenes): 0 = quiet. */
   loading(): number;
+  /** Local ground is ready to play on; optional for hosts without a streamed world. */
+  ready?(): boolean;
   /** The world is being torn down / switched (a scene switch in progress). */
   switching(): boolean;
   /** Where the player is going, for the title ("Ironspur Shore"); "" = the scene's name is used. */
@@ -52,6 +58,19 @@ export interface LoadScreenOptions {
 }
 
 type Phase = "connect" | "body" | "stream" | "settle" | "done";
+
+export function loadPhase(s: LoadSignals): Phase {
+  if (!s.connected()) return "connect";
+  if (!s.hasBody() || s.switching()) return "body";
+  if (s.ready ? !s.ready() : s.loading() > 0) return "stream";
+  return "settle";
+}
+
+export function shouldReleaseLoad(phase: Phase, elapsed: number, calmSeconds: number,
+  readySeconds: number, groundRequired: boolean): boolean {
+  const settled = phase === "settle" && (calmSeconds >= SETTLE_SECONDS || readySeconds >= MAX_SETTLE_SECONDS);
+  return (settled && elapsed >= MIN_SECONDS) || (!groundRequired && elapsed >= MAX_SECONDS);
+}
 
 const STYLE = `
 .hg-load{position:fixed;inset:0;z-index:19990;display:flex;align-items:flex-end;justify-content:center;background:#070606 center/cover no-repeat;font:14px/1.45 Georgia,'Times New Roman',serif;color:#dfd2b8;text-shadow:0 1px 3px #000;transition:opacity .6s ease;pointer-events:auto}
@@ -122,6 +141,7 @@ export function mountLoadScreen(opts: LoadScreenOptions): { dispose(): void; sho
   let fadeTimer: ReturnType<typeof setTimeout> | undefined;
   let shownProgress = 0;
   let wasWanted = false;
+  let readySince: number | null = null;
 
   const arm = (): void => {
     armed = true;
@@ -129,6 +149,7 @@ export function mountLoadScreen(opts: LoadScreenOptions): { dispose(): void; sho
     calmSince = startedAt;
     maxLoading = 1;
     shownProgress = 0;
+    readySince = null;
     clearTimeout(fadeTimer);
     skin();
     root.classList.remove("out");
@@ -143,13 +164,6 @@ export function mountLoadScreen(opts: LoadScreenOptions): { dispose(): void; sho
     }, 650);
   };
 
-  const phaseOf = (s: LoadSignals): Phase => {
-    if (!s.connected()) return "connect";
-    if (!s.hasBody() || s.switching()) return "body";
-    if (s.loading() > 0) return "stream";
-    return "settle";
-  };
-
   const tick = (): void => {
     raf = requestAnimationFrame(tick);
     const now = performance.now();
@@ -161,12 +175,14 @@ export function mountLoadScreen(opts: LoadScreenOptions): { dispose(): void; sho
       if (armed) release();
       return;
     }
-    const phase = phaseOf(s);
+    const phase = loadPhase(s);
     // entering the world, or the world went away again (a switch, a transfer, the body or the link lost) — but
     // never for ordinary streaming as the player walks: that is the world working, not loading
     if (!armed && (!wasWanted || phase === "connect" || phase === "body")) arm();
     wasWanted = true;
     if (!armed) return;
+    if (phase === "settle") readySince ??= now;
+    else readySince = null;
     if (frame > SETTLE_FRAME_MS || phase !== "settle") calmSince = now;
     const loading = s.loading();
     maxLoading = Math.max(maxLoading, loading);
@@ -196,8 +212,9 @@ export function mountLoadScreen(opts: LoadScreenOptions): { dispose(): void; sho
             : "Settling in…";
     const elapsed = (now - startedAt) / 1000;
     const settled = phase === "settle" && (now - calmSince) / 1000 >= SETTLE_SECONDS;
-    if ((settled && elapsed >= MIN_SECONDS) || elapsed >= MAX_SECONDS) {
-      if (!settled) console.warn(`[load-screen] let through after ${MAX_SECONDS}s (phase ${phase}, ${loading} still loading)`);
+    const readySeconds = readySince === null ? 0 : (now - readySince) / 1000;
+    if (shouldReleaseLoad(phase, elapsed, (now - calmSince) / 1000, readySeconds, !!s.ready)) {
+      if (!settled && !s.ready) console.warn(`[load-screen] let through after ${MAX_SECONDS}s (phase ${phase}, ${loading} still loading)`);
       shownProgress = 1;
       fill.style.transform = "scaleX(1)";
       release();

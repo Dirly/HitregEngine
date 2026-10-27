@@ -69,7 +69,7 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ../apps/playground/dist:/srv/client:ro
+      - ../apps/playground/dist/${CLIENT_PROJECT:?set CLIENT_PROJECT to the published game project}:/srv/client:ro
       - caddy-data:/data
       - caddy-config:/config
 

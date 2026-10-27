@@ -13,6 +13,8 @@ import { operatorDocSchema } from "./operator-registry.js";
 import { ribbonSchema } from "./ribbon.js";
 import { kitWallSchema } from "./kit-walls.js";
 import { landmarkSchema } from "./ledge-landmark.js";
+import { groundPaintSchema } from "./ground-paint.js";
+import { rockSetSchema } from "./rock-sets.js";
 
 /**
  * The world recipe: a small, hand-editable JSON document that fully determines
@@ -105,6 +107,40 @@ const polylineSchema = z
   .min(2)
   .describe("World-space XZ control points; the feature is the polyline through them.");
 
+/** A declared outlet on a river (weir, dam, spillway, a fen's lip): the river is held up behind it and drops over it. */
+export const riverWeirSchema = z.object({
+  id: z.string().optional().describe("Name for reports, e.g. the POI that builds the weir (\"gullet-weir\")."),
+  at: z
+    .tuple([z.number(), z.number()])
+    .describe("World XZ of the weir's crest on the river; the river point nearest it is the lip the water falls over."),
+  level: z
+    .number()
+    .optional()
+    .describe(
+      "Water level (world y) held behind the weir. Omitted: the water table of the marsh zone the river crosses " +
+        "upstream of the weir (the nearest marsh upstream). With neither, the weir does nothing.",
+    ),
+  reach: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      "Metres upstream of the crest the weir holds its POOL whatever the ground: the bed is cut (or built) to a channel " +
+        "under `level` along that stretch, stopping at the next weir upstream, so a gorge reach becomes a flat pool held " +
+        "by its sill. A chain of weirs with reaches is a pool-and-rapid river: long reaches are pools, short ones the " +
+        "ledges of a rapid (keep each ledge's drop under 2 m or it is a fall with its own curtain). Omitted: the " +
+        "backwater rule (held only where the river would stand under the level).",
+    ),
+  natural: z
+    .boolean()
+    .optional()
+    .describe(
+      "true: the crest is the brink of a NATURAL fall (a brink pool held flat to the cliff edge), not a built weir: " +
+        "its drop keeps everything a solved fall gets (slot gorge, rock walls, planar banks, fall sites). Default: a " +
+        "built weir (no gorge or rock walls at its lip).",
+    ),
+});
+
 /** A watercourse carved into the heightfield. Written by `worldgen rivers`. */
 export const riverSchema = z.object({
   id: z.string().default("river"),
@@ -174,6 +210,16 @@ export const riverSchema = z.object({
         "the recipe's `riverMaterial`. " +
         "false is a dry gully: carved and painted, no sheet.",
     ),
+  overSea: z
+    .boolean()
+    .optional()
+    .describe(
+      "Keep this river's OWN surface where its held level drops under the sea (a drowned rapid at a gorge mouth: " +
+        "weirs whose level is below `seaLevel`). Its channel is then drawn at the sea surface + 0.08 m in the river " +
+        "material, carrying the river's current and its rapids froth below each ledge, over the ocean plane — instead " +
+        "of the ocean plane alone, whose breaker lines turn a shallow flooded channel into flat white sheets. Off by " +
+        "default: an ordinary mouth meets the sea at its own level.",
+    ),
   surface: z
     .string()
     .default("sand")
@@ -191,6 +237,17 @@ export const riverSchema = z.object({
       "Metres over which the channel grows from a trickle to full width and depth at its HEAD. Without it a " +
         "river begins at full size in the middle of a field, which is the single most obvious tell of a traced " +
         "channel; with it the source reads as a stream forming.",
+    ),
+  weirs: z
+    .array(riverWeirSchema)
+    .optional()
+    .describe(
+      "Declared OUTLETS that hold this river up: a weir, a dam, a spillway, the lip a fen drains over. Above each " +
+        "the river stands at the weir's `level` (backwater: from the weir upstream until the river's own level is " +
+        "higher) and drops only AT the weir, which the field solves as a fall. A river crossing a marsh zone with a " +
+        "`waterTable` should carry one where it leaves the marsh: its level then defaults to that table, the river " +
+        "IS the fen (no trench, no levee, the banks merge into the sheet) and `worldgen water-logic` stops " +
+        "reporting a river under its fen. Omit it and the river is solved exactly as before.",
     ),
 });
 
@@ -299,6 +356,14 @@ export const roadSchema = z.object({
         "`road`, its surface replaces `surface`. `paving`: a town street or square, painted with the zone's " +
         "`paving` (cobble); `town-ground` writes it on the streets it builds. `none`: always `surface`. A zone " +
         "that overrides nothing leaves `surface` as it is.",
+    ),
+  keepLandforms: z
+    .boolean()
+    .optional()
+    .describe(
+      "true = this road is NOT an obstacle to the procedural landforms (`terrain.buttes`, `terrain.seaCliffs`): an " +
+        "approach that climbs onto a monument's apron (`worldgen road --keep-landforms`). Omitted = every road keeps " +
+        "them clear, so a road reaching into a butte field drops the monument it reaches (the field re-sites it).",
     ),
 });
 
@@ -444,6 +509,8 @@ export const heightPatchSchema = z.object({
   feather: z.number().positive().optional().describe("Explicit feather width in metres inside every edge (at least `blend`), replacing the automatic per-edge width. A feather narrower than two voxel steps draws as a sawtooth on any edge that is not level with the ground."),
   edgeSlope: z.number().positive().optional().describe("Steepest rise/run the automatic edge feather allows (default 1 = 45 degrees). Lower = softer edges."),
   maxSlope: z.number().positive().optional().describe("Steepest rise/run allowed INSIDE the raster. Risers drawn steeper (a terrace or tier wall, a bench edge) are filled at the foot into a talus at this slope, keeping every top level where it is. Omitted = the raster as written. A wall steeper than about 1.6 between 2 m lattice samples draws as a zig-zag; `worldgen lips` reports where."),
+  calm: z.boolean().optional().describe("Built ground: the terrain's 3D overhang noise is off wherever this patch pulls the ground (scaled by 1 - its blend weight), so no rock heaves through what is laid on it. The wall operator's ramp cut sets it with `ramp.cut.calm`."),
+  raiseOnly: z.boolean().optional().describe("true: the patch only FILLS — wherever its blended height would fall below the ground under it, that ground stays. A raised shelf or apron sampled next to a sheer cliff then never chamfers the cliff top or face between its lattice samples (the bilinear raster between a toe sample and a top sample would cut the rim). Under sea cliffs and buttes it takes the column from the walls only where it lifts gentle ground (beside a stack the heightfield is the stack top, not the surface); elsewhere the walls keep their faces and read the raised heightfield."),
   afterRivers: z.boolean().optional().describe("Ground the river solve must NOT see (like terrace-wall `tw-*` and bridge-span `bs-*` patches): banks raised beside a channel, a lip shoulder. Without it the solve re-reads the raised ground and can move the river, its levels and its falls. The patch still shapes the finished ground, the water clip and every gate."),
   filter: z.number().min(0).optional().describe("Half-width in metres of the tent prefilter applied to the raster before sampling (default: the voxel step). Anti-aliases cliffs and terrace edges drawn sharper than the lattice so diagonal edges do not stair-step. 0 = raw raster."),
 }).superRefine((p, ctx) => {
@@ -1296,6 +1363,21 @@ const scatterSchema = z.object({
         "character. Worth it on anything with leaf cards a player will walk into. See the mesh component's field.",
     ),
   material: z.string().optional(),
+  smallMaterial: z.string().optional().describe(
+    "Material for the rule's SMALL pieces: an instance whose largest extent (its collider box x its scale) is under " +
+      "SMALL_ROCK_METRES (4 m) draws with this instead of `material`. For rocks: a 1-3 m boulder wearing a cliff's 12.8 m " +
+      "strata tile shows a patchwork per face, so small pieces take the zone's small-rock tile (a second rock-cap material " +
+      "whose `bases` run parallel to the main one's, so the per-instance skin slice stays the same). Each model draws one " +
+      "batch per material. `worldgen rock-skins` / `rock-skins install` write it.",
+  ),
+  largeMaterial: z.string().optional().describe(
+    "Material for the rule's LARGE pieces: an instance whose largest extent (collider box x scale) is from " +
+      "SMALL_ROCK_METRES (4 m) up to LARGE_ROCK_MAX_METRES (16 m) draws with this instead of `material`. For free-standing " +
+      "rocks: a 4-16 m boulder, fin or tor wearing the zone's cliff tile (painted for 100 m faces) reads as a patchwork, so " +
+      "it takes the zone's boulder tile (`rock-large.png`; a third rock-cap material whose `bases` run parallel to the main " +
+      "one's). Rules placed on cliffs (`cliff`) leave it unset: they are the cliff face and keep the cliff tile. " +
+      "`rock-skins install` writes it.",
+  ),
   biomes: z.array(z.string()).default([]).describe("Biome ids this may appear in; empty = anywhere."),
   biomeDensity: z
     .record(z.string(), z.number().min(0).max(1))
@@ -1383,6 +1465,12 @@ const scatterSchema = z.object({
   capLayers: z.array(z.string().min(1)).max(16).optional().describe(
     "Cap layers the rule's rock-cap material adds AFTER the world palette (its `rockCap.extraLayers`, same names, same " +
       "order): a moss that is no ground surface. A cap or zone `rockCap.layer` naming one resolves to index palette + i.",
+  ),
+  capLedge: z.number().min(0).max(20).optional().describe(
+    "Default 2. Metres of up-facing ground a rock needs under it to wear a cap: the terrain surface is found within " +
+      "this/2 above or below the rock, and again at this/2 out in four directions within the same rise (45 deg). A rock " +
+      "set into a wall, or on a ledge narrower than this, is bare (wears its stone), so a cliff face carries no pale cap " +
+      "flecks. 0 = the old flat-ground probe only.",
   ),
   capAmount: z.number().min(0).max(1).optional().describe(
     "Default 0.6. How far the rule's own cap reaches (see `mesh.source.rockCap.amount`); with \"auto\" it is scaled by how much of " +
@@ -1827,6 +1915,17 @@ export const worldRecipeSchema = z.object({
     .default(24)
     .describe("Voxels per cell edge. voxelSize = cellSize / resolution — 2m voxels read as chunky low-poly, 0.5m as smooth."),
   seaLevel: z.number().default(0),
+  floaters: z
+    .object({
+      keepVoxels: z
+        .number()
+        .int()
+        .min(1)
+        .default(64)
+        .describe("A solid piece cut off from the ground is removed when it has FEWER voxels than this; a bigger floating mass is reported, never removed (a design call)."),
+    })
+    .optional()
+    .describe("The floating-voxel pass (`tools/voxel-floaters.mts`, `features.floaterClears`)."),
   bounds: boundsSchema.optional().describe(
     "Turns the endless noise field into CONTINENTS ringed by open ocean. Omit it and the world has no edge at " +
       "all: the terrain tiles outward forever and 'world size' is only however far the CLI happened to place " +
@@ -2363,6 +2462,22 @@ export const worldRecipeSchema = z.object({
             "hand-edited. The streamer places the prefab (merged DC mesh + trimesh collider, the terrain material) in the cell its " +
             "origin stands in; the operator's height patch keeps the terrain inside it. docs/voxel-worlds.md 'Landform operators'.",
         ),
+      groundPaints: z
+        .array(groundPaintSchema)
+        .optional()
+        .describe(
+          "GROUND PAINT: one palette surface over a polygon or disc (feathered, optionally limited by slope or height band), " +
+            "e.g. pale cut stone on a quarry floor, scree on talus fans, ash on a camp. Splat only (no height, no new material). " +
+            "COMPILED by the `paint` and `scree` landform operators (ids `op:<id>:*`); never hand-edited. Later entries win; roads, " +
+            "rivers and lakes still paint over it. docs/voxel-worlds.md 'Landform operators'.",
+        ),
+      rockSets: z
+        .array(rockSetSchema)
+        .optional()
+        .describe(
+          "Boulders COMPILED by a landform operator (`scree`; ids `op:<id>:rocks`): instances of existing scatter rules seated " +
+            "on the meshed ground like fall-site rocks, batched with each rule. Never hand-edited.",
+        ),
       ribbons: z
         .array(ribbonSchema)
         .optional()
@@ -2384,6 +2499,21 @@ export const worldRecipeSchema = z.object({
             "fits each to the ground and writes its `solved` pieces plus the derived `tw-<id>*` height patch, passages and " +
             "clearing; `--refit` re-solves them after the terrain changes. `worldgen terrace` writes the `<town>-riser-*` ones " +
             "for towns when `townTerraces.walls` is on.",
+        ),
+      floaterClears: z
+        .array(
+          z.object({
+            id: z.string().describe("The swept area this entry clears (e.g. `floaters-x-1152-z-768`); re-running the pass over it replaces it."),
+            cells: z
+              .array(z.number().int())
+              .describe("Lattice cells forced to air, flat (gx, gy, gz) triples; world position = index * voxelSize."),
+          }),
+        )
+        .optional()
+        .describe(
+          "Floating voxels removed: solid lattice cells cut off from the ground mass and smaller than " +
+            "`floaters.keepVoxels`, forced to air by the field (point query and mesher alike). Written by " +
+            "`tools/voxel-floaters.mts` (`worldgen status` row `floaters`); never hand-written.",
         ),
       clearings: z
         .array(clearingSchema)
@@ -2564,6 +2694,7 @@ export function recipeSplatIndexed(recipe: Pick<WorldRecipe, "splat" | "surfaces
   return recipe.splat === "indexed" || recipe.surfaces.length > MAX_SURFACES;
 }
 export type RiverDoc = z.infer<typeof riverSchema>;
+export type RiverWeirDoc = z.infer<typeof riverWeirSchema>;
 export type CanyonDoc = z.infer<typeof canyonSchema>;
 export type RidgeDoc = z.infer<typeof ridgeSchema>;
 export type RoadDoc = z.infer<typeof roadSchema>;

@@ -20,6 +20,7 @@
  * Town plans stay where the town tools read them: authoring/towns/<town>-plan.json.
  */
 import { z } from "zod";
+import { tierSummary } from "../../../../tools/poi-review/size-tiers.mjs";
 
 const id = z.string().min(1).regex(/^[a-z0-9][a-z0-9-]*$/, "lower-case letters, digits and dashes");
 const xz = z.tuple([z.number().finite(), z.number().finite()]);
@@ -62,6 +63,7 @@ export const creatureSchema = z.object({
         atlas: z.string().default(""),
         status: z.enum(["ready", "needs-install", "needs-art"]).describe("needs-install: the art exists (`source`) but is not under assets/ yet."),
         source: z.string().default("").describe("Where finished art lives when it is not installed yet (e.g. tools/atlas/out/<family>/<theme>/)."),
+        name: z.string().optional().describe("Display name of the creature in this theme, WoW-style '<Kin> <Role>' in Title Case ('Risen Soldier', 'Wrecker Axeman'); the same in every zone. Absent = populate's rule (displayName): a one-word human + its weapon role, else the theme words before the name ('Giant Sewer Rat')."),
       }),
     )
     .min(1)
@@ -155,13 +157,15 @@ export const groundPaletteSchema = z.object({
           texture: z.string().min(1),
           uvScale: z.number().positive().optional().describe("Metres per tile; default: the base surface's for that role."),
           roughness: z.number().min(0).max(1).optional(),
+          note: z.string().optional().describe("Why this tile (a borrowed tile, an owner ruling). Prose only: it excuses nothing a lint finds."),
         }),
       ]),
     )
     .describe(
       "Ground role -> texture asset id (assets/textures/, e.g. \"zones/<palette>/grass.png\"), or { texture, uvScale, roughness }. " +
         "`worldgen zone-textures` registers each as palette surface `<palette>-<role>` and sets every cast zone's " +
-        "`regions[].ground`; a role left out keeps the world's base surface. Tiles match the base ground tiles' pixel size.",
+        "`regions[].ground`; a role left out keeps the world's base surface. Tiles match the base ground tiles' pixel size. " +
+        "`road` and `paving` are never wood: a tile whose path names plank/board/deck is refused (streets are dirt, gravel or stone).",
     ),
   rock: z
     .string()
@@ -171,6 +175,29 @@ export const groundPaletteSchema = z.object({
       "The zone's ROCK SKIN: body texture (assets/textures/) for every scatter rock, boulder and cliff mass that stands in " +
         "this palette's cliff. Default: `rock.png` beside the cliff tile, else the cliff tile itself (40 texels/m). " +
         "`worldgen zone-textures` adds it as a slice of the world's rock material and maps it in `recipe.rockSkins`.",
+    ),
+  rockSmall: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "The zone's SMALL-ROCK tile: body texture for rock pieces under 4 m (scatter boulders, dressed rocks). A grainy, " +
+        "uniform stone surface in the zone's tone with NO strata (a cliff's layered tile projects a different patch on " +
+        "every facet of a 1 m boulder: a checker), drawn at 40 texels/m. Default: `rock-small.png` beside the cliff tile. " +
+        "`worldgen zone-textures` / `rock-skins install` put it in the zone's slot of the small rock material " +
+        "(`<rock material>-small`, the rules' `smallMaterial`).",
+    ),
+  rockLarge: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "The zone's LARGE-ROCK tile: body texture for free-standing rock pieces from 4 m up to 16 m (boulders, fins, tors; " +
+        "scatter and dressed). The zone's stone as a BOULDER reads it at 5-20 m: low contrast, fine bedding and fractures, " +
+        "lichen in the zone's tone, no single dominant feature (the cliff tile is painted for 100 m faces and patches per " +
+        "facet), drawn at 40 texels/m in the small-rock tile's palette so small and large rocks are one family. Default: " +
+        "`rock-large.png` beside the cliff tile. `worldgen zone-textures` / `rock-skins install` put it in the zone's slot of " +
+        "the large rock material (`<rock material>-large`, the rules' `largeMaterial`); rocks placed on cliffs keep the cliff tile.",
     ),
 });
 export type GroundPalette = z.infer<typeof groundPaletteSchema>;
@@ -215,12 +242,12 @@ export type Links = z.infer<typeof linksSchema>;
 export const placeSchema = z.object({
   id,
   name: z.string().min(1),
-  size: z.enum(["pinpoint", "small", "medium", "large"]).describe("Size class (docs/world-standards/sites.md). A large place is several linked sub-sites round one landmark."),
-  read: z.string().min(1).describe("One line: what a passer-by sees at a glance (\"illegal hunters with hides on tanning racks\"). The build is that."),
+  size: z.enum(["pinpoint", "small", "medium", "large"]).describe(`Size tier (tools/poi-review/size-tiers.mjs, enforced by reserve, poi-brief and the install gate): ${tierSummary()}. A large place is a district of the map round one landmark with water or a cave among its features.`),
+  read: z.string().min(1).describe("One line: the visible fantasy discovery or adventure opportunity that draws a passer-by (a spider nursery in a collapsed shrine, a smugglers' cache beneath a broken watch). Ordinary trades are supporting context, not the destination; follow docs/world-standards/adventure-design.md. The build must show this read."),
   landmark: z.string().min(1).describe("The biggest thing there and where it is seen from (\"a gutted watchtower on the spur, seen from the coast road\")."),
   features: z.array(z.string().min(1)).default([]).describe("The sub-sites joined by walked routes. A large place has three or more, water or caves among them where the land allows."),
   setPiece: z.string().min(1).describe("The one moment or arrangement the place is remembered for (cultists round a pentagram, a giant asleep on a cart of stolen bells)."),
-  unique: z.string().min(1).describe("What no other place in this zone has: a material, a creature, a structure, a light, a sound."),
+  unique: z.string().min(1).describe("The distinctive discovery and payoff of investigating this place, supported by its physical features and actual play. A different commodity, grim name, generic danger or unseen backstory alone is insufficient."),
   mood: z.string().default("").describe("Ground, vegetation, water and air (\"spoil-black ground, dead pines, green tarn, low mist\"). May break the zone palette."),
   holder: z.string().default("").describe("Zone bestiary group id (or a few words before the bestiary exists) holding it; empty = safe place."),
   named: z.array(z.string().min(1)).default([]).describe("Named creatures or people met here: one near the edge, more further in."),
@@ -296,8 +323,10 @@ export const zoneBriefSchema = z
         maxMainHostileShare: z.number().min(0).max(1).default(0.5).describe("Share of hostile locations the main story faction may hold, at most (error above)."),
         minHostileGroups: z.number().int().min(1).default(3).describe("Distinct groups holding the hostile locations, at least (error below, when the zone has that many hostile locations)."),
         minKillGroups: z.number().int().min(1).default(3).describe("Distinct groups that kill objectives across the zone target, at least (warning)."),
+        maxInteractShare: z.number().min(0).max(1).default(0.3).describe("quest-mix gate: share of the zone's objectives that are `interact` (use a thing), at most. Not every quest is an interactive spot."),
+        minFieldShare: z.number().min(0).max(1).default(0.7).describe("quest-mix gate: share of the zone's objectives that are kill, collect (incl. drops from the slain) or visit (discover a place), at least: standard MMO fare first."),
       })
-      .default({ maxRepeatPerZone: 2, maxRepeatNeighbourhood: 3, nearDuplicate: 0.8, minNoKillShare: 0.4, minNonNpcSources: 2, minWorldGated: 2, minDistinctActions: 6, maxKillCollectShare: 0.3, maxLeadsPerQuest: 3, minGroups: 4, maxMainHostileShare: 0.5, minHostileGroups: 3, minKillGroups: 3 })
+      .default({ maxRepeatPerZone: 2, maxRepeatNeighbourhood: 3, nearDuplicate: 0.8, minNoKillShare: 0.4, minNonNpcSources: 2, minWorldGated: 2, minDistinctActions: 6, maxKillCollectShare: 0.3, maxLeadsPerQuest: 3, minGroups: 4, maxMainHostileShare: 0.5, minHostileGroups: 3, minKillGroups: 3, maxInteractShare: 0.3, minFieldShare: 0.7 })
       .describe("Sameness thresholds the quest lint WARNS against (for now). A zone argues for an exception here, in data."),
     places: z
       .array(placeSchema)
@@ -331,6 +360,7 @@ export const zoneBestiarySchema = z
           level: z.number().int().min(1),
           abilities: z.array(z.string()).default([]),
           scale: z.number().min(0.5).max(6).default(1).describe("Body size multiplier on the base creature (an enormous croc = 3). Populate scales its collider, reach, eye height and gait with it; the server sees anything bigger than a person from further away (up to 600 m) and places its pack beyond that, so a giant is seen coming."),
+          title: z.string().optional().describe("Title after its unique name ('the Raven of the Weep' -> 'Old Blackbill, the Raven of the Weep'). Absent = 'the <kin display name>' unless the name already carries one."),
         }),
       )
       .default([]),
@@ -362,7 +392,7 @@ export const locationSchema = z.object({
   id,
   name: z.string().min(1),
   kind: z.enum(["town", "poi", "dungeon-entrance", "landmark", "wild"]),
-  size: z.enum(LOCATION_SIZES).default("small"),
+  size: z.enum(LOCATION_SIZES).default("small").describe("Size tier (tools/poi-review/size-tiers.mjs): its reservation must be at least the tier's diameter and approaches (reserve `under-tier`), and the install gate measures the built place against it."),
   siteKinds: z.array(z.string()).default([]).describe("Worldgen POI kinds that would suit it (\"mine-site\", \"ruin-site\", \"lakeshore\"). Empty = needs a new site."),
   hostile: z.string().default("").describe("Zone bestiary group id (preferred) or faction id holding it; empty for a safe place."),
   overlooksRoad: z.boolean().default(false).describe("A hostile LOOKOUT over a town-to-town road (a watch post, a toll gang): allowed beside the road. Every other hostile place keeps off those roads (`zonegen sites` / `reserve` lint `hostile-on-road`)."),
@@ -396,7 +426,7 @@ export const objectiveSchema = z.object({
   action: z.string().min(1).describe("A registered quest ACTION block (engine spec `questBlocks.action`, read at lint time so it cannot drift): visit, kill, collect, talk, interact, read, deliver, endure, perform."),
   target: z.object({
     type: z.enum(["npc", "creature", "item", "place", "entity"]),
-    ref: z.string().min(1).describe("npc: resident id. creature: catalogue creature, rare or boss id. item: quest item id. place: location id. entity: a declared quest entity (presence, object, readable)."),
+    ref: z.string().min(1).describe("npc: resident id. creature: catalogue creature, rare or boss id (never a group id: name a member). item: quest item id. place: location id. entity: a declared quest entity (presence, object, readable)."),
   }),
   count: z.number().int().positive().default(1),
   at: z.string().default("").describe("Location id where it happens."),
@@ -416,7 +446,7 @@ export const objectiveSchema = z.object({
   then: z
     .array(z.union([z.string().min(1), z.record(z.string(), z.unknown())]))
     .default([])
-    .describe("CONSEQUENCES this step triggers: a registered block name, or the consequence itself ({ do: setFlag, flag: <name> })."),
+    .describe("CONSEQUENCES this step triggers: a registered block name, or the consequence itself ({ do: setFlag, flag: <name> }; an exclusive choice: { do: choose, choice: <id>, option: <id> } on two or more steps of the quest)."),
 });
 export type Objective = z.infer<typeof objectiveSchema>;
 
@@ -438,6 +468,10 @@ export const plannedQuestSchema = z
     summary: z.string().min(1).describe("What the player does and learns. NOT final prose: directions and dialogue are written after placement."),
     objectives: z.array(objectiveSchema).min(1),
     rewards: z.object({ xp: z.number().int().min(0).default(0), coins: z.number().int().min(0).default(0), items: z.array(z.string()).default([]) }).default({ xp: 0, coins: 0, items: [] }),
+    repeat: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe("A repeatable (daily): the registered CONSEQUENCE block `repeat` (engine spec `questBlocks.consequence.repeat`), validated against it — { after: <world hours> | \"day\", limit? }. Offered again by its own source once `after` has passed; objectives reset, rewards pay again. Absent = the quest plays once."),
     leads: z
       .array(
         z.object({
@@ -486,7 +520,12 @@ export const questGraphSchema = z
       .array(
         z.object({
           id,
-          kind: z.enum(["presence", "object", "readable"]).describe("presence: someone only there while a condition holds; object: a thing that offers or takes; readable: text to read."),
+          kind: z
+            .enum(["presence", "object", "readable", "escort"])
+            .describe(
+              "presence: someone only there while a condition holds; object: a thing that offers or takes; readable: text to read; " +
+                "escort: someone an `escort` step walks (an npc builtin with an `escort` route from its post to where it is going).",
+            ),
           location: z.string().min(1).describe("Location id where it stands."),
           what: z.string().min(1).describe("What it is, in a few words (\"a drowned surveyor's ghost\", \"the tithe stone\")."),
         }),

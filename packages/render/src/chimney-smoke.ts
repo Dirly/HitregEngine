@@ -15,6 +15,7 @@ import {
   uv,
   vec3,
 } from "three/tsl";
+import { CHIMNEY_SMOKE } from "@hitreg/core";
 import { foliageWindScale } from "./foliage-wind.js";
 import { worldDaylight } from "./daylight.js";
 
@@ -36,13 +37,17 @@ type N = any;
  * Each chimney is PUFFS quads cycling through one rise: born small at the
  * cap, swelling, leaning downwind and thinning out. About one in seven of the
  * chimneys are cold (a hash of their position), more draw at night.
+ *
+ * The numbers are the smoke standard's (core vfx/smoke.ts CHIMNEY_SMOKE; Derek
+ * 2026-10-22 "smoke is far too big"): a thin pale column <= 1.5 m wide that is
+ * gone ~3.5 m over the cap, opacity <= 0.3, a moonlit grey at night (no glow).
  */
 export const CHIMNEYS_KEY = "hitregChimneys";
 
-const PUFFS = 10;
+const PUFFS = CHIMNEY_SMOKE.puffs;
 /** Seconds for one puff to rise and fade. */
-const PERIOD = 7;
-const RISE = 10;
+const PERIOD = CHIMNEY_SMOKE.period;
+const RISE = CHIMNEY_SMOKE.rise;
 const INITIAL_CAPACITY = 32 * PUFFS;
 
 const cameraRight = uniform(new THREE.Vector3(1, 0, 0));
@@ -172,10 +177,10 @@ export function smokeMaterial(): THREE.MeshBasicNodeMaterial {
   const phase: N = fract(puff.w);
   const age: N = fract(time.div(PERIOD).add(phase));
   const wind: N = foliageWindScale.mul(0.6).add(0.4);
-  const lean: N = vec3(smokeWind.x, 0, smokeWind.y).mul(age.mul(age).mul(wind).mul(4.5));
-  const wobble: N = vec3(sin(time.mul(0.7).add(phase.mul(40))), 0, sin(time.mul(0.5).add(phase.mul(23)))).mul(age.mul(0.6));
+  const lean: N = vec3(smokeWind.x, 0, smokeWind.y).mul(age.mul(age).mul(wind).mul(CHIMNEY_SMOKE.lean));
+  const wobble: N = vec3(sin(time.mul(0.7).add(phase.mul(40))), 0, sin(time.mul(0.5).add(phase.mul(23)))).mul(age.mul(0.15));
   const centre: N = puff.xyz.add(vec3(0, age.mul(RISE), 0)).add(lean).add(wobble);
-  const size: N = age.mul(2.0).add(0.4);
+  const size: N = age.mul(CHIMNEY_SMOKE.sizeGrow).add(CHIMNEY_SMOKE.sizeStart);
   const corner: N = positionLocal.xy.mul(size);
   m.positionNode = centre.add(cameraRight.mul(corner.x)).add(cameraUp.mul(corner.y));
   // a soft, slightly lumpy puff: radial falloff broken by the phase
@@ -183,13 +188,11 @@ export function smokeMaterial(): THREE.MeshBasicNodeMaterial {
   const lump: N = sin(p.x.mul(5).add(phase.mul(30))).mul(sin(p.y.mul(4).add(phase.mul(17)))).mul(0.12);
   const body: N = saturate(float(1).sub(length(p).add(lump)));
   const life: N = smoothstep(0, 0.08, age).mul(pow(float(1).sub(age), float(1.6)));
-  m.opacityNode = body.mul(life).mul(strength).mul(0.6);
-  // grey by day, cold blue-grey by moonlight, barely warm at the root
-  // a shade darker than the cloud deck, so it reads against a grey sky
-  // at night a moonlit grey a touch lighter than the night sky (dark smoke
-  // read as a black hole in it); by day a shade under the cloud deck
-  const day: N = mix(vec3(0.16, 0.17, 0.21), vec3(0.36, 0.35, 0.34), daylight);
-  m.colorNode = mix(day.add(vec3(0.06, 0.03, 0.0).mul(float(1).sub(daylight))), day, smoothstep(0, 0.25, age));
+  m.opacityNode = body.mul(life).mul(strength).mul(CHIMNEY_SMOKE.opacity);
+  // a pale grey a shade under the cloud deck by day; a moonlit grey a touch
+  // lighter than the night sky at night (no warm root: smoke never glows)
+  const [dr, dg, db] = CHIMNEY_SMOKE.day, [nr, ng, nb] = CHIMNEY_SMOKE.night;
+  m.colorNode = mix(vec3(nr, ng, nb), vec3(dr, dg, db), daylight);
   sharedMaterial = m;
   return m;
 }

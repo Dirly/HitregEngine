@@ -142,6 +142,10 @@ export const bridgeSpanSchema = z
       .default("pad")
       .describe("pad: level each end with a feathered height patch (the cliff top behind the face only). rock: no patch (an end on a DC cliff top or rock formation): a rope end slides to the rim and its deck eases level over it, the gate checks the rock seats it. stage (rope only): a timber landing stage off a steep lip, with a walkway / stair to walkable ground (world-kit bridges stage.mts)."),
     seed: z.string().optional(),
+    replaces: z
+      .string()
+      .optional()
+      .describe("Id of the `features.bridges` PLACEHOLDER deck (a road/trail crossing written by `worldgen roads`) this span stands in for: once the span is fitted the streamer stops drawing that flat slab and its box piers. Anchor the span on the placeholder's abutments at its deckY so the road ends meet the deck."),
     tags: z.array(z.string()).default([]),
     solved: bridgeSpanSolvedSchema.optional().describe("Written by `worldgen bridge-place`; never hand-edit. Absent = not fitted yet (nothing is built)."),
   })

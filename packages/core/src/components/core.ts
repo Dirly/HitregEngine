@@ -12,6 +12,7 @@ import { registerVoxelComponents } from "./voxel.js";
 import { registerPlacementComponent } from "./placement.js";
 import { registerDressingComponent } from "./dressing.js";
 import { registerDecalComponent } from "./decal.js";
+import { landmarkComponentSchema } from "./landmark.js";
 import { loadingScreenSchema, portalAnchorSchema } from "../portal.js";
 import { polyMeshSourceSchema } from "../poly-mesh/types.js";
 
@@ -173,6 +174,8 @@ export const cullingProfileSchema = z
   );
 
 export type CullingProfileData = z.infer<typeof cullingProfileSchema>;
+
+export { landmarkComponentSchema, type LandmarkComponentData } from "./landmark.js";
 
 /**
  * Vertex-shader wind for a model, shared by the `mesh` component and the voxel
@@ -2650,6 +2653,25 @@ export const particlesSchema = z.object({
     .min(0)
     .default(1)
     .describe("How fast the wander field evolves. Low (~0.2) is a lazy indoor drift; high is agitated."),
+  windDrift: z
+    .number()
+    .min(0)
+    .max(10)
+    .default(0)
+    .describe(
+      "Metres/sec the weather's wind adds to a newly born particle's velocity, along the live wind direction and scaled " +
+        "by its strength (world-space emitters only). Smoke uses it so a plume leans downwind instead of pooling; " +
+        "0 = no wind (sparks, magic). The smoke standard (core vfx/smoke.ts) counts it in the plume's width.",
+    ),
+  nightDim: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0)
+    .describe(
+      "How far an unlit particle's colour falls with the world's daylight (0 = never, 1 = to a moonlit floor at full " +
+        "night). Particles draw unlit, so pale smoke would glow at night without it: smoke sets ~0.8.",
+    ),
   fadeIn: z
     .number()
     .min(0)
@@ -3373,6 +3395,14 @@ export const spawnMixEntrySchema = z.object({
     .describe("[min, max] creatures spawned together by one roll: [1,1] a single, [1,2] a single or a pair. More than 2 reads as a pack, not ambient life."),
   temperament: z.enum(MOB_TEMPERAMENTS).optional().describe("This row's temperament (overrides the area's `temperament`)."),
   near: z.number().min(0).default(4).describe("Metres the members of one roll stand from the first of them (a pair grazing together)."),
+  with: z
+    .array(z.string().min(1))
+    .default([])
+    .describe(
+      "Companion templates spawned in the same roll, beside the row's own `count` (a band: a Bandit Footpad with a Cutpurse " +
+        "and a Lookout). On a `route` every member of one roll sets off the same way, so the band walks together. Each " +
+        "companion takes a population slot.",
+    ),
 });
 export type SpawnMixEntry = z.infer<typeof spawnMixEntrySchema>;
 
@@ -3463,6 +3493,21 @@ export const spawnAreaSchema = z
           "instead of wandering inside `roam`. Handed to each NPC as the `patrol` param in world coordinates; the leash and the " +
           "server's fence are then measured from the nearest point of the route, so the route itself may be longer than the leash. " +
           "Empty = no patrol.",
+      ),
+    loop: z
+      .boolean()
+      .default(false)
+      .describe(
+        "`patrol` is a closed LOOP, walked round and round (the last point leads back to the first) instead of out and back: " +
+          "a roaming pack ranging a moor or a gorge rim. A road corridor stays out and back (false).",
+      ),
+    hours: z
+      .tuple([z.number().min(0).max(24), z.number().min(0).max(24)])
+      .optional()
+      .describe(
+        "World-clock window [from, to) in hours (netState world/hour; wraps past midnight, [19, 5] = dusk to dawn) when the " +
+          "area is OUT. Outside it nothing spawns and every member no player is within `hiddenFrom` of is cleared (bats at " +
+          "dusk and night). `anywhere` / `route` only. Unset = always; no clock running = always.",
       ),
     placement: z
       .enum(SPAWN_PLACEMENTS)
@@ -3556,6 +3601,7 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("visibility", visibilitySchema);
   registry.register("culling", cullingSchema);
   registry.register("cullingProfile", cullingProfileSchema);
+  registry.register("landmark", landmarkComponentSchema);
   registry.register("mesh", meshSchema);
   registry.register("light", lightSchema);
   registry.register("camera", cameraSchema);

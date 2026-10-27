@@ -19,14 +19,32 @@
  * rock material without resolving one; no fall-site formation names a foreign wall surface). `--near`/`--rect` adds
  * the sampled rocks there; `--stamp` sweeps every land chunk and, clean, stamps the `rock-skins` stage.
  * Fix: `recipe.rockSkins` (cliff surface -> slice) and the rock material's `bases` (docs/voxel-worlds.md "Rock skins").
+ *
+ * SMALL ROCKS: a piece under SMALL_ROCK_METRES (4 m) wears the world's SMALL rock material (`<rock material>-small`,
+ * the rules' `smallMaterial`): the same shader with `bases` parallel to the main material's (so the per-instance slice
+ * is unchanged), each zone slot holding the zone's grainy small-rock tile (`rock-small.png` beside its cliff tile, or
+ * the palette's `rockSmall`) at 40 texels/m. A cliff's strata tile on a 1 m boulder projects a different patch of its
+ * courses on every facet (a checker). The gate faults a rule whose small pieces have no small material, a small
+ * material whose slots are not parallel or off the texel standard, and a placed small rock wearing the main material.
+ *
+ * LARGE ROCKS: a FREE-STANDING piece from 4 m up to LARGE_ROCK_MAX_METRES (16 m: boulders, fins, tors) wears the
+ * world's LARGE rock material (`<rock material>-large`, the rules' `largeMaterial`), built the same way with each zone
+ * slot holding the zone's boulder tile (`rock-large.png` beside its cliff tile, or the palette's `rockLarge`). The cliff
+ * tile is painted for 100 m faces and reads as a patchwork on a 5-20 m boulder. Rules placed ON cliffs (`cliff`) are
+ * the cliff face and keep the cliff tile (no `largeMaterial`), as do pieces of 16 m and more. The gate faults a
+ * free-standing rule whose 4-16 m pieces have no large material, a cliff rule that has one, a large material off
+ * parallel / 40 texels/m / tone, and a placed 4-16 m rock wearing the main material.
  */
 import fs from "node:fs";
 import path from "node:path";
-import { applyOps, ComponentRegistry, createRockCapResolver, createWorldField, registerCoreComponents, rockSkinProbe, scatterCell, worldRecipeSchema, type WorldField, type WorldRecipe } from "@hitreg/core";
+import { applyOps, ComponentRegistry, createRockCapResolver, createWorldField, LARGE_ROCK_MAX_METRES, registerCoreComponents, rockSkinProbe, scatterCell, scatterMaterialOf, SMALL_ROCK_METRES, worldRecipeSchema, type WorldField, type WorldRecipe } from "@hitreg/core";
 import { fileURLToPath } from "node:url";
 import { decodePng } from "./_png.mjs";
+import { modelBounds } from "./_gltf-bounds.mjs";
 import { findAsset } from "./_closure.mjs";
 import { worldChunks } from "./float.mts";
+import { applyOpsToSceneFile, updateJsonFile } from "./_scene-write.mts";
+import { zonePalette } from "./_zone-palette.mts";
 
 type Area = { near?: [number, number, number]; rect?: [number, number, number, number] };
 const inArea = (a: Area, x: number, z: number): boolean =>
@@ -101,28 +119,51 @@ function textureMean(project: string, id: string | undefined, color?: string): [
 
 // ------------------------------------------------------------------ the gate
 
-interface RockMaterial { id: string; bases: { map: string; color?: string }[]; tones: ([number, number, number] | null)[] }
+interface RockMaterial { id: string; bases: { map: string; metres?: number; color?: string }[]; tones: ([number, number, number] | null)[]; small: boolean; large: boolean }
 
-/** The rock-cap materials the world's scatter rules draw with (by asset id). */
+/** The rock-cap materials the world's scatter rules draw with (by asset id): each rule's `material`, then its `smallMaterial` and `largeMaterial`. */
 function rockMaterials(project: string, recipe: WorldRecipe, override?: readonly { map: string; color?: string }[]): Map<string, RockMaterial> {
   const out = new Map<string, RockMaterial>();
-  for (const rule of recipe.scatter) {
-    const id = (rule as { material?: string }).material;
-    if (!id || out.has(id)) continue;
-    const file = findAsset(project, `materials/${id}.json`);
-    if (!file) continue;
-    const doc = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (doc.shader !== "rock-cap" || !doc.rockCap?.bases) continue;
-    const bases = (override ?? doc.rockCap.bases) as { map: string; color?: string }[];
-    out.set(id, { id, bases, tones: bases.map((b) => textureMean(project, b.map, b.color && b.color !== "#ffffff" ? b.color : undefined)) });
-  }
+  for (const rule of recipe.scatter)
+    for (const [id, kind] of [[rule.material, "main"], [rule.smallMaterial, "small"], [rule.largeMaterial, "large"]] as const) {
+      if (!id || out.has(id)) continue;
+      const file = findAsset(project, `materials/${id}.json`);
+      if (!file) continue;
+      const doc = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (doc.shader !== "rock-cap" || !doc.rockCap?.bases) continue;
+      const bases = (kind !== "main" ? doc.rockCap.bases : override ?? doc.rockCap.bases) as { map: string; metres?: number; color?: string }[];
+      out.set(id, { id, bases, small: kind === "small", large: kind === "large", tones: bases.map((b) => textureMean(project, b.map, b.color && b.color !== "#ffffff" ? b.color : undefined)) });
+    }
   return out;
+}
+
+/** Which material a placed or scattered piece of this size (m) draws with: small under 4 m, large up to 16 m, else main. */
+export function rockMaterialForSize(size: number | null, ids: { main: string; small?: string; large?: string }): string {
+  if (size === null) return ids.main;
+  if (size < SMALL_ROCK_METRES) return ids.small ?? ids.main;
+  if (size < LARGE_ROCK_MAX_METRES) return ids.large ?? ids.main;
+  return ids.main;
+}
+
+/** Largest piece (m) a rule can scatter: its biggest collider box (rule or variant) times its top scale. */
+function ruleExtent(rule: WorldRecipe["scatter"][number]): { least: number; most: number } {
+  const boxes = [rule.colliderSize, ...(rule.modelVariants ?? []).map((v) => v.colliderSize)].filter((b): b is [number, number, number] => !!b).map((b) => Math.max(...b));
+  return { least: Math.min(...boxes) * (rule.scale?.[0] ?? 1), most: Math.max(...boxes) * (rule.scale?.[1] ?? rule.scale?.[0] ?? 1) };
+}
+
+/** The model-space collider box of a scatter instance: its own, its variant's, else the rule's. */
+function scatterBox(rule: WorldRecipe["scatter"][number], inst: { colliderSize?: readonly number[]; variant?: number }): readonly number[] | undefined {
+  return inst.colliderSize ?? (inst.variant !== undefined ? rule.modelVariants?.[inst.variant]?.colliderSize : undefined) ?? rule.colliderSize;
 }
 
 // ------------------------------------------------------------------ placed rocks (scenes)
 
 export interface PlacedRock {
   id: string;
+  /** A stone piece of a BUILT structure (entity tag `stone:<material id>`: a weighting stone in a basin): it draws with that
+   *  structure's stone, never the zone's scatter skin, and carries no cap (RETTING 2026-10-23: blue cliff-skinned boulders in a
+   *  masonry pit). */
+  builtStone?: string;
   what: string;
   prefabId: string | null;
   /** The prefab's root entity id (override paths start with it), or null for a plain mesh entity. */
@@ -134,6 +175,28 @@ export interface PlacedRock {
   rockCap: { layer?: number; amount?: number; base?: number; tint?: number[] } | null;
   /** The model's own body texture (rock-kit GLB extras `rockKit.bases[0]`), when it draws without a rock material. */
   modelBase: string | null;
+  /** Largest world extent (m): the model's bounds x the instance's world scale; null when the model is unreadable. */
+  size: number | null;
+  /** The instance's world scale (largest axis): the rock-cap body is projected in MODEL metres, so texels/m divide by it. */
+  scale: number;
+}
+
+const modelSizeCache = new Map<string, number | null>();
+/** Largest model-space extent of a model (m), or null. */
+function modelSizeOf(project: string, assetId: string): number | null {
+  const key = `${project}|${assetId}`;
+  if (modelSizeCache.has(key)) return modelSizeCache.get(key)!;
+  let out: number | null = null;
+  const file = assetId ? findAsset(project, `models/${assetId}`) : null;
+  if (file) { try { const b = modelBounds(file); out = Math.max(b.size[0], b.size[1], b.size[2]); } catch { out = null; } }
+  modelSizeCache.set(key, out);
+  return out;
+}
+/** Largest world scale factor of an entity (parent chain composed). */
+function worldScale(ents: Record<string, any>, id: string): number {
+  let s = 1;
+  for (let cur: string | undefined = id; cur && ents[cur]; cur = ents[cur].parent) { const v = ents[cur].components?.transform?.scale ?? [1, 1, 1]; s *= Math.max(Math.abs(v[0]), Math.abs(v[1]), Math.abs(v[2])); }
+  return s;
 }
 
 const prefabCache = new Map<string, { root: string; mesh: any; tags: string[] } | null>();
@@ -197,13 +260,15 @@ export function placedRocks(project: string, scene: any): PlacedRock[] {
       const material = (ov.get(`${p.root}/components/mesh/material`) as string | undefined) ?? p.mesh.material ?? null;
       const rockCap = (ov.get(`${p.root}/components/mesh/source/rockCap`) as PlacedRock["rockCap"]) ?? p.mesh.source?.rockCap ?? null;
       const [x, y, z] = worldPosition(ents, id);
-      out.push({ id, what: pf.prefabId, prefabId: pf.prefabId, root: p.root, x, y, z, material, rockCap, modelBase: material ? null : modelBaseOf(project, p.mesh.source?.assetId ?? "") });
+      const ms = modelSizeOf(project, p.mesh.source?.assetId ?? ""), builtStone = ((e.tags ?? []) as string[]).find((t) => t.startsWith("stone:"))?.slice(6);
+      out.push({ id, ...(builtStone ? { builtStone } : {}), what: pf.prefabId, prefabId: pf.prefabId, root: p.root, x, y, z, material, rockCap, modelBase: material ? null : modelBaseOf(project, p.mesh.source?.assetId ?? ""), size: ms === null ? null : ms * worldScale(ents, id), scale: worldScale(ents, id) });
       continue;
     }
     const mesh = e.components?.mesh;
     if (!mesh?.source?.rockCap) continue;
     const [x, y, z] = worldPosition(ents, id);
-    out.push({ id, what: String(mesh.source.assetId ?? e.name ?? id), prefabId: null, root: null, x, y, z, material: mesh.material ?? null, rockCap: mesh.source.rockCap, modelBase: null });
+    const ms = modelSizeOf(project, String(mesh.source.assetId ?? ""));
+    out.push({ id, what: String(mesh.source.assetId ?? e.name ?? id), prefabId: null, root: null, x, y, z, material: mesh.material ?? null, rockCap: mesh.source.rockCap, modelBase: null, size: ms === null ? null : ms * worldScale(ents, id), scale: worldScale(ents, id) });
   }
   return out;
 }
@@ -211,26 +276,32 @@ export function placedRocks(project: string, scene: any): PlacedRock[] {
 /**
  * The ops that give placed rocks their place's skin and cap: each rock-kit prefab instance draws with the world's
  * rock material (the one its scatter rocks use: one batch per model, the skin rides per instance) and carries the
- * rockCap the scatter resolver gives a rock at that spot. Idempotent: an instance already right gets no op.
+ * rockCap the scatter resolver gives a rock at that spot. A piece under SMALL_ROCK_METRES draws with the rule's
+ * `smallMaterial` (the zone's small-rock tile) when the world has one, a free-standing one up to LARGE_ROCK_MAX_METRES
+ * the free-standing rules' `largeMaterial` (the zone's boulder tile). Idempotent: an instance already right gets no op.
  * `ids` limits it to freshly placed entities (dress apply).
  */
 export function skinPlacedOps(project: string, scene: any, field: WorldField, ids?: ReadonlySet<string>): { ops: any[]; changed: string[] } {
   const recipe = field.recipe;
-  const template = recipe.scatter.find((r) => r.cap && (r as { material?: string }).material && rockMaterials(project, recipe).has((r as { material?: string }).material!));
+  const template = recipe.scatter.find((r) => r.cap && r.material && rockMaterials(project, recipe).has(r.material));
   if (!template) return { ops: [], changed: [] };
-  const material = (template as { material?: string }).material!;
+  const mainId = template.material!;
+  const sameMain = recipe.scatter.filter((r) => r.material === mainId);
+  const smallId = sameMain.find((r) => r.smallMaterial)?.smallMaterial;
+  const largeId = sameMain.find((r) => r.largeMaterial && !r.cliff)?.largeMaterial;
   const rule = { ...template, cap: "auto", capAmount: 0.6 } as typeof template;
   const resolve = createRockCapResolver(field);
   const ops: any[] = [], changed: string[] = [];
   const ents = scene.entities as Record<string, any>;
   for (const r of placedRocks(project, scene)) {
     if (!r.prefabId || !r.root || (ids && !ids.has(r.id))) continue;
-    const cap = resolve(rule, r.x, r.y, r.z);
-    if (!cap) continue;
-    const want: Record<string, unknown> = { [`${r.root}/components/mesh/material`]: material, [`${r.root}/components/mesh/source/rockCap`]: cap };
+    const cap = r.builtStone ? null : resolve(rule, r.x, r.y, r.z);
+    if (!cap && !r.builtStone) continue;
+    const material = r.builtStone ?? rockMaterialForSize(r.size, { main: mainId, small: smallId, large: largeId });
+    const want: Record<string, unknown> = r.builtStone ? { [`${r.root}/components/mesh/material`]: material } : { [`${r.root}/components/mesh/material`]: material, [`${r.root}/components/mesh/source/rockCap`]: cap };
     const pf = ents[r.id].components.prefab;
-    const overrides = [...(pf.overrides ?? [])] as { path: string; value: unknown }[];
-    let dirty = false;
+    const overrides = ([...(pf.overrides ?? [])] as { path: string; value: unknown }[]).filter((o) => !(r.builtStone && o.path === `${r.root}/components/mesh/source/rockCap`));
+    let dirty = overrides.length !== (pf.overrides ?? []).length;
     for (const [p, v] of Object.entries(want)) {
       const i = overrides.findIndex((o) => o.path === p);
       if (i >= 0 && JSON.stringify(overrides[i]!.value) === JSON.stringify(v)) continue;
@@ -245,6 +316,50 @@ export function skinPlacedOps(project: string, scene: any, field: WorldField, id
   return { ops, changed };
 }
 
+/** Texels per metre a small-rock tile must hold (the town standard, 40), with this much slack either way. */
+const SMALL_TEXEL = 40, SMALL_TEXEL_SLACK = 8;
+
+/**
+ * The small-rock recipe faults: a rule drawing with the main rock material whose pieces go under SMALL_ROCK_METRES
+ * without a `smallMaterial`, and a small material whose slots do not run parallel to the main one's (count, tone) or
+ * leave the 40 texel/m standard.
+ */
+function smallRockFaults(project: string, recipe: WorldRecipe, materials: Map<string, RockMaterial>, toneLimit: number): RockSkinRow[] {
+  const rows: RockSkinRow[] = [];
+  const main = [...materials.values()].find((m) => !m.small && !m.large);
+  if (!main) return rows;
+  for (const rule of recipe.scatter) {
+    if (rule.material !== main.id) continue;
+    const { least, most } = ruleExtent(rule);
+    const small = rule.smallMaterial, large = rule.largeMaterial;
+    if (Number.isFinite(least) && least < SMALL_ROCK_METRES && !small)
+      rows.push({ kind: "recipe", fault: "recipe", what: "rule", id: rule.id, detail: `pieces down to ${least.toFixed(1)} m wear ${main.id}'s cliff tiles (a checker on a small boulder): give it smallMaterial (rock-skins install)` });
+    else if (small && !materials.has(small))
+      rows.push({ kind: "recipe", fault: "recipe", what: "rule", id: rule.id, detail: `smallMaterial ${small} is not a rock-cap material in the closure` });
+    // large: free-standing pieces of 4-16 m wear the zone's boulder tile; a rule ON a cliff is the cliff face and keeps the cliff tile
+    if (rule.cliff) {
+      if (large) rows.push({ kind: "recipe", fault: "recipe", what: "rule", id: rule.id, detail: `a cliff-placed rule draws its big pieces with ${large}: cliff faces keep the cliff tile (drop largeMaterial; rock-skins install)` });
+    } else if (Number.isFinite(most) && most >= SMALL_ROCK_METRES && least < LARGE_ROCK_MAX_METRES && !large)
+      rows.push({ kind: "recipe", fault: "recipe", what: "rule", id: rule.id, detail: `free-standing pieces up to ${most.toFixed(1)} m wear ${main.id}'s cliff tiles (a patchwork on a boulder): give it largeMaterial (rock-skins install)` });
+    else if (large && !materials.has(large))
+      rows.push({ kind: "recipe", fault: "recipe", what: "rule", id: rule.id, detail: `largeMaterial ${large} is not a rock-cap material in the closure` });
+  }
+  for (const m of materials.values()) {
+    if (!m.small && !m.large) continue;
+    const what = m.small ? "small-material" : "large-material";
+    if (m.bases.length !== main.bases.length) rows.push({ kind: "recipe", fault: "recipe", what, id: m.id, detail: `${m.bases.length} bases, ${main.id} has ${main.bases.length}: slots must run parallel (the per-instance slice is shared)` });
+    m.bases.forEach((b, i) => {
+      const px = pngWidth(findAsset(project, `textures/${b.map}`));
+      const texel = px && b.metres ? px / b.metres : null;
+      if (texel !== null && Math.abs(texel - SMALL_TEXEL) > SMALL_TEXEL_SLACK) rows.push({ kind: "recipe", fault: "recipe", what, id: m.id, detail: `slot ${i} ${b.map} at ${texel.toFixed(0)} texels/m (want ${SMALL_TEXEL})` });
+      const a = m.tones[i], c = main.tones[i];
+      const tone = a && c ? r1(toneDistance(a, c)) : null;
+      if (tone !== null && tone > toneLimit) rows.push({ kind: "recipe", fault: "recipe", what, id: m.id, tone, detail: `slot ${i} ${b.map} is tone ${tone} off ${main.bases[i]?.map ?? "?"} (the same stone, ${m.small ? "smaller" : "as a boulder"})` });
+    });
+  }
+  return rows;
+}
+
 export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; field?: WorldField; area: Area | null; areaText: string; scene?: any; toneLimit?: number; /** Rock material bases to judge with instead of the file's (a plan not yet written). */ bases?: readonly { map: string; color?: string }[]; /** scatterCell results by "cx,cz", shared with a caller sweeping the same field. */ cells?: Map<string, ReturnType<typeof scatterCell>> }): RockSkinReport {
   const t0 = performance.now();
   const { project, recipe } = opts;
@@ -254,7 +369,7 @@ export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; fiel
   const names = recipe.surfaces.map((s) => s.name);
   const surfaceTone = (i: number) => textureMean(project, (recipe.surfaces[i] as { map?: string }).map, (recipe.surfaces[i] as { map?: string }).map ? undefined : (recipe.surfaces[i] as { color?: string }).color);
   const materials = rockMaterials(project, recipe, opts.bases);
-  const mainMaterial = [...materials.values()][0] ?? null;
+  const mainMaterial = [...materials.values()].find((m) => !m.small && !m.large) ?? null;
   const rows: RockSkinRow[] = [];
   const skins = (recipe as { rockSkins?: Record<string, number> }).rockSkins;
 
@@ -284,6 +399,10 @@ export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; fiel
       if (m && materials.has(m) && !rule.cap && rule.rockBase === undefined && !rule.rockBaseByCliff)
         rows.push({ kind: "recipe", fault: "recipe", what: "rule", id: rule.id, detail: `draws with ${m} but never resolves a skin (give it cap or rockBase)` });
     }
+    rows.push(...smallRockFaults(project, recipe, materials, toneLimit));
+    const smallM = [...materials.values()].find((m) => m.small), largeM = [...materials.values()].find((m) => m.large);
+    for (const detail of paletteSkinFaults(recipe, skins, mainMaterial.bases, smallM?.bases, largeM?.bases))
+      rows.push({ kind: "recipe", fault: "recipe", what: "palette", id: detail.split(":")[0]!, detail });
   }
   for (const site of (recipe.features as { fallSites?: any[] }).fallSites ?? []) {
     const wall = site.formations?.wallSurface;
@@ -361,7 +480,7 @@ export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; fiel
             if (!inArea(a, x, z)) continue;
             checkedScatter++;
             const wet = rule.water ? (anchors.get(inst.id.replace(/_f\d+$/, "")) ?? { x, z }) : undefined;
-            judge("scatter", rule.id, inst.id, x, inst.position[1], z, inst.rockCap, materials.get((rule as { material?: string }).material ?? "") ?? null, wet);
+            judge("scatter", rule.id, inst.id, x, inst.position[1], z, inst.rockCap, materials.get(scatterMaterialOf(rule, scatterBox(rule, inst), inst.scale) ?? "") ?? null, wet);
           }
         }
     }
@@ -372,6 +491,8 @@ export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; fiel
     for (const r of placedRocks(project, opts.scene)) {
       if (opts.area && !inArea(opts.area, r.x, r.z)) continue;
       checkedScene++;
+      // a built structure's stone piece: judged against its structure's stone, not the zone skin
+      if (r.builtStone) { if (r.material !== r.builtStone) rows.push({ kind: "scene", fault: "skin", what: r.what, id: r.id, x: r1(r.x), y: r1(r.y), z: r1(r.z), detail: `a stone of a built structure wears ${r.material ?? "its model's own texture"}, not its structure's ${r.builtStone} (rock-skins install)` }); continue; }
       const mat = r.material ? materials.get(r.material) ?? null : null;
       if (!mat) {
         // the model's own texture (the kit's first base, granite): not the world's stone anywhere it differs
@@ -383,6 +504,14 @@ export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; fiel
           rows.push({ kind: "scene", fault: "skin", what: r.what, id: r.id, x: r1(r.x), y: r1(r.y), z: r1(r.z), ...(tone !== null ? { tone } : {}), detail: `draws the model's own ${r.modelBase ?? "texture"}, not ${mainMaterial.id}, on ${ci >= 0 ? names[ci] : "?"} ground${tone !== null ? ` (tone ${tone})` : ""}` });
         continue;
       }
+      // a small placed rock on the main material wears the cliff's strata tile: the checker on a 1 m boulder
+      const small = [...materials.values()].find((q) => q.small);
+      if (small && !mat.small && r.size !== null && r.size < SMALL_ROCK_METRES)
+        rows.push({ kind: "scene", fault: "skin", what: r.what, id: r.id, x: r1(r.x), y: r1(r.y), z: r1(r.z), detail: `a ${r.size.toFixed(1)} m rock wears ${mat.id}, not the small-rock ${small.id} (rock-skins install)` });
+      // a free-standing 4-16 m placed rock on the main material wears the 100 m cliff tile: a patchwork on a boulder
+      const large = [...materials.values()].find((q) => q.large);
+      if (large && !mat.small && !mat.large && r.size !== null && r.size >= SMALL_ROCK_METRES && r.size < LARGE_ROCK_MAX_METRES)
+        rows.push({ kind: "scene", fault: "skin", what: r.what, id: r.id, x: r1(r.x), y: r1(r.y), z: r1(r.z), detail: `a ${r.size.toFixed(1)} m rock wears ${mat.id}'s cliff tile, not the boulder ${large.id} (rock-skins install)` });
       judge("scene", r.what, r.id, r.x, r.y, r.z, r.rockCap ?? {}, mat);
     }
   }
@@ -434,7 +563,10 @@ export function commandRockSkins(host: { argv: string[]; loadRecipe(): { recipe:
   if (stamp && area) host.fail("--stamp sweeps the whole world; drop --near/--rect");
   const assets = path.dirname(path.dirname(path.resolve(file)));
   const project = path.basename(path.dirname(assets));
-  const sceneFile = opt(argv, "scene") ?? path.join(assets, "scenes", `${recipe.name}.scene.json`);
+  // L (bar-watch 2026-10-21): the scene is named for the WORLD FILE; a place-build lab copies the recipe (name skelmorrow)
+  // into world pbbarwatch, so the recipe name found no scene and the lab gate checked 0 scene rocks (a granite ledge passed)
+  const byFile = path.join(assets, "scenes", `${path.basename(file).replace(/\.json$/, "")}.scene.json`);
+  const sceneFile = opt(argv, "scene") ?? (fs.existsSync(byFile) ? byFile : path.join(assets, "scenes", `${recipe.name}.scene.json`));
   const scene = !argv.includes("--no-scene") && fs.existsSync(sceneFile) ? JSON.parse(fs.readFileSync(sceneFile, "utf8")) : undefined;
   const toneLimit = Number(opt(argv, "tone") ?? 9);
   const field = createWorldField(recipe);
@@ -462,6 +594,18 @@ export interface RockSkinPlan {
   rockSkins: Record<string, number>;
   /** The rock material's `rockCap.bases` after the plan (existing slices kept in place, new ones appended). */
   bases: { map: string; metres?: number; color?: string }[];
+  /**
+   * The SMALL rock material's bases, parallel to `bases`: a zone stone's slot holds the zone's small-rock tile
+   * (`preferSmall[surface]`, else `rock-small.png` beside its cliff tile), every other slot the main slot's own
+   * texture; all at 40 texels/m.
+   */
+  smallBases: { map: string; metres?: number; color?: string }[];
+  /**
+   * The LARGE rock material's bases, parallel to `bases`: a zone stone's slot holds the zone's boulder tile
+   * (`preferLarge[surface]`, else `rock-large.png` beside its cliff tile), every other slot the main slot's own texture;
+   * all at 40 texels/m.
+   */
+  largeBases: { map: string; metres?: number; color?: string }[];
   added: string[];
   /** Stone surfaces left without a slice of their own (no texture, or all eight slices taken). */
   flagged: string[];
@@ -479,21 +623,63 @@ function pngWidth(file: string | null): number {
  * a `rock.png` beside a zone's cliff tile, else the cliff tile itself, at the 40 texels/m standard. A slice already carrying
  * that texture is reused, so the plan is idempotent and never reorders slices.
  */
-export function planRockSkins(project: string, recipe: WorldRecipe, bases: readonly { map: string; metres?: number; color?: string }[], prefer: Record<string, string> = {}): RockSkinPlan {
+/** The fields rock-skins install owns, laid onto a FRESH read of the recipe (rockSkins + each scatter rule's small/large material by
+ *  id). install plans for seconds on its own read; writing that stale copy back dropped every feature another tool added meanwhile
+ *  (widows-arch's 551 passages/operators/paints, 2026-10-21). Mutates and returns `fresh`. */
+export function mergeRockSkinFields(fresh: any, mine: any): any {
+  fresh.rockSkins = mine.rockSkins;
+  const byId = new Map<string, any>((mine.scatter ?? []).map((r: any) => [r.id, r]));
+  for (const r of fresh.scatter ?? []) {
+    const m = byId.get(r.id);
+    if (!m) continue;
+    for (const k of ["smallMaterial", "largeMaterial"]) { if (m[k] === undefined) delete r[k]; else r[k] = m[k]; }
+  }
+  return fresh;
+}
+/**
+ * The rock tile that goes with a cliff tile: `<prefix>${file}` beside `<prefix>cliff.png` (a corridor's
+ * `gorge-cliff.png` -> `gorge-rock-small.png`), else null (the caller falls back to the folder's plain `${file}`).
+ */
+export function siblingTile(project: string, cliffMap: string, file: string): string | null {
+  const base = path.posix.basename(cliffMap);
+  const m = /^(.+-)cliff.png$/.exec(base);
+  if (!m) return null;
+  const t = `${path.posix.dirname(cliffMap)}/${m[1]}${file}`;
+  return findAsset(project, `textures/${t}`) ? t : null;
+}
+
+export function planRockSkins(project: string, recipe: WorldRecipe, bases: readonly { map: string; metres?: number; color?: string }[], prefer: Record<string, string> = {}, preferSmall: Record<string, string> = {}, preferLarge: Record<string, string> = {}, assign: Record<string, number> = {}): RockSkinPlan {
   const out = bases.map((b) => ({ ...b }));
   const rockSkins: Record<string, number> = { ...((recipe as { rockSkins?: Record<string, number> }).rockSkins ?? {}) };
   const added: string[] = [], flagged: string[] = [];
+  // a stone ASSIGNED a slice (the 8 slices are full: a corridor's own stone reclaims one whose stone the world hardly
+  // draws, by ruling): that slice takes its texture; every other stone on the slice now wears it (reported)
+  for (const [name, slice] of Object.entries(assign)) {
+    const s = recipe.surfaces.find((q) => q.name === name) as { map?: string } | undefined;
+    const texture = prefer[name] ?? s?.map;
+    if (!texture || !Number.isInteger(slice) || slice < 0 || slice >= 8) { flagged.push(`${name}: cannot assign slice ${slice}`); continue; }
+    while (out.length <= slice) out.push({ ...out[0]! });
+    if (out[slice]!.map !== texture) {
+      const px = pngWidth(findAsset(project, `textures/${texture}`)) || 256;
+      const others = Object.entries(rockSkins).filter(([n, v]) => v === slice && n !== name).map(([n]) => n);
+      added.push(`${name} -> ${texture} (slice ${slice} reclaimed from ${out[slice]!.map}${others.length ? `; ${others.join(", ")} now wear it` : ""})`);
+      out[slice] = { map: texture, metres: Math.round((px / 40) * 10) / 10 };
+    }
+    rockSkins[name] = slice;
+  }
   const stones: string[] = [];
   for (const r of (recipe as { regions?: any[] }).regions ?? []) if (r.ground?.cliff && !stones.includes(r.ground.cliff)) stones.push(r.ground.cliff);
   const zoneStones = new Set(stones);
   for (const s of recipe.surfaces) if (((s as { role?: string }).role === "cliff" || s.name === "rock" || s.name === "cliff") && !stones.includes(s.name)) stones.push(s.name);
   for (const name of stones) {
+    if (assign[name] !== undefined) continue;
     const s = recipe.surfaces.find((q) => q.name === name) as { map?: string } | undefined;
     if (!s?.map) { flagged.push(`${name}: no texture to derive a rock skin from`); continue; }
-    const sibling = `${path.posix.dirname(s.map)}/rock.png`;
+    const sibling = siblingTile(project, s.map, "rock.png") ?? `${path.posix.dirname(s.map)}/rock.png`;
     // a zone's own folder may carry a dedicated rock skin beside its cliff tile (never a shared folder: mmo/Rock.png is no zone's)
     const texture = prefer[name] ?? (zoneStones.has(name) && s.map.includes("/") && findAsset(project, `textures/${sibling}`) ? sibling : s.map);
     let slice = out.findIndex((b) => b.map === texture);
+    if (slice < 0 && rockSkins[name] !== undefined && Object.values(assign).includes(rockSkins[name]!)) continue; // its slice was reclaimed: keeps it
     if (slice < 0) {
       if (out.length >= 8) { flagged.push(`${name}: the rock material has no free slice (8 bases) for ${texture}`); continue; }
       const px = pngWidth(findAsset(project, `textures/${texture}`)) || 256;
@@ -503,7 +689,77 @@ export function planRockSkins(project: string, recipe: WorldRecipe, bases: reado
     }
     rockSkins[name] = slice;
   }
-  return { rockSkins, bases: out, added, flagged };
+  // the small and large materials: the same slots, each zone stone's grainy small-rock tile / boulder tile in place
+  // of its cliff tile
+  const atTexel = (map: string, color?: string) => ({ map, metres: Math.round(((pngWidth(findAsset(project, `textures/${map}`)) || 256) / SMALL_TEXEL) * 10) / 10, ...(color ? { color } : {}) });
+  const variant = (file: string, preferred: Record<string, string>, what: string) => {
+    const vb = out.map((b) => atTexel(b.map, b.color));
+    const claimed = new Map<number, string>();
+    for (const name of stones) {
+      if (!zoneStones.has(name) || rockSkins[name] === undefined) continue;
+      const s = recipe.surfaces.find((q) => q.name === name) as { map?: string } | undefined;
+      const sibling = s?.map && s.map.includes("/") ? (siblingTile(project, s.map, file) ?? `${path.posix.dirname(s.map)}/${file}`) : null;
+      const tile = preferred[name] ?? (sibling && findAsset(project, `textures/${sibling}`) ? sibling : null);
+      const slice = rockSkins[name]!;
+      if (!tile) { flagged.push(`${name}: no ${what} tile (draw ${sibling ?? `<zone>/${file}`}): its ${what === "small-rock" ? "small rocks" : "boulders"} wear ${out[slice]!.map}`); continue; }
+      if (claimed.has(slice) && claimed.get(slice) !== tile) { flagged.push(`${name}: slice ${slice} already takes ${claimed.get(slice)} for its ${what} tile`); continue; }
+      claimed.set(slice, tile);
+      vb[slice] = atTexel(tile);
+    }
+    return vb;
+  };
+  const smallBases = variant("rock-small.png", preferSmall, "small-rock");
+  const largeBases = variant("rock-large.png", preferLarge, "large-rock");
+  return { rockSkins, bases: out, smallBases, largeBases, added, flagged };
+}
+
+/** The small rock material's id beside a main rock material's: `<id>-small`. */
+export const smallRockMaterialId = (id: string): string => `${id}-small`;
+
+/**
+ * Write the world's SMALL rock material (a copy of the main one with `smallBases`) beside the main material's file and
+ * point every rule that draws with the main material at it (`smallMaterial`, in `rules`). Returns the file written, or
+ * null when it was already right.
+ */
+export function writeSmallRockMaterial(material: { id: string; file: string; doc: any }, smallBases: RockSkinPlan["smallBases"], rules: { material?: string; smallMaterial?: string }[]): { id: string; file: string; wrote: boolean; rules: string[] } {
+  const { id, file, wrote } = writeVariantMaterial(material, smallBases, "small");
+  const changed: string[] = [];
+  for (const r of rules) if (r.material === material.id && r.smallMaterial !== id) { r.smallMaterial = id; changed.push((r as { id?: string }).id ?? "?"); }
+  return { id, file, wrote, rules: changed };
+}
+
+/** The large rock material's id beside a main rock material's: `<id>-large`. */
+export const largeRockMaterialId = (id: string): string => `${id}-large`;
+
+/** The file of a main rock material's `-small` / `-large` sibling. */
+export const variantMaterialFile = (material: { id: string; file: string }, kind: "small" | "large"): string => path.join(path.dirname(material.file), `${path.basename(material.id)}-${kind}.json`);
+
+/** A variant rock material's text: the main material's doc with its own bases. */
+export const variantMaterialText = (doc: any, bases: RockSkinPlan["bases"]): string => JSON.stringify({ ...doc, rockCap: { ...doc.rockCap, bases } }, null, 2) + "\n";
+
+function writeVariantMaterial(material: { id: string; file: string; doc: any }, bases: RockSkinPlan["bases"], kind: "small" | "large"): { id: string; file: string; wrote: boolean } {
+  const id = `${material.id}-${kind}`;
+  const file = variantMaterialFile(material, kind);
+  const text = variantMaterialText(material.doc, bases);
+  const wrote = !fs.existsSync(file) || fs.readFileSync(file, "utf8") !== text;
+  if (wrote) fs.writeFileSync(file, text);
+  return { id, file, wrote };
+}
+
+/**
+ * Write the world's LARGE rock material (a copy of the main one with `largeBases`) beside the main material's file and
+ * point every FREE-STANDING rule that draws with the main material at it (`largeMaterial`); a rule placed on cliffs
+ * (`cliff`) is the cliff face and loses any `largeMaterial` it had (listed as "-<id>").
+ */
+export function writeLargeRockMaterial(material: { id: string; file: string; doc: any }, largeBases: RockSkinPlan["largeBases"], rules: { material?: string; largeMaterial?: string; cliff?: unknown }[]): { id: string; file: string; wrote: boolean; rules: string[] } {
+  const { id, file, wrote } = writeVariantMaterial(material, largeBases, "large");
+  const changed: string[] = [];
+  for (const r of rules) {
+    if (r.material !== material.id) continue;
+    if (r.cliff) { if (r.largeMaterial !== undefined) { delete r.largeMaterial; changed.push(`-${(r as { id?: string }).id ?? "?"}`); } }
+    else if (r.largeMaterial !== id) { r.largeMaterial = id; changed.push((r as { id?: string }).id ?? "?"); }
+  }
+  return { id, file, wrote, rules: changed };
 }
 
 const PROJECTS_DIR = path.resolve(import.meta.dirname, "..", "projects");
@@ -526,15 +782,17 @@ export function ownRockMaterial(project: string, recipe: WorldRecipe): { id: str
  * The template step (`worldgen init`, `zone-textures`): plan the skins onto the recipe (in memory) and write the
  * world's own rock material when its bases change. Prints what it did; returns the plan.
  */
-export function writeRockSkinTemplate(project: string, recipe: WorldRecipe, prefer: Record<string, string> = {}): RockSkinPlan | null {
+export function writeRockSkinTemplate(project: string, recipe: WorldRecipe, prefer: Record<string, string> = {}, preferSmall: Record<string, string> = {}, preferLarge: Record<string, string> = {}, assign: Record<string, number> = {}): RockSkinPlan | null {
   const material = project ? ownRockMaterial(project, recipe) : null;
   if (!material) return null;
-  const plan = planRockSkins(project, recipe, material.doc.rockCap.bases, prefer);
+  const plan = planRockSkins(project, recipe, material.doc.rockCap.bases, prefer, preferSmall, preferLarge, assign);
   (recipe as { rockSkins?: Record<string, number> }).rockSkins = plan.rockSkins;
   if (JSON.stringify(material.doc.rockCap.bases) !== JSON.stringify(plan.bases)) {
     material.doc.rockCap.bases = plan.bases;
     fs.writeFileSync(material.file, JSON.stringify(material.doc, null, 2) + "\n");
   }
+  writeSmallRockMaterial(material, plan.smallBases, recipe.scatter as never);
+  writeLargeRockMaterial(material, plan.largeBases, recipe.scatter as never);
   console.log(`rock skins: ${Object.entries(plan.rockSkins).map(([k, v]) => `${k}=${v}`).join(", ") || "(none)"}${plan.added.length ? `; added ${plan.added.join("; ")}` : ""}${plan.flagged.length ? `; ! ${plan.flagged.join("; ")}` : ""}`);
   return plan;
 }
@@ -567,32 +825,60 @@ function main(argv: string[]): void {
     return;
   }
   if (cmd === "install") {
-    // rock-skins install <project> --world w [--prefer surface=texture,...] [--inverse f] [--dry]
-    const prefer = Object.fromEntries((opt(argv, "prefer") ?? "").split(",").filter(Boolean).map((kv) => kv.split("=") as [string, string]));
+    // rock-skins install <project> --world w [--prefer surface=texture,...] [--prefer-small surface=texture,...] [--prefer-large surface=texture,...] [--inverse f] [--dry]
+    const kv = (s: string | undefined) => Object.fromEntries((s ?? "").split(",").filter(Boolean).map((p) => p.split("=") as [string, string]));
+    const prefer = kv(opt(argv, "prefer")), preferSmall = kv(opt(argv, "prefer-small")), preferLarge = kv(opt(argv, "prefer-large"));
     const raw = JSON.parse(fs.readFileSync(recipeFile, "utf8"));
     const recipe = readRecipe(recipeFile);
     const material = ownRockMaterial(project, recipe) ?? fail(`${world}: no rock-cap material of ${project}'s own to write`);
-    const before = { rockSkins: raw.rockSkins ?? null, bases: JSON.parse(JSON.stringify(material.doc.rockCap.bases)), scene: [] as unknown[] };
-    const plan = planRockSkins(project, recipe, material.doc.rockCap.bases, prefer);
+    const smallFile = variantMaterialFile(material, "small"), largeFile = variantMaterialFile(material, "large");
+    const before = {
+      rockSkins: raw.rockSkins ?? null, bases: JSON.parse(JSON.stringify(material.doc.rockCap.bases)), scene: [] as unknown[],
+      smallMaterial: fs.existsSync(smallFile) ? fs.readFileSync(smallFile, "utf8") : null,
+      smallRules: Object.fromEntries((raw.scatter ?? []).map((r: any) => [r.id, r.smallMaterial ?? null])),
+      largeMaterial: fs.existsSync(largeFile) ? fs.readFileSync(largeFile, "utf8") : null,
+      largeRules: Object.fromEntries((raw.scatter ?? []).map((r: any) => [r.id, r.largeMaterial ?? null])),
+    };
+    const plan = planRockSkins(project, recipe, material.doc.rockCap.bases, prefer, preferSmall, preferLarge);
     console.log(`rock skins for ${world}: ${Object.entries(plan.rockSkins).map(([k, v]) => `${k}=${v}`).join(", ")}`);
     for (const a of plan.added) console.log(`  + ${a}`);
     for (const f of plan.flagged) console.log(`  ! ${f}`);
-    // the scene's placed rocks, under the NEW table (a field built from the planned recipe)
+    const palFaults = paletteSkinFaults(recipe, plan.rockSkins, plan.bases, plan.smallBases, plan.largeBases);
+    for (const f of palFaults) console.log(`  PALETTE ${f}`);
+    if (palFaults.length && !argv.includes("--allow-off-palette")) fail(`rock-skins install REFUSED: ${palFaults.length} slice(s) outside a zone palette (regions[].palette; --allow-off-palette with a ruling)`);
+    console.log(`  small rocks (< ${SMALL_ROCK_METRES} m): ${plan.smallBases.map((b, i) => (b.map !== plan.bases[i]!.map ? `${i}=${b.map}` : null)).filter(Boolean).join(", ") || "(no zone small-rock tiles)"}`);
+    console.log(`  large rocks (${SMALL_ROCK_METRES}-${LARGE_ROCK_MAX_METRES} m, free-standing): ${plan.largeBases.map((b, i) => (b.map !== plan.bases[i]!.map ? `${i}=${b.map}` : null)).filter(Boolean).join(", ") || "(no zone large-rock tiles)"}`);
+    // the scene's placed rocks, under the NEW table (a field built from the planned recipe) and the small/large materials
+    const smallId = smallRockMaterialId(material.id), largeId = largeRockMaterialId(material.id);
+    const planned = { ...recipe, rockSkins: plan.rockSkins, scatter: recipe.scatter.map((r) => (r.material === material.id ? { ...r, smallMaterial: smallId, ...(r.cliff ? { largeMaterial: undefined } : { largeMaterial: largeId }) } : r)) } as WorldRecipe;
     const scene = fs.existsSync(sceneFile) ? JSON.parse(fs.readFileSync(sceneFile, "utf8")) : null;
-    const skin = scene ? skinPlacedOps(project, scene, createWorldField({ ...recipe, rockSkins: plan.rockSkins } as WorldRecipe)) : { ops: [], changed: [] };
-    console.log(`  scene: ${skin.changed.length} placed rock(s) to skin`);
-    const same = JSON.stringify(raw.rockSkins ?? null) === JSON.stringify(plan.rockSkins) && JSON.stringify(before.bases) === JSON.stringify(plan.bases);
+    // --rect x0,z0,x1,z1: skin only the placed rocks there (a corridor install leaves the rest of the scene to its owners)
+    const rect = opt(argv, "rect")?.split(",").map(Number) as [number, number, number, number] | undefined;
+    const only = scene && rect ? new Set(placedRocks(project, scene).filter((r) => inArea({ rect }, r.x, r.z)).map((r) => r.id)) : undefined;
+    const skin = scene ? skinPlacedOps(project, scene, createWorldField(planned), only) : { ops: [], changed: [] };
+    console.log(`  scene: ${skin.changed.length} placed rock(s) to skin${rect ? `: ${skin.changed.join(", ")}` : ""}`);
+    const planDoc = { ...material.doc, rockCap: { ...material.doc.rockCap, bases: plan.bases } };
+    const smallSame = before.smallMaterial === variantMaterialText(planDoc, plan.smallBases) && (raw.scatter ?? []).every((r: any) => r.material !== material.id || r.smallMaterial === smallId);
+    const largeSame = before.largeMaterial === variantMaterialText(planDoc, plan.largeBases) && (raw.scatter ?? []).every((r: any) => r.material !== material.id || (r.cliff ? r.largeMaterial === undefined : r.largeMaterial === largeId));
+    const same = JSON.stringify(raw.rockSkins ?? null) === JSON.stringify(plan.rockSkins) && JSON.stringify(before.bases) === JSON.stringify(plan.bases) && smallSame && largeSame;
     if (same && !skin.ops.length) { console.log("  nothing to do (already installed)"); return; }
     if (argv.includes("--dry")) { console.log("  DRY RUN: nothing written"); return; }
     raw.rockSkins = plan.rockSkins;
-    fs.writeFileSync(recipeFile, JSON.stringify(raw, null, 2) + "\n");
+    const small = writeSmallRockMaterial({ ...material, doc: planDoc }, plan.smallBases, raw.scatter ?? []);
+    if (small.rules.length) console.log(`  smallMaterial ${small.id} on ${small.rules.length} rule(s): ${small.rules.join(", ")}`);
+    const large = writeLargeRockMaterial({ ...material, doc: planDoc }, plan.largeBases, raw.scatter ?? []);
+    if (large.rules.length) console.log(`  largeMaterial ${large.id} on ${large.rules.length} rule(s): ${large.rules.join(", ")}`);
+    // onto a FRESH read: another tool may have written the recipe while this one planned
+    updateJsonFile(recipeFile, (fresh) => ({ doc: mergeRockSkinFields(fresh, raw) }), { label: "rock-skins install" }); // under the recipe's lock
     material.doc.rockCap.bases = plan.bases;
     fs.writeFileSync(material.file, JSON.stringify(material.doc, null, 2) + "\n");
     if (scene && skin.ops.length) {
       const reg = new ComponentRegistry();
       registerCoreComponents(reg);
-      const res = applyOps(scene, skin.ops as never, reg);
-      fs.writeFileSync(sceneFile, JSON.stringify(res.doc, null, 2));
+      // fresh read under the scene's lock (tools/_scene-write.mts): same race as the recipe
+      let res: ReturnType<typeof applyOps>;
+      try { res = applyOpsToSceneFile(sceneFile, skin.ops, (d, o) => applyOps(d, o as never, reg), { label: "rock-skins install", indent: 2, trailer: "" }); }
+      catch (e) { fail(`rock-skins: ${(e as Error).message}: re-run`); }
       before.scene = res.inverse as unknown[];
     }
     const inv = opt(argv, "inverse");
@@ -605,23 +891,58 @@ function main(argv: string[]): void {
     const inv = opt(argv, "inverse") ?? fail("undo needs --inverse <file>");
     if (!fs.existsSync(inv)) { console.log(`rock-skins undo: no ${inv} (not installed)`); return; }
     const before = JSON.parse(fs.readFileSync(inv, "utf8"));
-    const raw = JSON.parse(fs.readFileSync(recipeFile, "utf8"));
     const material = ownRockMaterial(project, readRecipe(recipeFile));
-    if (before.rockSkins === null) delete raw.rockSkins;
-    else raw.rockSkins = before.rockSkins;
-    fs.writeFileSync(recipeFile, JSON.stringify(raw, null, 2) + "\n");
+    updateJsonFile(recipeFile, (raw: any) => { // one read-modify-write under the recipe's lock (tools/_scene-write.mts)
+      if (before.rockSkins === null) delete raw.rockSkins;
+      else raw.rockSkins = before.rockSkins;
+      if (before.smallRules) for (const r of raw.scatter ?? []) if (r.id in before.smallRules) { if (before.smallRules[r.id] === null) delete r.smallMaterial; else r.smallMaterial = before.smallRules[r.id]; }
+      if (before.largeRules) for (const r of raw.scatter ?? []) if (r.id in before.largeRules) { if (before.largeRules[r.id] === null) delete r.largeMaterial; else r.largeMaterial = before.largeRules[r.id]; }
+      return { doc: raw };
+    }, { label: "rock-skins undo" });
     if (material && before.bases) { material.doc.rockCap.bases = before.bases; fs.writeFileSync(material.file, JSON.stringify(material.doc, null, 2) + "\n"); }
+    for (const kind of ["small", "large"] as const) {
+      const key = `${kind}Material`;
+      if (!material || !(key in before)) continue;
+      const file = variantMaterialFile(material, kind);
+      if (before[key] === null) fs.rmSync(file, { force: true });
+      else fs.writeFileSync(file, before[key]);
+    }
     if (before.scene?.length && fs.existsSync(sceneFile)) {
       const reg = new ComponentRegistry();
       registerCoreComponents(reg);
-      const res = applyOps(JSON.parse(fs.readFileSync(sceneFile, "utf8")), before.scene, reg);
-      fs.writeFileSync(sceneFile, JSON.stringify(res.doc, null, 2));
+      applyOpsToSceneFile(sceneFile, before.scene, (d, o) => applyOps(d, o as never, reg), { label: "rock-skins undo", trailer: "" });
     }
     fs.rmSync(inv);
     console.log(`rock-skins undo: restored ${world}'s rockSkins, rock material bases${before.scene?.length ? " and placed rocks" : ""}`);
     return;
   }
-  fail("usage: rock-skins install <project> [--world w] [--prefer s=tex] [--inverse f] [--dry] | undo <project> --inverse f | chunks <project> --dir d");
+  fail("usage: rock-skins install <project> [--world w] [--prefer s=tex] [--prefer-small s=tex] [--prefer-large s=tex] [--inverse f] [--dry] | undo <project> --inverse f | chunks <project> --dir d");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) main(process.argv.slice(2));
+
+/**
+ * The zone palette (regions[].palette) against a rock-skin table: each zone's cliff slice must wear one of its palette
+ * cliff tiles, its small-rock slot one of `rockSmall`, its large-rock slot one of `rockLarge` (an empty list = not
+ * declared, not checked). `rock-skins install` refuses a plan with any; the gate lists them as recipe faults.
+ */
+export function paletteSkinFaults(recipe: WorldRecipe, rockSkins: Record<string, number> | undefined, bases: readonly { map: string }[], smallBases?: readonly { map: string }[], largeBases?: readonly { map: string }[]): string[] {
+  const out: string[] = [];
+  const regions = ((recipe as { regions?: any[] }).regions ?? []).filter((r) => !r.within);
+  const mapOf = (n: string) => (recipe.surfaces.find((s) => s.name === n) as { map?: string } | undefined)?.map ?? n;
+  for (const r of regions) {
+    const p = zonePalette(recipe, r.id);
+    const cliff = r.ground?.cliff as string | undefined;
+    if (!p || !cliff || !rockSkins) continue;
+    const slice = rockSkins[cliff] ?? rockSkins["*"];
+    if (slice === undefined) continue;
+    const okCliff = new Set(p.cliff.flatMap((n) => [n, mapOf(n)]));
+    const main = bases[slice]?.map;
+    if (p.cliff.length && main && !okCliff.has(main)) out.push(`${r.id}: rock skin ${main} (slice ${slice}) is not a palette cliff tile [${p.cliff.map(mapOf).join(", ")}]`);
+    const small = smallBases?.[slice]?.map;
+    if (p.rockSmall.length && small && !p.rockSmall.includes(small)) out.push(`${r.id}: small-rock slot ${small} not in palette rockSmall [${p.rockSmall.join(", ")}]`);
+    const large = largeBases?.[slice]?.map;
+    if (p.rockLarge.length && large && !p.rockLarge.includes(large)) out.push(`${r.id}: large-rock slot ${large} not in palette rockLarge [${p.rockLarge.join(", ")}]`);
+  }
+  return out;
+}

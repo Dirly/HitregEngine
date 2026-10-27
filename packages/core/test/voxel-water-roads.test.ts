@@ -641,6 +641,16 @@ describe("a bridge in a chunk", () => {
     }
   });
 
+  it("a fitted bridge span that replaces the placeholder draws instead of it", () => {
+    const solved = { pieces: [{ prefab: "bridges/x", role: "deck", position: [24, 60, 24], yaw: 0 }] };
+    const spans = (replaces: string | undefined, fitted: boolean) =>
+      createWorldField({ ...bridged, features: { ...bridged.features, bridgeSpans: [{ id: "real", kind: "rope", style: "gnawspur", a: { at: [0, 24], y: 60 }, b: { at: [48, 24], y: 60 }, ...(replaces ? { replaces } : {}), ...(fitted ? { solved } : {}) }] } } as never);
+    const decks = (f: ReturnType<typeof createWorldField>) => Object.values(voxelChunkDoc(f, "w", 0, 0, { scatter: false }).entities).filter((e) => e.tags?.includes("deck")).length;
+    expect(decks(spans("span", true))).toBe(0);
+    expect(decks(spans("span", false))).toBe(1); // not fitted yet: the placeholder still carries the crossing
+    expect(decks(spans(undefined, true))).toBe(1);
+  });
+
   it("leaves the water running under the deck", () => {
     expect(field.waterY(24, 24)).not.toBeNull();
     expect(field.height(24, 24)).toBeLessThan(56);

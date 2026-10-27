@@ -8,6 +8,14 @@ import type { VoxelMesh } from "@hitreg/core";
 // @ts-expect-error plain JS tool module
 import { GltfBuilder } from "../../../tools/wfc-3d/gltf.mjs";
 
+/** A BUILT landmark group (landmark-built.ts): POSITION, NORMAL, TEXCOORD_0 (engine-material convention: v up, flipY). */
+export function writeBuiltGlb(mesh: { positions: Float32Array; normals: Float32Array; uvs: Float32Array; indices: Uint32Array }, file: string): number {
+  const b = new GltfBuilder("HitReg built landmark (meshed CSG, real UVs)");
+  const attributes = { POSITION: b.pushAccessor(mesh.positions, "VEC3", { minMax: true }), NORMAL: b.pushAccessor(mesh.normals, "VEC3"), TEXCOORD_0: b.pushAccessor(mesh.uvs, "VEC2") };
+  b.pushNode({ mesh: b.pushMesh({ primitives: [{ attributes, indices: b.pushAccessor(mesh.indices, "SCALAR") }] }) }, true);
+  return writeGlbDoc(b.finish(), file);
+}
+
 export function writeVolumeGlb(mesh: VoxelMesh, file: string): number {
   const b = new GltfBuilder("HitReg rock formations (baked DC volume)");
   const count = mesh.vertexCount;
@@ -23,7 +31,11 @@ export function writeVolumeGlb(mesh: VoxelMesh, file: string): number {
     attributes["_SPLATWEIGHT" + (k ? String(k + 1) : "")] = b.pushAccessor(a, "VEC4");
   }
   b.pushNode({ mesh: b.pushMesh({ primitives: [{ attributes, indices: b.pushAccessor(mesh.indices, "SCALAR") }] }) }, true);
-  const doc = b.finish();
+  return writeGlbDoc(b.finish(), file);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function writeGlbDoc(doc: any, file: string): number {
   const uri: string = doc.buffers[0].uri;
   const bin = Buffer.from(uri.slice(uri.indexOf(",") + 1), "base64");
   const json = Buffer.from(JSON.stringify({ ...doc, buffers: [{ byteLength: bin.byteLength }] }), "utf8");

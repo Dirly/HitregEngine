@@ -12,17 +12,23 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { DIGEST_VERSION, digest, exists, gateState, readJson, type Ctx, type Finding } from "./lib.mts";
+import { DIGEST_VERSIONS_READ, digestMatches, exists, gateState, readJson, type Ctx, type Finding } from "./lib.mts";
 import { bestiarySchema, freezeSchema, questGraphSchema, zoneBriefSchema } from "./schemas.mts";
 import { manifestRows } from "./commands/manifest.mts";
 import { townNames, type Adjacency } from "./commands/_shared.mts";
 import { findSceneFile, readBindReport } from "./commands/_zone.mts";
 import { populateRow } from "./commands/populate.mts";
+import { wanderersRow } from "./commands/_wanderers.mts";
 import { systemsRow } from "./commands/systems.mts";
+import { questMix } from "./commands/quests.mts";
 import { groundNear, streetsOf, TownStamps, type StampInput } from "./commands/_town-stamps.mts";
 import { streetLightingFile } from "../town-lights-rule.mts";
 import { atlasState } from "../town-atlas.mjs";
+import { readableReportFile } from "../_dress-report.mts";
 import { portalDigest, walkThroughPortals } from "../_portal-veil-ops.mts";
+import { ribbonApproachOps } from "../_place-archetype.mts";
+import { smokeReport } from "../_smoke-check.mts";
+import { designBlock } from "../../../../tools/poi-review/job.mjs";
 import type { SceneDoc } from "@hitreg/core";
 
 export type Who = "procedural" | "gpt" | "fable" | "opus" | "sonnet" | "human";
@@ -109,7 +115,25 @@ export function worldRows(ctx: Ctx): Row[] {
 
 // ------------------------------------------------------------------- zone
 
-export const PLANNING = ["sites", "brief", "bestiary", "town", "quests", "reserve", "manifest", "freeze"] as const;
+/**
+ * quest-mix: the zone's objectives are mostly field work, not interactive spots (questMix in commands/quests.mts):
+ * interact share, kill/collect/visit share, a quest offered on arrival at every large place, a kill/collect chain per
+ * dungeon. Read straight from quests.json + brief.json, so it is never stale.
+ */
+export function questMixRow(ctx: Ctx, zone: string): Row {
+  const how = `rewrite steps in zones/${zone}/quests.json (kill N, collect N from the slain: params.from, visit a place, an auto quest on arrival) -> npx tsx tools/zonegen.mts quests ${ctx.world} --project ${ctx.project} --zone ${zone}`;
+  const p = ctx.paths;
+  if (!exists(p.quests(zone)) || !exists(p.brief(zone))) return { stage: "quest-mix", who: "opus", state: "MISSING", why: "no quests.json / brief.json", how };
+  const g = questGraphSchema.safeParse(readJson(p.quests(zone)));
+  const b = zoneBriefSchema.safeParse(readJson(p.brief(zone)));
+  if (!g.success || !b.success) return { stage: "quest-mix", who: "opus", state: "FAILED", why: "quests.json or brief.json does not parse (run the quests lint)", how };
+  const m = questMix(g.data, b.data);
+  const pct = (n: number): string => `${m.objectives ? Math.round((100 * n) / m.objectives) : 0}%`;
+  const tally = `interact ${m.interact}/${m.objectives} (${pct(m.interact)}), kill/collect/visit ${m.field}/${m.objectives} (${pct(m.field)})`;
+  return { stage: "quest-mix", who: "opus", state: m.problems.length ? "FAILED" : "ok", why: m.problems.length ? m.problems.join("; ") : tally, how };
+}
+
+export const PLANNING = ["sites", "brief", "bestiary", "town", "quests", "quest-mix", "reserve", "manifest", "freeze"] as const;
 
 export function zoneRows(ctx: Ctx, zone: string): Row[] {
   const { world, project, paths: p } = ctx;
@@ -122,6 +146,7 @@ export function zoneRows(ctx: Ctx, zone: string): Row[] {
     gateRow(ctx, "bestiary", zone, "sonnet", agent("zone-bestiary", "bestiary"), p.zoneBestiary(zone)),
     gateRow(ctx, "town", zone, "opus", agent("town", "town")),
     gateRow(ctx, "quests", zone, "opus", agent("quests", "quests"), p.quests(zone)),
+    questMixRow(ctx, zone),
     gateRow(ctx, "reserve", zone, "sonnet", agent("reserve", "reserve"), p.reservations(zone)),
     gateRow(ctx, "manifest", zone, "procedural", cmd("manifest")),
   ];
@@ -132,9 +157,9 @@ export function zoneRows(ctx: Ctx, zone: string): Row[] {
   if (exists(freezeFile)) {
     const fz = freezeSchema.safeParse(readJson(freezeFile));
     if (!fz.success) frozen = { ok: false, why: "freeze.json unreadable" };
-    else if (fz.data.v !== DIGEST_VERSION) frozen = { ok: false, why: `freeze.json was written by an older zonegen (${fz.data.v ? `digest v${fz.data.v}` : "whole-file hashes"}): re-run zonegen freeze` };
+    else if (!(DIGEST_VERSIONS_READ as readonly number[]).includes(fz.data.v ?? 0)) frozen = { ok: false, why: `freeze.json was written by an older zonegen (${fz.data.v ? `digest v${fz.data.v}` : "whole-file hashes"}): re-run zonegen freeze` };
     else {
-      const changed = Object.entries(fz.data.hashes).filter(([rel, h]) => !exists(path.join(p.projectDir, rel)) || digest(p, path.join(p.projectDir, rel), zone) !== h).map(([rel]) => rel);
+      const changed = Object.entries(fz.data.hashes).filter(([rel, h]) => !exists(path.join(p.projectDir, rel)) || !digestMatches(p, path.join(p.projectDir, rel), zone, h, fz.data.v)).map(([rel]) => rel);
       frozen = changed.length ? { ok: false, why: `plan changed since the freeze: ${changed.join(", ")}` } : { ok: true, why: "" };
     }
     rows.push({ stage: "freeze", who: "procedural", state: frozen.ok ? "ok" : "STALE", why: frozen.why, how: cmd("freeze") });
@@ -144,7 +169,9 @@ export function zoneRows(ctx: Ctx, zone: string): Row[] {
   build.push(lipsRow(ctx, zone));
   build.push(floatRow(ctx, zone));
   build.push(rockSkinsRow(ctx, zone));
+  build.push(paletteRow(ctx, zone));
   build.push(waterEdgesRow(ctx, zone));
+  build.push(holesRow(ctx, zone));
   if (!exists(freezeFile)) for (const r of build) if (!r.gap) Object.assign(r, { state: "MISSING", why: `after freeze${r.state === "ok" ? " (evidence exists from before)" : ""}` });
   if (exists(freezeFile) && !frozen.ok) for (const r of build) if (!r.gap) Object.assign(r, { state: "STALE", why: frozen.why });
   return [...rows, ...build];
@@ -216,14 +243,39 @@ function floatRow(ctx: Ctx, zone: string): Row {
       fs.mkdirSync(path.dirname(cache), { recursive: true });
       fs.writeFileSync(cache, JSON.stringify(res, null, 1));
     } catch {
-      return { stage, who: "procedural", state: "FAILED", why: `worldgen float failed: ${(out.stderr || out.stdout || "").split(/?
-/).find((l) => l.trim()) ?? "no output"}`, how };
+      return { stage, who: "procedural", state: "FAILED", why: `worldgen float failed: ${(out.stderr || out.stdout || "").split(/\r?\n/).find((l) => l.trim()) ?? "no output"}`, how };
     }
   }
   const h = how.replace("<rect>", res!.rect!.join(","));
   if (res!.ok) return { stage, who: "procedural", state: "ok", why: "", how: h };
   const worst = (res!.rows ?? []).slice(0, 3).map((r) => `${r.what} ${r.id} gap ${r.gap}`).join(", ");
   return { stage, who: "procedural", state: "FAILED", why: `${res!.counts!.off} off, ${res!.counts!.unsupported} unsupported (worst: ${worst})`, how: h };
+}
+
+/**
+ * The fall-through gate (tools/holes.mts): every column of the zone (4 m, 1 m on places and roads) cast against the
+ * PHYSICS the server holds for a body standing there, next to the ground the player sees (field surface + landmark
+ * render meshes). It boots a server, so status does not run it: it reads zones/<zone>/reports/holes.json, which goes
+ * STALE when the recipe or the scene changes after the sweep.
+ */
+function holesRow(ctx: Ctx, zone: string): Row {
+  const { world, project, paths: p } = ctx;
+  const stage = "holes";
+  const how = `node <heavy.mjs> "<id>: holes" -- npx tsx tools/holes.mts ${world} --project ${project} --zone ${zone} --list  (fix: re-bake the landmark / re-run the installer that owns the site; docs/zone-pipeline.md)`;
+  if (!exists(p.recipe)) return { stage, who: "procedural", state: "MISSING", why: "no recipe", how };
+  const scene = path.join(path.dirname(path.dirname(p.recipe)), "scenes", `${world}.scene.json`);
+  const stamp = (f: string): string => (exists(f) ? `${fs.statSync(f).size}:${fs.statSync(f).mtimeMs}` : "-");
+  const key = `${stamp(p.recipe)}|${stamp(scene)}`;
+  const rep = path.join(p.zoneDir(zone), "reports", "holes.json");
+  if (!exists(rep)) return { stage, who: "procedural", state: "MISSING", why: "never swept (a server-exact fall-through sweep)", how };
+  const res = readJson(rep) as { key?: string; ok?: boolean; counts?: { falls: number; fallColumns: number; sinks: number; unchecked: number }; falls?: { kind: string; x: number; z: number; near: string }[] };
+  const c = res.counts ?? { falls: 0, fallColumns: 0, sinks: 0, unchecked: 0 };
+  if (!res.ok) {
+    const worst = (res.falls ?? []).slice(0, 3).map((f) => `${f.kind} (${f.x}, ${f.z}) near ${f.near}`).join("; ");
+    return { stage, who: "procedural", state: "FAILED", why: `${c.falls} fall site(s), ${c.unchecked} unchecked block(s)${worst ? ` (worst: ${worst})` : ""}`, how };
+  }
+  if (res.key !== key) return { stage, who: "procedural", state: "STALE", why: "recipe or scene changed since the sweep", how };
+  return { stage, who: "procedural", state: "ok", why: c.sinks ? `${c.sinks} knee-deep sink site(s) listed` : "", how };
 }
 
 /**
@@ -253,14 +305,39 @@ function rockSkinsRow(ctx: Ctx, zone: string): Row {
       fs.mkdirSync(path.dirname(cache), { recursive: true });
       fs.writeFileSync(cache, JSON.stringify(res, null, 1));
     } catch {
-      return { stage, who: "procedural", state: "FAILED", why: `worldgen rock-skins failed: ${(out.stderr || out.stdout || "").split(/?
-/).find((l) => l.trim()) ?? "no output"}`, how };
+      return { stage, who: "procedural", state: "FAILED", why: `worldgen rock-skins failed: ${(out.stderr || out.stdout || "").split(/\r?\n/).find((l) => l.trim()) ?? "no output"}`, how };
     }
   }
   const h = how.replace("<rect>", res!.rect!.join(","));
   if (res!.ok) return { stage, who: "procedural", state: "ok", why: "", how: h };
   const worst = (res!.rows ?? []).slice(0, 3).map((r) => `${r.fault} ${r.what} ${r.id}: ${r.detail}`).join("; ");
   return { stage, who: "procedural", state: "FAILED", why: `${res!.counts!.skin} skin, ${res!.counts!.cap} cap, ${res!.counts!.recipe} recipe (worst: ${worst})`, how: h };
+}
+
+/**
+ * The zone palette (recipe regions[].palette, Derek 2026-10-21: one palette per role per zone): MISSING while the zone
+ * declares none (or leaves ground / cliff empty); then the rendered surfaces against it, from the last
+ * `worldgen rock-audit --zone <z> --out <zone>/reports/rock-audit.json` (a mesh sweep of minutes, so never run from
+ * status): FAILED on ground tiles winning faces > 45 deg or tiles outside the palette, STALE once the recipe changed.
+ */
+function paletteRow(ctx: Ctx, zone: string): Row {
+  const { world, project, paths: p } = ctx;
+  const stage = "palette";
+  const report = path.join(p.zoneDir(zone), "reports", "rock-audit.json");
+  const how = `npx tsx tools/worldgen.mts rock-audit ${world} --project ${project} --zone ${zone} --every 2 --out ${path.relative(process.cwd(), report)} --md ${path.relative(process.cwd(), report.replace(/.json$/, ".md"))}  (palette: recipe regions[].palette; docs/voxel-worlds.md "Zone palette")`;
+  if (!exists(p.recipe)) return { stage, who: "procedural", state: "MISSING", why: "no recipe", how };
+  const recipe = readJson(p.recipe) as { regions?: { id: string; palette?: { ground?: string[]; cliff?: string[] } }[] };
+  const pal = recipe.regions?.find((r) => r.id === zone)?.palette;
+  if (!pal) return { stage, who: "agentic", state: "MISSING", why: "the zone declares no regions[].palette (ground, cliff, cap, rockSmall, rockLarge, builtStone)", how };
+  if (!pal.ground?.length || !pal.cliff?.length) return { stage, who: "agentic", state: "MISSING", why: "the palette leaves ground or cliff empty", how };
+  if (!exists(report)) return { stage, who: "procedural", state: "MISSING", why: "never audited", how };
+  const rep = readJson(report) as { ok?: boolean; recipeKey?: string; m2?: number; faults?: { ground: { area: number }; palette: { area: number; tiles: Record<string, number> } }; rocks?: { offCount: number } };
+  const key = `${fs.statSync(p.recipe).size}:${fs.statSync(p.recipe).mtimeMs}`;
+  const pct = (a: number) => `${((100 * a) / Math.max(rep.m2 ?? 1, 1)).toFixed(2)}%`;
+  const why = rep.faults ? `ground on faces ${pct(rep.faults.ground.area)}, off-palette ${pct(rep.faults.palette.area)}, rocks off ${rep.rocks?.offCount ?? 0}` : "";
+  if (!rep.ok) return { stage, who: "procedural", state: "FAILED", why, how };
+  if (rep.recipeKey !== key) return { stage, who: "procedural", state: "STALE", why: `recipe changed since the audit (${why})`, how };
+  return { stage, who: "procedural", state: "ok", why, how };
 }
 
 /**
@@ -290,8 +367,7 @@ function waterEdgesRow(ctx: Ctx, zone: string): Row {
       fs.mkdirSync(path.dirname(cache), { recursive: true });
       fs.writeFileSync(cache, JSON.stringify(res, null, 1));
     } catch {
-      return { stage, who: "procedural", state: "FAILED", why: `worldgen water-edges failed: ${(out.stderr || out.stdout || "").split(/?
-/).find((l) => l.trim()) ?? "no output"}`, how };
+      return { stage, who: "procedural", state: "FAILED", why: `worldgen water-edges failed: ${(out.stderr || out.stdout || "").split(/\r?\n/).find((l) => l.trim()) ?? "no output"}`, how };
     }
   }
   const h = how.replace("<rect>", res!.rect!.join(","));
@@ -390,6 +466,19 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
       return f.length ? `${f.length} building(s) with terrain through the floor: ${f.slice(0, 2).join("; ")}` : null;
     }, [{ file: layout, authored: false, proj: (l) => (l.buildings ?? []).map((b: { id: string; groundY?: number; full?: unknown; ground?: unknown }) => [b.id, b.groundY, b.full ?? b.ground]) }, { file: p.recipe, authored: false, proj: groundNear(t.id, 200, true) }],
     (r: { at?: unknown }) => ({ ...r, at: 0 }));
+    // wall: the town wall / palisade (`wall` operators named `<town>-wall*`) seated along its whole line: no <= 4 m
+    // segment shows daylight under it (`worldgen seated --wall`, tools/_wall-seated.mts); re-judged after any ground
+    // change round the town or an edit of the wall op (Reedholt palisade, 2026-10-21)
+    const recipeJson = exists(p.recipe) ? json<{ features?: { operators?: { id: string; op: string }[] } }>(p.recipe) : null;
+    const wallOps = (recipeJson?.features?.operators ?? []).filter((o) => o.op === "wall" && (o.id === `${name}-wall` || o.id.startsWith(`${name}-wall-`))).map((o) => o.id);
+    if (wallOps.length) {
+      const wallReport = path.join(towns, "survey", `${name}-wall-seated.json`);
+      step("wall", "procedural", `npx tsx tools/worldgen.mts seated ${ctx.world} --project ${project} ${wallOps.map((w) => `--wall ${w}`).join(" ")} --out projects/${project}/authoring/towns/survey/${name}-wall-seated.json  (a failure: worldgen op --apply <wall> + tools/landmark.mts, or a deeper footing)`, wallReport, () => {
+        const r = json<{ ok?: boolean; walls?: { id: string; worst: number; bad: number; stale?: string }[] }>(wallReport);
+        const bad = (r.walls ?? []).filter((w) => w.bad > 0 || w.stale);
+        return r.ok && !bad.length ? null : `${bad.map((w) => (w.stale ? `${w.id} stale bake` : `${w.id}: ${w.bad} segment(s) show daylight (worst ${w.worst} m)`)).join("; ") || "report not ok"}`;
+      }, [{ file: p.recipe, authored: false, proj: (rc) => ({ ground: groundNear(t.id, 200, false)(rc), walls: (rc.features?.operators ?? []).filter((o: { id: string }) => wallOps.includes(o.id)) }) }]);
+    }
     // paths: a footpath from every placed door to the nearest street, painted AFTER install (town-ground doors writes
     // <town>-paths.json); stale when the layout or the building models (manifest, .glb) change, so moved doors re-run it
     const pathsReport = path.join(towns, `${name}-paths.json`);
@@ -441,7 +530,7 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
       const candidates = dressPlans.includes(own) ? [own] : lots.filter((x) => modelOf(x.id) === modelOf(lot.id)).length === 1 ? dressPlans : [];
       const good = candidates.some((f) => {
         const file = path.join(plansDir, f);
-        const report = file.replace(/\.json$/, ".report.json");
+        const report = readableReportFile(file) ?? "";
         try {
           if ((readJson(file) as { map?: string }).map !== mapId || !exists(report)) return false;
           return (readJson(report) as { ok?: boolean }).ok === true && mtime(report) >= mtime(file) && mtime(report) >= mtime(map);
@@ -463,7 +552,7 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
     {
       const extMap = path.join(sockets, `${name}-exterior.json`);
       const extPlan = path.join(plansDir, `${name}--exterior.json`);
-      const extReport = extPlan.replace(/\.json$/, ".report.json"), extInv = extPlan.replace(/\.json$/, ".inverse.json");
+      const extReport = readableReportFile(extPlan) ?? "", extInv = extPlan.replace(/\.json$/, ".inverse.json");
       const how = `npx tsx tools/town-exterior.mts sockets --project ${project} --town ${name} -> write authoring/dressing/plans/${name}--exterior.json -> dress check -> dress apply --scene <scene> --at 0,0,0 --yaw 0 -> town-walk`;
       const why = !exists(extMap) ? "no street map (town-exterior sockets)" : !exists(extPlan) ? `no plan ${name}--exterior` :
         !exists(extReport) || (readJson(extReport) as { ok?: boolean }).ok !== true || mtime(extReport) < mtime(extPlan) || mtime(extReport) < mtime(extMap) ? "dress check not passing or older than the plan/map" :
@@ -502,7 +591,21 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
       continue;
     }
     const stage = (readJson(progress) as { stage?: string }).stage ?? "?";
-    rows.push({ stage: `poi ${l.id}`, who: "opus", state: stage === "installed" ? "ok" : stage === "needs-input" ? "FAILED" : "MISSING", why: stage === "installed" ? "" : `job at stage "${stage}"`, how });
+    // L (owner ruling 2026-10-20: "no ribbon roads: buried by terrain, never approved"): a job still carrying its approach
+    // as a ribbon / path operator fails (place-build gate `roads`, same rule): the approach is a carved + painted track
+    const opsOf = (f: string): unknown[] => { try { const j = readJson(path.join(job, f)); return Array.isArray(j) ? j : []; } catch { return []; } };
+    const ribbons = ribbonApproachOps(opsOf("operators.json"), opsOf("world-ops.json"));
+    if (ribbons.length) {
+      rows.push({ stage: `poi ${l.id}`, who: "opus", state: "FAILED", why: `ribbon approach (owner: carved + painted roads only): ${ribbons.join(", ")}`,
+        how: `node node_modules/tsx/dist/cli.mjs tools/place-build.mts approach ${ctx.world} --project ${project} --zone ${zone} --location ${l.id}  -> lab -> build -> gates -> install (docs/place-builder.md)` });
+    } else {
+      // gate 16 (owner ruling 2026-10-22): a place is designed — premise, journey, story elements, one finished area a fresh
+      // reviewer passed — before it expands or installs; a place installed before the gate says so (re-review it on the Place lines)
+      const design = stage === "installed" ? null : designBlock(job);
+      const legacy = stage === "installed" && !exists(path.join(job, "design.json")) ? "installed before gate 16: no design.json (re-review on the rubric's Place lines)" : "";
+      rows.push({ stage: `poi ${l.id}`, who: "opus", state: stage === "installed" ? "ok" : stage === "needs-input" || /verdict is FAIL/.test(design ?? "") ? "FAILED" : "MISSING",
+        why: stage === "installed" ? legacy : `job at stage "${stage}"${design ? `; design: ${design.slice(0, 220)}` : ""}`, how: design ? `${how}; first node tools/poi-review/job.mjs design ${path.relative(process.cwd(), job).replaceAll("\\", "/")} (design.json + a fresh reviewer's Place lines)` : how });
+    }
     // site dressing: the place's outdoor props placed by NAME (tools/site-sockets.mts writes one map per area). Each map
     // needs a plan whose dress check passes and is newer than plan and map, then applied (its inverse): the town exterior rule
     {
@@ -515,7 +618,7 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
       for (const m of maps) {
         const id = m.replace(/\.json$/, ""), mapFile = path.join(sockDir, m);
         const good = plans.filter((f) => { try { return (readJson(f) as { map?: string }).map === id; } catch { return false; } }).find((f) => {
-          const rep = f.replace(/\.json$/, ".report.json");
+          const rep = readableReportFile(f) ?? "";
           return exists(rep) && (readJson(rep) as { ok?: boolean }).ok === true && mtime(rep) >= mtime(f) && mtime(rep) >= mtime(mapFile);
         });
         if (!good) open.push(id.slice(l.id.length + 1));
@@ -551,11 +654,14 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
     rows.push({ stage: `dungeon ${d.id}`, who: "opus", state: /^every stage is present and current/.test(line) ? "ok" : "MISSING", why: line.startsWith("every") ? "" : line || (r.stderr ?? "").trim(), how });
   }
 
-  rows.push(...portalRows(ctx, zone));
+  rows.push(...portalRows(ctx, zone, brief?.success ? brief.data.places.filter((x) => x.dungeon).map((x) => x.id) : []));
 
   // mood: the zone's air and light (recipe regions[].mood, played by the `zone-mood` builtin) and each signature
   // place's own mood as a nested region (`within` the zone, same id as the place) — a nested region wins under the player
   rows.push(moodRow(ctx, zone, brief?.success ? brief.data.places.filter((x) => x.mood).map((x) => x.id) : []));
+
+  // smoke: every smoke emitter in the zone against the smoke standard (core vfx/smoke.ts; Derek 2026-10-22)
+  rows.push(smokeRow(ctx, zone));
 
   // art lane: the manifest re-checked against the disk now
   if (exists(p.assets(zone))) {
@@ -572,6 +678,8 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
 
   // populate: the wilderness creatures (reports/populate.json + the coordinator's install record); stale on bestiary/reservations/recipe zone
   rows.push({ stage: "populate", who: "procedural", ...populateRow(ctx, zone) });
+  // wanderers: packs and roamers that walk the roads and the moor (zones/<z>/wanderers.json, installed by populate)
+  rows.push({ stage: "wanderers", who: "procedural", ...wanderersRow(ctx, zone) });
 
   // explore: exploration.json (added after the freeze) against budget.expansion; the gate also lists sites left
   const zcmd = (c: string): string => `npx tsx tools/zonegen.mts ${c} ${ctx.world} --project ${project} --zone ${zone}`;
@@ -618,13 +726,25 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
  * covers its measured opening: tools/portal-cover.mts' report for the world scene, per portal, with the digest of the
  * portal and its veil as they were measured (an edit to either makes the row STALE; other edits to the live scene do not).
  * The dungeon side of each trip is the dungeon pipeline's `portals` stage.
+ * Zero portals is not a pass when the zone brief puts a dungeon behind a place (`places[].dungeon`): each such place needs
+ * its door portal, or its POI job declares the door shut (handoff.json `doors: [{ name: "dungeon", sealed: true }]`, the
+ * art-check portal rule); silence used to let a dungeon door with no portal pass (QA-C, the Delf Door).
  */
-function portalRows(ctx: Ctx, zone: string): Row[] {
+function portalRows(ctx: Ctx, zone: string, dungeonPlaces: string[] = []): Row[] {
   const file = findSceneFile(path.resolve("."), ctx.world);
-  if (!file) return [];
+  const sealed = (id: string) => {
+    const h = path.join(ctx.paths.zoneDir(zone), "pois", id, "handoff.json");
+    const doors = exists(h) ? (readJson(h) as { doors?: { name?: string; sealed?: boolean }[] }).doors ?? [] : [];
+    return doors.some((d) => d?.name === "dungeon" && d.sealed === true);
+  };
+  const owed = dungeonPlaces.filter((id) => !sealed(id));
+  const how0 = `install each dungeon door's portal (portals skill: portal + portal-veil + portal-cover --fit), or declare the door sealed in its POI job's handoff.json doors`;
+  if (!file) return owed.length ? [{ stage: "portals", who: "procedural", state: "MISSING", why: `no world scene ${ctx.world}: ${owed.length} dungeon door(s) owed (${owed.join(", ")})`, how: how0 }] : [];
   const doc = readJson(file) as SceneDoc;
   const ids = walkThroughPortals(doc).map(([id]) => id).filter((id) => (doc.entities[id]?.tags ?? []).includes(`zone:${zone}`));
-  if (!ids.length) return [];
+  if (!ids.length) return owed.length
+    ? [{ stage: "portals", who: "procedural", state: "MISSING", why: `no walk-through portal tagged zone:${zone}, but ${owed.length} place(s) have a dungeon behind them: ${owed.join(", ")}`, how: how0 }]
+    : [{ stage: "portals", who: "procedural", state: "ok", why: dungeonPlaces.length ? `no portals; every dungeon door declared sealed (${dungeonPlaces.join(", ")})` : "no portals; the zone brief places no dungeon", how: how0 }];
   const how = `npx tsx tools/portal-cover.mts --scene ${ctx.world} --portal ${ids.join(",")} (failing: add --fit; coordinator-authorised on a live scene)`;
   const rep = path.join(ctx.paths.projectDir, "reports", "portal-cover", `${ctx.world}.json`);
   if (!exists(rep)) return [{ stage: "portals", who: "procedural", state: "MISSING", why: "no portal-cover report", how }];
@@ -647,7 +767,7 @@ function portalRows(ctx: Ctx, zone: string): Row[] {
 function portalPlayRow(ctx: Ctx, doc: SceneDoc, ids: string[]): Row {
   const rep = path.join(ctx.paths.projectDir, "reports", "portal-play", `${ctx.world}.json`);
   const dungeonOf = (id: string) => String(((doc.entities[id]?.components["script"] as { params?: Record<string, unknown> } | undefined)?.params ?? {})["scene"] ?? "");
-  const how = `npx tsx tools/portal-play.mts --dungeon <instance> --world ${ctx.world} (one per portal; HITREG_PLAYWRIGHT=<playwright dir>)`;
+  const how = `npx tsx tools/portal-play.mts --dungeon <instance> --world ${ctx.world} (one per portal)`;
   if (!exists(rep)) return { stage: "portal play", who: "procedural", state: "MISSING", why: `never walked in a browser: ${ids.map(dungeonOf).join(", ")}`, how };
   const got = new Map(((readJson(rep) as { portals?: { id: string; exit: string; scene: string; status: string; digest: string; exitDigest: string; phases?: { name: string; ok: boolean; note: string }[] }[] }).portals ?? []).map((p) => [p.id, p]));
   const missing = ids.filter((id) => !got.has(id));
@@ -663,6 +783,28 @@ function portalPlayRow(ctx: Ctx, doc: SceneDoc, ids: string[]): Row {
   const why = failed.length ? `${failed.map(dungeonOf).join(", ")}: ${bad ? `${bad.name}: ${bad.note}` : "failed"}`
     : missing.length ? `never walked in a browser: ${missing.map(dungeonOf).join(", ")}` : stale.length ? `a door changed since walked: ${stale.map(dungeonOf).join(", ")}` : "";
   return { stage: "portal play", who: "procedural", state, why, how };
+}
+
+/**
+ * The smoke gate (tools/smoke-check.mts): every smoke emitter the zone's scene places, measured from its preset's
+ * numbers against its source's class caps (height, width, opacity, pale colour, night dim, wind drift), plus the
+ * chimney batch. Pure JSON, so status runs it live and writes zones/<zone>/reports/smoke.json.
+ */
+function smokeRow(ctx: Ctx, zone: string): Row {
+  const { world, project, paths: p } = ctx;
+  const stage = "smoke", how = `npx tsx tools/smoke-check.mts ${project} --scene ${world} --zone ${zone}  (presets: foundation vfx env/*, the standard: core vfx/smoke.ts)`;
+  try {
+    const rep = smokeReport(project, { scene: world, zone });
+    fs.mkdirSync(path.join(p.zoneDir(zone), "reports"), { recursive: true });
+    fs.writeFileSync(path.join(p.zoneDir(zone), "reports", "smoke.json"), JSON.stringify(rep, null, 1));
+    if (rep.ok) return { stage, who: "procedural", state: "ok", why: `${rep.counts.emitters} emitter(s) within the standard`, how };
+    const bad = rep.rows.filter((r) => r.faults.length);
+    const worst = bad.slice(0, 2).map((r) => `${r.place}: ${r.effect} ${r.faults[0]!.rule} ${r.faults[0]!.detail}`).join("; ");
+    const chim = [...rep.chimney.at4m.faults, ...rep.chimney.at10m.faults].map((f) => `chimney ${f.detail}`).join("; ");
+    return { stage, who: "procedural", state: "FAILED", why: `${bad.length} of ${rep.counts.emitters} emitter(s) over the standard${worst ? ` (${worst})` : ""}${chim ? ` ${chim}` : ""}`, how };
+  } catch (err) {
+    return { stage, who: "procedural", state: "MISSING", why: (err as Error).message, how };
+  }
 }
 
 function moodRow(ctx: Ctx, zone: string, moodyPlaces: string[]): Row {

@@ -13,6 +13,8 @@ import path from "node:path";
 import { applyOps, ComponentRegistry, registerChunkComponents, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
 import { exists, readJson, writeJson, type Ctx } from "../lib.mts";
 import { requireZone } from "./_shared.mts";
+import { findAsset } from "../../_closure.mjs";
+import { applyOpsToSceneFile } from "../../_scene-write.mts";
 
 interface Wire { id: string; dialogue: string; places: string }
 
@@ -81,7 +83,8 @@ export async function run(ctx: Ctx): Promise<number> {
   if (autos.length && player) {
     const [pid, pe] = player;
     const pf = pe.components["prefab"] as { prefabId: string; props?: Record<string, unknown>; overrides?: { path: string; value: unknown }[] };
-    const prefabFile = path.join(p.projectDir, "assets", "prefabs", `${pf.prefabId}.json`);
+    // the player prefab usually lives in a project the world depends on (foundation): resolve it through the closure
+    const prefabFile = findAsset(ctx.project, path.join("prefabs", `${pf.prefabId}.json`)) ?? path.join(p.projectDir, "assets", "prefabs", `${pf.prefabId}.json`);
     const prefab = exists(prefabFile) ? (readJson(prefabFile) as { entities: Record<string, { components?: Record<string, unknown> }> }) : null;
     const logId = Object.entries(prefab?.entities ?? {}).find(([, e]) => (e.components?.["script"] as { name?: string } | undefined)?.name === "quest-log")?.[0];
     if (!logId) console.log(`  note: the player prefab ${pf.prefabId} has no quest-log entity; auto quests ${autos.join(", ")} cannot be offered`);
@@ -106,8 +109,7 @@ export async function run(ctx: Ctx): Promise<number> {
   const reg = new ComponentRegistry();
   registerCoreComponents(reg);
   registerChunkComponents(reg);
-  const res = applyOps(plan.scene, ops, reg);
-  fs.writeFileSync(plan.sceneFile, JSON.stringify(res.doc, null, 2) + "\n");
+  const res = applyOpsToSceneFile(plan.sceneFile, ops, (d, o) => applyOps(d, o, reg), { label: "zonegen wire" }); // fresh read under the scene lock (tools/_scene-write.mts)
   writeJson(path.join(ctx.paths.zoneDir(ctx.zone), `wire-inverse-${sceneId}.json`), res.inverse);
   console.log(`wire: ${ops.length} change(s) applied to ${sceneId}`);
   return 0;

@@ -67,6 +67,18 @@ export type MobMove = z.output<typeof mobMoveSchema>;
 
 const DEG = Math.PI / 180;
 
+/**
+ * A shout is not heard across a storey. An answer from further above or below
+ * the shouter than this (metres) is refused outright: stacked terraces and
+ * galleries in a multi-level dungeon are separate pulls.
+ */
+export const ALERT_MAX_HEIGHT_GAP = 3;
+/**
+ * Seconds a mob that only HEARD of its target (a packmate's shout) has to see
+ * it for itself. No sight by then and no hit from it: it lets the target go.
+ */
+export const ALERT_SIGHT_GRACE = 2;
+
 /** `mob.threat` as this script reads it (the schema is in core). */
 interface ThreatPayload {
   mobId: string;
@@ -366,6 +378,12 @@ export class MobBrain extends Script {
       max: 100,
       description: "A territorial creature's: metres round itself or its home inside which a stranger is attacked (still within aggroRange, and seen).",
     },
+    patrolLoop: {
+      default: false,
+      description:
+        "`patrol` is a closed loop (its last point repeats its first): walk it round and round in `patrolDir` instead of out " +
+        "and back. A route-placed spawnArea with `loop` writes it (and closes the route).",
+    },
     patrolDir: {
       default: 0,
       min: -1,
@@ -451,6 +469,10 @@ export class MobBrain extends Script {
   private hostileTo: string[] = [];
   /** Target the pack has already been shouted at about, so a pull shouts once. */
   private alertedFor = "";
+  /** Targets known only from a shout: id -> time (s) by which it must see them. */
+  private heardOf = new Map<string, number>();
+  /** Sources that have hit/threatened it first-hand: never dropped for want of sight. */
+  private struckBy = new Set<string>();
   /** Ids worth considering, refreshed at 1 Hz — see `candidates`. */
   private candidateCache: string[] = [];
   private candidatesAt = -Infinity;
@@ -574,6 +596,8 @@ export class MobBrain extends Script {
     if (p.mobId !== this.actorId || !p.sourceId) return;
     const now = this.ctx.now() / 1000;
     if (p.kind === "forget") return this.forget(p.sourceId);
+    this.struckBy.add(p.sourceId);
+    this.heardOf.delete(p.sourceId);
     if (p.kind === "taunt") this.threat.taunt(p.sourceId, now, p.seconds ?? 3);
     else if (p.kind === "set") this.threat.set(p.sourceId, p.amount ?? 0, now);
     else this.threat.add(p.sourceId, p.amount ?? 0, now);
@@ -588,6 +612,8 @@ export class MobBrain extends Script {
    */
   private forget(sourceId: string): void {
     this.threat.forget(sourceId);
+    this.heardOf.delete(sourceId);
+    this.struckBy.delete(sourceId);
     if (this.targetId === sourceId) this.targetId = "";
     if (this.alertedFor === sourceId) this.alertedFor = "";
   }
@@ -616,9 +642,20 @@ export class MobBrain extends Script {
     }
     const me = this.bodyPosition();
     if (!me || !p.at) return;
-    if (Math.hypot(me[0] - p.at[0], me[2] - p.at[2]) > Math.max(radius, p.radius ?? 0)) return;
+    // In 3D, and never across a storey: a pack one terrace down is its own pull.
+    const dy = me[1] - p.at[1];
+    if (Math.abs(dy) > ALERT_MAX_HEIGHT_GAP) return;
+    if (Math.hypot(me[0] - p.at[0], dy, me[2] - p.at[2]) > Math.max(radius, p.radius ?? 0)) return;
     if (!this.hostile(p.targetId, this.taggedTargets())) return;
-    this.threat.add(p.targetId, 1, this.ctx.now() / 1000);
+    const now = this.ctx.now() / 1000;
+    if (this.param<boolean>("requireLineOfSight") && !this.struckBy.has(p.targetId)) {
+      // It has to see the shouter or the target: rock between them and it is
+      // not answering. Rays only for mobs already inside the radius.
+      const targetAt = this.positionOf(p.targetId);
+      if (!this.canSee(me, p.at, p.mobId) && !(targetAt && this.canSee(me, targetAt, p.targetId))) return;
+      if (!this.heardOf.has(p.targetId)) this.heardOf.set(p.targetId, now + ALERT_SIGHT_GRACE);
+    }
+    this.threat.add(p.targetId, 1, now);
   }
 
   override onFixedUpdate(dt: number): void {
@@ -636,6 +673,8 @@ export class MobBrain extends Script {
         this.alertedFor = "";
         this.dir = [0, 0];
         this.threat.clear();
+        this.heardOf.clear();
+        this.struckBy.clear();
         this.steering.reset();
         this.windupUntil = 0;
         this.lunge = null;
@@ -785,7 +824,9 @@ export class MobBrain extends Script {
     // A pull is loud. Shout once per target, not once per tick — and from
     // where the fight started, so a mob that has already chased you thirty
     // metres does not drag a second camp in behind it.
-    if (shout && this.alertedFor !== target.id) {
+    // A target it only heard of is not passed on until it has seen it: shouts
+    // do not chain through mobs that never laid eyes on the player.
+    if (shout && this.alertedFor !== target.id && !this.heardOf.has(target.id)) {
       this.alertedFor = target.id;
       const radius = this.alertRadius();
       if (radius > 0) {
@@ -1131,7 +1172,11 @@ export class MobBrain extends Script {
       const at = positionIfValid(id);
       return at !== null && Math.hypot(at[0] - me[0], at[2] - me[2]) <= deaggro;
     });
-    if (hated) return { id: hated, at: seen.get(hated)! };
+    if (hated) {
+      const at = seen.get(hated)!;
+      // heard of it, never saw it: dropped, and the nearest-seen rule below decides
+      if (this.confirmHeard(me, hated, at, now)) return { id: hated, at };
+    }
 
     let bestId = "";
     let bestAt: [number, number, number] | null = null;
@@ -1168,6 +1213,23 @@ export class MobBrain extends Script {
     if (this.temperament === "passive") return false;
     const t = this.param<number>("territory");
     return Math.hypot(at[0] - me[0], at[2] - me[2]) <= t || Math.hypot(at[0] - this.home[0], at[2] - this.home[2]) <= t;
+  }
+
+  /**
+   * A target it only heard about (a packmate's shout) is kept while it is seen
+   * once inside `ALERT_SIGHT_GRACE`; after that it is forgotten unless it has
+   * hit this mob. One ray per think, and only while unconfirmed.
+   */
+  private confirmHeard(me: readonly [number, number, number], id: string, at: readonly [number, number, number], now: number): boolean {
+    const by = this.heardOf.get(id);
+    if (by === undefined || this.struckBy.has(id)) return true;
+    if (this.canSee(me, at, id)) {
+      this.heardOf.delete(id);
+      return true;
+    }
+    if (now < by) return true;
+    this.forget(id);
+    return false;
   }
 
   /** How far its shout carries (and how far off it answers one): the param, or by temperament when it is -1. */
@@ -1275,6 +1337,30 @@ export class MobBrain extends Script {
     return this.candidateCache;
   }
 
+  /**
+   * The eye, kept under whatever is overhead: a tall body (an ogre's 3.9 m
+   * eye) in a low gallery would otherwise trace sight from ABOVE the ceiling
+   * and see the terrace upstairs. One upward ray, re-cast only after the body
+   * has moved half a metre.
+   */
+  private eyeUnderCeiling(me: readonly [number, number, number], eye: number): number {
+    const c = this.eyeCache;
+    if (c && c.eye === eye && Math.abs(c.at[0] - me[0]) < 0.5 && Math.abs(c.at[1] - me[1]) < 0.5 && Math.abs(c.at[2] - me[2]) < 0.5) return c.value;
+    const raycast = this.ctx.sim?.raycast;
+    let value = eye;
+    const base = Math.min(0.3, eye);
+    if (raycast && eye > base) {
+      const hit = raycast.call(this.ctx.sim!, [me[0], me[1] + base, me[2]], [0, 1, 0], eye - base, {
+        layers: LAYER_WORLD | LAYER_TERRAIN | LAYER_PROP,
+        exclude: [this.actorId, this.entityId],
+      });
+      if (hit) value = Math.max(base, base + hit.distance - 0.15);
+    }
+    this.eyeCache = { at: [me[0], me[1], me[2]], eye, value };
+    return value;
+  }
+  private eyeCache: { at: [number, number, number]; eye: number; value: number } | null = null;
+
   /** Eye-to-torso ray against the things that actually block vision. */
   private canSee(
     me: readonly [number, number, number],
@@ -1284,7 +1370,7 @@ export class MobBrain extends Script {
     const raycast = this.ctx.sim?.raycast;
     if (!raycast) return true; // no physics queries: sight is not a thing here
     const eye = this.param<number>("eyeHeight");
-    const from: [number, number, number] = [me[0], me[1] + eye, me[2]];
+    const from: [number, number, number] = [me[0], me[1] + this.eyeUnderCeiling(me, eye), me[2]];
     const to: [number, number, number] = [at[0], at[1] + eye * 0.6, at[2]];
     const dx = to[0] - from[0];
     const dy = to[1] - from[1];
@@ -1317,6 +1403,8 @@ export class MobBrain extends Script {
       // Wiping the table is what makes a leash a real escape rather than a
       // pause: get away, and the fight is genuinely over.
       this.threat.clear();
+      this.heardOf.clear();
+      this.struckBy.clear();
     }
     if (fromHome <= Math.max(1.5, this.route.length ? 1.5 : this.param<number>("roam") * 0.5)) {
       this.heal();
@@ -1340,7 +1428,14 @@ export class MobBrain extends Script {
     const target = this.route[this.routeAt]!;
     if (Math.hypot(target[0] - me[0], target[2] - me[2]) < 1.2) {
       if (this.route.length > 1) {
-        if (this.routeAt + this.routeDir < 0 || this.routeAt + this.routeDir >= this.route.length) this.routeDir = -this.routeDir;
+        const next = this.routeAt + this.routeDir;
+        if (this.param<boolean>("patrolLoop") && this.route.length > 2) {
+          // a closed loop (its last point is its first): round and round, never back
+          const n = this.route.length;
+          this.routeAt = next >= n ? 1 : next < 0 ? n - 2 : next;
+          return;
+        }
+        if (next < 0 || next >= this.route.length) this.routeDir = -this.routeDir;
         this.routeAt += this.routeDir;
       }
       return;

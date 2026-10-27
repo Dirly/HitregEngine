@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "hitreg.place-build",
+  "name": "Place Builder",
+  "description": "Build a small or medium outdoor place (camp, croft row, shrine, graveyard, landing, work yard, den, watch ruin, halt yard, cuttings) from a place archetype + the zone brief + the reservation + the measured ground: plan the job dir, build it in a lab copy of the world, run every install gate, take the pictures, install with an inverse. Loose props go through dressing plans, never transforms. CLI: apps/playground/tools/place-build.mts; docs/place-builder.md.",
+  "category": "World/Places",
+  "surfaces": ["tools"],
+  "permissions": [],
+  "entry": "./run.mjs",
+  "inputs": {
+    "command": {
+      "kind": "select",
+      "label": "Command",
+      "default": "plan",
+      "options": [
+        { "value": "plan", "label": "Plan the job dir (archetype + brief + reservation + ground)" },
+        { "value": "build", "label": "Build in the lab copy" },
+        { "value": "gates", "label": "Run every install gate on the lab" },
+        { "value": "shots", "label": "Pictures at noon and dusk" },
+        { "value": "all", "label": "plan -> lab -> build -> gates -> shots" }
+      ]
+    },
+    "world": { "kind": "string", "label": "World", "default": "skelmorrow" },
+    "zone": { "kind": "string", "label": "Zone", "default": "" },
+    "location": { "kind": "string", "label": "Place id (brief places[].id)", "default": "" },
+    "archetype": { "kind": "string", "label": "Archetype (blank: picked from the brief)", "default": "" },
+    "sets": { "kind": "string", "label": "Overrides, space separated k=v (core.marker=parish-weep/weep-lych-gate)", "default": "" }
+  }
+}

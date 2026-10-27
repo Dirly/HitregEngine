@@ -1,6 +1,6 @@
 /**
  * `worldgen lips <world> [--near x,z,r] [--list] [--json] [--allow id,id]`
- * `worldgen seated <world> --slab x,z,halfX,halfZ,yawDeg,baseY [--slab ...] | --slabs <file.json>`
+ * `worldgen seated <world> --slab x,z,halfX,halfZ,yawDeg,baseY [--slab ...] | --slabs <file.json> | --wall <opId> | --walls`
  *
  * LIPS — the lip / sawtooth gate. The terrain is drawn from the field sampled
  * on the 2 m voxel lattice, so any height change an EDIT makes that is
@@ -12,6 +12,9 @@
  *
  *  - every height patch: its whole raster and 6 m beyond its edge;
  *  - along every graded road (flatten > 0 with a surface): out to its reach.
+ *
+ * An operator's patch (`op:<id>:*`) is measured against the world without that patch only (like a terrace wall's
+ * `tw-*`): operators compose in recipe order, so a patch is charged for what IT changed, not for the pad under it.
  *
  * A terrace wall's own riser is exempt: the lattice cell holding each fitted
  * `features.terraceWalls` face (and the cell in front, holding the berm the cut removes) is the wall, drawn by the
@@ -33,6 +36,8 @@
  * See docs/voxel-worlds.md "Height-patch edges".
  */
 import fs from "node:fs";
+import path from "node:path";
+import { visibleWorldGround, wallSeat, type WallSeatReport } from "./_wall-seated.mts";
 import {
   createWorldField,
   measureTerrainLips,
@@ -127,6 +132,55 @@ export interface LipsResult {
   totals: { alias: number; step: number; lip: number; cells: number; touched: number };
 }
 
+/**
+ * A `wall` operator's retaining/quay body as riser faces: the bank it retains is the wall's job, drawn by its baked
+ * geometry, not a fault of the patch that cut the ground in front of it (or of its own backfill). One face per plan leg,
+ * re-based to the exposed face (`face: right` = right of travel, the normal [-dz, dx] as for ribbons); the band runs
+ * from 2.2 m in front of the battered foot (+ footing projection) back over the body and its backfill width.
+ */
+export function wallOperatorFaces(recipe: WorldRecipe): { a: number[]; b: number[]; normal: number[]; reach: number }[] {
+  const out: { a: number[]; b: number[]; normal: number[]; reach: number }[] = [];
+  for (const o of (recipe.features.operators ?? []) as Record<string, any>[]) {
+    if (o.op !== "wall" || !Array.isArray(o.points)) continue;
+    if (o.variant === "ramp") {
+      // a causeway ramp's body hides the ground under it: both sides of the line out to the deck edge + parapet + 2.2 m
+      const half = Number(o.thickness ?? 1.2) / 2 + Number(o.parapet?.thickness ?? 0) + 2.2, P = o.points as number[][];
+      for (let i = 0; i + 1 < P.length; i++) {
+        const [ax, az] = P[i]!, [bx, bz] = P[i + 1]!, l = Math.hypot(bx! - ax!, bz! - az!);
+        if (l < 1e-6) continue;
+        const nx = -(bz! - az!) / l, nz = (bx! - ax!) / l;
+        // one band from the right edge across to the left (the band starts 2.2 m outside its face line)
+        out.push({ a: [ax! + nx * (half - 2.2), az! + nz * (half - 2.2)], b: [bx! + nx * (half - 2.2), bz! + nz * (half - 2.2)], normal: [-nx, -nz], reach: 2 * half - 2.2 });
+      }
+      continue;
+    }
+    if (o.variant !== "retaining" && o.variant !== "quay") continue;
+    const t = Number(o.thickness ?? 1.2), h = Number(o.height ?? 4), bat = Number(o.batter ?? 0.06);
+    const foot = Number(o.footing?.projection ?? (o.scale === "giant" ? 0.8 : 0.25)) + Number(o.buttresses?.depth ?? 0);
+    const front = t / 2 + bat * h + foot; // face line, from the plan line
+    const reach = front + t / 2 + Number(o.backfill?.width ?? 0) + 2.2; // back to the earth behind (and its backfill)
+    const sgn = o.face === "left" ? -1 : 1;
+    // a `terrain` end runs on `tie` m past its point into the hillside (the wall's body there too)
+    const P = (o.points as number[][]).map((p) => [...p]);
+    const tie = Number(o.ends?.tie ?? 2 * t + 2);
+    const runOn = (end: number, prev: number, on: boolean) => {
+      if (!on || P.length < 2) return;
+      const dx = P[end]![0]! - P[prev]![0]!, dz = P[end]![1]! - P[prev]![1]!, l = Math.hypot(dx, dz);
+      if (l > 1e-6) P[end] = [P[end]![0]! + (dx / l) * tie, P[end]![1]! + (dz / l) * tie];
+    };
+    runOn(0, 1, (o.ends?.start ?? "terrain") === "terrain");
+    runOn(P.length - 1, P.length - 2, (o.ends?.end ?? "terrain") === "terrain");
+    for (let i = 0; i + 1 < P.length; i++) {
+      const [ax, az] = P[i]!, [bx, bz] = P[i + 1]!, l = Math.hypot(bx! - ax!, bz! - az!);
+      if (l < 1e-6) continue;
+      // normal toward the exposed face; the band n in [-2.2, reach] is measured from the face line INTO the wall
+      const nx = (-(bz! - az!) / l) * sgn, nz = ((bx! - ax!) / l) * sgn;
+      out.push({ a: [ax! + nx * front, az! + nz * front], b: [bx! + nx * front, bz! + nz * front], normal: [-nx, -nz], reach });
+    }
+  }
+  return out;
+}
+
 /** Cells whose centre is in a fitted terrace wall's riser band (the lattice cell behind each face). */
 export function terraceRiserBand(recipe: WorldRecipe): (x: number, z: number) => boolean {
   const faces: { a: readonly number[]; b: readonly number[]; normal: readonly number[]; reach?: number }[] = (recipe.features.terraceWalls ?? []).flatMap((t) => t.solved?.faces ?? []);
@@ -136,6 +190,7 @@ export function terraceRiserBand(recipe: WorldRecipe): (x: number, z: number) =>
     if (c.kind !== "face") continue;
     faces.push({ a: c.origin, b: [c.origin[0] + c.dir[0] * c.s[1], c.origin[1] + c.dir[1] * c.s[1]], normal: [-c.dir[1], c.dir[0]], reach: c.n[1] + 0.5 });
   }
+  faces.push(...wallOperatorFaces(recipe));
   if (!faces.length) return () => false;
   return (x, z) => {
     for (const f of faces) {
@@ -149,8 +204,53 @@ export function terraceRiserBand(recipe: WorldRecipe): (x: number, z: number) =>
   };
 }
 
+/**
+ * Cells an OPEN box passage cuts (a way, a court, a cleft open to the sky: its ceiling stands above the ground there): the
+ * drawn surface in them is the passage floor and walls, which the heightfield `height()` the lips measure reads cannot
+ * see, so a patch is not charged for a step the passage carves away (a path ribbon ending in a cut court mouth). A
+ * tunnel (ceiling under the ground) does not open the cell. Footprint + one lattice step.
+ */
+export function openCutBand(recipe: WorldRecipe, height: (x: number, z: number) => number): (x: number, z: number) => boolean {
+  const cuts = (recipe.features.passages ?? []).filter((p) => (p.footprint ?? "box") === "box").map((p) => {
+    const along = p.axis === "x" ? 0 : 1, dir = p.direction ?? 1;
+    const a0 = p.start[along === 0 ? 0 : 2]!, a1 = a0 + dir * p.length, c = p.start[along === 0 ? 2 : 0]!;
+    return { along, lo: Math.min(a0, a1), hi: Math.max(a0, a1), c, half: p.width / 2 + (p.wallNoise ?? 0), floor: p.start[1], top: p.start[1] + p.height + (p.roofRise ?? 0) };
+  });
+  if (!cuts.length) return () => false;
+  const M = 2.2;
+  return (x, z) => {
+    for (const q of cuts) {
+      const s = q.along === 0 ? x : z, t = q.along === 0 ? z : x;
+      if (s < q.lo - M || s > q.hi + M || Math.abs(t - q.c) > q.half + M) continue;
+      const h = height(x, z);
+      if (h > q.floor + 0.25 && q.top >= h) return true;
+    }
+    return false;
+  };
+}
+
 /** The gate as a function, so installers and `zonegen status` can call it in-process. */
-export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number, number]; aliasTol?: number; maxSlope?: number; lipTol?: number; allow?: string[] } = {}): LipsResult & { faults: (TerrainLipFault & { owner: string })[] } {
+/**
+ * A documented lips exception (`<project>/authoring/terrain/<world>.lips-exceptions.json`, `{ exceptions: [...] }`): faults
+ * of owner `id` on the listed lattice cells (fault x,z as `--list` prints them) are reported as excepted, never counted.
+ * For cells no edit can draw (a raised flat meeting a near-vertical face inside one 2 m cell); `reason` holds the diagnosis.
+ */
+export interface LipsException { id: string; reason: string; cells: [number, number][] }
+
+export function lipsExceptionsFile(recipeFile: string): string {
+  // beside the world: <project>/authoring/terrain/ (as worldgen-operators.mts sideDir, the fine-legacy list)
+  const parts = path.resolve(recipeFile).split(/[\\/]/), at = parts.lastIndexOf("assets");
+  const side = at > 1 && parts[at - 2] === "projects" && parts[at + 1] === "worlds" ? path.join(...parts.slice(0, at), "authoring", "terrain") : path.dirname(recipeFile);
+  return path.join(side, path.basename(recipeFile).replace(/\.json$/i, ".lips-exceptions.json"));
+}
+export function readLipsExceptions(recipeFile: string): LipsException[] {
+  const f = lipsExceptionsFile(recipeFile);
+  if (!fs.existsSync(f)) return [];
+  const j = JSON.parse(fs.readFileSync(f, "utf8"));
+  return Array.isArray(j.exceptions) ? j.exceptions : [];
+}
+
+export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number, number]; aliasTol?: number; maxSlope?: number; lipTol?: number; allow?: string[]; exceptions?: LipsException[] } = {}): LipsResult & { faults: (TerrainLipFault & { owner: string })[]; excepted: number } {
   const field = createWorldField(recipe);
   const reference = createWorldField({ ...recipe, features: { ...recipe.features, heightPatches: [], roads: [] } });
   let list = owners(recipe);
@@ -159,7 +259,12 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
     list = list.filter((o) => o.box[0] < nx + nr && o.box[2] > nx - nr && o.box[1] < nz + nr && o.box[3] > nz - nr);
   }
   const allow = new Set(opts.allow ?? []);
+  // documented exceptions: single lattice cells of one owner, reported as excepted, never counted
+  const excCells = new Map<string, Set<string>>();
+  for (const e of opts.exceptions ?? []) { const set = excCells.get(e.id) ?? new Set<string>(); for (const [cx, cz] of e.cells) set.add(`${Math.round(cx)},${Math.round(cz)}`); excCells.set(e.id, set); }
+  let excepted = 0;
   const riser = terraceRiserBand(recipe);
+  const cut = openCutBand(recipe, (x, z) => field.height(x, z));
   const withoutTerrace = (fid: string) => createWorldField({
     ...recipe,
     features: {
@@ -169,6 +274,7 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
       terraceWalls: (recipe.features.terraceWalls ?? []).filter((t) => `tw-${t.id}` !== fid),
     },
   });
+  const withoutPatch = (fid: string) => createWorldField({ ...recipe, features: { ...recipe.features, heightPatches: recipe.features.heightPatches.filter((p) => p.id !== fid) } });
   const rows: LipsResult["owners"] = [];
   const all: (TerrainLipFault & { owner: string })[] = [];
   const totals = { alias: 0, step: 0, lip: 0, cells: 0, touched: 0 };
@@ -184,7 +290,9 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
     // a terrace wall's patch (`tw-*`) is levelled ground under built works, blended back into whatever was there,
     // trails included: it is measured against the world without IT, so a trail's own teeth inside its raster are
     // not charged to it
-    const ref = o.kind === "patch" && o.id.startsWith("tw-") ? withoutTerrace(o.id) : reference;
+    // an OPERATOR patch (`op:<id>:*`) is composed on the ground the operators before it made (recipe order: a scree fan
+    // heaped on a landmark pad's slope): measured against the world without IT, so the pad's own faults stay the pad's
+    const ref = o.kind === "patch" && o.id.startsWith("tw-") ? withoutTerrace(o.id) : o.kind === "patch" && o.id.startsWith("op:") ? withoutPatch(o.id) : reference;
     const rep = measureTerrainLips(field, ref, {
       x0, z0, x1, z1,
       aliasTol: opts.aliasTol, maxSlope: opts.maxSlope, lipTol: opts.lipTol,
@@ -192,10 +300,18 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
         const mine = o.band(x, z);
         if (mine > 0) return false;
         if (riser(x, z)) return false;
+        if (cut(x, z)) return false;
         for (const q of others) if (q.band(x, z) < mine) return false;
         return true;
       },
     });
+    const exc = excCells.get(o.id);
+    if (exc) {
+      const kept = rep.faults.filter((f) => !exc.has(`${Math.round(f.x)},${Math.round(f.z)}`));
+      for (const f of rep.faults) if (!kept.includes(f)) { excepted++; rep.counts[f.kind as keyof typeof rep.counts]--; }
+      rep.faults = kept;
+      for (const k of Object.keys(rep.worst) as (keyof typeof rep.worst)[]) rep.worst[k] = Math.max(0, ...kept.filter((f) => f.kind === k).map((f) => f.size));
+    }
     totals.cells += rep.cells;
     totals.touched += rep.touchedCells;
     const worst = Math.max(rep.worst.alias, rep.worst.step, rep.worst.lip);
@@ -209,12 +325,13 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
     }
   }
   rows.sort((a, b) => b.alias + b.step + b.lip - (a.alias + a.step + a.lip));
-  return { ok: totals.alias + totals.step + totals.lip === 0, owners: rows, totals, faults: all };
+  return { ok: totals.alias + totals.step + totals.lip === 0, owners: rows, totals, faults: all, excepted };
 }
 
 export function commandLips(host: LipsHost): void {
   const { argv } = host;
-  const { recipe } = host.loadRecipe();
+  const { recipe, file } = host.loadRecipe();
+  const exceptions = file && !argv.includes("--no-exceptions") ? readLipsExceptions(file) : [];
   const nearArg = str(argv, "near");
   let near: [number, number, number] | undefined;
   if (nearArg) {
@@ -223,12 +340,12 @@ export function commandLips(host: LipsHost): void {
   }
   const allow = (str(argv, "allow") ?? "").split(",").filter(Boolean);
   const t0 = Date.now();
-  const res = runLipsGate(recipe, { near, aliasTol: num(argv, "alias", 0.5), maxSlope: num(argv, "max-slope", 1.6), lipTol: num(argv, "lip", 0.75), allow });
+  const res = runLipsGate(recipe, { near, aliasTol: num(argv, "alias", 0.5), maxSlope: num(argv, "max-slope", 1.6), lipTol: num(argv, "lip", 0.75), allow, exceptions });
   if (argv.includes("--json")) {
-    console.log(JSON.stringify({ ok: res.ok, totals: res.totals, owners: res.owners }, null, 1));
+    console.log(JSON.stringify({ ok: res.ok, totals: res.totals, owners: res.owners, excepted: res.excepted }, null, 1));
   } else {
     console.log(`lips ${recipe.name}${near ? ` near ${near.join(",")}` : ""}: ${res.totals.touched}/${res.totals.cells} edited lattice cells in edge bands, ${((Date.now() - t0) / 1000).toFixed(1)} s`);
-    console.log(`  alias (sawtooth) ${res.totals.alias}   step (wall) ${res.totals.step}   lip (rim/slot) ${res.totals.lip}`);
+    console.log(`  alias (sawtooth) ${res.totals.alias}   step (wall) ${res.totals.step}   lip (rim/slot) ${res.totals.lip}${res.excepted ? `   excepted ${res.excepted} (documented: ${lipsExceptionsFile(file!)})` : ""}`);
     for (const r of res.owners.slice(0, argv.includes("--list") ? Infinity : 25)) {
       console.log(`  ${r.allowed ? "allowed " : ""}${r.kind} ${r.id}: alias ${r.alias}, step ${r.step}, lip ${r.lip}; worst ${r.worst.toFixed(2)} m; longest run ${r.run} cells`);
     }
@@ -252,7 +369,36 @@ export function commandSeated(host: LipsHost): void {
     if (v.length !== 6 || !v.every(Number.isFinite)) host.fail("--slab wants x,z,halfX,halfZ,yawDeg,baseY");
     slabs.push({ id: `slab${slabs.length}`, x: v[0]!, z: v[1]!, halfX: v[2]!, halfZ: v[3]!, yaw: (v[4]! * Math.PI) / 180, baseY: v[5]! });
   });
-  if (!slabs.length) host.fail("give --slab x,z,halfX,halfZ,yawDeg,baseY (repeatable) or --slabs <file.json> ([{id,x,z,halfX,halfZ,yaw(rad),baseY}])");
+  // --wall <opId> (repeatable) / --walls (every installed wall operator): the baked wall's bottom against the ground,
+  // per <= 4 m segment; daylight under any segment > --wall-gap (0.05 m) fails (tools/_wall-seated.mts)
+  const wallIds = argv.flatMap((a, i) => (a === "--wall" ? [argv[i + 1] ?? ""] : []));
+  // (a causeway ramp is a deck over its own cut, not a wall standing on the ground: not judged here)
+  if (argv.includes("--walls")) for (const o of recipe.features.operators ?? []) if ((o as { op?: string }).op === "wall" && (o as { variant?: string }).variant !== "ramp" && !wallIds.includes(o.id)) wallIds.push(o.id);
+  if (wallIds.length) {
+    const maxWallGap = num(argv, "wall-gap", 0.05), worldGround = visibleWorldGround(recipe);
+    let badWalls = 0;
+    const out: WallSeatReport[] = [];
+    for (const id of wallIds) {
+      const r = wallSeat(recipe, id, { maxGap: maxWallGap, ground: worldGround });
+      out.push(r);
+      if (!r.ok) badWalls++;
+      if (!argv.includes("--json")) {
+        console.log(`  ${r.ok ? "ok  " : "FAIL"} wall ${id}: ${r.segments.length} segments over ${r.length} m, worst gap ${r.worst} m${r.worstAt ? ` @ ${r.worstAt.join(",")}` : ""}${r.bad ? `, ${r.bad} segment(s) show daylight` : ""}${r.samples ? "" : " (no samples)"}${r.stale ? `; STALE: ${r.stale}` : ""}`);
+        for (const sg of r.segments) if (sg.gap > maxWallGap || argv.includes("--list")) console.log(`      ${sg.from}-${sg.to} m @ ${sg.at.join(",")}: gap ${sg.gap} m`);
+      }
+    }
+    if (argv.includes("--json")) console.log(JSON.stringify({ ok: !badWalls, walls: out }, null, 1));
+    else { const lit = out.filter((r) => r.bad > 0).length, stale = out.filter((r) => r.stale).length; console.log(badWalls ? `FAIL: ${lit} wall(s) show daylight under a segment (gap > ${maxWallGap} m), ${stale} stale bake(s), of ${wallIds.length}: re-apply (worldgen op --apply <id>) + re-bake (tools/landmark.mts) the wall, or deepen footing.depth` : `OK: ${wallIds.length} wall(s) seated`); }
+    // --out <file>: the report the town pipeline judges (zonegen status row `town <name>: wall`)
+    const outFile = str(argv, "out");
+    if (outFile) {
+      fs.mkdirSync(path.dirname(outFile), { recursive: true });
+      fs.writeFileSync(outFile, JSON.stringify({ ok: !badWalls, maxGap: maxWallGap, walls: out.map(({ segments, ...r }) => ({ ...r, faults: segments.filter((s) => s.gap > maxWallGap) })) }, null, 1) + "\n");
+    }
+    if (badWalls) process.exitCode = 1;
+    if (!slabs.length) return;
+  }
+  if (!slabs.length) host.fail("give --slab x,z,halfX,halfZ,yawDeg,baseY (repeatable), --slabs <file.json> ([{id,x,z,halfX,halfZ,yaw(rad),baseY}]), --wall <opId> or --walls");
   const field = createWorldField(recipe);
   const maxGap = num(argv, "gap", 0.25), maxClip = num(argv, "clip", 0.6);
   // the REAL solid (seat.ts): a stair cut, a carve or a planar tread is ground; the drawn heightfield is not the

@@ -9,6 +9,7 @@ import {
   type QuestJournal,
 } from "@hitreg/core";
 import { presentFor } from "./presence.js";
+import { worldTimeOf } from "./world-facts.js";
 import { Script } from "./script.js";
 import { sheetStoreOf, type SheetStoreLike } from "./character-store.js";
 
@@ -202,7 +203,7 @@ export class Nameplates extends Script {
     for (const qid of gives) {
       const q = this.quest(qid);
       // only a person advertises a quest: an object, a presence or a place carries no marker (players find those through leads)
-      if (q && questSource(q).kind === "npc" && questOfferProblem(journal, q) === null && q.level <= level + 3) return "!";
+      if (q && questSource(q).kind === "npc" && questOfferProblem(journal, q, worldTimeOf(this.store)) === null && q.level <= level + 3) return "!";
     }
     return "";
   }

@@ -23,9 +23,20 @@ node ../../../../tools/dungeon-pipeline/quality.mjs <gate|all> [--build] [--prin
 `authoring/.plan-geometry.json`, the export's input: re-populating, renaming or writing "unlit" in a note never asks for a
 Blender export.
 
+A stage may judge an input by digest instead of mtime: `digests: { <input>: "<report field>" }`. dc-bake and import
+record the stamp's `sourceSha256`, so a byte-identical Blender re-export (only the mtime moved) leaves them ok
+(test: digest.test.mjs). A report without the field falls back to mtime.
+
 `standardStages({ id, blender, exportInputs, override, insert })`: `override` merges fields into a stage by name
 (`null` drops it), `insert: [{ after, stage }]` adds a project stage. A stage is `{ name, out, inputs, report?, check?,
-fresh?, run, note }`; FAILED = its `report` has `passed !== true` (or `check(out)` is false).
+fresh?, run, note }`; FAILED = its `report` has `passed !== true` (or `check(out)` is false). `run` may be a function of
+the project root (the `portal play` command reads the plan).
+
+**Exit far from the arrival:** `portal play` walks a straight line from the arrival to the return portal. A dungeon whose
+exit is at the end of a long route declares where that walk starts in its plan, in ENGINE metres inside the instance:
+`"portalPlay": { "exitFrom": [72, -6.4, 0], "note": "..." }` — the stage command then carries
+`--exit-from 72,-6.4,0` (tools/portal-play.mts fast-travels there first). `portalPlay` is test data, not geometry: it
+never moves the export's plan digest. Set by tipped-kirk (the straight walk stopped 23 m short).
 
 ## Standard order
 
@@ -48,6 +59,7 @@ inputs, `thresholds.json`, `quality.mjs` or the project's exceptions file change
 | `culling` | the scene, the plan route | a room whose dressing group (an interior culling unit) appears more than 2 m after the walker enters the room, the scene's `cullingProfile` applied (docs/culling.md "Interior scenes"). |
 | `readability` | `reports/views/*.png` (shipped light) | a view > 90% near-black (luma < 12); the median view > 50% near-black (lights on black), its mean outside 14-45, or its 10th percentile > 10 (flat fill, no pools). |
 | `loot` | `authoring/loot.json` (the drop list: id, slot, `weight` or `role`, rarity, `from`), plan named/boss loot strings, `plan.trashLoot`, the item files | an armor weight (cloth/leather/mail/plate) that never drops; an armor slot dropping in < 2 weights; a weapon role (caster, melee-1h, melee-2h, tank) that never drops; < 4 trash drops; a named that drops nothing or a boss with no rare; rarity above the level band (top level <= 10: uncommon, boss rare; <= 20: rare); ornament parts below rare; a drop with no item file or missing from its source's loot string. Owner ruling 2026-10-08: every instance gives every class a reason to go. |
+| `water` | plan `water` bodies + `spaces` floors, the shipped scene | ONE STILL LEVEL AT THE BOTTOM (owner 2026-10-25): `oneWaterLevel` a body off the shared surface height; `lowest` a dry floor under any water surface (the water would run there); `static` moving water in the scene (tags `moving-water`/`waterfall`, path/ribbon water meshes, a sloping water surface: falls, cascades, curtains, channels). None can be excepted: sink the water to the lowest floor or remove it; a fall is mist/vfx or nothing |
 | `compare` | the dungeon's view sheet and the references' | `reports/compare.png` (this dungeon, then fieldfast-barrow, fieldfast-hall, side by side) missing or older than the views. `--build` makes it. A person still judges it. |
 
 How things are counted: rooms/passages are plan space kinds (`thresholds.json` `spaces`). Built detail is every
@@ -90,3 +102,11 @@ dungeon.
 
 Ported: gnawspur-deeps, fieldfast-barrow (2026-10-05), rime-hall (2026-10-06). Not yet: fieldfast-hall (calibrated through the CLI only; its
 `fresh()` sha checks go in `override`), gloomvein-hold, gnawspur-rough (a proof copy).
+
+## prove fight under load
+
+`step-jitter.mjs` times every server tick of a proof. A fight that fails while the MEDIAN tick took more than 1.5x the
+fixed step is written `{ passed: false, result: "unjudged (load)", unjudged: "<why>" }` and the pipeline shows the stage
+UNJUDGED (re-run on a quiet machine), not FAILED. Wire it in a dungeon's `prove.mts`:
+`const jitter = instrumentTicks(server, { fixedStepMs: world.fixedDt * 1000 })` after the GameServer is built, then
+`out("fight.json", { ...judgeUnderLoad(passed, jitter.summary()), ...rest })` (test: step-jitter.test.mjs).

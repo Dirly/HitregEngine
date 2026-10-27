@@ -16,6 +16,17 @@ import { z } from "zod";
  */
 export const WORLD_HOUR_KEY = "world/hour";
 export const WORLD_WEATHER_KEY = "world/weather";
+/**
+ * Whole days the world clock has run (an integer the day-night builtin's authority bumps at each midnight and
+ * publishes together with the hour). `day * 24 + hour` is the monotonic world time a quest's `repeat` is measured in.
+ */
+export const WORLD_DAY_KEY = "world/day";
+
+/** The four tide windows, in the order the tide runs (high water, falling, low water, rising). */
+export const TIDE_PHASES = ["high", "ebb", "low", "flood"] as const;
+export type TidePhase = (typeof TIDE_PHASES)[number];
+/** World-clock hours from one high water to the next (a semi-diurnal tide: it slips ~50 min a day against the clock). */
+export const TIDE_PERIOD_HOURS = 12.4;
 
 /** Hour window on the world clock (netState `world/hour`). */
 export interface ClockWindow {
@@ -45,6 +56,7 @@ export interface DialogueCondition {
   bound?: boolean;
   clock?: ClockWindow;
   weather?: WeatherBand;
+  tide?: TidePhase;
   all?: DialogueCondition[];
   any?: DialogueCondition[];
   not?: DialogueCondition;
@@ -75,6 +87,16 @@ export const weatherBandSchema = z
   })
   .describe("Holds while the layer's weather (netState world/weather) is inside this band. No weather in the scene = never holds.");
 
+export const tideConditionSchema = z
+  .enum(TIDE_PHASES)
+  .describe(
+    "Holds while the tide is in this window. The tide is ONE world function, the same on every coast and for every player: " +
+      `a ${TIDE_PERIOD_HOURS} h cycle of the world time (netState world/day * 24 + world/hour, written by the day-night builtin on ` +
+      "the authority), high water at world time 0. Each window is a quarter of the cycle: high (around high water), ebb (falling), " +
+      "low (around low water), flood (rising). It slips against the hour of day, so `low` falls at a different hour each day. " +
+      "No clock in the scene = never holds. Several windows: `any: [{ tide: low }, { tide: flood }]`. The sea surface does not move with it.",
+  );
+
 export const dialogueConditionSchema: z.ZodType<DialogueCondition> = z.lazy(() =>
   z
     .object({
@@ -83,7 +105,7 @@ export const dialogueConditionSchema: z.ZodType<DialogueCondition> = z.lazy(() =
         .enum(["none", "available", "active", "ready", "complete", "taken"])
         .optional()
         .describe(
-          "With `quest`: none = never accepted; available = can be accepted NOW (not taken, its `requires` done); " +
+          "With `quest`: none = never accepted; available = can be accepted NOW (not taken, its `requires` done, a `repeat` quest's wait over); " +
             "active = objectives open; ready = objectives done, not handed in; complete = handed in; taken = active or ready.",
         ),
       flag: z.string().min(1).optional().describe("A per-character memory flag (set by a `setFlag` action)."),
@@ -102,6 +124,7 @@ export const dialogueConditionSchema: z.ZodType<DialogueCondition> = z.lazy(() =
         ),
       clock: clockWindowSchema.optional(),
       weather: weatherBandSchema.optional(),
+      tide: tideConditionSchema.optional(),
       all: z.array(dialogueConditionSchema).optional().describe("Every one holds."),
       any: z.array(dialogueConditionSchema).optional().describe("At least one holds."),
       not: dialogueConditionSchema.optional().describe("This one does NOT hold."),
@@ -115,16 +138,43 @@ export const dialogueConditionSchema: z.ZodType<DialogueCondition> = z.lazy(() =
 export interface WorldFacts {
   /** netState world/hour, or null when no clock runs. */
   hour: number | null;
+  /** netState world/day (whole days the clock has run); absent = 0. */
+  day?: number | null;
   /** netState world/weather (precipitation and storm 0..1), or null. */
   weather: { precipitation: number; storm: number } | null;
   /** Winning biome rule id under the character, or null (no voxel world). */
   biome: string | null;
 }
 
+/** World time in hours since the clock started (`day * 24 + hour`), or null when no clock runs. */
+export function worldTime(world: Pick<WorldFacts, "hour" | "day"> | null | undefined): number | null {
+  const hour = world?.hour;
+  if (typeof hour !== "number" || !Number.isFinite(hour)) return null;
+  const day = typeof world?.day === "number" && Number.isFinite(world.day) ? world.day : 0;
+  return day * 24 + hour;
+}
+
 export function clockHolds(c: ClockWindow, hour: number | null | undefined): boolean {
   if (typeof hour !== "number" || !Number.isFinite(hour)) return false;
   const h = ((hour % 24) + 24) % 24;
   return c.from <= c.to ? h >= c.from && h < c.to : h >= c.from || h < c.to;
+}
+
+/** The tide window at world time `worldHours` (day * 24 + hour). */
+export function tidePhase(worldHours: number): TidePhase {
+  const f = (((worldHours % TIDE_PERIOD_HOURS) + TIDE_PERIOD_HOURS) % TIDE_PERIOD_HOURS) / TIDE_PERIOD_HOURS;
+  return f < 1 / 8 || f >= 7 / 8 ? "high" : f < 3 / 8 ? "ebb" : f < 5 / 8 ? "low" : "flood";
+}
+
+/** Height of the tide at world time `worldHours`: 1 = high water, -1 = low water (for a renderer or a sound; conditions use tidePhase). */
+export function tideLevel(worldHours: number): number {
+  return Math.cos((2 * Math.PI * worldHours) / TIDE_PERIOD_HOURS);
+}
+
+/** Whether the tide is in window `phase` for these world facts; no clock = false. */
+export function tideHolds(phase: TidePhase, world: Pick<WorldFacts, "hour" | "day"> | null | undefined): boolean {
+  const t = worldTime(world);
+  return t !== null && tidePhase(t) === phase;
 }
 
 export function weatherHolds(c: WeatherBand, world: WorldFacts | null | undefined): boolean {

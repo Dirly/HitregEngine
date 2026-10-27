@@ -3,6 +3,7 @@
 You write the adventure's LOGIC and everything it needs to exist: quests, the places they happen, dungeons, quest items. Not prose: directions and dialogue are written after placement.
 
 **Read**
+- `docs/world-standards/adventure-design.md`: exploration, discovery and payoff; mundane work is supporting context.
 - `{brief}`: premise, threat, history, budget (every count is checked against it).
 - `{zoneBestiary}`: the only creatures, rares and bosses a quest may target.
 - The zone's town plans (`zonegen brief-for town` lists them): the only npcs a quest may name.
@@ -13,6 +14,11 @@ You write the adventure's LOGIC and everything it needs to exist: quests, the pl
 **Write** `{quests}`.
 
 **Judgment**
+- Give the player a particular question, opportunity or threat to investigate and a payoff for doing it.
+  A smugglers' cache or rat-infested salvage can be enough; neither epic stakes nor a curse is compulsory.
+  A roster dominated by commodity chores fails the direction, even when every objective can run.
+  Offers, clues and hand-ins must agree about what is learned or recovered. Never promise an unimplemented
+  ritual, choice, boss or enterable chamber through prose alone.
 - Quests come LAST and attach to the brief's signature `places`: each place is a location with the same id and size,
   and its sub-sites and dungeon entrance are locations with `place` set to it. Quests use what a place is (its set
   piece, its named people and creatures, its dungeon); they never shrink a place to what one quest needs.

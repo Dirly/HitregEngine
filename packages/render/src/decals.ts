@@ -41,6 +41,7 @@ export interface DecalData {
   emissiveIntensity?: number;
   filter?: TextureFilter;
   fadeDepth?: number;
+  maxAngle?: number;
   sortOffset?: number;
 }
 
@@ -183,6 +184,111 @@ function writeFadeAttribute(
   geometry.setAttribute("decalFade", new THREE.BufferAttribute(fade, 1));
 }
 
+/** Cells across the projector for the nearest-surface test. */
+const SURFACE_GRID = 24;
+/** A face this far (m, along the projection axis) from the nearest surface at its spot belongs to another layer. */
+const SURFACE_LAYER_TOLERANCE = 0.12;
+
+/**
+ * Keep only what the sticker belongs on. DecalGeometry paints EVERY triangle
+ * inside the box, so a beam or pier standing in front of the wall got the
+ * relief wrapped over it and its flanks stretched the texture sideways.
+ * Two cuts, in projector space (the projector looks down -Z, entity at 0):
+ *  - facing: a face turned more than `maxAngle` from the projection axis is
+ *    dropped (beam sides, corner returns, back faces);
+ *  - layer: over a grid across the box, the facing surface whose depth is
+ *    nearest the entity's own plane owns each cell; faces lying more than a
+ *    layer's tolerance in front of or behind that owner are dropped (the beam
+ *    face in front, an alcove's back wall behind).
+ * Pieces are DecalGeometry output: non-indexed, world-space triangles.
+ */
+function keepNearestSurface(
+  pieces: THREE.BufferGeometry[],
+  projectorInverse: THREE.Matrix4,
+  size: THREE.Vector3,
+  maxAngle: number,
+): THREE.BufferGeometry[] {
+  const minFacing = Math.cos(THREE.MathUtils.degToRad(maxAngle));
+  const G = SURFACE_GRID;
+  const owner = new Float64Array(G * G).fill(Number.POSITIVE_INFINITY);
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  const ab = new THREE.Vector3(), ac = new THREE.Vector3(), n = new THREE.Vector3();
+  const cellOf = (v: number, extent: number): number => Math.min(G - 1, Math.max(0, Math.floor((v / extent + 0.5) * G)));
+  const centreOf = (k: number, extent: number): number => ((k + 0.5) / G - 0.5) * extent;
+  // projector-space triangles with their facing, per piece
+  const local = pieces.map((piece) => {
+    const pos = piece.getAttribute("position");
+    const out = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      a.fromBufferAttribute(pos, i).applyMatrix4(projectorInverse);
+      out[i * 3] = a.x; out[i * 3 + 1] = a.y; out[i * 3 + 2] = a.z;
+    }
+    const facing = new Uint8Array(pos.count / 3);
+    for (let t = 0; t < facing.length; t++) {
+      a.fromArray(out, t * 9); b.fromArray(out, t * 9 + 3); c.fromArray(out, t * 9 + 6);
+      n.crossVectors(ab.subVectors(b, a), ac.subVectors(c, a));
+      const len = n.length();
+      facing[t] = len > 1e-12 && n.z / len >= minFacing ? 1 : 0;
+    }
+    return { out, facing };
+  });
+  // pass 1: every facing face offers its depth at each cell centre it covers
+  // (and at its centroid's cell, so a face smaller than a cell still counts)
+  const offer = (k: number, z: number): void => {
+    if (Math.abs(z) < Math.abs(owner[k]!)) owner[k] = z;
+  };
+  for (const { out, facing } of local) {
+    for (let t = 0; t < facing.length; t++) {
+      if (!facing[t]) continue;
+      a.fromArray(out, t * 9); b.fromArray(out, t * 9 + 3); c.fromArray(out, t * 9 + 6);
+      offer(cellOf((a.x + b.x + c.x) / 3, size.x) + cellOf((a.y + b.y + c.y) / 3, size.y) * G, (a.z + b.z + c.z) / 3);
+      const i0 = cellOf(Math.min(a.x, b.x, c.x), size.x), i1 = cellOf(Math.max(a.x, b.x, c.x), size.x);
+      const j0 = cellOf(Math.min(a.y, b.y, c.y), size.y), j1 = cellOf(Math.max(a.y, b.y, c.y), size.y);
+      const det = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+      if (Math.abs(det) < 1e-12) continue;
+      for (let j = j0; j <= j1; j++) {
+        const py = centreOf(j, size.y);
+        for (let i = i0; i <= i1; i++) {
+          const px = centreOf(i, size.x);
+          const w0 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / det;
+          const w1 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / det;
+          const w2 = 1 - w0 - w1;
+          if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+          offer(i + j * G, w0 * a.z + w1 * b.z + w2 * c.z);
+        }
+      }
+    }
+  }
+  // pass 2: keep the facing faces that lie on their spot's owning surface
+  const kept: THREE.BufferGeometry[] = [];
+  pieces.forEach((piece, p) => {
+    const { out, facing } = local[p]!;
+    const keep: number[] = [];
+    for (let t = 0; t < facing.length; t++) {
+      if (!facing[t]) continue;
+      const cx = (out[t * 9]! + out[t * 9 + 3]! + out[t * 9 + 6]!) / 3;
+      const cy = (out[t * 9 + 1]! + out[t * 9 + 4]! + out[t * 9 + 7]!) / 3;
+      const cz = (out[t * 9 + 2]! + out[t * 9 + 5]! + out[t * 9 + 8]!) / 3;
+      const z = owner[cellOf(cx, size.x) + cellOf(cy, size.y) * G]!;
+      if (Math.abs(cz - z) <= SURFACE_LAYER_TOLERANCE) keep.push(t);
+    }
+    if (keep.length === facing.length) { kept.push(piece); return; }
+    if (keep.length > 0) {
+      const next = new THREE.BufferGeometry();
+      for (const name of Object.keys(piece.attributes)) {
+        const src = piece.getAttribute(name) as THREE.BufferAttribute;
+        const w = src.itemSize;
+        const arr = new Float32Array(keep.length * 3 * w);
+        keep.forEach((t, o) => arr.set((src.array as Float32Array).subarray(t * 3 * w, t * 3 * w + 3 * w), o * 3 * w));
+        next.setAttribute(name, new THREE.BufferAttribute(arr, w));
+      }
+      kept.push(next);
+    }
+    piece.dispose();
+  });
+  return kept;
+}
+
 function makeDecalMaterial(
   data: DecalData,
   url: string,
@@ -293,6 +399,10 @@ function buildDecal(
 
   const projectorMatrix = new THREE.Matrix4().makeRotationFromEuler(orientation).setPosition(position);
   const projectorInverse = projectorMatrix.clone().invert();
+  const surface = keepNearestSurface(pieces, projectorInverse, size, data.maxAngle ?? 60);
+  pieces.length = 0;
+  pieces.push(...surface);
+  if (pieces.length === 0) return; // only faces turned away or off the surface
   const groupInverse = group.matrixWorld.clone().invert();
   const attach = (geometry: THREE.BufferGeometry): void => {
     if (data.fadeDepth !== undefined && data.fadeDepth > 0) {

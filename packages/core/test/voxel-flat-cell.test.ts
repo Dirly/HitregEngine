@@ -68,7 +68,7 @@ describe("uniform flat voxel cells", () => {
         return out.sort((x, y) => x! - y!);
       };
       expect(seam(a, 48)).toEqual(seam(b, 0));
-      expect(a.max).toEqual([48, -45, 48]); expect(a.min).toEqual([0, -45 - 6 * lodStep, 0]);
+      expect(a.max).toEqual([48, -45, 48]); expect(a.min).toEqual([0, -45 - 6 * lodStep * (lodStep > 1 ? 3 : 1), 0]); // HLOD cells hang 3x deeper skirts (mesh.ts COARSE_SKIRT_K)
       expect(a.triangleCount).toBe(12 * (24 / lodStep));
     }
   });

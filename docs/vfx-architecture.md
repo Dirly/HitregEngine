@@ -684,6 +684,17 @@ Traps:
   do (`emitter.max`). A bonfire is ~340 particles, a torch ~90 — `cullDistance`
   is what keeps a dungeon of them affordable.
 
+### Smoke standard (2026-10-22)
+
+Every smoke layer (a normal-blended particle module named smoke/plume/column, or any layer of an effect with
+`smoke: chimney | kiln | fire | pyre`) is held to `packages/core/src/vfx/smoke.ts`: plume top <= ~2x (chimney) or 3x
+(kiln, fire, pyre) the source's height, width <= 2x the source (chimney <= 1.5 m), per-particle opacity <= 0.35
+(kiln 0.4), pale grey (luminance >= 0.15), `nightDim` >= 0.5 (particles are unlit; pale smoke glows at night without
+it) and `windDrift` > 0 (world space: leans with the live weather wind). The plume is measured by running the particle
+integrator (`measurePlume`), no renderer. The chimney batch takes `CHIMNEY_SMOKE`. Gate:
+`npx tsx tools/smoke-check.mts <project> [--zone <z>]` and the `zonegen status` row `smoke`. Places read by their
+structures, never by their smoke.
+
 ## Symbol sheets: how to draw them
 
 One PNG per category (symbols, projectiles, radials…), any size, white on

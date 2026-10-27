@@ -6,6 +6,11 @@
  * model) can never shadow it. Unscoped pages send no project.
  */
 let scopeOwner: string | null = null;
+let bundleBase: string | null = null;
+
+/** Published hosts resolve streaming files from their static bundle, without a dev bridge. */
+export const setAssetBundleBase = (base: string): void => { bundleBase = base; };
+export const assetIndexUrl = (): string => bundleBase ? new URL("assets-index.json", bundleBase).href : "/__hitreg/assets-index?kinds=chunks";
 
 /** Set by asset-loader from the assets-index x-hitreg-scope header (owner first). */
 export const setAssetScopeOwner = (owner: string | null): void => {
@@ -13,4 +18,7 @@ export const setAssetScopeOwner = (owner: string | null): void => {
 };
 
 export const assetFileUrl = (file: string): string =>
-  `/__hitreg/asset-file?file=${encodeURIComponent(file)}${scopeOwner ? `&project=${encodeURIComponent(scopeOwner)}` : ""}`;
+  bundleBase ? new URL(`content/${file}`, bundleBase).href : `/__hitreg/asset-file?file=${encodeURIComponent(file)}${scopeOwner ? `&project=${encodeURIComponent(scopeOwner)}` : ""}`;
+
+export const assetBatchUrl = (): string =>
+  `/__hitreg/asset-json${scopeOwner ? `?project=${encodeURIComponent(scopeOwner)}` : ""}`;

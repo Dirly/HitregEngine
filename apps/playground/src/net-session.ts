@@ -558,6 +558,22 @@ export function savePendingGrant<G, C>(storage: { setItem(k: string, v: string):
   }
 }
 
+/** Join only the scene the gateway placed us in; preserve the ticket before changing pages. */
+export function acceptSceneGrant<G extends { scene: string }, C>(
+  currentScene: string,
+  grant: G,
+  character: C,
+  storage: { setItem(k: string, v: string): void } | null,
+  reload: (scene: string) => void,
+): boolean {
+  if (grant.scene === currentScene) return true;
+  if (!savePendingGrant(storage, grant, character)) {
+    throw new Error(`Cannot enter ${grant.scene}: session storage is unavailable. Open that scene before pressing Play.`);
+  }
+  reload(grant.scene);
+  return false;
+}
+
 /** Take (and remove) a pending grant younger than its ticket. */
 export function takePendingGrant<G, C>(
   storage: { getItem(k: string): string | null; removeItem(k: string): void } | null,

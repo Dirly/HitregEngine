@@ -3,11 +3,17 @@ import {
   acceptQuest,
   advanceQuest,
   carriedCount,
+  choiceFlag,
+  choiceLockedByFlags,
+  combatKey,
   DEFAULT_PERFORM_ACTIONS,
+  escortKey,
   INTERACT_RANGE,
   NPC_EVENTS,
   npcMemorySchema,
   objectiveArea,
+  objectiveChoice,
+  objectiveLocked,
   objectiveOpen,
   PERFORM_TOLERANCE,
   QUEST_EVENTS,
@@ -20,6 +26,7 @@ import {
   testCondition,
   type CharacterSheet,
   type DialogueFacts,
+  type EscortState,
   type NpcMemory,
   type Quest,
   type QuestArea,
@@ -28,7 +35,7 @@ import {
   migrateJournal,
 } from "@hitreg/core";
 import { Script, type ScriptCommandDecl, type ScriptEventDecl } from "./script.js";
-import { worldFactsAt } from "./world-facts.js";
+import { worldFactsAt, worldTimeOf } from "./world-facts.js";
 import { presentFor } from "./presence.js";
 import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } from "./character-store.js";
 
@@ -39,20 +46,27 @@ const inArea = (a: QuestArea | undefined, x: number, z: number): boolean => !!a 
 /**
  * A character's quest journal (`quests/<bodyId>`), advanced on the session
  * authority from what actually happened: kills (the `killEvent` a combat
- * script emits), items carried (`collect`), standing in an area (`visit`,
+ * script emits), items carried (`collect`; with `from`, a kill of a matching
+ * body rolls the step's `chance` and drops the item into the killer's bags), standing in an area (`visit`,
  * `endure`), conversations opened (`talk`, from the `npc` builtin's
  * `npc.talked`), readables opened (`read`, `player.read`), entities used
- * (`interact`, `deliver`, from `player.interact`) and actions performed
- * (`perform`, from `player.perform`). Every objective kind is a registered
+ * (`interact`, `deliver`, from `player.interact` — or `npc.talked` for an entity
+ * running the `npc` builtin: opening its conversation IS its use) and actions performed
+ * (`perform`, from `player.perform`) and escorts (`escort`: the claim on the NPC
+ * is taken here, the walk is the `npc` builtin's). Every objective kind is a registered
  * quest action block (core `questBlocks`); `after` orders steps, `when` gates
- * them (clock, weather with the biome underfoot, flags …) and `then` runs the
- * step's consequences.
+ * them (clock, weather with the biome underfoot, tide, flags …) and `then` runs the
+ * step's consequences — a `choose` sets `<choice>=<option>` and locks the
+ * choice's other options (in this quest by its progress, in any other by the flag).
  *
  * Quests are `quest` data assets (assets/quests/<id>.json) looked up by id —
  * the journal only holds the ones the character has: accepted from an NPC's
  * or an object's dialogue (`acceptQuest`), `autoStart`ed here on a fresh
  * journal, or `autoOffer`ed here once an `auto` source holds. A started
- * quest is always in the journal; only its START goes unadvertised.
+ * quest is always in the journal; only its START goes unadvertised. A quest
+ * with `repeat` records its completions and the world time (world/day * 24 +
+ * world/hour) of the last; its source offers it again once `after` has passed,
+ * and accepting it again resets its objectives (rewards pay every run).
  *
  * Clients only ASK: change the tracked quest (`quest.track`), use an entity
  * (`player.interact`, owner + range checked) or perform an action
@@ -102,6 +116,8 @@ export class QuestLog extends Script {
   private interacts: string[] = [];
   private performs: Array<{ action: string; at: [number, number, number] }> = [];
   private endured = new Map<string, number>();
+  /** Drops from the slain given in the last second, per quest/objective, with the carried count when given. */
+  private recentDrops = new Map<string, { n: number; at: number; owned: number }>();
   private pendingTrack: string | null | undefined;
   private elapsed = 0;
   private clock = 0;
@@ -129,7 +145,13 @@ export class QuestLog extends Script {
     this.ctx.events?.on(NPC_EVENTS.talked, (data, meta) => {
       if (meta?.from !== undefined || !this.store.isAuthority()) return;
       const p = data as { actorId: string; npcId: string };
-      if (p.actorId === this.actor) this.talks.push(p.npcId);
+      if (p.actorId !== this.actor) return;
+      this.talks.push(p.npcId);
+      // Opening a conversation IS how a player uses an `npc` entity (npc-ui sends npc.talk, never player.interact, for
+      // one), so a quest object holding a dialogue (a muster roll, a spring) counts for `interact` / `deliver` aimed at
+      // it. npc.talk already checked owner, range and presence: one authority-side use per conversation opened.
+      this.interacts.push(p.npcId);
+      this.ctx.events?.emit(QUEST_EVENTS.interacted, { actorId: this.actor, entityId: p.npcId });
     });
     this.ctx.events?.on(QUEST_EVENTS.read, (data, meta) => {
       if (meta?.from !== undefined || !this.store.isAuthority()) return;
@@ -214,13 +236,20 @@ export class QuestLog extends Script {
     return victimId === target || victimId.startsWith(`${target}-`) || victimId.includes(`#${target}#`);
   }
 
+  /** The drop roll of a `collect` step's `from` (0..1); replaceable by tests. */
+  static roll: () => number = Math.random;
+
   /** The `tag:` kill targets of the quests this character has open: only these are worth testing when something dies. */
   private openKillTags(): string[] {
     const journal = this.store.get(`quests/${this.actor}`) as QuestJournal | undefined;
     const out = new Set<string>();
     for (const [id, st] of Object.entries(journal?.quests ?? {})) {
       if (st.status !== "active") continue;
-      for (const o of this.quest(id)?.objectives ?? []) if (o.kind === "kill" && o.target.startsWith("tag:")) out.add(o.target.slice(4));
+      for (const o of this.quest(id)?.objectives ?? []) {
+        if (o.kind === "kill" && o.target.startsWith("tag:")) out.add(o.target.slice(4));
+        // a drop from the slain is aimed like a kill
+        if (o.kind === "collect" && o.from?.startsWith("tag:")) out.add(o.from.slice(4));
+      }
     }
     return [...out];
   }
@@ -238,10 +267,27 @@ export class QuestLog extends Script {
     for (const c of list) {
       const flags = { ...m.flags };
       if (c.do === "setFlag") flags[c.flag] = true;
+      else if (c.do === "choose") flags[choiceFlag(c.choice, c.option)] = true;
       else delete flags[c.flag];
       m = { ...m, flags };
     }
     return m;
+  }
+
+  /**
+   * An escort step: 1 once THIS character's claim on the NPC has arrived. Otherwise it takes the claim (netState
+   * escort/<npcId>) when the NPC is free at its post, alive, and the body stands within `radius` of it; the npc builtin
+   * walks it from there. A claim held by someone else (or an NPC still walking back) is waited out.
+   */
+  private escort(quest: string, objective: string, npcId: string, radius: number, grace: number, body: [number, number, number] | null): number {
+    const key = escortKey(npcId);
+    const st = this.store.get(key) as EscortState | undefined;
+    if (st) return st.by === this.actor && st.quest === quest && st.objective === objective && st.state === "arrived" ? 1 : 0;
+    if (this.store.get(combatKey.dead(npcId)) === true) return 0;
+    const at = this.positionOf(npcId);
+    if (!body || !at || Math.hypot(body[0] - at[0], body[2] - at[2]) > radius) return 0;
+    this.store.set(key, { by: this.actor, quest, objective, state: "walk", d: 0, away: 0, t: 0, radius, grace } satisfies EscortState);
+    return 0;
   }
 
   override onFixedUpdate(dt: number): void {
@@ -280,6 +326,7 @@ export class QuestLog extends Script {
     const memory0 = (this.store.get(`npc/${this.actor}`) as NpcMemory | undefined) ?? npcMemorySchema.parse({});
     let memory = memory0;
     const world = body ? worldFactsAt(this.ctx, this.store, body[0], body[2]) : null;
+    const now = worldTimeOf(this.store);
     const facts = (): DialogueFacts => ({ npcId: "", memory, journal, sheet, quest: (id) => this.quest(id), metBefore: false, bind: null, bindPoint: null, world });
 
     // auto sources: taken up silently once they hold
@@ -287,10 +334,10 @@ export class QuestLog extends Script {
       const q = this.quest(id);
       if (!q) continue;
       const src = questSource(q);
-      if (src.kind !== "auto" || questOfferProblem(journal, q) !== null) continue;
+      if (src.kind !== "auto" || questOfferProblem(journal, q, now) !== null) continue;
       if (src.when && !testCondition(src.when, facts())) continue;
       if (src.area && !(body && inArea(src.area, body[0], body[2]))) continue;
-      journal = acceptQuest(journal, q, false).journal;
+      journal = acceptQuest(journal, q, false, now).journal;
     }
 
     const active = Object.entries(journal.quests).filter(([, s]) => s.status === "active");
@@ -309,6 +356,12 @@ export class QuestLog extends Script {
           this.endured.delete(timer);
           continue;
         }
+        // an option of a choice already taken (another step of this quest, or the flag from any quest) never progresses
+        const choice = objectiveChoice(o);
+        if (choice && (objectiveLocked(q, questState(journal, id)?.progress ?? {}, o) || choiceLockedByFlags(memory.flags, choice.choice, choice.option))) {
+          this.endured.delete(timer);
+          continue;
+        }
         let amount = 0;
         switch (o.kind) {
           case "visit":
@@ -324,6 +377,22 @@ export class QuestLog extends Script {
             if (sheet) {
               let owned = 0;
               for (const s of Object.values(sheet.items)) if (s.itemId === o.target) owned += s.qty;
+              // a drop from the slain: each matching kill this pass rolls, and what drops goes straight into the bags
+              // (counted once the sheet shows it); never more than the step still wants. A give may reach the sheet a
+              // few passes later, so what was given in the last second counts against `required` too (then it expires:
+              // a give refused for want of room is lost, and the next matching kill rolls again).
+              if (o.from) {
+                const kills = this.kills.filter((v) => QuestLog.matchesKill(v, o.from!)).length;
+                const recent = this.recentDrops.get(timer);
+                const inFlight = recent && this.clock - recent.at < 1 && owned <= recent.owned ? recent.n : 0;
+                let drops = 0;
+                for (let k = 0; k < kills; k++) if (QuestLog.roll() < o.chance) drops++;
+                drops = Math.min(drops, o.required - Math.max(owned, have) - inFlight);
+                if (drops > 0) {
+                  this.recentDrops.set(timer, { n: inFlight + drops, at: this.clock, owned });
+                  this.ctx.events?.emit("inventory.give", { actorId: this.actor, itemId: o.target, qty: drops });
+                }
+              }
               amount = Math.max(0, owned - have);
             }
             break;
@@ -354,6 +423,9 @@ export class QuestLog extends Script {
             if (t >= o.seconds) amount = 1;
             break;
           }
+          case "escort":
+            amount = this.escort(id, o.id, o.target, o.radius, o.grace, body);
+            break;
           case "perform": {
             const at = o.target ? this.positionOf(o.target) : null;
             if (o.target && !at) break;
@@ -365,7 +437,7 @@ export class QuestLog extends Script {
           }
         }
         if (amount <= 0) continue;
-        journal = advanceQuest(journal, q, o.id, amount);
+        journal = advanceQuest(journal, q, o.id, amount, now);
         if ((questState(journal, id)?.progress[o.id] ?? 0) >= o.required) {
           this.endured.delete(timer);
           if (o.then.length) memory = this.consequences(memory, o.then);

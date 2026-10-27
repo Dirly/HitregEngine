@@ -88,6 +88,21 @@ export function createSocketPreview(deps: SocketPreviewDeps) {
   const quat = new THREE.Quaternion();
   const parentQ = new THREE.Quaternion();
   let cachedDoc: SceneDoc | null = null;
+  /**
+   * What each socket was last placed from: its object, params, pose (the model's poseVersion) and where its
+   * carrier stood. Unchanged, the placement is too — and recomputing it walked every bone's ancestor chain
+   * three times per socket per frame (~4k matrix updates a frame in a populated world).
+   */
+  const placed = new Map<string, { object: THREE.Object3D; params: unknown; alt: boolean; pose: number; under: THREE.Matrix4 }>();
+  /** The pose version on the model the bone belongs to (the first ancestor carrying one, up to the carrier). */
+  const poseVersionOf = (bone: THREE.Object3D, carrier: THREE.Object3D): number => {
+    for (let at: THREE.Object3D | null = bone; at; at = at.parent) {
+      const v = (at.userData as { poseVersion?: number }).poseVersion;
+      if (v !== undefined) return v;
+      if (at === carrier) break;
+    }
+    return -1;
+  };
   let sockets: SocketEntity[] = [];
   /** actor -> its character-sheet params, from the same pass as `sockets`. */
   let sheets = new Map<unknown, Record<string, unknown>>();
@@ -218,6 +233,11 @@ export function createSocketPreview(deps: SocketPreviewDeps) {
         // the gizmo edits whichever pose is on show; holstered with no second
         // pose yet, it sits in the hand and the first drag makes one
         object.userData["socketPose"] = holstered ? "alt" : "main";
+        parent.updateWorldMatrix(true, false);
+        const pose = poseVersionOf(bone, parent);
+        const last = placed.get(socket.id);
+        if (last && !fresh && pose >= 0 && last.object === object && last.params === p && last.alt === !!alt && last.pose === pose &&
+          last.under.equals(parent.matrixWorld)) continue;
         const o = alt ? p.altOffset : p.offset;
         const r = alt ? p.altRotationDeg : p.rotationDeg;
         socketWorldPose(
@@ -232,6 +252,8 @@ export function createSocketPreview(deps: SocketPreviewDeps) {
         parent.updateWorldMatrix(true, false);
         object.position.copy(parent.worldToLocal(pos));
         object.quaternion.copy(parent.getWorldQuaternion(parentQ).invert().multiply(quat));
+        if (last) { last.object = object; last.params = p; last.alt = !!alt; last.pose = pose; last.under.copy(parent.matrixWorld); }
+        else placed.set(socket.id, { object, params: p, alt: !!alt, pose, under: parent.matrixWorld.clone() });
       }
     },
     /**

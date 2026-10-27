@@ -532,6 +532,12 @@ export class AnimationSystem {
   holdBones = true;
 
   /**
+   * Host hook: models not to pose this frame at all (a sleeping mob, a mid-distance one out of view — see the
+   * scripting runtime's MobSleepRule). The pose holds where it was; the time is dropped, not banked.
+   */
+  skip: ((entityId: string) => boolean) | null = null;
+
+  /**
    * Pose LOD for animators that declare none (`animator.poseLod` wins when
    * set). Null keeps the old rule: no LOD unless authored. A host running a
    * world full of mobs sets it so a wolf 80 m away is not posed 60 times a
@@ -1057,7 +1063,13 @@ export class AnimationSystem {
       const clip = known ? name : (entry.animator?.play ?? null);
       const time = known && typeof wanted === "object" && wanted ? wanted.time : 0;
       const key = clip && time > 0 ? `${clip}@${time}` : clip;
-      if (entry.posedStill === key) continue;
+      // unchanged since the walk that followed its posing: the bones hold, so the
+      // renderer's matrix walk skips the skeleton (every idle mob in an edited world
+      // re-walked ~300 bones a frame without this)
+      if (entry.posedStill === key) {
+        entry.held = this.holdBones;
+        continue;
+      }
       entry.posedStill = key;
       const action = clip ? entry.actions.get(clip) : undefined;
       if (!action) continue;
@@ -1117,7 +1129,13 @@ export class AnimationSystem {
     if (camera) camera.getWorldPosition(this.lodCameraPosition);
     const protectedEntry = fullRateEntityId ? this.entryFor(fullRateEntityId) : undefined;
     const wall = performance.now();
-    for (const entry of this.entries.values()) {
+    const skipEntity = this.skip; // not `skip`: the loop body declares its own `skip` (pose LOD), and the TDZ broke play
+    for (const [entityId, entry] of this.entries) {
+      if (skipEntity && entry !== protectedEntry && skipEntity(entityId)) {
+        entry.pendingDt = 0;
+        entry.held = this.holdBones;
+        continue;
+      }
       // HIT-STOP: presentation freezes a pose for a few frames (a heavy blow
       // landing) by stamping `userData.poseHoldUntil` (performance.now() ms)
       // on the model, its entity or a body up to three levels above it. The

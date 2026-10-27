@@ -3,6 +3,8 @@ import { atan, cameraPosition, clamp, dot, floor, fog, float, fract, Fn, hash, I
 import { godrays } from "three/addons/tsl/display/GodraysNode.js";
 import { bilateralBlur } from "three/addons/tsl/display/BilateralBlurNode.js";
 import { depthAwareBlend } from "three/addons/tsl/display/depthAwareBlend.js";
+import { isSkyDepth } from "./depth.js";
+import { LANDMARK_FOG_PARTS, type LandmarkFogParts } from "./landmark-fog.js";
 
 /**
  * Fog and volumetric light shafts for `sky.fog` / `sky.volumetric`.
@@ -357,6 +359,9 @@ function buildHeightFogNode(features: FogFeatures = { scatter: false, mist: fals
     const toward: any = pow(max(dot(view, fogSun.direction), 0), fogSun.power);
     fogColor = mix(color, fogSun.color, clamp(toward.mul(fogSun.scatter), 0, 1));
   }
+  // what a landmark variant re-blends with its own curve (landmark-fog.ts); the
+  // lamp glow below is light in the air in front of it, added on top unchanged
+  const landmarkParts: LandmarkFogParts = { color: fogColor, factor };
   // Lamps glowing in the haze: single-scattered light from the nearest point
   // lights along this sight line — the closed form of the inverse-square
   // integral (two atans per lamp), weighted by how thick the air is. It is
@@ -377,17 +382,20 @@ function buildHeightFogNode(features: FogFeatures = { scatter: false, mist: fals
     }
     const air: any = features.mist ? density.add(fogMist.amount.mul(fogMist.scale).mul(0.02)) : density;
     const scatter: any = glow.mul(air).mul(fogLamps.gain);
+    landmarkParts.glow = scatter;
     fogColor = fogColor.add(scatter.div(max(factor, 0.02)));
   }
   /* eslint-enable @typescript-eslint/no-explicit-any */
 
+  const node = fog(fogColor, factor) as THREE.Node<"vec4">;
+  (node as unknown as Record<string, unknown>)[LANDMARK_FOG_PARTS] = landmarkParts;
   return {
     color,
     density,
     heightFalloff,
     baseHeight,
     features: key,
-    node: fog(fogColor, factor) as THREE.Node<"vec4">,
+    node,
   };
 }
 
@@ -707,7 +715,7 @@ export class ScreenShafts {
         const weight: any = float(1).toVar();
         Loop(n, () => {
           pos.subAssign(step);
-          const sky: any = depthNode.sample(pos).r.greaterThanEqual(0.9999);
+          const sky: any = isSkyDepth(depthNode.sample(pos).r);
           const lum: any = dot(colorNode.sample(pos).rgb, vec3(0.299, 0.587, 0.114));
           // linear HDR: the slate sky is ~0.03, lit cloud ~0.2, the sun disc >1 — weight by brightness, capped
           sum.addAssign(select(sky, lum.min(2), float(0)).mul(weight));

@@ -98,6 +98,7 @@ export {
   buildVolumeMesh,
   registerVolume,
   registerVolumeDoc,
+  registerVolumeLoader,
   isVolumeInUse,
   getVolume,
   volumeIds,
@@ -125,6 +126,8 @@ export {
   type NaturalSurfaceRole,
   recipeSplatIndexed,
   riverSchema,
+  riverWeirSchema,
+  type RiverWeirDoc,
   canyonSchema,
   roadSchema,
   townSchema,
@@ -177,6 +180,7 @@ export {
 } from "./recipe.js";
 export {
   regionSchema,
+  regionPaletteSchema,
   regionMoodSchema,
   type RegionMood,
   regionSoundSchema,
@@ -263,6 +267,7 @@ export {
   scatterContact,
   scatterGroundProbe,
   scatterSeatSize,
+  scatterEmbed,
   editedGround,
   FOOTING_OPEN,
   scatterVariation,
@@ -280,6 +285,9 @@ export {
   fittedFalls,
   voxelWaterEntities,
   FALL_LIP_OFFSET,
+  SMALL_ROCK_METRES,
+  LARGE_ROCK_MAX_METRES,
+  scatterMaterialOf,
   type VoxelChunkOptions,
 } from "./chunk.js";
 
@@ -326,6 +334,8 @@ export {
   operatorPrefix,
   operatorPieces,
   withoutOperatorPieces,
+  operatorsFrom,
+  operatorDependencies,
   groundFingerprint,
   featureMinDimension,
   fineCarves,
@@ -346,10 +356,18 @@ export {
   type FineReport,
 } from "./operators.js";
 export { terraceOperatorSchema, type TerraceOperatorParams } from "./operators-terrace.js";
+export { paintOperatorSchema, type PaintOperatorParams } from "./operators-paint.js";
+export { screeOperatorSchema, fanSurface, type ScreeOperatorParams } from "./operators-scree.js";
+export { riverbankOperatorSchema, riverbankStations, type RiverbankOperatorParams } from "./operators-riverbank.js";
+export { groundPaintSchema, groundPaintBounds, createGroundPainter, type GroundPaintDoc, type GroundPainter } from "./ground-paint.js";
+export { rockSetSchema, rockSetBounds, type RockSetDoc } from "./rock-sets.js";
 export * from "./ribbon.js";
+export * from "./floaters.js";
+export * from "./white-water.js";
 export * from "./kit-walls.js";
 export * from "./ledge-landmark.js";
 export { caveOperatorSchema, caveRoutes, type CaveOperatorParams } from "./operators-cave.js";
+export { cliffPathOperatorSchema, solveCliffPath, type CliffPathParams, type CliffPathSolution, type CliffPathPoint } from "./operators-cliff-path.js";
 export { ledgesOperatorSchema, landmarkOptions, landmarkPrefabId, solveLedges, type LedgesOperatorParams } from "./operators-ledges.js";
 export { rockCover, routeCover } from "./cave-route.js";
 export { solveShelves, contourLines, fringeShelves, type ShelvingOptions, type ShelvingResult, type ShelvingGrid, type ShelfArea } from "./shelving.js";
@@ -366,13 +384,14 @@ export {
   type BridgeSpanDoc,
   type BridgeSpanSolved,
 } from "./bridge-spans.js";
-export { measureFallLip, fitFall, shiftFall, fallFace, fallColumn, profileFace, groundAtProfile, fallProbeDepth, FALL_LIP_SEARCH, FALL_FACE_CLEAR, type FallLip, type FallFitField } from "./fall-fit.js";
+export { measureFallLip, fitFall, shiftFall, fallFace, fallColumn, columnReachesPool, profileFace, groundAtProfile, fallProbeDepth, FALL_LIP_SEARCH, FALL_FACE_CLEAR, type FallLip, type FallFitField } from "./fall-fit.js";
 export { fallSiteSchema, applyFallSites, fallSiteLedge, FALL_SITE_MIN_TIER, type FallSiteDoc, type SolvedFallSite } from "./fall-sites.js";
 export { rockFormations, rockFormationSolid, rockMassNodes, zoneWallStone, type RockShapeContext, type RockFormationSolid, type RockFormationSite, type RockFormationOptions, type RockFormationResult, type RockMass } from "./rock-formations.js";
-export { fallSiteRockInstances, meshDensity, type SiteRockInstance, type MeshDensity } from "./fall-site-rocks.js";
+export { fallSiteRockInstances, rockSetInstances, meshDensity, type SiteRockInstance, type MeshDensity } from "./fall-site-rocks.js";
 
 export {
   auditVoxelMesh,
+  bladeClearCells,
   type VoxelMeshAuditOptions,
   type VoxelMeshAuditResult,
   type VoxelMeshBlade,
@@ -400,11 +419,15 @@ export {
   seatObject,
   seatMany,
   seatSamples,
+  flatSafeSink,
   fieldSolidProbe,
   triangleSolidProbe,
   unionSolidProbe,
   defaultSeatContact,
   SEAT_CONTACTS,
+  ROCK_EMBED,
+  ROCK_EMBED_MIN,
+  ROCK_EMBED_SLOPE,
   type SeatContact,
   type SeatFootprint,
   type SeatOptions,
@@ -414,4 +437,6 @@ export {
   type SeatField,
 } from "./seat.js";
 export * from "./landmark-stamp.js";
+export * from "./landmark-built.js";
 export { landmarkOperatorSchema, landmarkSourceSchema, compileLandmarkOperator, landmarkSpecOf, type LandmarkOperatorParams } from "./operators-landmark.js";
+export { wallParamsSchema, wallLandmarkParams, wallMaterials, wallOrigin, wallPlanCurve, buildWall, WALL_SCALE, type WallParams } from "./operators-wall.js";

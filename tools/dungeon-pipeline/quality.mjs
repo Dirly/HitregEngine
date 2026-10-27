@@ -75,13 +75,14 @@ export const GATES = {
   noise: { note: "natural roles carry geometry noise: authoring/noise.json exists, the stamp embeds it, natural solids are noised, no box lumps, no flat natural ceilings" },
   originality: { note: "no set-piece builder or build script shared with another dungeon (function + file hashes across projects/*/authoring; lib/ primitives allowed)" },
   decals: { note: "the decal set is this dungeon's own: no decal texture (same file, byte copy or perceptual near copy) used by another dungeon, no one decal over 40% of them; decals are optional" },
-  atlas: { note: "ONE atlas page; every role mapped into it; one stone / wood / metal colouring (hue + saturation bands); tints only darken" },
+  atlas: { note: "ONE atlas page; every role mapped into it; one stone / wood / metal colouring (hue + saturation bands), plus at most ONE declared accent family (plan.json atlas.accent: roles + hue, e.g. red trim on slate) judged on its own band and kept out of the main means; tints only darken" },
   recipe: { note: "per room: built detail, props via dressing plans (count, kinds), bone cap, 2-5 visible light sources with fixtures, 6-12 decals (>= 3 textures), a set piece" },
   readability: { note: "shipped-light views read dim, never black: per-view near-black share, the median view's near-black share, mean luminance band and flat-fill floor (thresholds.json readability)" },
   matte: { note: "every surface matte unless intended: atlas roles, own material assets and own models roughness >= 0.9 (metal roles >= 0.6), metalness 0 except metal" },
   culling: { note: "interior pop-in along the route: every room's dressing is shown when the walker enters the room (scene cullingProfile; docs/culling.md 'Interior scenes')" },
   stairs: { note: "stair ceilings follow the stair: along every stair/ramp line the clear height above the walking surface stays >= 2.6 m and within a band (no flat ceiling pinch, no stepped roof), cast from the shipped GLBs" },
   arrival: { note: "arrival safe zone: no pack, patrol point, named or boss within safeM (thresholds.json arrival) of any arrival or exit portal anchor, so a player who arrives or leaves is never pulled into the fight lock" },
+  water: { note: "DUNGEON WATER IS ONE STILL LEVEL AT THE BOTTOM (owner rules 2026-10-15 one level, 2026-10-21 \"water all over the place\", 2026-10-25 \"dungeon water only happens at one static level, usually the lowest point of the dungeon; the Weep Hole did not work\"): oneWaterLevel = every plan.water body at the same surface height; lowest = no dry floor under any water surface (water would run there); static = no moving water in the scene (falls, cascades, curtains, channels: tags moving-water/waterfall, path/ribbon or sloping water meshes). None of the three can be excepted" },
   loot: { note: "instance loot coverage: authoring/loot.json drops every armor weight, every armor slot in 2+ weights, every weapon role (caster, 1h, 2h, tank), a trash table, something from every named, a rare from the boss; rarity within the level band, ornaments rare+, every drop wired into its source's loot string (thresholds.json loot)" },
   compare: { note: "reports/compare.png: this dungeon's shipped-light sheet beside fieldfast-barrow and fieldfast-hall, newer than the views (--build makes it)" },
 };
@@ -102,6 +103,7 @@ export function gateInputs(name, root) {
     case "matte": return [...base, c.f("reports/materials.json"), c.f("assets/materials"), c.f("assets/models")];
     case "culling": return [...base, sceneFile(c), c.f("authoring/plan.json")];
     case "arrival": return [...base, c.f("authoring/plan.json")];
+    case "water": return [...base, c.f("authoring/plan.json"), sceneFile(c)];
     case "loot": return [...base, c.f("authoring/plan.json"), c.f("authoring/loot.json")];
     case "stairs": return [...base, c.f("authoring/plan.json"), c.f("authoring/rooms.json"), c.f("reports/kit/markers.json"), c.f("assets/models")];
     default: return base;
@@ -118,9 +120,15 @@ function exceptionsOf(c) {
 }
 
 /** Write reports/quality/<gate>.json from raw failures {space?, check, what}. */
+/** Owner rules no exception can lift: an exception naming one is ignored (and named in the report). 2026-10-25: dungeon water. */
+export const HARD_CHECKS = { water: ["oneWaterLevel", "lowest", "static"] };
+
 export function gateReport(c, gate, failures, metrics) {
+  const hard = new Set(HARD_CHECKS[gate] ?? []);
   const ex = exceptionsOf(c).filter((e) => e.gate === gate);
-  const match = (f) => ex.find((e) => e.check === f.check && (e.space === "*" || e.space === undefined || e.space === f.space));
+  const ignored = ex.filter((e) => hard.has(e.check)).map((e) => e.check + (e.space ? " " + e.space : ""));
+  if (ignored.length) metrics = { ...(metrics ?? {}), ignoredExceptions: ignored };
+  const match = (f) => (hard.has(f.check) ? undefined : ex.find((e) => e.check === f.check && (e.space === "*" || e.space === undefined || e.space === f.space)));
   const failing = [], excepted = [];
   for (const f of failures) { const e = match(f); if (e) excepted.push({ ...f, why: e.why }); else failing.push(f); }
   const report = { gate, passed: failing.length === 0, at: new Date().toISOString(), rule: GATES[gate].note, thresholds: "tools/dungeon-pipeline/thresholds.json", failures: failing, excepted, metrics };
@@ -197,6 +205,16 @@ function spaceAt(spaces, pos) {
 
 function qmul(a, b) { return [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0], a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]]; }
 function qrot(q, v) { const [x, y, z, w] = q; const ix = w * v[0] + y * v[2] - z * v[1], iy = w * v[1] + z * v[0] - x * v[2], iz = w * v[2] + x * v[1] - y * v[0], iw = -x * v[0] - y * v[1] - z * v[2]; return [ix * w + iw * -x + iy * -z - iz * -y, iy * w + iw * -y + iz * -x - ix * -z, iz * w + iw * -z + ix * -y - iy * -x]; }
+/** Bone piles in one room for the recipe's bone cap. Owner rule 2026-10-21: every bone pile carries skulls on or beside it,
+ * so a lone skull (R.skullCompanionPattern) within R.skullCompanionM of a bone pile is that pile's dressing, not another pile;
+ * a skull with no pile near it still counts as one. items: [{ pid, p: [x, y, z] }]. */
+export function countBonePiles(items, R = {}) {
+  const skull = new RegExp(R.skullCompanionPattern ?? "(^|/)skull(-surface)?$"), near = R.skullCompanionM ?? 1.5;
+  const piles = items.filter((i) => !skull.test(i.pid));
+  const lone = items.filter((i) => skull.test(i.pid) && !piles.some((q) => Math.hypot(q.p[0] - i.p[0], q.p[1] - i.p[1], q.p[2] - i.p[2]) <= near));
+  return piles.length + lone.length;
+}
+
 export function worldPositions(entities) {
   const memo = new Map();
   const get = (id) => {
@@ -234,12 +252,20 @@ function bucketFixtures(c) {
 
 let _png = null;
 async function png() { if (!_png) _png = await import(pathToFileURL(path.join(HERE, "../texture-intake/png.mjs")).href); return _png; }
-async function meanColour(file, alphaMin = 128) {
+/** Mean colour of a tile's opaque pixels; `skip(rgb)` drops pixels (an accent stone's course inside a main-stone tile). */
+async function meanColour(file, alphaMin = 128, skip = null) {
   const { decodePng } = await png();
   const img = decodePng(fs.readFileSync(file));
-  let r = 0, g = 0, b = 0, n = 0;
-  for (let i = 0; i < img.data.length; i += 4) { if (img.data[i + 3] < alphaMin) continue; r += img.data[i]; g += img.data[i + 1]; b += img.data[i + 2]; n++; }
-  return n ? [r / n, g / n, b / n] : [0, 0, 0];
+  let r = 0, g = 0, b = 0, n = 0, all = 0;
+  for (let i = 0; i < img.data.length; i += 4) {
+    if (img.data[i + 3] < alphaMin) continue;
+    all++;
+    if (skip && skip([img.data[i], img.data[i + 1], img.data[i + 2]])) continue;
+    r += img.data[i]; g += img.data[i + 1]; b += img.data[i + 2]; n++;
+  }
+  const out = n ? [r / n, g / n, b / n] : [0, 0, 0];
+  out.skipped = all ? 1 - n / all : 0;
+  return out;
 }
 function hsv([r, g, b]) {
   const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
@@ -473,6 +499,14 @@ async function gateDecals(c) {
 
 async function gateAtlas(c) {
   const A = T.atlas, failures = [], metrics = {};
+  // ONE declared accent family (plan.json atlas.accent, e.g. banded slate with a red sandstone trim): its roles are judged
+  // against the accent band, every other tile of that family against the main band, and accent-hued pixels inside a
+  // main tile (a red course in the ashlar) are left out of that tile's mean, so the two colourings never average.
+  const acc = c.plan?.atlas?.accent ?? null;
+  const accent = acc ? { family: acc.family ?? "stone", roles: acc.roles ?? [], hue: acc.hue, band: acc.hueBandDeg ?? A.hueBandDeg, maxSat: acc.maxSat ?? null } : null;
+  if (accent) metrics.accent = accent;
+  if (accent && (!Number.isFinite(accent.hue) || !accent.roles.length)) failures.push({ check: "accent", what: "plan.json atlas.accent needs a hue (deg) and at least one role" });
+  const accentPixel = accent && Number.isFinite(accent.hue) ? (px) => { const v = hsv(px); return v.s >= A.minSatForHue && v.v > 0.08 && hueDiff(v.h, accent.hue) <= accent.band; } : null;
   const pals = palettes(c);
   metrics.pages = pals.map((p) => path.relative(c.root, p).replace(/\\/g, "/"));
   if (pals.length !== 1) failures.push({ check: "pages", what: `${pals.length} DC palettes (atlas pages) in assets/materials; a dungeon has exactly one` });
@@ -499,10 +533,12 @@ async function gateAtlas(c) {
     const tv = hsv(tint);
     if (tv.s > A.tintChroma) failures.push({ space: r.role, check: "tint", what: `role ${r.role} tint ${layer.color} shifts hue (chroma ${tv.s.toFixed(2)} > ${A.tintChroma}); give it its own tile` });
     if (tv.v < A.tintMinValue) failures.push({ space: r.role, check: "tint", what: `role ${r.role} tint ${layer.color} darkens to ${Math.round(100 * tv.v)}% (min ${Math.round(100 * A.tintMinValue)}%)` });
-    const mc = (await meanColour(file)).map((v, i) => (v * tint[i]) / 255);
-    const h = hsv(mc);
     const family = Object.entries(A.families).find(([, list]) => list.includes(r.role))?.[0] ?? null;
-    rows.push({ role: r.role, family, map: layer.map, mean: "#" + mc.map((v) => Math.round(v).toString(16).padStart(2, "0")).join(""), hue: Math.round(h.h), sat: +h.s.toFixed(3), luma: Math.round(luma(mc)) });
+    const isAccent = !!accent && accent.family === family && accent.roles.includes(r.role);
+    const raw = await meanColour(file, 128, accentPixel && accent.family === family && !isAccent ? accentPixel : null);
+    const mc = raw.map((v, i) => (v * tint[i]) / 255);
+    const h = hsv(mc);
+    rows.push({ role: r.role, family: isAccent ? `${family}-accent` : family, map: layer.map, mean: "#" + mc.map((v) => Math.round(v).toString(16).padStart(2, "0")).join(""), hue: Math.round(h.h), sat: +h.s.toFixed(3), luma: Math.round(luma(mc)), ...(raw.skipped > 0.005 ? { accentShare: +raw.skipped.toFixed(3) } : {}) });
   }
   metrics.tiles = rows;
   for (const fam of Object.keys(A.families)) {
@@ -516,6 +552,17 @@ async function gateAtlas(c) {
     for (const r of members) {
       if (meanHue !== null && r.sat >= A.minSatForHue && hueDiff(r.hue, meanHue) > A.hueBandDeg) failures.push({ space: r.role, check: "hue", what: `${fam} tile ${r.role} hue ${r.hue} is ${Math.round(hueDiff(r.hue, meanHue))} deg off the ${fam} colouring (${Math.round(meanHue)}, band ${A.hueBandDeg}): one ${fam} colouring per dungeon` });
       if (Math.abs(r.sat - meanSat) > A.satBand) failures.push({ space: r.role, check: "saturation", what: `${fam} tile ${r.role} saturation ${r.sat} vs the ${fam} mean ${meanSat.toFixed(2)} (band ${A.satBand})` });
+    }
+  }
+  if (accent && Number.isFinite(accent.hue)) {
+    const members = rows.filter((r) => r.family === `${accent.family}-accent`);
+    for (const role of accent.roles) if (!members.some((r) => r.role === role) && !rows.some((r) => r.role === role && r.painted === false)) failures.push({ space: role, check: "accent", what: `accent role ${role} is not a painted ${accent.family} tile` });
+    const meanSat = members.length ? members.reduce((a, r) => a + r.sat, 0) / members.length : 0;
+    metrics[`${accent.family}AccentBand`] = { hue: accent.hue, band: accent.band, sat: +meanSat.toFixed(3), tiles: members.length };
+    for (const r of members) {
+      if (r.sat >= A.minSatForHue && hueDiff(r.hue, accent.hue) > accent.band) failures.push({ space: r.role, check: "hue", what: `accent tile ${r.role} hue ${r.hue} is ${Math.round(hueDiff(r.hue, accent.hue))} deg off the declared accent (${accent.hue}, band ${accent.band})` });
+      if (accent.maxSat !== null && r.sat > accent.maxSat) failures.push({ space: r.role, check: "saturation", what: `accent tile ${r.role} saturation ${r.sat} > the declared accent max ${accent.maxSat}` });
+      if (members.length > 1 && Math.abs(r.sat - meanSat) > A.satBand) failures.push({ space: r.role, check: "saturation", what: `accent tile ${r.role} saturation ${r.sat} vs the accent mean ${meanSat.toFixed(2)} (band ${A.satBand})` });
     }
   }
   return gateReport(c, "atlas", failures, metrics);
@@ -558,30 +605,36 @@ async function gateRecipe(c) {
     if (!bucket) { unplaced.props++; continue; }
     if (mob.test(pid)) continue;
     if (isFixture(pid)) bucket.fixtures.push(pos(id));
-    else if (bone.test(pid)) bucket.bones++;
+    else if (bone.test(pid)) (bucket.boneItems ??= []).push({ pid, p: pos(id) });
     else bucket.props.push(pid);
     if (ownPrefabs.has(pid)) bucket.setPiece.push(`own prop ${pid}`);
   }
+  for (const bucket of per.values()) bucket.bones = countBonePiles(bucket.boneItems ?? [], R);
   if (looseList.length) failures.push({ check: "loose", what: `${looseList.length} prefab(s) placed by transform outside a dressing plan: ${looseList.slice(0, 6).join(", ")}` });
-  // every dressing plan in the scene has a passing check report on disk
-  const plansDir = c.f("authoring/dressing/plans");
+  // every dressing plan in the scene has a passing check report on disk: dress check writes it to authoring/dressing/reports
+  // (apps/playground/tools/_dress-report.mts); a legacy report beside the plan still counts
+  const plansDir = c.f("authoring/dressing/plans"), reportsDir = c.f("authoring/dressing/reports");
   for (const pid of planIds) {
-    const rep = readJson(path.join(plansDir, `${pid}.report.json`));
-    if (!rep) failures.push({ check: "planCheck", what: `dressing plan ${pid} has no dress check report in authoring/dressing/plans` });
+    const rep = readJson(path.join(reportsDir, `${pid}.report.json`)) ?? readJson(path.join(plansDir, `${pid}.report.json`));
+    if (!rep) failures.push({ check: "planCheck", what: `dressing plan ${pid} has no dress check report in authoring/dressing/reports (run dress check)` });
     else if (rep.ok !== true) failures.push({ check: "planCheck", what: `dress check of ${pid} did not pass` });
   }
   // lights: every point/spot light has a fixture prop beside it; fill
   const allFixtures = [...per.values()].flatMap((b) => b.fixtures);
-  const sourceless = [];
+  const sourceless = [], environment = [];
+  const envTags = new Set(R.environmentLightTags ?? []);
   let fill = 0;
   for (const [id, e] of Object.entries(E)) {
     const L = e.components?.light; if (!L) continue;
     if (L.kind === "ambient" || L.kind === "hemisphere") { fill = Math.max(fill, L.intensity ?? 0); continue; }
     if (L.kind !== "point" && L.kind !== "spot") continue;
+    // the place is its source (an oculus's daylight, light off water): tagged, no fixture, capped per dungeon
+    if (e.tags?.some((t) => envTags.has(t))) { environment.push(id); continue; }
     const p = pos(id);
     if (!allFixtures.some((f) => Math.hypot(f[0] - p[0], f[1] - p[1], f[2] - p[2]) <= R.sourceRadiusM)) sourceless.push(id);
   }
-  metrics.fill = fill; metrics.sourcelessLights = sourceless.length;
+  metrics.fill = fill; metrics.sourcelessLights = sourceless.length; metrics.environmentLights = environment.length;
+  if (environment.length > (R.environmentLightsMax ?? 0)) failures.push({ check: "environmentLights", what: `${environment.length} environment lights (tagged ${[...envTags].join("/")}; max ${R.environmentLightsMax ?? 0}): give the rest a fixture` });
   if (fill > R.dungeon.fillMax) failures.push({ check: "fill", what: `ambient fill ${fill} > ${R.dungeon.fillMax} (thresholds recipe.dungeon.fillNote; the fill comes from lighting.json)` });
   if (sourceless.length) failures.push({ check: "sourceless", what: `${sourceless.length} light(s) with no fixture prop within ${R.sourceRadiusM} m: ${sourceless.slice(0, 5).join(", ")}` });
   // decals
@@ -1186,6 +1239,70 @@ async function gateArrival(c) {
 }
 
 /**
+ * DUNGEON WATER: one still level at the bottom (owner rules 2026-10-15, 2026-10-21, 2026-10-25 "dungeon water only
+ * happens at one static level, usually the lowest point of the dungeon; the Weep Hole did not work"). Pure, tested in
+ * water-level.test.mjs:
+ *  - oneWaterLevel: plan.water bodies grouped by surface height (5 cm); the level is the one most bodies share (ties:
+ *    the largest area); every body off it fails.
+ *  - lowest: water lies at the lowest point. A space with a floor UNDER a body's surface that no body at that height
+ *    floods (none holds the space centre) is a dry floor below water: the water would run there. Fails.
+ *  - static: nothing moves. A scene entity tagged moving-water or waterfall, or tagged water with a path/ribbon mesh or
+ *    a surface that is not level (> 0.1 m between its points), fails. A pool is a level plane and passes.
+ */
+export function measureWaterLevels(plan) {
+  const bodies = (plan.water ?? []).map((w) => ({ id: w.id, z: Math.round(w.surfaceZ * 20) / 20, area: Math.abs((w.x?.[1] - w.x?.[0]) * (w.y?.[1] - w.y?.[0])) || 0 }));
+  const by = new Map();
+  for (const b of bodies) { const g = by.get(b.z) ?? { z: b.z, n: 0, area: 0, ids: [] }; g.n++; g.area += b.area; g.ids.push(b.id); by.set(b.z, g); }
+  const levels = [...by.values()].sort((p, r) => r.n - p.n || r.area - p.area);
+  const level = levels[0]?.z ?? null;
+  return { level, levels, off: bodies.filter((b) => b.z !== level) };
+}
+
+/** The three water checks on a plan (+ the shipped scene entities when given). */
+export function measureWaterRule(plan, ents = null) {
+  const m = measureWaterLevels(plan);
+  const bodies = plan.water ?? [];
+  const inRect = (p, w) => Array.isArray(p) && Array.isArray(w.x) && Array.isArray(w.y) && p[0] >= Math.min(...w.x) - 1e-6 && p[0] <= Math.max(...w.x) + 1e-6 && p[1] >= Math.min(...w.y) - 1e-6 && p[1] <= Math.max(...w.y) + 1e-6;
+  const dryBelow = [];
+  for (const w of bodies) {
+    if (typeof w.surfaceZ !== "number") continue;
+    for (const s of plan.spaces ?? []) {
+      const f = typeof s.floor === "number" ? s.floor : typeof s.walkFloor === "number" ? s.walkFloor : null;
+      if (f === null || f >= w.surfaceZ - 0.05) continue;
+      const flooded = bodies.some((b) => typeof b.surfaceZ === "number" && Math.abs(b.surfaceZ - w.surfaceZ) < 0.05 && inRect(s.centre, b));
+      if (!flooded) dryBelow.push({ water: w.id, z: w.surfaceZ, space: s.id, floor: f });
+    }
+  }
+  const moving = [];
+  if (ents) for (const [id, e] of Object.entries(ents)) {
+    const tags = Array.isArray(e?.tags) ? e.tags : [];
+    const src = e?.components?.mesh?.source;
+    if (!src) continue;
+    if (tags.includes("waterfall") || tags.includes("moving-water")) { moving.push({ id, why: "tagged " + (tags.includes("waterfall") ? "waterfall" : "moving-water") }); continue; }
+    if (!tags.includes("water")) continue;
+    if (src.kind === "path") { moving.push({ id, why: "a path/ribbon water mesh (a channel or a fall)" }); continue; }
+    const pts = Array.isArray(src.points) ? src.points : Array.isArray(src.vertices) ? src.vertices : null;
+    if (src.kind === "surface" && pts && pts.length) {
+      const ys = pts.map((p) => p?.[1]).filter((y) => typeof y === "number");
+      if (ys.length && Math.max(...ys) - Math.min(...ys) > 0.1) moving.push({ id, why: "a water surface that is not level (" + (Math.max(...ys) - Math.min(...ys)).toFixed(2) + " m of fall)" });
+    }
+  }
+  return { ...m, dryBelow, moving };
+}
+
+async function gateWater(c) {
+  const sf = sceneFile(c);
+  const scene = exists(sf) ? readJson(sf) : null;
+  const m = measureWaterRule(c.plan, scene?.entities ?? null);
+  const failures = [
+    ...m.off.map((b) => ({ space: b.id, check: "oneWaterLevel", what: `water ${b.id} stands at ${b.z} m, off the one level ${m.level} m (${m.levels.map((l) => `${l.z}: ${l.ids.join("/")}`).join("; ")}): dungeon water is one still level; re-shape its floor so it floods at ${m.level} or remove it` })),
+    ...m.dryBelow.map((d) => ({ space: d.space, check: "lowest", what: `water ${d.water} stands at ${d.z} m above the dry floor of ${d.space} (${d.floor} m): water lies at the lowest point of the dungeon; sink the body to the bottom or raise that floor above the level` })),
+    ...m.moving.map((x) => ({ space: x.id, check: "static", what: `${x.id} is moving water (${x.why}): dungeon water is one still level; no falls, cascades, curtains or channels (mist/vfx or nothing)` })),
+  ];
+  return gateReport(c, "water", failures, { level: m.level, levels: m.levels, dryBelow: m.dryBelow.length, moving: m.moving.length, scene: scene ? path.relative(c.root, sf).replace(/\\/g, "/") : null });
+}
+
+/**
  * Instance loot coverage, measured on authoring/loot.json — the instance's drop list:
  *   { version, items: [ { id, name, slot, weight?, role?, rarity, from: ["trash" | <miniboss id> | <boss id>], chance,
  *                          appearance?: { model, parts, texture } } ] }
@@ -1254,6 +1371,7 @@ export async function runGate(name, root, opts = {}) {
     case "culling": return gateCulling(c);
     case "stairs": return gateStairs(c);
     case "arrival": return gateArrival(c);
+    case "water": return gateWater(c);
     case "loot": return gateLoot(c);
     default: throw new Error(`unknown gate ${name} (${Object.keys(GATES).join(", ")})`);
   }

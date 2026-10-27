@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { EQUIPMENT_SLOTS } from "./character/items.js";
 import { dialogueConditionSchema } from "./npc/conditions.js";
-import { ACTION_FIELDS, questAreaSchema, questBlocks, questConsequenceSchema, questSourceSchema, type QuestArea, type QuestSource } from "./quest-blocks.js";
+import { ACTION_FIELDS, questAreaSchema, questBlocks, questConsequenceSchema, questRepeatSchema, questSourceSchema, repeatProblem, type ChooseConsequence, type QuestArea, type QuestSource } from "./quest-blocks.js";
 
 export const tooltipSchema = z.object({
   title: z.string(), subtitle: z.string().default(""), description: z.string().default(""),
@@ -70,7 +70,7 @@ export type GameHud = z.infer<typeof gameHudSchema>;
 const objectiveBase = {
   id: z.string().min(1),
   label: z.string().min(1),
-  target: z.string().default("").describe("What the action is aimed at: an entity id (kill, talk, interact, read, deliver, perform) or an item id (collect). A kill may also name a spawn template id (every spawned copy counts) or `tag:<tag>` (every body carrying the tag, e.g. `tag:creature:wolf`)."),
+  target: z.string().default("").describe("What the action is aimed at: an entity id (kill, talk, interact, read, deliver, perform, escort) or an item id (collect). A kill may also name a spawn template id (every spawned copy counts) or `tag:<tag>` (every body carrying the tag, e.g. `tag:creature:wolf`)."),
   required: z.number().int().positive().default(1),
   area: questAreaSchema
     .optional()
@@ -105,6 +105,7 @@ export const questObjectiveSchema = z
     z.object({ ...objectiveBase, kind: z.literal("deliver"), ...ACTION_FIELDS.deliver }).describe(actionText("deliver")),
     z.object({ ...objectiveBase, kind: z.literal("endure"), ...ACTION_FIELDS.endure }).describe(actionText("endure")),
     z.object({ ...objectiveBase, kind: z.literal("perform"), ...ACTION_FIELDS.perform }).describe(actionText("perform")),
+    z.object({ ...objectiveBase, kind: z.literal("escort"), ...ACTION_FIELDS.escort }).describe(actionText("escort")),
   ])
   .describe("One step of a quest. `kind` is a registered action block (spec `questBlocks.action`); its extra fields are that block's.");
 export type QuestObjective = z.infer<typeof questObjectiveSchema>;
@@ -113,7 +114,14 @@ export const questSchema = z.object({
   id: z.string().min(1), title: z.string().min(1), description: z.string(),
   objectives: z.array(questObjectiveSchema).min(1)
     .refine(a => new Set(a.map(o => o.id)).size === a.length, "duplicate objective id")
-    .refine(a => a.every(o => o.after.every(x => x !== o.id && a.some(p => p.id === x))), "`after` names an objective this quest does not have (or itself)"),
+    .refine(a => a.every(o => o.after.every(x => x !== o.id && a.some(p => p.id === x))), "`after` names an objective this quest does not have (or itself)")
+    .refine(a => a.every(o => o.then.filter(t => t.do === "choose").length <= 1), "a step carries at most one `choose`")
+    .refine(a => {
+      const options = new Map<string, Set<string>>();
+      for (const o of a) for (const t of o.then) if (t.do === "choose") options.set(t.choice, (options.get(t.choice) ?? new Set()).add(t.option));
+      const steps = (c: string): number => a.filter(o => o.then.some(t => t.do === "choose" && t.choice === c)).length;
+      return [...options].every(([c, opts]) => opts.size >= 2 && opts.size === steps(c));
+    }, "a `choose` choice needs at least two steps in the quest, each with a different option"),
   area: questAreaSchema.optional().describe("Approximate search region [world X, world Z], never an exact objective marker. Only the compass may visualize this region. Absent = no compass guidance (an errand inside a town)."),
   rewardXp: z.number().int().min(0).default(0),
   rewardCoins: z.number().int().min(0).default(0).describe("Coins paid on completion, in copper (100 copper = 1 silver, 100 silver = 1 gold)."),
@@ -129,6 +137,7 @@ export const questSchema = z.object({
   level: z.number().int().min(1).default(1).describe("Suggested level, shown in the journal; never enforced."),
   places: z.string().default("").describe("places asset id (assets/places/<town>.json) its text's {dir:id} / {far:id} / {place:id} tokens resolve against — never write a compass word by hand. A step in another town names its own (objective `places`)."),
   source: questSourceSchema.optional(),
+  repeat: questRepeatSchema.optional(),
 }).describe("Quest definition (assets/quests/<id>.json). Progress belongs to authority-owned quest journals, not this asset.");
 export type Quest = z.infer<typeof questSchema>;
 export type QuestInput = z.input<typeof questSchema>;
@@ -137,6 +146,8 @@ export type QuestStatus = (typeof QUEST_STATUSES)[number];
 const questStateSchema = z.object({
   status: z.enum(QUEST_STATUSES).describe("active: objectives open; ready: objectives done, waiting to be handed in to the quest's `turnIn` NPC; complete: rewarded."),
   progress: z.record(z.string(), z.number().int().min(0)),
+  completions: z.number().int().min(0).optional().describe("Times completed (a `repeat` quest counts every run); absent = never, or once before this was recorded."),
+  completedAt: z.number().optional().describe("World time (hours: world/day * 24 + world/hour) of the last completion; absent = no clock ran."),
 });
 export type QuestState = z.infer<typeof questStateSchema>;
 export const questJournalSchema = z.object({
@@ -176,13 +187,30 @@ export function objectivePlaces(quest: Quest, objective: QuestObjective): string
   return objective.places || quest.places;
 }
 
-/** Whether every objective this one waits on (`after`) is complete. */
+/** The exclusive choice an objective is an option of (its `choose` consequence), if any. */
+export function objectiveChoice(objective: QuestObjective): ChooseConsequence | undefined {
+  return objective.then.find((t): t is ChooseConsequence => t.do === "choose");
+}
+
+/** Whether another option of this objective's choice is already complete in this quest: then this one is locked. */
+export function objectiveLocked(quest: Quest, progress: Readonly<Record<string, number>>, objective: QuestObjective): boolean {
+  const c = objectiveChoice(objective);
+  if (!c) return false;
+  return quest.objectives.some(o => o.id !== objective.id && (progress[o.id] ?? 0) >= o.required && objectiveChoice(o)?.choice === c.choice);
+}
+
+/** Complete, or a locked alternative of a choice that was taken: nothing more is needed from this step. */
+export function objectiveSettled(quest: Quest, progress: Readonly<Record<string, number>>, objective: QuestObjective): boolean {
+  return (progress[objective.id] ?? 0) >= objective.required || objectiveLocked(quest, progress, objective);
+}
+
+/** Whether every objective this one waits on (`after`) is settled (complete, or a locked alternative of a choice taken). */
 export function objectiveOpen(quest: Quest, progress: Readonly<Record<string, number>>, objectiveId: string): boolean {
   const o = quest.objectives.find(x => x.id === objectiveId);
   if (!o) return false;
   return o.after.every(id => {
     const before = quest.objectives.find(x => x.id === id);
-    return !!before && (progress[id] ?? 0) >= before.required;
+    return !!before && objectiveSettled(quest, progress, before);
   });
 }
 
@@ -194,32 +222,46 @@ export function nearbyTowns<T extends { center: readonly [number, number] }>(tow
 }
 
 /**
- * Monotonic objective progress; completion/rewards can only happen once. A
+ * Monotonic objective progress; completion/rewards happen once per run (a `repeat` quest runs again only through acceptQuest). A
  * quest with a `turnIn` NPC stops at "ready": only {@link turnInQuest} completes it.
  * An objective whose `after` steps are not complete does not progress.
  */
-export function advanceQuest(journal: QuestJournal, quest: Quest, objectiveId: string, amount = 1): QuestJournal {
+export function advanceQuest(journal: QuestJournal, quest: Quest, objectiveId: string, amount = 1, worldNow?: number | null): QuestJournal {
   const state = journal.quests[quest.id];
   const objective = quest.objectives.find(o => o.id === objectiveId);
   if (!state || state.status !== "active" || !objective || !Number.isFinite(amount) || amount <= 0) return journal;
-  if (!objectiveOpen(quest, state.progress, objectiveId)) return journal;
+  if (!objectiveOpen(quest, state.progress, objectiveId) || objectiveLocked(quest, state.progress, objective)) return journal;
   const was = state.progress[objectiveId] ?? 0;
   const now = Math.min(objective.required, was + Math.floor(amount));
   if (now <= was) return journal;
   const progress = { ...state.progress, [objectiveId]: now };
-  const done = quest.objectives.every(o => (progress[o.id] ?? 0) >= o.required);
+  const done = quest.objectives.every(o => objectiveSettled(quest, progress, o));
   const status: QuestStatus = !done ? "active" : quest.turnIn ? "ready" : "complete";
-  const next: QuestState = { status, progress };
+  const next: QuestState = status === "complete" ? completed({ ...state, status, progress }, worldNow) : { ...state, status, progress };
   return { ...journal, tracked: status === "complete" && journal.tracked === quest.id ? null : journal.tracked,
     quests: { ...journal.quests, [quest.id]: next } };
 }
 
 const emptyJournal = (): QuestJournal => questJournalSchema.parse({ quests: {} });
 
-/** Why `quest` cannot be accepted into `journal` right now, or null when it can. */
-export function questOfferProblem(journal: QuestJournal | null | undefined, quest: Quest): string | null {
+/** The state as it completes: one more completion, stamped with the world time when a clock runs. */
+function completed(state: QuestState, now: number | null | undefined): QuestState {
+  const at = typeof now === "number" && Number.isFinite(now) ? { completedAt: now } : {};
+  return { ...state, status: "complete", completions: (state.completions ?? 0) + 1, ...at };
+}
+
+/**
+ * Why `quest` cannot be accepted into `journal` right now, or null when it can. `now` is the world time in hours
+ * (`worldTime`): a complete `repeat` quest is on offer again once it has passed the repeat's `after`.
+ */
+export function questOfferProblem(journal: QuestJournal | null | undefined, quest: Quest, now?: number | null): string | null {
   const state = questState(journal, quest.id);
-  if (state) return state.status === "complete" ? "already completed" : "already accepted";
+  if (state && state.status !== "complete") return "already accepted";
+  if (state) {
+    if (!quest.repeat) return "already completed";
+    const wait = repeatProblem(quest.repeat, state, now);
+    if (wait) return wait;
+  }
   for (const need of quest.requires) if (questState(journal, need)?.status !== "complete") return `requires "${need}" first`;
   return null;
 }
@@ -227,22 +269,24 @@ export function questOfferProblem(journal: QuestJournal | null | undefined, ques
 /**
  * Accept a quest (a giver's dialogue, a script's autoStart); it becomes the tracked one when `track`.
  */
-export function acceptQuest(journal: QuestJournal | null | undefined, quest: Quest, track = true): { journal: QuestJournal; error: string | null } {
+export function acceptQuest(journal: QuestJournal | null | undefined, quest: Quest, track = true, now?: number | null): { journal: QuestJournal; error: string | null } {
   const base = journal ?? emptyJournal();
-  const problem = questOfferProblem(base, quest);
+  const problem = questOfferProblem(base, quest, now);
   if (problem) return { journal: base, error: problem };
-  const fresh: QuestState = { status: "active", progress: {} };
+  // a repeat starts over: objectives reset, the completion record is kept
+  const prior = questState(base, quest.id);
+  const fresh: QuestState = { status: "active", progress: {}, ...(prior?.completions !== undefined ? { completions: prior.completions } : {}), ...(prior?.completedAt !== undefined ? { completedAt: prior.completedAt } : {}) };
   const quests = { ...base.quests, [quest.id]: fresh };
   return { journal: { ...base, tracked: track || !base.tracked ? quest.id : base.tracked, quests }, error: null };
 }
 
 /** Hand a READY quest in: it becomes complete. Paying the rewards (once, on this transition) is the caller's. */
-export function turnInQuest(journal: QuestJournal | null | undefined, quest: Quest): { journal: QuestJournal; error: string | null } {
+export function turnInQuest(journal: QuestJournal | null | undefined, quest: Quest, now?: number | null): { journal: QuestJournal; error: string | null } {
   const base = journal ?? emptyJournal();
   const state = base.quests[quest.id];
   if (!state) return { journal: base, error: "quest not accepted" };
   if (state.status === "complete") return { journal: base, error: "already handed in" };
   if (state.status !== "ready") return { journal: base, error: "objectives not finished" };
-  const quests = { ...base.quests, [quest.id]: { ...state, status: "complete" as const } };
+  const quests = { ...base.quests, [quest.id]: completed(state, now) };
   return { journal: { ...base, tracked: base.tracked === quest.id ? null : base.tracked, quests }, error: null };
 }

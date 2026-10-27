@@ -49,7 +49,7 @@ export function formatCoins(copper: number): string {
 // -- dialogue -------------------------------------------------------------------------
 
 export * from "./conditions.js";
-import { clockHolds, dialogueConditionSchema, weatherHolds, type DialogueCondition, type WorldFacts } from "./conditions.js";
+import { clockHolds, dialogueConditionSchema, tideHolds, weatherHolds, worldTime, type DialogueCondition, type WorldFacts } from "./conditions.js";
 
 export const dialogueActionSchema = z
   .discriminatedUnion("do", [
@@ -185,7 +185,7 @@ export function testCondition(c: DialogueCondition | undefined, f: DialogueFacts
     const want = c.status ?? "complete";
     const ok =
       want === "none" ? status === undefined
-      : want === "available" ? !!def && questOfferProblem(f.journal, def) === null
+      : want === "available" ? !!def && questOfferProblem(f.journal, def, worldTime(f.world)) === null
       : want === "taken" ? status === "active" || status === "ready"
       : status === want;
     if (!ok) return false;
@@ -198,6 +198,7 @@ export function testCondition(c: DialogueCondition | undefined, f: DialogueFacts
   if (c.bound !== undefined && isBoundAt(f.bind, f.bindPoint) !== c.bound) return false;
   if (c.clock !== undefined && !clockHolds(c.clock, f.world?.hour)) return false;
   if (c.weather !== undefined && !weatherHolds(c.weather, f.world)) return false;
+  if (c.tide !== undefined && !tideHolds(c.tide, f.world)) return false;
   if (c.all && !c.all.every((x) => testCondition(x, f))) return false;
   if (c.any && !c.any.some((x) => testCondition(x, f))) return false;
   if (c.not && testCondition(c.not, f)) return false;

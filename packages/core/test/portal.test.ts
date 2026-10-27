@@ -51,6 +51,24 @@ describe("portal records", () => {
 });
 
 describe("portal arrivals and trigger volumes", () => {
+  it("a measured queue puts each overflow spot on its own floor and never on a spot with none", () => {
+    const base: [number, number, number] = [0, 101.2, 0]; // anchor on the floor at 100, facing +Z down a stair
+    const queue = [-0.4, -0.8, null]; // two stair steps lower, then the door's box: unusable
+    const second = portalArrivalSpot(base, 0, 4, [base], queue);
+    expect(second[2]).toBeCloseTo(1.1);
+    expect(second[1]).toBeCloseTo(100.8);
+    const third = portalArrivalSpot(base, 0, 4, [base, second], queue);
+    expect(third[1]).toBeCloseTo(100.4);
+    // every measured spot taken: the anchor again, never the unmeasured spot past the queue
+    expect(portalArrivalSpot(base, 0, 4, [base, second, third], queue)).toEqual(base);
+    expect(portalArrivalSpot(base, 0, 4, [base], [])).toEqual(base);
+    // resolvePortalArrival reads portalAnchor.queue
+    const entities: Record<string, EntityDoc> = {
+      a: { name: "a", parent: null, tags: [], components: { transform: { position: [0, 100, 0], rotation: [0, 0, 0, 1] }, portalAnchor: { corridor: 4, queue } } },
+    };
+    const landed = resolvePortalArrival({ arrive: { scene: "d", anchor: "a" } }, "d", entities, [[0, 101.2, 0]])!;
+    expect(landed.position[1]).toBeCloseTo(100.8);
+  });
   it("a corridor anchor lines later arrivals up along its forward line; open ground rings them", () => {
     const base: [number, number, number] = [10, 1.2, 0];
     const yaw = Math.PI / 2; // facing +X

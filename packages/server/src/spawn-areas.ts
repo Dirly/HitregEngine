@@ -24,9 +24,10 @@
  * shows enemies blinking.
  */
 
-import { polygonEdgeDistance, regionAt, spawnAreaSchema, type EntityDoc, type MobTemperament, type SpawnAreaData, type SpawnRare } from "@hitreg/core";
+import { polygonEdgeDistance, regionAt, spawnAreaSchema, WORLD_HOUR_KEY, type EntityDoc, type MobTemperament, type SpawnAreaData, type SpawnRare } from "@hitreg/core";
 import type { GameServer } from "./server.js";
 import { nearestOnRoute } from "@hitreg/scripting";
+import { SOLID_WORLD } from "@hitreg/physics";
 import type { NpcManager, NpcRecord } from "./npcs.js";
 import { SIGHT_MAX, sightRadius } from "./sight.js";
 
@@ -90,6 +91,18 @@ export interface MixRow {
   count: [number, number];
   temperament?: MobTemperament;
   near: number;
+  /** Companion templates spawned in the same roll (a band). */
+  with?: string[];
+}
+
+/** Is a spawnArea `hours` window [from, to) open at this world hour? (wraps past midnight; no window or no clock = open) */
+export function hoursOpen(hours: readonly [number, number] | undefined, hour: unknown): boolean {
+  if (!hours) return true;
+  if (typeof hour !== "number" || !Number.isFinite(hour)) return true;
+  const h = ((hour % 24) + 24) % 24;
+  const [from, to] = hours;
+  if (from === to) return true;
+  return from < to ? h >= from && h < to : h >= from || h < to;
 }
 
 /** A roaming area's own bookkeeping. */
@@ -113,7 +126,7 @@ export function resolveSpawnArea(raw: unknown): SpawnAreaData {
 
 /** What one roll draws from: `mix`, else the `spawns` read as rows weighted by their counts (one creature a roll). */
 export function spawnTable(data: SpawnAreaData): MixRow[] {
-  if (data.mix?.length) return data.mix.map((m) => ({ template: m.template, weight: m.weight ?? 1, count: [Math.min(m.count[0], m.count[1]), Math.max(m.count[0], m.count[1])] as [number, number], ...(m.temperament ? { temperament: m.temperament } : {}), near: m.near ?? 4 }));
+  if (data.mix?.length) return data.mix.map((m) => ({ template: m.template, weight: m.weight ?? 1, count: [Math.min(m.count[0], m.count[1]), Math.max(m.count[0], m.count[1])] as [number, number], ...(m.temperament ? { temperament: m.temperament } : {}), near: m.near ?? 4, ...(m.with?.length ? { with: [...m.with] } : {}) }));
   return (data.spawns ?? []).map((sp) => ({ template: sp.template, weight: sp.count ?? 1, count: [1, 1] as [number, number], near: 4 }));
 }
 
@@ -170,6 +183,44 @@ export function pickHiddenPoint(
     if (y !== null) return [x, y, z];
   }
   return null;
+}
+
+/** How far (m) above or below the area's height a spread spawn point must find ground, or it is rejected. */
+export const SPREAD_GROUND_REACH = 2;
+
+/**
+ * A pack member's spawn point: a random spot in the spread disc that has ground (`ground(x, z, y)` answers a height or
+ * null), tried `tries` times; null when every try missed (the caller uses the area's centre). A point off a tipped or
+ * broken floor is never used: creatures spawned in the air fell out of the world (tipped-kirk y -85).
+ */
+export function pickSpreadPoint(
+  center: readonly [number, number, number],
+  spread: number,
+  ground: (x: number, z: number, y: number) => number | null,
+  rand: () => number = Math.random,
+  tries = 12,
+): [number, number, number] | null {
+  for (let i = 0; i < tries; i++) {
+    const a = rand() * Math.PI * 2;
+    const r = Math.sqrt(rand()) * spread;
+    const x = center[0] + Math.cos(a) * r, z = center[2] + Math.sin(a) * r;
+    const g = ground(x, z, center[1]);
+    if (g !== null) return [x, g, z];
+  }
+  return null;
+}
+
+/**
+ * Ground within `reach` metres of height `y` from the physics world (a dungeon or any scene without voxel terrain):
+ * a ray down from y + reach to y - reach against SOLID_WORLD (walkable floors are TERRAIN, masonry WORLD); a hit must
+ * face up (normal y >= 0.5, not a wall or ceiling underside). null = no floor there.
+ */
+export function physicsGroundWithin(
+  raycast: (from: [number, number, number], dir: [number, number, number], len: number, opts: { solid: boolean; layers: number }) => { point: readonly number[]; normal: readonly number[] } | null,
+  x: number, y: number, z: number, reach = SPREAD_GROUND_REACH,
+): number | null {
+  const hit = raycast([x, y + reach, z], [0, -1, 0], reach * 2, { solid: false, layers: SOLID_WORLD });
+  return hit && (hit.normal[1] ?? 0) >= 0.5 ? hit.point[1]! : null;
 }
 
 /** The point a fraction `u` (0..1) of the way along a polyline, by length (x, z; y interpolated). */
@@ -282,6 +333,14 @@ export class SpawnAreaManager {
     // a rare exists only when a placeholder rolls it: a scene template named as one never stands at its authored spot
     for (const r of data.rares ?? []) {
       if (this.npcs.npcs.get(r.template)?.authored) this.npcs.despawn(r.template);
+    }
+    // a roaming area's population IS its table: a scene template it names (a wanderer, a band's companion) never stands
+    // at its authored spot, it only walks as the area rolls it (a template a `pack` also counts on is left standing)
+    if (record.roaming) {
+      const packed = new Set<string>();
+      for (const other of this.areas.values()) if (!other.roaming) for (const s of other.data.spawns) packed.add(s.template);
+      for (const row of spawnTable(data))
+        for (const t of [row.template, ...(row.with ?? [])]) if (!packed.has(t) && this.npcs.npcs.get(t)?.authored) this.npcs.despawn(t);
     }
     return record;
   }
@@ -474,14 +533,18 @@ export class SpawnAreaManager {
     for (const spawn of [...area.data.spawns, ...rolled]) {
       const mood = temperamentParams((spawn as { temperament?: MobTemperament }).temperament ?? area.data.temperament, area.data.territory);
       for (let i = 0; i < spawn.count; i++) {
-        const angle = Math.random() * Math.PI * 2;
-        const r = Math.sqrt(Math.random()) * spawn.spread;
-        const x = area.position[0] + Math.cos(angle) * r;
-        const z = area.position[2] + Math.sin(angle) * r;
         // the area's own height says which floor it is on: an area in a cave spawns on the cave floor, not on the
-        // mountain above it; a spot past the cave wall falls back to the area's centre
-        const g = this.server.terrain ? this.server.terrain.groundNear(x, z, area.position[1]) : null;
-        const at: [number, number, number] = !this.server.terrain ? [x, area.position[1], z] : g === null ? [area.position[0], area.position[1] + 1.2, area.position[2]] : [x, g + 1.2, z];
+        // mountain above it. Without voxel terrain (a dungeon) the floor is the physics world's, within 2 m of the
+        // area's height. A spot with no ground (past a wall, off a tipped floor) is re-rolled, then falls back to
+        // the area's centre.
+        const terrain = this.server.terrain, sim = this.server.world.sim;
+        const ground = terrain
+          ? (x: number, z: number, y: number) => terrain.groundNear(x, z, y)
+          : sim?.raycast ? (x: number, z: number, y: number) => physicsGroundWithin((f, d, l, o) => sim.raycast(f, d, l, o), x, y, z) : null;
+        const p = ground ? pickSpreadPoint(area.position, spawn.spread, ground) : null;
+        const at: [number, number, number] = p ? [p[0], p[1] + 1.2, p[2]]
+          : ground ? [area.position[0], area.position[1] + 1.2, area.position[2]]
+          : (() => { const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * spawn.spread; return [area.position[0] + Math.cos(a) * r, area.position[1], area.position[2] + Math.sin(a) * r] as [number, number, number]; })();
         const params: Record<string, unknown> = { home: area.position, leash: area.data.leash, roam: area.data.roam, spawnArea: area.id, ...(route.length ? { patrol: route } : {}), ...mood };
         // the slot's first fill rolls too: a rare is never guaranteed up when its camp is first placed
         const rare = this.pickRare(area, spawn.template, this.server.world.tick);
@@ -571,6 +634,20 @@ export class SpawnAreaManager {
     const target = populationOf(area.data);
     const table = spawnTable(area.data);
     const hiddenFrom = area.data.hiddenFrom ?? 60;
+    if (!hoursOpen(area.data.hours, world.netState.get(WORLD_HOUR_KEY))) {
+      // out of its hours (bats by day): nothing spawns, and whoever no player can see is cleared
+      delete st.next;
+      for (const id of [...area.npcIds]) {
+        const p = world.positionOf(id);
+        if (p && !hiddenFromAll(p[0], p[2], players, hiddenFrom)) continue;
+        st.members.delete(id);
+        st.timers = st.timers.filter((t) => t.corpse !== id);
+        area.npcIds = area.npcIds.filter((x) => x !== id);
+        this.fenced.delete(id);
+        this.npcs.despawn(id);
+      }
+      return;
+    }
     for (let guard = 0; guard < 8; guard++) {
       const free = target - area.npcIds.length;
       if (free <= 0) return;
@@ -580,9 +657,10 @@ export class SpawnAreaManager {
         st.next = roll;
       }
       const next = st.next;
-      if (next.count > free) {
-        if (st.timers.length) return; // a pair waits for a corpse's slot to free up as well
-        next.count = free; // nothing else will free a slot: the last one is a single, never a population stuck short
+      const band = next.row.with?.length ?? 0;
+      if (next.count + band > free) {
+        if (st.timers.length) return; // a pair (or a band) waits for a corpse's slot to free up as well
+        next.count = Math.max(1, Math.min(next.count, free)); // nothing else will free a slot: never a population stuck short
       }
       if (next.at && !hiddenFromAll(next.at[0], next.at[2], players, hiddenFrom)) delete next.at; // someone walked up to it
       if (!next.at) {
@@ -592,7 +670,7 @@ export class SpawnAreaManager {
       }
       const terrain = this.server.terrain;
       if (terrain && !terrain.prefetch(next.at[0], next.at[2], terrain.resolved.streamer.cellSize)) return; // its cells are on their way
-      this.spawnRoll(area, next.row, next.count, next.at);
+      this.spawnRoll(area, next.row, next.count, next.at, Math.max(0, Math.min(band, free - next.count)));
       delete st.next;
     }
   }
@@ -627,12 +705,15 @@ export class SpawnAreaManager {
   }
 
   /** Spawn one roll: the first member on the spot, the rest within the row's `near`, each with its own home and roam. */
-  private spawnRoll(area: SpawnAreaRecord, row: MixRow, count: number, at: [number, number, number]): void {
+  private spawnRoll(area: SpawnAreaRecord, row: MixRow, count: number, at: [number, number, number], companions = 0): void {
     const st = area.roaming!;
     const route = (area.data.placement ?? "pack") === "route" ? SpawnAreaManager.route(area) : [];
     const [rlo, rhi] = area.data.roamRange ?? [40, 80];
     const mood = temperamentParams(row.temperament ?? area.data.temperament, area.data.territory);
-    for (let i = 0; i < count; i++) {
+    // one roll is one group: on a route every member sets off the same way (a pack walks together, never splits at birth)
+    const patrolDir = this.rand() < 0.5 ? -1 : 1;
+    const members = [...Array.from({ length: count }, () => row.template), ...(row.with ?? []).slice(0, companions)];
+    for (let i = 0; i < members.length; i++) {
       let p: [number, number, number] = at;
       if (i > 0) {
         const a = this.rand() * Math.PI * 2;
@@ -647,15 +728,15 @@ export class SpawnAreaManager {
       let leash: number;
       if (route.length) {
         leash = area.data.leash;
-        params = { home, leash, roam: area.data.roam, spawnArea: area.id, patrol: route, patrolDir: this.rand() < 0.5 ? -1 : 1, ...mood };
+        params = { home, leash, roam: area.data.roam, spawnArea: area.id, patrol: route, patrolDir, ...(area.data.loop && route.length > 3 ? { patrolLoop: true } : {}), ...mood };
       } else {
         const roam = Math.min(rlo, rhi) + this.rand() * Math.abs(rhi - rlo);
         leash = Math.max(area.data.leash, roam + 20);
         params = { home, leash, roam, spawnArea: area.id, ...mood };
       }
       // every spawn of a slot is a placeholder roll: the rare comes up in this member's place
-      const rare = this.pickRare(area, row.template, this.server.world.tick);
-      const template = rare ? rare.template : row.template;
+      const rare = this.pickRare(area, members[i]!, this.server.world.tick);
+      const template = rare ? rare.template : members[i]!;
       const id = `${area.id}#${template}#${++st.counter}`;
       const record = this.npcs.spawn(template, [p[0], p[1] + (this.server.terrain ? 1.2 : 0), p[2]], {
         id,
@@ -702,7 +783,10 @@ export class SpawnAreaManager {
   /** Backstop leash: a body 1.5× past its leash is put back home. */
   /** The area's patrol route in world coordinates (empty = none). */
   static route(area: SpawnAreaRecord): Array<[number, number, number]> {
-    return (area.data.patrol ?? []).map((p) => [area.position[0] + p[0], area.position[1] + p[1], area.position[2] + p[2]] as [number, number, number]);
+    const route = (area.data.patrol ?? []).map((p) => [area.position[0] + p[0], area.position[1] + p[1], area.position[2] + p[2]] as [number, number, number]);
+    // a loop is closed: its first point repeated last, so the leash, the fence and the brain see the closing leg
+    if (area.data.loop && route.length > 2) route.push([...route[0]!] as [number, number, number]);
+    return route;
   }
 
   private fence(area: SpawnAreaRecord): void {

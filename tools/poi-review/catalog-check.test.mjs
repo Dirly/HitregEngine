@@ -108,3 +108,21 @@ test('a big DC prop needs a passing see-through review newer than its model', ()
   const later = new Date(Date.now() + 60000); fs.utimesSync(rep, later, later);
   assert.equal(seeThroughProp({ id: 'wrecks/ship', size: [30, 9, 8], models: [dc], root }), null);
 });
+
+test('a dependency held by a dependsOn project (the closure the runtime loads) is met; one held nowhere is missing', t => {
+  const { project, write, prefab, check } = fixture(t);
+  // move the fire material and effect into a sibling "foundation" project the fixture depends on
+  const base = path.join(path.dirname(project), `${path.basename(project)}-foundation`);
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  for (const rel of ['assets/materials/fx/ember-bed.json', 'assets/vfx/env/fire-brazier.json']) {
+    fs.mkdirSync(path.dirname(path.join(base, rel)), { recursive: true });
+    fs.renameSync(path.join(project, rel), path.join(base, rel));
+  }
+  assert.match(check(['assets/prefabs/brazier.json']).failures.join('\n'), /Missing dependency: assets\/materials\/fx\/ember-bed.json/);
+  write('project.json', { dependsOn: [path.basename(base)] });
+  const report = check(['assets/prefabs/brazier.json']);
+  assert.deepEqual(report.failures, []);
+  assert.ok(report.results[0].dependencies.includes('assets/vfx/env/fire-brazier.json'));
+  write('assets/prefabs/brazier.json', { ...prefab, entities: { ...prefab.entities, lid: { components: { mesh: { source: { kind: 'asset', assetId: 'lid.glb' } } } } } });
+  assert.match(check(['assets/prefabs/brazier.json']).failures.join('\n'), /Missing dependency: assets\/models\/lid.glb/);
+});

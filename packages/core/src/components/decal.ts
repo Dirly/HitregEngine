@@ -114,6 +114,16 @@ export const decalSchema = z
           "distance of the box's front/back planes fades to transparent, so wrapped edges feather out instead of " +
           "slicing off mid-surface. Omit for a hard clip at the box.",
       ),
+    maxAngle: z
+      .number()
+      .min(0)
+      .max(90)
+      .default(60)
+      .describe(
+        "Steepest receiving surface, in DEGREES between a face's normal and the projection axis: faces turned further " +
+          "away (beam sides, pier flanks, the far side of a corner) are not painted, so the sticker never smears " +
+          "sideways. Raise only for a decal meant to wrap a rounded surface.",
+      ),
     sortOffset: z
       .number()
       .optional()
@@ -126,6 +136,9 @@ export const decalSchema = z
     "Projected sticker detail: the renderer builds fitted, clipped geometry (three DecalGeometry) for whatever " +
       "static meshes intersect the projection box, and REGENERATES the projection whenever the decal component is " +
       "edited, the decal entity moves, or nearby geometry is edited/moved — never author fitted geometry by hand. " +
+      "Only the surface NEAREST the entity's position receives it: geometry standing in front of that surface " +
+      "(a beam, a pier, a prop) or behind it inside the box is left unpainted, and faces steeper than `maxAngle` are " +
+      "skipped — so place the entity on the surface it belongs to. " +
       "Position the entity with the placement solver (`placement.snap: \"wall\"|\"ground\"|\"ceiling\"`), which puts " +
       "it ON the surface in exactly the orientation the default `direction` expects.",
   );

@@ -1,7 +1,9 @@
 /**
  * LANDFORM OPERATORS — install them, gate the 6 m rule, preview them. (docs/voxel-worlds.md "Landform operators")
  *
- *   worldgen op <world> --apply <file|id> [--dry-run] [--inverse f.json]   compile + install one doc (or an array), inverse kept
+ *   worldgen op <world> --apply <file|id> [--dry-run] [--inverse f.json] [--no-cascade]   compile + install one doc (or an array), inverse kept;
+ *        operators compose in RECIPE ORDER: each reads the ground the earlier ones made, and the later ones that overlap
+ *        it are re-applied after it (--no-cascade: leave them STALE)
  *   worldgen op <world> --remove <id> [--inverse f.json]                    drop an operator and its op:<id>:* pieces, inverse kept
  *   worldgen op <world> --undo <inverse.json>                               apply a kept inverse batch
  *   worldgen op <world> --list | --check                                    installed operators (--check: EDITED / MISSING / STALE)
@@ -17,15 +19,21 @@
  * Every command takes `--recipe <file>` (worldgen-wide) to work on a scratch copy.
  */
 import fs from "node:fs";
+import { missingRibbonMaterials, writeRibbonMaterials } from "./_ribbon-materials.mts";
+import { unbakedLandmarks } from "./_landmark-bakes.mts";
 import path from "node:path";
 import os from "node:os";
 import {
   applyOperator,
+  worldRecipeSchema,
   applyRecipeEdits,
+  buildLandmarkMesh,
   buildVolumeMesh,
+  isNaturalRole,
   createVolume,
   compileLandmarkOperator,
   landmarkOperatorSchema,
+  wallLandmarkParams,
   decodeHeightfieldValues,
   landmarkOptions,
   landmarkTileDoc,
@@ -45,13 +53,17 @@ import {
   ribbonArc,
   ribbonHalfWidth,
   withoutOperatorPieces,
+  operatorDependencies,
   type OperatorFieldReader,
   type RecipeEdit,
   type WorldField,
   type WorldRecipe,
+  operatorSpecs,
 } from "@hitreg/core";
 import { encodePng, decodePng } from "./_png.mjs";
 import { findAsset } from "./_closure.mjs";
+import { updateJsonFile } from "./_scene-write.mts";
+import { paintPaletteFault } from "./_zone-palette.mts";
 
 export interface OpHost {
   argv: string[];
@@ -71,7 +83,10 @@ const opt = (argv: string[], name: string): string | undefined => {
 
 export function operatorReader(recipe: WorldRecipe, id: string): OperatorFieldReader {
   const field = createWorldField(withoutOperatorPieces(recipe, id));
-  return { height: (x, z) => field.height(x, z), density: (x, y, z) => field.density(x, y, z), voxelSize: field.voxelSize, seaLevel: recipe.seaLevel, seed: recipe.seed };
+  return {
+    height: (x, z) => field.height(x, z), density: (x, y, z) => field.density(x, y, z), voxelSize: field.voxelSize, seaLevel: recipe.seaLevel, seed: recipe.seed,
+    surfaces: recipe.surfaces.map((s) => s.name), scatterRules: recipe.scatter.map((s) => s.id),
+  };
 }
 
 /** `--apply` source: a JSON file holding one doc or an array, else the id of an operator already in the recipe. */
@@ -117,6 +132,18 @@ function keepInverse(file: string, recipe: WorldRecipe, what: string, inverse: R
 
 export function commandOp(host: OpHost): void {
   const { argv, fail } = host;
+  if (argv.includes("--kinds")) {
+    // the registered operators and their params (the same schemas spec.json carries), without loading a world
+    const specs = operatorSpecs(), only = opt(argv, "kinds");
+    for (const [name, s] of Object.entries(specs)) {
+      if (only && !only.startsWith("--") && only !== name) continue;
+      console.log(`${name.padEnd(10)} ${String(s.description).split("\n")[0]!.slice(0, 200)}`);
+      if (!only || only.startsWith("--")) continue;
+      const props = ((s.schema as { properties?: Record<string, { description?: string; default?: unknown }> }).properties ?? {});
+      for (const [k, p] of Object.entries(props)) console.log(`  ${k.padEnd(18)} ${p.default !== undefined ? `(${JSON.stringify(p.default)}) ` : ""}${(p.description ?? "").slice(0, 180)}`);
+    }
+    return;
+  }
   const { recipe, file } = host.loadRecipe();
   const apply = opt(argv, "apply"), remove = opt(argv, "remove"), undo = opt(argv, "undo");
   if (argv.includes("--list") || argv.includes("--check") || (!apply && !remove && !undo)) {
@@ -127,6 +154,22 @@ export function commandOp(host: OpHost): void {
       console.log(`  ${r.state.padEnd(10)} ${r.id.padEnd(24)} ${r.op.padEnd(10)} ${doc.compiled?.pieces.join(", ") ?? ""}${r.why ? ` — ${r.why}` : ""}`);
     }
     if (rows.some((r) => r.state !== "ok")) process.exitCode = 1;
+    for (const o of recipe.features.operators ?? []) {
+      const pf = paintPaletteFault(recipe, o as never);
+      if (pf) { console.log(`  PALETTE    ${pf}`); process.exitCode = 1; }
+    }
+    // a ribbon without its material draws flat white-grey: `--apply` writes them, --check fails while any is missing
+    const missing = missingRibbonMaterials(recipe, file);
+    if (missing.length) {
+      console.log(`  MISSING    ribbon materials: ${missing.join(", ")} — worldgen op ${recipe.name} --apply <any path id> writes them (or tools/worldgen-ribbon.mts materials <world.json>)`);
+      process.exitCode = 1;
+    }
+    // an applied landmark/wall whose prefab was never baked is simply absent in game (the chunk skips it)
+    for (const u of unbakedLandmarks(recipe, file)) {
+      const opId = u.id.replace(/^op:/, "").replace(/:landmark$/, "");
+      console.log(`  UNBAKED    ${u.id}: ${u.prefab} has no prefab — node node_modules/tsx/dist/cli.mjs tools/landmark.mts <project> ${recipe.name} ${opId}`);
+      process.exitCode = 1;
+    }
     return;
   }
   if (undo) {
@@ -150,8 +193,15 @@ export function commandOp(host: OpHost): void {
   }
   let current = recipe;
   const inverse: RecipeEdit[] = [];
-  for (const doc of operatorDocs(recipe, apply!, fail, host.project)) {
+  const batch = operatorDocs(recipe, apply!, fail, host.project);
+  // ids of this batch still to apply: the cascade leaves them to their own (new) doc instead of re-applying the old one
+  const pending = new Set(batch.map((d) => String(d.id ?? "")));
+  for (const doc of batch) {
     const id = String(doc.id ?? "");
+    pending.delete(id);
+    // one palette per role per zone (regions[].palette): a paint outside it is refused, a face paint must be a cliff tile
+    const palFault = paintPaletteFault(current, doc as never);
+    if (palFault && !argv.includes("--allow-off-palette")) fail(`${palFault} (--allow-off-palette to override, with a ruling)`);
     const t0 = performance.now();
     let res;
     try { res = applyOperator(current, doc, operatorReader(current, id)); } catch (e) { fail((e as Error).message); }
@@ -159,13 +209,57 @@ export function commandOp(host: OpHost): void {
     inverse.unshift(...res.inverse);
     console.log(`  ${id} (${String(doc.op)}): ${res.doc.compiled!.pieces.join(", ")} in ${Math.round(performance.now() - t0)} ms`);
     console.log(`    ${JSON.stringify(res.report).slice(0, 900)}`);
+    // operators compose in recipe order: the later ones that overlap this one read the ground it just changed
+    if (!argv.includes("--no-cascade")) {
+      const ids = (current.features.operators ?? []).map((o) => o.id);
+      const moved = new Set([id]); // transitive: a re-applied operator moves the ground of the ones after it
+      for (const later of ids.slice(ids.indexOf(id) + 1)) {
+        if (pending.has(later)) continue; // applied later in this batch from its new doc (it cascades on itself)
+        const on = operatorDependencies(current, later).filter((d) => moved.has(d));
+        if (!on.length) continue;
+        const ldoc = current.features.operators!.find((o) => o.id === later)! as Record<string, unknown>;
+        const before = (ldoc.compiled as { ground?: string } | undefined)?.ground;
+        let lres;
+        try { lres = applyOperator(current, ldoc, operatorReader(current, later)); } catch (e) { fail(`cascade ${later}: ${(e as Error).message}`); }
+        if (lres.doc.compiled!.ground === before) continue; // its ground did not move
+        current = lres.recipe;
+        inverse.unshift(...lres.inverse);
+        moved.add(later);
+        console.log(`  re-applied ${later} (${String(ldoc.op)}, later in recipe order, overlaps ${on.join(", ")})${ldoc.op === "landmark" ? " — re-bake it if its prefab id changed" : ""}`);
+      }
+    }
   }
   if (argv.includes("--dry-run")) return;
   const inv = keepInverse(file, recipe, `apply-${path.basename(apply!, ".json")}`, inverse, opt(argv, "inverse"));
   host.writeRecipe(current, file);
   console.log(`  inverse: ${inv}  (worldgen op ${recipe.name} --undo <it>)`);
-  const fine = fineCarves(current, { legacy: readLegacy(file) });
+  // the materials every ribbon draws with, next to the world (overwritten in place): never left for an installer to forget
+  if ((current.features.ribbons ?? []).length) {
+    const mat = writeRibbonMaterials(current, file);
+    for (const w of mat.warnings) console.warn(`  ribbon materials: ${w}`);
+    console.log(`  ribbon materials: ${mat.wrote.length} file(s) written`);
+  }
+  const fine = fineCarves(current, { legacy: readLegacy(file), excepted: readFineExceptions(file) });
   console.log(`  6 m gate: ${fine.ok ? "ok" : `${fine.faults.length} fault(s)`}${fine.legacy.length ? ` (${fine.legacy.length} legacy)` : ""}`);
+}
+
+// ------------------------------------------------------------------ gate stamps
+
+/**
+ * A read-only whole-world gate (float, rock-skins, water-edges, water-logic) stamps its stage WITHOUT writing back the
+ * recipe it loaded: a sweep runs many minutes while other jobs edit the world, and writing the copy loaded at the start
+ * would silently undo their edits. Re-read the file, set only `pipeline[stage]`, write. The stamp is the time the sweep
+ * LOADED the world (`at`), so anything a dependency re-ran during the sweep still shows the gate STALE.
+ */
+export function stampGateStage(file: string, stage: string, at: string): void {
+  updateJsonFile(file, (raw) => { // under the recipe's lock (tools/_scene-write.mts)
+    const fresh = raw as { pipeline?: Record<string, string> };
+    fresh.pipeline = { ...(fresh.pipeline ?? {}), [stage]: at };
+    const parsed = worldRecipeSchema.safeParse(fresh);
+    if (!parsed.success) throw new Error(`refusing to stamp ${stage}: the recipe on disk is invalid:
+${parsed.error.message}`);
+    return { doc: parsed.data };
+  }, { label: `stamp ${stage}` });
 }
 
 // ------------------------------------------------------------------ the 6 m gate
@@ -180,10 +274,22 @@ export function readLegacy(recipeFile: string): string[] {
   return Array.isArray(j.ids) ? j.ids : [];
 }
 
+/** The world's coordinator rulings (`<world>.fine-exceptions.json` beside the legacy list): every listed kind/id carve.
+ * The per-job gate (tools/poi-review/job.mjs gate 11) reads the same file, so a ruled carve passes both. */
+export function fineExceptionsFile(recipeFile: string): string {
+  return path.join(sideDir(recipeFile), path.basename(recipeFile).replace(/.json$/i, ".fine-exceptions.json"));
+}
+export function readFineExceptions(recipeFile: string): string[] {
+  const f = fineExceptionsFile(recipeFile);
+  if (!fs.existsSync(f)) return [];
+  const j = JSON.parse(fs.readFileSync(f, "utf8"));
+  return (Array.isArray(j.exceptions) ? j.exceptions : []).flatMap((e: { carves?: unknown }) => (Array.isArray(e.carves) ? e.carves.map(String) : []));
+}
+
 /** One line for `worldgen status`. */
 export function fineStatusLine(recipe: WorldRecipe, file: string): { ok: boolean; line: string } {
-  const rep = fineCarves(recipe, { legacy: readLegacy(file) });
-  const tail = `${rep.legacy.length} legacy, ${rep.exempt} kit-owned (tw-/bs-)`;
+  const rep = fineCarves(recipe, { legacy: readLegacy(file), excepted: readFineExceptions(file) });
+  const tail = `${rep.legacy.length} legacy, ${rep.excepted.length} excepted by ruling, ${rep.exempt} kit-owned (tw-/bs-)`;
   return rep.ok
     ? { ok: true, line: `ok      terrain-fine  (6 m rule: ${tail})` }
     : { ok: false, line: `FAIL    terrain-fine  — ${rep.faults.length} carve(s) under ${FINE_MIN} m: ${FINE_REMEDY} (worldgen fine ${recipe.name} --list; ${tail})` };
@@ -205,13 +311,13 @@ export function commandFine(host: OpHost): void {
     console.log(`  recorded ${ids.length} legacy fine carve(s) in ${legacyFile(file)}`);
     return;
   }
-  const rep = fineCarves(recipe, { legacy: readLegacy(file), near });
-  const out = { ok: rep.ok, rule: `smallest dimension >= ${FINE_MIN} m`, remedy: FINE_REMEDY, near: near ?? null, counts: { faults: rep.faults.length, legacy: rep.legacy.length, exempt: rep.exempt }, faults: rep.faults, legacy: rep.legacy.length };
+  const rep = fineCarves(recipe, { legacy: readLegacy(file), excepted: argv.includes("--no-exceptions") ? [] : readFineExceptions(file), near });
+  const out = { ok: rep.ok, rule: `smallest dimension >= ${FINE_MIN} m`, remedy: FINE_REMEDY, near: near ?? null, counts: { faults: rep.faults.length, legacy: rep.legacy.length, excepted: rep.excepted.length, exempt: rep.exempt }, faults: rep.faults, legacy: rep.legacy.length };
   const outFile = opt(argv, "out");
   if (outFile) { fs.mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true }); fs.writeFileSync(outFile, `${JSON.stringify(out, null, 1)}\n`); }
   if (argv.includes("--json")) console.log(JSON.stringify(out, null, 1));
   else {
-    console.log(`${recipe.name}: 6 m gate ${rep.ok ? "ok" : "FAIL"} — ${rep.faults.length} fault(s), ${rep.legacy.length} legacy, ${rep.exempt} kit-owned${near ? ` within ${near[2]} m of ${near[0]},${near[1]}` : ""}`);
+    console.log(`${recipe.name}: 6 m gate ${rep.ok ? "ok" : "FAIL"} — ${rep.faults.length} fault(s), ${rep.legacy.length} legacy, ${rep.excepted.length} excepted by ruling, ${rep.exempt} kit-owned${near ? ` within ${near[2]} m of ${near[0]},${near[1]}` : ""}`);
     const show = argv.includes("--list") ? rep.faults : rep.faults.slice(0, 12);
     for (const f of show) console.log(`  ${f.kind}/${f.id}: ${f.what} — ${FINE_REMEDY}`);
     if (show.length < rep.faults.length) console.log(`  ... ${rep.faults.length - show.length} more (--list)`);
@@ -488,7 +594,7 @@ export function commandOpPreview(host: OpHost): void {
   const gBefore = sampleGrid(fBefore, a, res);
   const gAfter = fAfter ? sampleGrid(fAfter, a, res) : null;
   // a landmark stands on the terrain: the map and the walk read the higher of the two
-  const landmark = doc && after ? (String(doc.op) === "landmark" ? stampPreview(before, after, doc) : landmarkPreview(before, doc)) : null;
+  const landmark = doc && after ? (["landmark", "wall"].includes(String(doc.op)) ? stampPreview(before, after, doc) : landmarkPreview(before, doc)) : null;
   if (landmark && gAfter) for (let j = 0; j < gAfter.n; j++) for (let i = 0; i < gAfter.n; i++) {
     const t = landmark.top(a.x - a.r + i * res, a.z - a.r + j * res);
     if (t !== null && t > gAfter.h[j * gAfter.n + i]!) gAfter.h[j * gAfter.n + i] = t;
@@ -542,15 +648,29 @@ function projectOf(file: string): string {
  * walk mode stand on the landmark rather than on the terrain under it.
  */
 function stampPreview(before: WorldRecipe, after: WorldRecipe, doc: Record<string, unknown>): { mesh: MeshOut; top: (x: number, z: number) => number | null; tris: number } | null {
-  const id = String(doc.id), p = landmarkOperatorSchema.parse(operatorParams(doc));
+  const id = String(doc.id);
+  const p = String(doc.op) === "wall" ? wallLandmarkParams(operatorParams(doc), operatorReader(before, id), { id }) : landmarkOperatorSchema.parse(operatorParams(doc));
   const c = compileLandmarkOperator(p, operatorReader(before, id), { id }, { skipThin: true });
   const piece = (after.features.landmarks ?? []).find((l) => l.id === `op:${id}:landmark`);
   if (!c || !piece) return null;
   const [ox, oy, oz] = piece.position, f = Math.max(0.5, c.compiled.voxel);
   const pos: number[] = [], nrm: number[] = [], idx: number[] = [];
   const tops = new Map<string, number>();
-  for (const tile of c.compiled.tiles) {
-    const m = buildVolumeMesh(createVolume({ voxelSize: f, bounds: tile, palette: ["rock"], nodes: c.compiled.nodes }));
+  // built: the real mesh (crisp, no voxels); natural roles of a mixed landmark still preview through the DC lattice below
+  const built = p.kind === "built" ? buildLandmarkMesh(c.compiled) : null;
+  if (built) for (const g of built.groups) {
+    const base = pos.length / 3;
+    for (let i = 0; i < g.vertexCount; i++) {
+      const x = g.positions[i * 3]! + ox, y = g.positions[i * 3 + 1]! + oy, z = g.positions[i * 3 + 2]! + oz;
+      pos.push(x, y, z);
+      for (let k = 0; k < 3; k++) nrm.push(Math.round(g.normals[i * 3 + k]! * 127));
+      const key = `${Math.round(x)},${Math.round(z)}`; if (y > (tops.get(key) ?? -Infinity)) tops.set(key, y);
+    }
+    for (const v of g.indices) idx.push(v + base);
+  }
+  const dcNodes = built ? c.compiled.nodes.filter((n, i) => n.op === "sub" || isNaturalRole(c.compiled.roles[i]!)) : c.compiled.nodes;
+  if (dcNodes.some((n) => n.op !== "sub")) for (const tile of c.compiled.tiles) {
+    const m = buildVolumeMesh(createVolume({ voxelSize: f, bounds: tile, palette: ["rock"], nodes: dcNodes }));
     const base = pos.length / 3;
     for (let i = 0; i < m.vertexCount; i++) {
       const x = m.positions[i * 3]! + ox, y = m.positions[i * 3 + 1]! + oy, z = m.positions[i * 3 + 2]! + oz;

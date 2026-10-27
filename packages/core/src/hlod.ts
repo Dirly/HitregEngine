@@ -5,6 +5,7 @@ import type { Vec3, WorldTransform } from "./math.js";
 import { worldTransforms } from "./math.js";
 import { expandScene } from "./prefab.js";
 import { chunkToSceneDoc, chunkKey, type ChunkCell } from "./chunks.js";
+import { landmarkComponentSchema, type LandmarkComponentData } from "./components/landmark.js";
 
 /**
  * Static HLOD generation (open-world-streaming-plan §7 / Phase E), headless core.
@@ -138,6 +139,39 @@ function hasHiddenAncestor(doc: SceneDoc, id: string): boolean {
   return false;
 }
 
+/**
+ * The `landmark` an entity draws under: its own, else its nearest ancestor's (defaults applied), or null. A
+ * landmark's meshes keep their own fog curve in the far proxies too, so the flattened bake entity carries it.
+ */
+export function landmarkOf(doc: SceneDoc, id: string): LandmarkComponentData | null {
+  const seen = new Set<string>();
+  for (let at: string | null = id; at !== null && !seen.has(at); ) {
+    seen.add(at);
+    const entity: EntityDoc | undefined = doc.entities[at];
+    if (!entity) break;
+    const data = entity.components["landmark"];
+    if (data !== undefined) {
+      const parsed = landmarkComponentSchema.safeParse(data);
+      return parsed.success ? parsed.data : null;
+    }
+    at = entity.parent;
+  }
+  return null;
+}
+
+/** True if the entity or an ancestor carries the `landmark` tag (every landmark bake tags its prefab entities). */
+function landmarkTagged(doc: SceneDoc, id: string): boolean {
+  const seen = new Set<string>();
+  for (let at: string | null = id; at !== null && !seen.has(at); ) {
+    seen.add(at);
+    const entity: EntityDoc | undefined = doc.entities[at];
+    if (!entity) break;
+    if (entity.tags?.includes("landmark")) return true;
+    at = entity.parent;
+  }
+  return false;
+}
+
 // -- build-doc assembly ------------------------------------------------------
 
 /** The dependency chain a supercell bake reads (§6), sorted & de-duplicated. */
@@ -229,7 +263,12 @@ export function assembleHlodBuildDoc(
         wt.position[2] - origin[2],
       ];
       const mesh = structuredClone(entity.components["mesh"]) as Record<string, unknown>;
+      // a landmark (a baked `landmarks/*` prefab, tagged `landmark` by its bake, with or without a fog curve) stays real
+      // geometry in the far proxy: with `lod` on, the proxy collapsed a 170 m town ring wall into ONE impostor card,
+      // which read as a pale untextured band from the 300 m approach (Cindermoot, 2026-10-20)
+      if (landmarkTagged(expanded, id)) mesh["lod"] = false;
       const outId = id.startsWith(idPrefix) ? id.slice(idPrefix.length) : id;
+      const landmark = landmarkOf(expanded, id);
       entities[outId] = {
         name: entity.name,
         parent: null,
@@ -241,6 +280,7 @@ export function assembleHlodBuildDoc(
             scale: [...wt.scale],
           },
           mesh,
+          ...(landmark ? { landmark } : {}),
         },
       };
 
@@ -325,7 +365,7 @@ function collectTextureDeps(materials: ReadonlySet<string>, assets: AssetLibrary
  * Bump when the HLOD bake algorithm changes in a way that invalidates cached
  * output regardless of source. Part of every cache key (§8).
  */
-export const HLOD_GENERATOR_VERSION = "hlod-core-2";
+export const HLOD_GENERATOR_VERSION = "hlod-core-4"; // 3: bake entities carry their `landmark`; 4: landmark-tagged meshes never impostor (lod false)
 
 export interface HlodCacheKeyInput {
   /** Defaults to HLOD_GENERATOR_VERSION; override to force-bust a range. */

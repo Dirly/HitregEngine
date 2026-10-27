@@ -747,3 +747,47 @@ export function swimming(planarSpeed: number, dive: number, swimSpeed: number): 
   if (dive > 0.01 || dive < -0.01) return "stroke";
   return planarSpeed > Math.max(0.35, swimSpeed * 0.15) ? "stroke" : "tread";
 }
+
+/** Feet this far above a surface (or over no water at all) are dry with room to spare: see DryWaterMemo. */
+export const WATER_DRY_MARGIN = 1;
+/** A dry answer is reused while the feet stay within this many metres of where it was asked... */
+export const WATER_RESAMPLE_M = 0.35;
+/** ...for at most this many samples. */
+export const WATER_RESAMPLE_STEPS = 8;
+
+/** The part of a water reading the memo needs (ctx.waterAt's WaterAt). */
+export interface WaterReading {
+  surfaceY: number;
+  depth: number;
+}
+
+/**
+ * Per-body water sampling for a locomotion tick. A procedural world answers "is the sea here" with a whole ground
+ * evaluation (field.waterY) — about a millisecond on a detailed coast, every fixed step, for every body. While the
+ * feet are clearly DRY (no water, or more than WATER_DRY_MARGIN above its surface) a body that has moved less than
+ * WATER_RESAMPLE_M cannot have reached water, so the last answer stands for up to WATER_RESAMPLE_STEPS samples, its
+ * depth recomputed from the exact foot height. A wet (or nearly wet) reading is never reused.
+ */
+export class DryWaterMemo<T extends WaterReading = WaterReading> {
+  private x = 0;
+  private y = 0;
+  private z = 0;
+  private steps = -1;
+  private result: T | null = null;
+
+  sample(x: number, footY: number, z: number, query: (x: number, y: number, z: number) => T | null): T | null {
+    if (this.steps >= 0 && this.steps < WATER_RESAMPLE_STEPS && Math.hypot(x - this.x, footY - this.y, z - this.z) < WATER_RESAMPLE_M) {
+      this.steps += 1;
+      if (this.result) this.result.depth = this.result.surfaceY - footY;
+      return this.result;
+    }
+    const result = query(x, footY, z);
+    const dry = result === null || result.surfaceY - footY < -WATER_DRY_MARGIN;
+    this.steps = dry ? 0 : -1;
+    this.x = x;
+    this.y = footY;
+    this.z = z;
+    this.result = dry ? result : null;
+    return result;
+  }
+}

@@ -20,7 +20,7 @@ function compilePath(params: PathParams, reader: OperatorFieldReader, ctx: { id:
   const ribbon = { id: "ribbon", ...fit.ribbon };
   const { minWidth, ...patch } = ribbonPatch({ ...ribbon, id: ctx.id }, 1);
   return {
-    features: { ribbons: [ribbon], heightPatches: [{ id: "grade", ...patch }] },
+    features: { ribbons: [ribbon], heightPatches: [{ id: "grade", ...patch, ...(params.calm ? { calm: true } : {}) }] },
     report: { ...fit.report, gradeWidth: Math.round(minWidth * 10) / 10, warnings: fit.ribbon.warnings },
   };
 }

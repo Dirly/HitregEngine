@@ -8,6 +8,7 @@ import {
   fallbackProjectOrder,
   projectClosure,
   resolveAssetFile,
+  readAssetJsonBatch,
   sceneOwnerProject,
 } from "../tools/_asset-resolve.mts";
 
@@ -99,4 +100,21 @@ test("an unknown or malformed project gives no scope", () => {
   const { projectsRoot } = fixture();
   assert.equal(projectClosure(projectsRoot, "nope"), null);
   assert.equal(projectClosure(projectsRoot, "../world"), null);
+});
+
+test("batch reads preserve scope, per-file errors, freshness and path boundaries", async () => {
+  const { root, projectsRoot } = fixture();
+  try {
+    const file = path.join(projectsRoot, "world/assets/items/test.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{"value":1}');
+    const scope = projectClosure(projectsRoot, "world");
+    const first = await readAssetJsonBatch(root, ["items/test.json", "items/missing.json"], scope);
+    assert.deepEqual(first[0], { data: { value: 1 } });
+    assert.match(first[1]!.error!, /missing.json/);
+    fs.writeFileSync(file, '{"value":2}');
+    assert.deepEqual(await readAssetJsonBatch(root, ["items/test.json"], scope), [{ data: { value: 2 } }]);
+    await assert.rejects(readAssetJsonBatch(root, ["../project.json"], scope));
+    await assert.rejects(readAssetJsonBatch(root, Array(65).fill("items/test.json"), scope));
+  } finally { fs.rmSync(path.dirname(projectsRoot), { recursive: true, force: true }); }
 });

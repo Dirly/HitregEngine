@@ -19,6 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyOps, ComponentRegistry, registerChunkComponents, registerCoreComponents, type SceneDoc } from "@hitreg/core";
 import { portalVeilOps, readStated, statedFileOf } from "./_portal-veil-ops.mts";
+import { applyOpsToSceneFile } from "./_scene-write.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const arg = (n: string) => { const i = process.argv.indexOf(n); return i >= 0 ? process.argv[i + 1] : undefined; };
@@ -35,7 +36,7 @@ if (ops.length === 0) { console.log(`portal-veil: no walk-through portal in ${sc
 const reg = new ComponentRegistry();
 registerCoreComponents(reg);
 registerChunkComponents(reg);
-const res = applyOps(doc, ops, reg);
+let res = applyOps(doc, ops, reg);
 if (flag("--dry")) { console.log(`[dry] ${hung} veil(s) would be hung in ${sceneId}`); process.exit(0); }
-fs.writeFileSync(sceneFile, JSON.stringify(res.doc, null, 2) + "\n");
+res = applyOpsToSceneFile(sceneFile, ops, (d, o) => applyOps(d, o, reg), { label: "portal-veil" }); // fresh read under the scene lock (tools/_scene-write.mts)
 console.log(`portal-veil: ${flag("--remove") ? "removed" : `${hung} veil(s) hung`} in ${project}/${sceneId}`);

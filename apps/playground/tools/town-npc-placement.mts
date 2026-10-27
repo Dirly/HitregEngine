@@ -67,3 +67,15 @@ export function placeUnder(
   target.decompose(p, q, s);
   return { position: [p.x, p.y, p.z], rotation: [q.x, q.y, q.z, q.w] };
 }
+
+/**
+ * The floor a resident standing `inside` a building stands on: the building's world origin height
+ * (town models have their ground floor at y = 0 in their own frame). Terrain height is wrong
+ * indoors: a raised or stilted floor stands metres above the ground under it, and a resident
+ * placed on the terrain ends up under the floor. Null when `inside` names no building/unit.
+ */
+export function insideFloorY(entities: Record<string, PlacementEntity>, inside: string): number | null {
+  const unit = interiorUnitFor(entities, inside);
+  if (!unit) return null;
+  return new THREE.Vector3().setFromMatrixPosition(worldMatrixOf(entities, unit)).y;
+}

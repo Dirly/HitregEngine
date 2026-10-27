@@ -92,12 +92,18 @@ export const readJson = (file: string): unknown => JSON.parse(fs.readFileSync(fi
  *    camps and earthworks never count.
  *  - the world cast and bestiary (shared by every zone, so one zone's planning must not stale another's): per zone,
  *    the cast's rules + that zone's row, and the bestiary factions/creatures that row or the zone bestiary names (by id,
- *    transitively through each kept faction). World-level gates hash both whole.
+ *    transitively through each kept faction). World-level gates hash the cast whole. ART never counts (v3): a
+ *    creature's body (model/status/source), template and notes, and every theme the plan does not name (a theme's
+ *    atlas/status/source always) are the art lane's progress — painting a theme or adding an atlas row never
+ *    un-freezes a plan (MOB-2, 2026-10-21). World level: every faction, every creature's planning fields.
  * Also: a town doc counts only for {town, world} (its dialogue is the residents stage), a town survey only for
  * `coastal`, and generated JSON (adjacency.json, assets.json) by content without its `at` timestamp.
- * Bump DIGEST_VERSION whenever a projection changes: older freezes then read STALE ("re-run zonegen freeze").
+ * Bump DIGEST_VERSION whenever a projection changes, keeping the old version in DIGEST_VERSIONS_READ (digest(..., v)
+ * still computes it): an older record keeps matching while its file is unchanged, and a re-freeze moves it forward.
  */
-export const DIGEST_VERSION = 2;
+export const DIGEST_VERSION = 3;
+/** The digest versions still read: a v2 record compares against the v2 projections (art in the bestiary counted). */
+export const DIGEST_VERSIONS_READ = [3, 2] as const;
 const hashOf = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type J = Record<string, any>;
@@ -166,12 +172,34 @@ export function bestiaryProjection(bestiary: J, castRow: J | null, zoneBestiary:
   return { version: bestiary.version, factions, creatures: ((bestiary.creatures ?? []) as J[]).filter((c) => names.has(c.id)) };
 }
 
+/** A creature's PLANNING fields (v3): no body, template, notes, and only the themes `named` (id + display name). */
+export function planningCreature(c: J, named: ReadonlySet<string>): J {
+  return {
+    ...pick(c, ["id", "name", "family", "kind", "roles", "abilities", "habitats", "level"]),
+    themes: ((c.themes ?? []) as J[]).filter((t) => named.has(t.id)).map((t) => pick(t, ["id", "name"])),
+  };
+}
+
+/** The art-free bestiary a plan depends on (v3): a zone's slice (bestiaryProjection), or with no zone the whole catalogue. */
+export function bestiaryPlanning(bestiary: J, zone: { castRow: J | null; zoneBestiary: J | undefined } | null): J {
+  const slice = zone ? bestiaryProjection(bestiary, zone.castRow, zone.zoneBestiary) : { version: bestiary.version, factions: bestiary.factions ?? [], creatures: bestiary.creatures ?? [] };
+  const named = new Set<string>();
+  const collect = (v: unknown): void => {
+    if (typeof v === "string") named.add(v);
+    else if (Array.isArray(v)) v.forEach(collect);
+    else if (v && typeof v === "object") Object.values(v).forEach(collect);
+  };
+  collect(slice.factions);
+  if (zone) { collect(zone.castRow); collect(zone.zoneBestiary); }
+  return { version: slice.version, factions: slice.factions, creatures: (slice.creatures as J[]).map((c) => planningCreature(c, named)) };
+}
+
 let recipeMemo: { file: string; mtime: number; raw: J } | null = null;
 /**
  * The digest of one planning input: the hash of its planning content (see PLANNING DIGESTS), or of its bytes for a
  * file that is planning through and through. `zone` scopes the recipe ("" = the world's view of it).
  */
-export function digest(paths: Paths, file: string, zone = ""): string {
+export function digest(paths: Paths, file: string, zone = "", v: number = DIGEST_VERSION): string {
   const norm = path.resolve(file).replaceAll("\\", "/");
   const base = path.basename(norm);
   const json = (): J => JSON.parse(fs.readFileSync(file, "utf8"));
@@ -180,30 +208,40 @@ export function digest(paths: Paths, file: string, zone = ""): string {
     if (!recipeMemo || recipeMemo.file !== norm || recipeMemo.mtime !== mtime) recipeMemo = { file: norm, mtime, raw: json() };
     const resFile = zone ? paths.reservations(zone) : "";
     const res = resFile && exists(resFile) ? (readJson(resFile) as J) : undefined;
-    return hashOf({ v: DIGEST_VERSION, recipe: recipeProjection(recipeMemo.raw, zone, res) });
+    return hashOf({ v, recipe: recipeProjection(recipeMemo.raw, zone, res) });
   }
-  if (/\/authoring\/towns\/[^/]+-plan\.json$/.test(norm)) return hashOf({ v: DIGEST_VERSION, plan: planProjection(json()) });
-  if (/\/authoring\/towns\/survey\/[^/]+\.json$/.test(norm)) return hashOf({ v: DIGEST_VERSION, coastal: json().coastal === true });
+  if (/\/authoring\/towns\/[^/]+-plan\.json$/.test(norm)) return hashOf({ v, plan: planProjection(json()) });
+  if (/\/authoring\/towns\/survey\/[^/]+\.json$/.test(norm)) return hashOf({ v, coastal: json().coastal === true });
   if (/\/authoring\/towns\/[^/]+\.json$/.test(norm)) {
     const doc = json();
-    if (doc.world !== undefined) return hashOf({ v: DIGEST_VERSION, townDoc: pick(doc, ["town", "world"]) });
+    if (doc.world !== undefined) return hashOf({ v, townDoc: pick(doc, ["town", "world"]) });
   }
-  if (zone && path.resolve(file) === path.resolve(paths.cast)) return hashOf({ v: DIGEST_VERSION, cast: castProjection(json(), zone) });
-  if (zone && path.resolve(file) === path.resolve(paths.bestiary)) {
-    const row = exists(paths.cast) ? castProjection(readJson(paths.cast) as J, zone).row : null;
-    const zb = exists(paths.zoneBestiary(zone)) ? (readJson(paths.zoneBestiary(zone)) as J) : undefined;
-    return hashOf({ v: DIGEST_VERSION, bestiary: bestiaryProjection(json(), row, zb) });
+  if (zone && path.resolve(file) === path.resolve(paths.cast)) return hashOf({ v, cast: castProjection(json(), zone) });
+  if (path.resolve(file) === path.resolve(paths.bestiary) && (zone || v >= 3)) {
+    const row = zone && exists(paths.cast) ? castProjection(readJson(paths.cast) as J, zone).row : null;
+    const zb = zone && exists(paths.zoneBestiary(zone)) ? (readJson(paths.zoneBestiary(zone)) as J) : undefined;
+    if (v >= 3) return hashOf({ v, bestiary: bestiaryPlanning(json(), zone ? { castRow: row, zoneBestiary: zb } : null) });
+    return hashOf({ v, bestiary: bestiaryProjection(json(), row, zb) });
   }
   // the art manifest's PLAN is which assets the zone needs; a row's status/note is the art lane's progress (re-checked
   // against the disk by every manifest run), so art arriving never un-freezes the plan
   if (base === "assets.json" && Array.isArray(json().rows))
-    return hashOf({ v: DIGEST_VERSION, assets: (json().rows as J[]).map((r) => pick(r, ["id", "kind", "for", "by"])) });
+    return hashOf({ v, assets: (json().rows as J[]).map((r) => pick(r, ["id", "kind", "for", "by"])) });
   if (base === "adjacency.json" || base === "assets.json") {
     const { at: _at, ...rest } = json();
-    return hashOf({ v: DIGEST_VERSION, generated: rest });
+    return hashOf({ v, generated: rest });
   }
   return sha(file);
 }
+/**
+ * Does a recorded planning digest still describe `file`? `v` is the version it was written under (a freeze's or gate
+ * report's `v`); unknown = any version still read (a populate report records none).
+ */
+export function digestMatches(paths: Paths, file: string, zone: string, hash: string, v?: number): boolean {
+  const vs = v === undefined ? DIGEST_VERSIONS_READ : (DIGEST_VERSIONS_READ as readonly number[]).includes(v) ? [v] : [];
+  return vs.some((x) => digest(paths, file, zone, x) === hash);
+}
+
 export function writeJson(file: string, value: unknown): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n");
@@ -279,7 +317,7 @@ export function gateState(paths: Paths, stage: string, zone = ""): { state: "ok"
     const full = path.join(paths.projectDir, rel);
     if (!exists(full)) changed.push(`${rel} (gone)`);
     // a report written before planning digests holds whole-file hashes: still valid while the bytes are unchanged
-    else if (parsed.data.v === DIGEST_VERSION ? digest(paths, full, zone) !== hash : sha(full) !== hash) changed.push(rel);
+    else if ((DIGEST_VERSIONS_READ as readonly number[]).includes(parsed.data.v ?? 0) ? !digestMatches(paths, full, zone, hash, parsed.data.v) : sha(full) !== hash) changed.push(rel);
   }
   if (changed.length) return { state: "STALE", why: `changed since the gate ran: ${changed.join(", ")}` };
   if (!parsed.data.ok) return { state: "FAILED", why: `${parsed.data.findings.filter((f) => f.level === "error").length} error(s)` };

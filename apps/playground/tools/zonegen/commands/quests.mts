@@ -18,10 +18,62 @@
  */
 import path from "node:path";
 import { findAsset } from "../../_closure.mjs";
-import { conditionBlockNames, DEFAULT_PERFORM_ACTIONS, dialogueConditionSchema, literalCompassWords, questBlocks, questConsequenceSchema, type QuestBlockSlot } from "@hitreg/core";
+import { conditionBlockNames, DEFAULT_PERFORM_ACTIONS, dialogueConditionSchema, literalCompassWords, questBlocks, questConsequenceSchema, questRepeatSchema, type QuestBlockSlot } from "@hitreg/core";
 import { exists, finish, load, readJson, type Ctx, type Finding } from "../lib.mts";
 import { bestiarySchema, castSchema, HABITATS, questGraphSchema, zoneBestiarySchema, zoneBriefSchema, type PlannedQuest } from "../schemas.mts";
 import { err, requireZone, townNames, warn } from "./_shared.mts";
+
+/** Objective kinds that are "field" work: fight, take off the slain, discover a place. */
+export const FIELD_ACTIONS = ["kill", "collect", "visit"] as const;
+
+export interface QuestMix {
+  objectives: number;
+  interact: number;
+  field: number;
+  /** Large signature places with no quest that offers itself on arrival there (an `auto` source acting at the place). */
+  largeWithoutDiscovery: string[];
+  /** Planned dungeons with no quest that chains two kill/collect steps (one a kill) at their entrance. */
+  dungeonsWithoutChain: string[];
+  problems: string[];
+}
+
+/**
+ * The quest-mix gate (zonegen status row `quest-mix`): not every quest is an interactive spot. Interact steps at most
+ * `variety.maxInteractShare` of the zone's objectives; kill / collect / visit at least `variety.minFieldShare`; every
+ * LARGE place has a quest that starts on arrival there (an `auto` source whose steps act at it); every dungeon has a
+ * kill/collect chain (one quest with two or more kill/collect steps at its entrance, a kill among them).
+ */
+export function questMix(
+  g: { quests: PlannedQuest[]; locations: { id: string; place?: string }[]; dungeons: { id: string; entrance: string }[] },
+  brief: { places: { id: string; size: string }[]; variety: { maxInteractShare: number; minFieldShare: number } },
+): QuestMix {
+  const all = g.quests.flatMap((q) => q.objectives);
+  const interact = all.filter((o) => o.action === "interact").length;
+  const field = all.filter((o) => (FIELD_ACTIONS as readonly string[]).includes(o.action)).length;
+  // a step acts at a place when its `at` (or a place target) is that place or a location inside it
+  const placeOf = new Map(g.locations.map((l) => [l.id, l.place || l.id]));
+  const actsAt = (o: PlannedQuest["objectives"][number], place: string): boolean =>
+    [o.at, o.target.type === "place" ? o.target.ref : ""].some((x) => !!x && (x === place || placeOf.get(x) === place));
+  const largeWithoutDiscovery = brief.places
+    .filter((pl) => pl.size === "large")
+    .filter((pl) => !g.quests.some((q) => q.giver.type === "auto" && q.objectives.some((o) => actsAt(o, pl.id))))
+    .map((pl) => pl.id);
+  const dungeonsWithoutChain = g.dungeons
+    .filter((d) => !g.quests.some((q) => {
+      const here = q.objectives.filter((o) => (o.action === "kill" || o.action === "collect") && o.at === d.entrance);
+      return here.length >= 2 && here.some((o) => o.action === "kill");
+    }))
+    .map((d) => d.id);
+  const problems: string[] = [];
+  const n = all.length;
+  if (n && interact / n > brief.variety.maxInteractShare)
+    problems.push(`${interact}/${n} objectives are interact (${Math.round((100 * interact) / n)}%, at most ${Math.round(brief.variety.maxInteractShare * 100)}%)`);
+  if (n && field / n < brief.variety.minFieldShare)
+    problems.push(`${field}/${n} objectives are kill/collect/visit (${Math.round((100 * field) / n)}%, at least ${Math.round(brief.variety.minFieldShare * 100)}%)`);
+  if (largeWithoutDiscovery.length) problems.push(`large place(s) with no quest offered on arrival: ${largeWithoutDiscovery.join(", ")}`);
+  if (dungeonsWithoutChain.length) problems.push(`dungeon(s) with no kill/collect chain: ${dungeonsWithoutChain.join(", ")}`);
+  return { objectives: n, interact, field, largeWithoutDiscovery, dungeonsWithoutChain, problems };
+}
 
 /** The engine's objective kinds: the registered action blocks. */
 export function objectiveKinds(): string[] {
@@ -39,6 +91,8 @@ const TARGET_FOR: Record<string, { types: string[]; entityKinds?: string[] }> = 
   deliver: { types: ["entity"], entityKinds: ["object", "presence", "readable"] },
   endure: { types: ["place"] },
   perform: { types: ["place", "entity"], entityKinds: ["object", "presence", "readable"] },
+  // someone who walks: a town resident, or a declared escort entity the place owner gives a route
+  escort: { types: ["npc", "entity"], entityKinds: ["escort"] },
 };
 type PlannedObjective = PlannedQuest["objectives"][number];
 /** A consequence entry's registered block name: a name as written, or the block whose schema accepts the object. */
@@ -152,7 +206,10 @@ export async function run(ctx: Ctx): Promise<number> {
     }
     // a kill target: any creature the zone fields (wildlife, line-up, spill, a GROUP member), a rare, a boss, or a group id
     // ("members of this group": fight the gang, not just its leader)
-    const creatures = new Set([...zb.wildlife.map((w) => w.creature), ...zb.faction.map((x) => x.creature), ...zb.minor.map((x) => x.creature), ...zb.groups.flatMap((gr) => gr.members.map((m) => m.creature)), ...zb.groups.map((gr) => gr.id), ...zb.rares.map((r) => r.id), ...zb.bosses.map((b) => b.id)]);
+    // a kill target: any creature the zone fields (wildlife, line-up, spill, a GROUP member), a rare or a boss. NOT a group id:
+    // populate tags each spawned body `creature:<id>` (never its group), so bind aims a kill at `tag:creature:<id>` — one creature
+    const creatures = new Set([...zb.wildlife.map((w) => w.creature), ...zb.faction.map((x) => x.creature), ...zb.minor.map((x) => x.creature), ...zb.groups.flatMap((gr) => gr.members.map((m) => m.creature)), ...zb.rares.map((r) => r.id), ...zb.bosses.map((b) => b.id)]);
+    const groupIds = new Map(zb.groups.map((gr) => [gr.id, [...new Set(gr.members.map((m) => m.creature))]]));
     const locations = new Map(g.locations.map((l) => [l.id, l]));
     const entities = new Map(g.entities.map((e) => [e.id, e]));
     for (const e of g.entities) {
@@ -224,21 +281,34 @@ export async function run(ctx: Ctx): Promise<number> {
           warn(f, "source-legacy", `${qr}: ${q.giver.type} source names location ${q.giver.ref}; declare the ${q.giver.type} in \`entities\` and name it instead`, qr);
         } else err(f, "unknown-entity", `${qr}: ${q.giver.type} source "${q.giver.ref}" is neither a declared entity nor a location`, qr);
       }
+      if (q.repeat) {
+        const parsed = questRepeatSchema.safeParse(q.repeat);
+        if (!parsed.success) err(f, "repeat-params", `${qr}: repeat: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")} (shape: { after: <world hours> | "day", limit? })`, qr);
+        if (q.giver.type === "auto" && !q.giver.when && !q.giver.area) warn(f, "repeat-auto", `${qr}: a repeatable auto quest with no \`when\` or \`area\` starts again by itself the moment its wait is over`, qr);
+      }
       if (q.turnIn && !residents.has(q.turnIn)) err(f, "unknown-npc", `${qr}: turn-in "${q.turnIn}" is not a resident`, qr);
       if (q.level < brief.level[0] || q.level > brief.level[1]) warn(f, "level", `${qr}: level ${q.level} outside the zone's ${brief.level.join("-")}`, qr);
       for (const it of q.rewards.items) if (!items.has(it) && !itemAsset(it)) warn(f, "reward-item", `${qr}: reward "${it}" is neither a planned item nor an item asset`, qr);
 
+      // an exclusive choice: two or more steps of THIS quest carry it, each a different option
+      const options = new Map<string, string[]>();
+      for (const o of q.objectives)
+        for (const c of o.then)
+          if (typeof c === "object" && c.do === "choose" && typeof c.choice === "string") options.set(c.choice, [...(options.get(c.choice) ?? []), String(c.option)]);
+      for (const [c, opts] of options)
+        if (opts.length < 2 || new Set(opts).size !== opts.length) err(f, "choose-options", `${qr}: choice "${c}" needs two or more steps of the quest, each with a different option (has: ${opts.join(", ")})`, qr);
       const objIds = new Set(q.objectives.map((o) => o.id));
       for (const o of q.objectives) {
         const ref = `${qr}/${o.id}`;
         if (kinds.length && !kinds.includes(o.action)) err(f, "unregistered-block", `${ref}: action "${o.action}" is not a registered quest block (${kinds.join(", ")})`, ref);
         for (const c of o.conditions) if (!questBlocks.has("condition", c)) err(f, "unregistered-block", `${ref}: condition "${c}" is not a registered quest block (${questBlocks.names("condition").join(", ")})`, ref);
         for (const c of o.then) {
-          if (typeof c === "string") {
+          if (c === "repeat" || (typeof c === "object" && "after" in c)) err(f, "repeat-in-then", `${ref}: \`repeat\` is a quest-level field (quests[].repeat), not a step's consequence`, ref);
+          else if (typeof c === "string") {
             if (!questBlocks.has("consequence", c)) err(f, "unregistered-block", `${ref}: consequence "${c}" is not a registered quest block (${questBlocks.names("consequence").join(", ")})`, ref);
           } else {
             const parsed = questConsequenceSchema.safeParse(c);
-            if (!parsed.success) err(f, "consequence-params", `${ref}: consequence ${JSON.stringify(c)}: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")} (shape: { do: setFlag | clearFlag, flag })`, ref);
+            if (!parsed.success) err(f, "consequence-params", `${ref}: consequence ${JSON.stringify(c)}: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")} (shape: { do: setFlag | clearFlag, flag } or { do: choose, choice, option })`, ref);
           }
         }
         if (o.if) {
@@ -282,7 +352,13 @@ export async function run(ctx: Ctx): Promise<number> {
             else if (d > 0) warn(f, "quest-level", `${ref}: quest level ${q.level} is outside ${t.ref}'s ${band.join("-")}`, ref);
           }
         }
-        if (t.type === "item" && o.action === "collect") {
+        if (o.action === "collect" && o.params.from !== undefined) {
+          const from = String(o.params.from);
+          if (!creatures.has(from)) err(f, "unknown-creature", `${ref}: collect from "${from}", which is not in the zone bestiary (a creature it fields, a rare or a boss)`, ref);
+          const src = items.get(t.ref)?.source;
+          if (src && !(src.type === "creature" && src.ref === from)) warn(f, "item-source", `${ref}: ${t.ref} drops from ${from} here, but the plan says it comes from ${src.type} ${src.ref}`, ref);
+        }
+        if (t.type === "item" && o.action === "collect" && o.params.from === undefined) {
           const it = items.get(t.ref);
           const granted = g.quests.some((qq) => qq.objectives.some((x) => x.grants.includes(t.ref)));
           const src = it?.source;
@@ -294,7 +370,9 @@ export async function run(ctx: Ctx): Promise<number> {
           if (!src && !granted) (it ? err : warn)(f, "item-source", `${ref}: collect ${t.ref}, but nothing drops, holds or grants it (give the item a \`source\` or an objective \`grants\`)`, ref);
         }
         if (t.type === "npc" && !residents.has(t.ref)) err(f, "unknown-npc", `${ref}: npc "${t.ref}" is not a resident of the zone's town plans`, ref);
-        if (t.type === "creature" && !creatures.has(t.ref)) err(f, "unknown-creature", `${ref}: "${t.ref}" is not in the zone bestiary (a creature it fields, a group id, a rare or a boss)`, ref);
+        if (t.type === "creature" && groupIds.has(t.ref) && !creatures.has(t.ref))
+          err(f, "group-target", `${ref}: "${t.ref}" is a GROUP of the zone bestiary; a kill names one creature (populate tags each body creature:<id>, bind aims at tag:creature:<id>): use a member — ${groupIds.get(t.ref)!.join(", ")} — one step per member to fight the gang`, ref);
+        else if (t.type === "creature" && !creatures.has(t.ref)) err(f, "unknown-creature", `${ref}: "${t.ref}" is not in the zone bestiary (a creature it fields, a rare or a boss)`, ref);
         if (t.type === "item" && !items.has(t.ref) && !itemAsset(t.ref)) err(f, "unknown-item", `${ref}: item "${t.ref}" is neither a planned quest item nor an item asset`, ref);
         if (t.type === "place") {
           if (!locations.has(t.ref)) err(f, "unknown-location", `${ref}: place "${t.ref}" is not a location`, ref);
@@ -323,6 +401,8 @@ export async function run(ctx: Ctx): Promise<number> {
           const before = ancestors(o.id, (n) => (q.objectives.find((x) => x.id === n)?.after ?? []).filter((a) => objIds.has(a)));
           const granted = new Set<string>();
           for (const b of before) for (const it of q.objectives.find((x) => x.id === b)!.grants) granted.add(it);
+          // a collect step done first (a drop from the slain, a pickup) puts the item in the bags just as a grant does
+          for (const b of before) { const x = q.objectives.find((y) => y.id === b)!; if (x.action === "collect" && x.target.type === "item") granted.add(x.target.ref); }
           for (const eq of earlierQuests) for (const x of quests.get(eq)?.objectives ?? []) for (const it of x.grants) granted.add(it);
           for (const it of o.needs)
             if (!granted.has(it)) {
@@ -488,6 +568,7 @@ export async function run(ctx: Ctx): Promise<number> {
         const seen = new Set<string>();
         const once = (slot: QuestBlockSlot, name: string): void => { if (!seen.has(`${slot}:${name}`)) { seen.add(`${slot}:${name}`); count(slot, name); } };
         once("source", q.giver.type);
+        if (q.repeat) once("consequence", "repeat");
         for (const o of q.objectives) {
           once("action", o.action);
           for (const c of conditionsOf(o)) once("condition", c);

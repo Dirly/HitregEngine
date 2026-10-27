@@ -21,12 +21,17 @@
  *     than 0.05 m^2, no protrusion.
  *  4. FINISH. The veil reads as the way in, never as sky: its material resolves in the scene project's closure (an
  *     unresolved one draws as a flat grey card, lit by the sky) and is the portal swirl or dark (_portal-veil-ops veilFinish).
+ *  5. ARRIVALS. Every arrival anchor of the checked portals (the portal itself when it carries `portalAnchor`, its
+ *     `returnAnchor`, the scene's `instance-entry` anchors) hands out the anchor and its overflow spots (core
+ *     portalArrivalSpot); each must stand on floor with headroom (tools/_portal-arrivals.mts). Unmeasured spots sit at
+ *     the anchor's height: in a sloped passage they are in the stair rock or the air, and a second traveller falls.
  *
  * --fit: the box is resized to the narrowest closed section near the anchor (its full walkable width and the body's
  * reach, 0.3 m into the rock all round) and the veil to that section's whole visible opening plus 0.3 m (the rock clips
  * it), choosing among the sections inside the box the one whose veil has no gap and no protrusion. Both are written to
  * <project>/authoring/portal-veils.json (so tools/portal-veil.mts re-applies them after a rebuild) and to the scene as
- * ONE applyOps batch, the inverse saved under <project>/reports/portal-cover/; then the check runs again.
+ * ONE applyOps batch (with each arrival anchor's measured `portalAnchor.queue`: the floor of every overflow spot, a
+ * corridor queue cut at the first spot with no floor, no headroom, a wall or a portal's box), the inverse saved under <project>/reports/portal-cover/; then the check runs again.
  *
  * Report: <project>/reports/portal-cover/<scene>.json ({ passed, portals: [...] }); exit 1 when any portal fails.
  * The approach side is the portal's `returnAnchor` (an entering portal) or the nearest `instance-entry` anchor (a
@@ -36,10 +41,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as THREE from "three";
-import { applyOps, ComponentRegistry, registerChunkComponents, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
+import { applyOps, ComponentRegistry, PORTAL_LANDING_LIFT, portalAnchorOf, portalArrivalCandidates, portalArrivalSpot, portalVolumeDistance, portalVolumeOf, registerChunkComponents, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
+import { checkArrivals, fitArrivalQueue, type ArrivalProbe } from "./_portal-arrivals.mts";
 import { loadContent, playgroundRoots, PortalHarness } from "../../../packages/server/src/index.ts";
 import { findAsset } from "./_closure.mjs";
 import { portalDigest, portalVeilOps, veilFinish, readStated, statedFileOf, triggerOf, veilOf, walkThroughPortals, type StatedFile, type V3 } from "./_portal-veil-ops.mts";
+import { applyOpsToSceneFile } from "./_scene-write.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const arg = (n: string) => { const i = process.argv.indexOf(n); return i >= 0 ? process.argv[i + 1] : undefined; };
@@ -373,6 +380,62 @@ function measure(id: string, params: Record<string, unknown>, stated: StatedFile
   return { r, sections, f, side };
 }
 
+// ---- 5. arrivals ------------------------------------------------------------------------------------------------------
+function arrivalAnchors(): string[] {
+  const ids = new Set<string>();
+  for (const [id, params] of portals) {
+    if (doc.entities[id]?.components["portalAnchor"]) ids.add(id);
+    const ra = params["returnAnchor"];
+    if (typeof ra === "string" && doc.entities[ra]) ids.add(ra);
+  }
+  for (const [id, e] of Object.entries(doc.entities)) if ((e.tags ?? []).includes("instance-entry") && e.components["portalAnchor"]) ids.add(id);
+  return [...ids];
+}
+function inBoxes(p: V3, fitted: Record<string, Trig> = {}): boolean {
+  return walkThroughPortals(doc).some(([pid, params]) => {
+    const vol = portalVolumeOf(fitted[pid] ? { ...params, ...fitted[pid] } : params);
+    const pose = poseOf(pid);
+    return !!vol && portalVolumeDistance(new Frame(pose.pos, pose.quat).local(p), vol) < BODY_R;
+  });
+}
+const arrivalProbe: ArrivalProbe = {
+  down: (o, max) => h.world.sim.raycast(o, [0, -1, 0], max, { layers: MASK as never, exclude: [h.bodyId] })?.distance ?? null,
+  up: (o, max) => h.world.sim.raycast(o, [0, 1, 0], max, { layers: MASK as never, exclude: [h.bodyId] })?.distance ?? null,
+  clear: (a, b) => {
+    const d: V3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], len = Math.hypot(...d);
+    if (len < 1e-3) return true;
+    const hit = h.world.sim.raycast(a, d, len, { layers: MASK as never, exclude: [h.bodyId] });
+    return !hit || hit.distance >= len - 0.03;
+  },
+  inTrigger: (p) => inBoxes(p),
+};
+interface ArrivalRow { anchor: string; corridor: number; queue: (number | null)[] | null; spots: number; bad: ReturnType<typeof checkArrivals> }
+function anchorFrame(id: string) {
+  const { pos, quat } = poseOf(id);
+  const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(quat);
+  const pa = portalAnchorOf(doc.entities, id);
+  return { anchor: [pos.x, pos.y, pos.z] as V3, yaw: Math.atan2(fwd.x, fwd.z), corridor: pa.corridor, queue: pa.queue ?? null };
+}
+function checkAnchorArrivals(id: string): ArrivalRow {
+  const a = anchorFrame(id);
+  h.teleport([a.anchor[0], a.anchor[1] + 40, a.anchor[2]]);
+  const base: V3 = [a.anchor[0], a.anchor[1] + PORTAL_LANDING_LIFT, a.anchor[2]];
+  const out: V3[] = [base];
+  for (let i = 0; i < 18; i++) {
+    const s = portalArrivalSpot(base, a.yaw, a.corridor, out, a.queue ?? undefined) as V3;
+    if (out.some((q) => q[0] === s[0] && q[2] === s[2])) break;
+    out.push(s);
+  }
+  const bad = checkArrivals(out, arrivalProbe);
+  return { anchor: id, corridor: a.corridor, queue: a.queue, spots: out.length, bad };
+}
+function printArrivals(rows: ArrivalRow[]): void {
+  for (const r of rows) {
+    log(`\n${r.anchor} (arrival anchor, corridor ${r.corridor}): ${r.bad.length ? "FAIL" : "PASS"}  ${r.spots} spot(s), queue ${r.queue ? JSON.stringify(r.queue) : "unmeasured"}`);
+    for (const b of r.bad) log(`  spot ${b.i} at (${b.at.map((n) => n.toFixed(1)).join(", ")}): ${b.why}`);
+  }
+}
+
 function print(r: Result): void {
   log(`\n${r.id}: ${r.status}   (approach ${r.approach})`);
   const n = r.narrowest;
@@ -447,8 +510,7 @@ if (undo) {
   const reg = new ComponentRegistry();
   registerCoreComponents(reg);
   registerChunkComponents(reg);
-  const res = applyOps(docNow(), ops, reg);
-  fs.writeFileSync(sceneFile, JSON.stringify(res.doc, null, 2) + "\n");
+  applyOpsToSceneFile(sceneFile, ops, (d, o) => applyOps(d, o, reg), { label: "portal-cover --undo" }); // fresh read under the scene lock
   if (!Array.isArray(rec) && rec.stated) {
     const st = readStated(statedFile);
     st[sceneId] ??= {};
@@ -464,6 +526,8 @@ await boot();
 let stated = readStated(statedFile);
 let results = portals.map(([id, params]) => measure(id, params, stated));
 for (const m of results) print(m.r);
+let arrivals = arrivalAnchors().map(checkAnchorArrivals);
+printArrivals(arrivals);
 if (flag("--profile")) for (const m of results) {
   log(`
 ${m.r.id}: sections (z: closed, floor, height, width at 0.5/1.5/2.5/3.5 m, standing points)`);
@@ -480,23 +544,38 @@ if (flag("--fit")) {
     fits[id] = ft;
     log(`\n${id}: fitted trigger ${ft.trigger.halfExtents.map((v) => r2(2 * v)).join(" x ")} m at [${ft.trigger.offset.join(", ")}], veil ${ft.size.join(" x ")} m at [${ft.at.join(", ")}]`);
   }
-  if (Object.keys(fits).length) {
+  // arrival queues are measured against the boxes as fitted: a spot inside a fitted box is cut too
+  const queues: Record<string, (number | null)[]> = {};
+  const fitted = Object.fromEntries(Object.entries(fits).map(([pid, ft]) => [pid, ft!.trigger]));
+  for (const id of arrivalAnchors()) {
+    const a = anchorFrame(id);
+    h.teleport([a.anchor[0], a.anchor[1] + 40, a.anchor[2]]);
+    const probe: ArrivalProbe = { ...arrivalProbe, inTrigger: (p) => inBoxes(p, fitted) };
+    const { queue, spots } = fitArrivalQueue(portalArrivalCandidates([a.anchor[0], a.anchor[1] + PORTAL_LANDING_LIFT, a.anchor[2]], a.yaw, a.corridor) as V3[], a.anchor, a.corridor, probe);
+    queues[id] = queue;
+    const stop = spots.find((s) => !s.ok);
+    log(`\n${id}: arrival queue ${JSON.stringify(queue)}${stop ? ` (spot ${stop.i}: ${stop.why})` : ""}`);
+  }
+  if (Object.keys(fits).length || Object.keys(queues).length) {
     // stated data first (a rebuild re-applies it through portal-veil), then the scene as one batch with its inverse
     stated = readStated(statedFile);
     stated[sceneId] ??= {};
     const statedBefore = Object.fromEntries(Object.keys(fits).map((id) => [id, stated[sceneId]![id] ?? null]));
     for (const [id, ft] of Object.entries(fits)) stated[sceneId]![id] = { ...stated[sceneId]![id], size: ft!.size, at: ft!.at, trigger: ft!.trigger, fit: ft!.note };
+    for (const id of Object.keys(queues)) if (!(id in statedBefore)) statedBefore[id] = stated[sceneId]![id] ?? null;
+    for (const [id, queue] of Object.entries(queues)) stated[sceneId]![id] = { ...stated[sceneId]![id], queue };
+    fs.mkdirSync(path.dirname(statedFile), { recursive: true }); // a fresh lab project has no authoring/ yet
     fs.writeFileSync(statedFile, JSON.stringify(stated, null, 2) + "\n");
     const fresh = docNow(); // the editor autosaves: build on the file as it is now
-    const { ops } = portalVeilOps(fresh, sceneId, stated, { only: new Set(Object.keys(fits)) });
+    const { ops } = portalVeilOps(fresh, sceneId, stated, { only: new Set([...Object.keys(fits), ...Object.keys(queues)]) });
     const reg = new ComponentRegistry();
     registerCoreComponents(reg);
     registerChunkComponents(reg);
-    const res = applyOps(fresh, ops as Op[], reg);
+    // the veil ops are re-applied onto the file under its lock (tools/_scene-write.mts)
+    const res = applyOpsToSceneFile(sceneFile, ops as Op[], (d, o) => applyOps(d, o, reg), { label: "portal-cover --fit" });
     fs.mkdirSync(reportDir, { recursive: true });
     const inv = path.join(reportDir, `${sceneId}.fit-inverse.${Date.now()}.json`);
     fs.writeFileSync(inv, JSON.stringify({ tool: "portal-cover --fit", scene: sceneId, ops: res.inverse, stated: statedBefore }, null, 1) + "\n");
-    fs.writeFileSync(sceneFile, JSON.stringify(res.doc, null, 2) + "\n");
     log(`\nportal-cover: ${ops.length} op(s) applied to ${project}/${sceneId}; inverse ${path.relative(PG, inv)}; stated sizes in ${path.relative(PG, statedFile)}`);
     // re-check on the scene as written
     await h.close();
@@ -504,16 +583,18 @@ if (flag("--fit")) {
     portals = walkThroughPortals(doc).filter(([id]) => !only || only.includes(id));
     await boot();
     results = portals.map(([id, params]) => measure(id, params, stated));
+    arrivals = arrivalAnchors().map(checkAnchorArrivals);
     log("\n---- after the fit ----");
     for (const m of results) print(m.r);
-    const file = writeReport(results.map((m) => m.r), { before: before.map((b) => ({ id: b.id, status: b.status, trigger: b.trigger, veil: { size: b.veil.size, at: b.veil.at, gaps: b.veil.gaps } })) });
+    printArrivals(arrivals);
+    const file = writeReport(results.map((m) => m.r), { arrivals, before: before.map((b) => ({ id: b.id, status: b.status, trigger: b.trigger, veil: { size: b.veil.size, at: b.veil.at, gaps: b.veil.gaps } })) });
     log(`\nreport ${path.relative(PG, file)}`);
   }
 } else {
-  const file = writeReport(results.map((m) => m.r));
+  const file = writeReport(results.map((m) => m.r), { arrivals });
   log(`\nreport ${path.relative(PG, file)}`);
 }
-const failed = results.filter((m) => m.r.status !== "PASS").map((m) => m.r.id);
+const failed = [...results.filter((m) => m.r.status !== "PASS").map((m) => m.r.id), ...arrivals.filter((a) => a.bad.length).map((a) => `${a.anchor} (arrivals)`)];
 console.log(failed.length ? `portal-cover: FAIL ${failed.join(", ")} in ${sceneId}` : `portal-cover: PASS ${results.length} portal(s) in ${sceneId}`);
 await h.close();
 process.exit(failed.length ? 1 : 0);

@@ -21,8 +21,12 @@ import {
   type ProjectToolReport,
   type SceneMenuProjectInput,
 } from "../../packages/core/src/project.ts";
-import { projectClosure, resolveAssetFile, sceneOwnerProject } from "./tools/_asset-resolve.mts";
+import { projectClosure, readAssetJsonBatch, resolveAssetFile, sceneOwnerProject } from "./tools/_asset-resolve.mts";
 import { ownerCatalog, ownerInfo, recordOwnerEdits, sceneProject } from "./tools/_owner-edit-bridge.mts";
+import { voxelCodeKey } from "./tools/_voxel-code-key.mts";
+import { lockFileOf, lockIsStale } from "./tools/_scene-write.mts";
+import { assetChangePublisher, assetSourceProject, scopedAssetChange } from "./tools/_asset-watch.mts";
+import { assertPlayerModules } from "./tools/_player-boundary.mjs";
 
 /**
  * The dev server is the AI/file bridge:
@@ -60,6 +64,7 @@ import { ownerCatalog, ownerInfo, recordOwnerEdits, sceneProject } from "./tools
 /** The bridge's own HTTP surface, surfaced through GET /__hitreg/spec so an AI
  * can discover the tooling without reading this file. */
 const BRIDGE_ENDPOINTS = [
+  { method: "POST", path: "/__hitreg/log", purpose: "Browser startup checkpoints and client errors, also retained as the last 100 entries in .hitreg/client-log.json so an agent can diagnose startup before the context bridge is running." },
   { method: "GET", path: "/__hitreg/spec", purpose: "This capability spec + endpoint list." },
   { method: "GET", path: "/__hitreg/context", purpose: "What the user currently sees: scene, selection, camera, in-view entities, play mode, diagnostics, plus `focus` — where their attention is, ranked (focus.strongest names which of manipulating/hover/selection/asset to resolve \"this\" against, and focus.mode says what they are doing: edit, graybox, terrain-sculpt, editing-prefab:<id>, playing, …). Keyed per browser tab (bridgeSessionId) — with exactly one tab connected this just returns its data; with more than one, returns { multipleClients: true, clients: [...] } instead of guessing, pass ?id=<id> from that list to pick one." },
   { method: "GET", path: "/__hitreg/camera", purpose: "Where the editor camera is: { id, scene, playMode, mode, camera: { position:[x,y,z], target:[x,y,z] }, lastSeen } — the camera block of /__hitreg/context without the rest of the payload. Same per-tab keying as /__hitreg/context (?id=<id>; { multipleClients, clients } when several tabs are live)." },
@@ -68,6 +73,8 @@ const BRIDGE_ENDPOINTS = [
   { method: "GET", path: "/__hitreg/owner-edit?scene=<s>&entity=<id>&tags=<a,b>&name=<n>", purpose: "Who placed this prop (plan item or scene), the place's scale/cultures and the owner override on it, for the editor's Prop panel. ?catalog=<project> instead returns the swap catalogue (the closure's prop index) and the real-size kinds table." },
   { method: "GET", path: "/__hitreg/assets-index", purpose: "Every asset file on disk, bucketed by kind (scenes, prefabs, materials, models, chunks, …)." },
   { method: "GET", path: "/__hitreg/asset-file?file=<rel>", purpose: "Read one asset file fresh from disk (bypasses Vite's cache)." },
+  { method: "POST", path: "/__hitreg/asset-json?project=<owner>", purpose: "Read up to 64 JSON assets fresh in one request: { files: [relative paths] }. Returns [{data} | {error}] in request order, resolving in the project's dependency closure." },
+  { method: "GET", path: "/__hitreg/voxel-code-key", purpose: "Current generation source fingerprint for the disposable browser terrain cache. Changes to generation code invalidate cached cell docs and meshes." },
   { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content, project?}); live-syncs into the running app. An existing file is overwritten where it lives; a NEW file goes into projects/<project>/assets/ when `project` names one." },
   { method: "GET", path: "/__hitreg/scene-menu", purpose: "The editor's scene menu: { groups: [{ title, projects: [{ name, label, main, listed: [{id,label,note,depth}], other }] }] }, built from each project.json's `group`, `menuOrder` and `scenes` (the menu order; variants nest under their base) plus the scene files on disk. `name: null` is the flat assets/ tree. A scene id is its file path under assets/scenes/ without .scene.json." },
   { method: "POST", path: "/__hitreg/scene-menu", purpose: "Add a scene to a project's menu in its project.json: { project, id, label?, note?, variantOf? }. `variantOf` lists it as a stage under that scene (and lists an unlisted base too). Writes the menu entry only; write the scene file itself with /__hitreg/write-asset { file: \"scenes/<id>.scene.json\", content, project }. 400 with the reason if the id is already listed or the manifest would be invalid." },
@@ -571,6 +578,17 @@ function hitregBridge(): Plugin {
               target = path.resolve(projectsRoot, project, "assets", file);
             }
             if (!withinKnownRoot(target)) throw new Error("path outside assets/ or projects/");
+            // a tool is mid read-modify-write of this file (tools/_scene-write.mts): refuse, never interleave with it
+            const lf = lockFileOf(target);
+            if (fs.existsSync(lf)) {
+              let info: any = null;
+              try { info = JSON.parse(fs.readFileSync(lf, "utf8")); } catch { /* being written */ }
+              if (!lockIsStale(info)) {
+                res.statusCode = 409;
+                res.end(JSON.stringify({ ok: false, error: `locked by ${info?.label ?? "a tool"} (pid ${info?.pid ?? "?"}): retry after it finishes` }));
+                return;
+              }
+            }
             fs.mkdirSync(path.dirname(target), { recursive: true });
             fs.writeFileSync(target, content, "utf8");
             res.setHeader("content-type", "application/json");
@@ -624,6 +642,34 @@ function hitregBridge(): Plugin {
         }
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify(index));
+      });
+
+      server.middlewares.use("/__hitreg/voxel-code-key", (_req, res) => {
+        res.setHeader("content-type", "application/json");
+        res.setHeader("cache-control", "no-store");
+        res.end(JSON.stringify({ key: voxelCodeKey(engineRoot) }));
+      });
+
+      server.middlewares.use("/__hitreg/asset-json", (req, res) => {
+        if (req.method !== "POST") { res.statusCode = 405; res.end(); return; }
+        let body = "";
+        req.on("data", (chunk: Buffer) => { body += chunk.toString("utf8"); });
+        req.on("end", () => {
+          void (async () => {
+            try {
+              if (body.length > 256 * 1024) throw new Error("asset batch request too large");
+              const { files } = JSON.parse(body) as { files?: unknown };
+              const params = new URL(req.url ?? "", "http://x").searchParams;
+              const entries = await readAssetJsonBatch({ assetsRoot, projectsRoot }, files, requestScope(params));
+              res.setHeader("content-type", "application/json");
+              res.setHeader("cache-control", "no-store");
+              res.end(JSON.stringify(entries));
+            } catch (error) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: String(error) }));
+            }
+          })();
+        });
       });
 
       server.middlewares.use("/__hitreg/asset-file", (req, res) => {
@@ -871,6 +917,8 @@ function hitregBridge(): Plugin {
         }
       });
 
+      const clientLogs: Array<{ at: string; message: string }> = [];
+      let clientLogWrite = Promise.resolve();
       server.middlewares.use("/__hitreg/log", (req, res) => {
         if (req.method !== "POST") {
           res.statusCode = 405;
@@ -881,6 +929,14 @@ function hitregBridge(): Plugin {
         req.on("data", (chunk: Buffer) => (body += chunk));
         req.on("end", () => {
           console.log(`[client] ${body}`);
+          clientLogs.push({ at: new Date().toISOString(), message: body.slice(0, 16000) });
+          if (clientLogs.length > 100) clientLogs.shift();
+          const snapshot = JSON.stringify(clientLogs);
+          clientLogWrite = clientLogWrite.then(async () => {
+            const dir = path.resolve(server.config.root, ".hitreg");
+            await fs.promises.mkdir(dir, { recursive: true });
+            await fs.promises.writeFile(path.join(dir, "client-log.json"), snapshot);
+          }).catch(() => undefined);
           res.end("{}");
         });
       });
@@ -1466,23 +1522,46 @@ function hitregBridge(): Plugin {
       });
 
       // live-sync: push asset file changes into the running app
-      const pushAssetChange = (root: string, filename: string): void => {
-        const file = filename.split(path.sep).join("/");
-        const full = path.join(root, filename);
-        let content: string | null = null;
-        try {
-          content = fs.readFileSync(full, "utf8");
-        } catch {
-          return; // deleted or mid-write; next event will catch it
-        }
-        console.log(`[hitreg] asset changed: ${file} (${content.length}b) -> ws push`);
-        server.ws.send("hitreg:asset-changed", { file, content });
+      // A Vite config restart keeps the Node process alive. Watchers installed
+      // before lifecycle cleanup was added can still broadcast globally
+      // through this server object. Asset updates now use per-client sends
+      // below; discard obsolete global publishers, with or without provenance.
+      const transport = server.ws as unknown as { send(...args: unknown[]): void };
+      const broadcast = transport.send.bind(transport);
+      transport.send = (...args: unknown[]): void => {
+        const message = args[0] as { type?: string; event?: string; data?: unknown } | string | undefined;
+        const event = typeof message === "string" ? message : message?.type === "custom" ? message.event : undefined;
+        if (event === "hitreg:asset-changed") return;
+        broadcast(...args);
       };
+      const assetScopes = new WeakMap<object, ReadonlySet<string> | null>();
+      server.ws.on("hitreg:asset-scope", (data: unknown, client) => {
+        if (!data || typeof data !== "object" || !("projects" in data)) return;
+        const projects = data.projects;
+        if (projects === null) assetScopes.set(client, null);
+        else if (Array.isArray(projects) && projects.every((name) => typeof name === "string")) {
+          assetScopes.set(client, new Set(projects));
+        }
+      });
+      const assetPublisher = assetChangePublisher((root, filename, content) => {
+        const file = filename.split(path.sep).join("/");
+        console.log(`[hitreg] asset changed: ${file} (${content.length}b) -> ws push`);
+        const project = assetSourceProject(projectsRoot, root);
+        for (const client of server.ws.clients) {
+          const payload = scopedAssetChange({ file, content, project }, assetScopes.get(client));
+          if (payload) client.send("hitreg:asset-changed", payload);
+        }
+      });
+      const assetWatchers: fs.FSWatcher[] = [];
+      server.httpServer?.once("close", () => {
+        assetPublisher.close();
+        for (const watcher of assetWatchers) watcher.close();
+      });
       try {
-        fs.watch(assetsRoot, { recursive: true }, (_event, filename) => {
+        assetWatchers.push(fs.watch(assetsRoot, { recursive: true }, (_event, filename) => {
           if (!filename || !filename.endsWith(".json")) return;
-          pushAssetChange(assetsRoot, filename);
-        });
+          assetPublisher.enqueue(assetsRoot, filename);
+        }));
       } catch (error) {
         console.warn("[hitreg] assets watcher failed:", error);
       }
@@ -1492,14 +1571,14 @@ function hitregBridge(): Plugin {
       // path the flat watcher above sends (e.g. "materials/heli-island/x.json")
       try {
         fs.mkdirSync(projectsRoot, { recursive: true });
-        fs.watch(projectsRoot, { recursive: true }, (_event, filename) => {
+        assetWatchers.push(fs.watch(projectsRoot, { recursive: true }, (_event, filename) => {
           if (!filename || !filename.endsWith(".json")) return;
           const parts = filename.split(path.sep);
           const assetsIdx = parts.indexOf("assets");
           if (assetsIdx === -1 || assetsIdx === parts.length - 1) return;
           const projectAssetsDir = path.join(projectsRoot, ...parts.slice(0, assetsIdx + 1));
-          pushAssetChange(projectAssetsDir, parts.slice(assetsIdx + 1).join(path.sep));
-        });
+          assetPublisher.enqueue(projectAssetsDir, parts.slice(assetsIdx + 1).join(path.sep));
+        }));
       } catch (error) {
         console.warn("[hitreg] projects watcher failed:", error);
       }
@@ -1511,6 +1590,42 @@ function hitregBridge(): Plugin {
 // base, so the bundle is path-portable (works served at any URL, e.g. a CDN
 // subpath). Without it, a normal `vite build` builds the editor app as usual.
 const gameBuild = process.env["GAME"] === "1";
+
+function playerBoundary(): Plugin {
+  return {
+    name: "hitreg-player-boundary",
+    generateBundle(_options, bundle) {
+      const modules = Object.values(bundle).flatMap((output) => output.type === "chunk"
+        ? [...Object.keys(output.modules), ...output.imports, ...output.dynamicImports]
+        : []);
+      assertPlayerModules(modules);
+    },
+  };
+}
+
+/** A published game must not import scripts from every other world and authoring lab. */
+function publishedScripts(): Plugin {
+  const virtual = "\0hitreg-game-scripts";
+  return {
+    name: "hitreg-published-scripts",
+    enforce: "pre",
+    resolveId(source, importer) {
+      if (gameBuild && process.env["HITREG_PROJECT"] && source === "./project-scripts.js" && importer?.replace(/\\/g, "/").endsWith("/src/play.ts")) return virtual;
+    },
+    load(id) {
+      if (id !== virtual) return;
+      const root = path.resolve("projects");
+      const scope = projectClosure(root, process.env["HITREG_PROJECT"]!);
+      if (!scope) throw new Error("Published project not found");
+      const files = scope.flatMap((name) => {
+        const dir = path.join(root, name, "scripts");
+        return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".ts")).sort().map((f) => path.join(dir, f)) : [];
+      });
+      return files.map((file, i) => `import * as script${i} from ${JSON.stringify(file.replace(/\\/g, "/"))};`).join("\n") +
+        `\nexport function initProjectScripts(deps) { for (const mod of [${files.map((_, i) => `script${i}`).join(",")}]) { if (mod.default) deps.registry.reregister(mod.default, deps.events, deps.assets); } }`;
+    },
+  };
+}
 
 /**
  * Does this build CONTAIN the developer console (`@hitreg/scripting/console`)?
@@ -1528,7 +1643,7 @@ const gameBuild = process.env["GAME"] === "1";
 const devConsole = process.env["HITREG_CONSOLE"] === "1" || (!gameBuild && process.env["HITREG_CONSOLE"] !== "0");
 
 export default defineConfig({
-  plugins: [hitregBridge()],
+  plugins: [...(gameBuild ? [playerBoundary()] : [hitregBridge()]), publishedScripts()],
   base: gameBuild ? "./" : "/",
   define: { "import.meta.env.HITREG_CONSOLE": JSON.stringify(devConsole ? "1" : "0") },
   server: {

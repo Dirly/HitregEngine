@@ -193,7 +193,7 @@ Made by one command (also the `loading art` stage of tools/dungeon-pipeline, MIS
 
 ```
 cd apps/playground
-PLAYWRIGHT_MODULE=<playwright index.mjs> npx tsx tools/loading-art.mts --project <id> --base <running dev server>
+npx tsx tools/loading-art.mts --project <id> --base <running dev server>
      [--view <views.json name> | --cam x,y,z --look x,y,z] [--size 1024x576] [--title "..."] [--characters "..."]
      [--snapshot-only] [--record-only] [--dry-run]
 ```
@@ -510,6 +510,24 @@ five commands. A home box is the same with `deploy/hitreg-main.service`
 under systemd and a cheap VPS in front (WireGuard or a Cloudflare tunnel)
 so the home IP stays private.
 
+**The published client:** `pnpm -F playground build:game <project> <scene>.scene.json`
+produces the player-only site under `apps/playground/dist/<project>`. A plain
+`build` produces the editor; pointing a public host or tunnel at it exposes the
+authoring interface and does world rendering while the gateway card is open.
+Serve the published folder for players and keep the authoring URL separate.
+The gateway panel in the published client waits for a character's Play grant
+before loading boot data, constructing the scene, or streaming terrain.
+The simulation server remains headless; a player's browser still needs the
+rendering, input, prediction and gameplay runtime.
+
+Publishing merges the project's dependency closure with owner-first asset
+resolution, scopes project scripts to that closure and packs boot JSON for
+static hosting. Export currently includes unused files inside the closure;
+hosting a file does not mean every browser downloads it. Models, textures and
+audio are fetched when used. Do not put private authoring references in a
+runtime asset folder expecting export to remove them. See deploy/README.md
+for the static client mount and gateway routes.
+
 **Open dev server, no gateway** (`serve --scene x` without `--secret`)
 still works exactly as before: `?server=ws://…`, anyone joins, nothing
 persists. `--secret` alone (no `--main`) is *standalone*: tickets required,
@@ -553,7 +571,11 @@ publishes it as netState `staff/<peerId>` (core `STAFF_NETSTATE`,
 and refuses them from everyone else. A console command honoured this way is
 declared `staff: true` (`ScriptCommandDecl`); the console stops warning a staff
 tab about those, and still warns about the rest (`/time`, `/weather` are not
-yet honoured from staff). Character names that pose as staff are already
+yet honoured from staff). `/teleport <place|x z>` (and a world-map click) on a
+server sends core `staff.teleport`; the layer (`GameServer.requestTeleport`)
+honours it from a staff peer for its own body, waits for the destination's
+cells like a join does, and lands the body on the first collider over the
+column (else the field surface); a player gets `character.refused`. Character names that pose as staff are already
 refused (docs/moderation.md).
 
 ## The agent's weekly edit and running servers

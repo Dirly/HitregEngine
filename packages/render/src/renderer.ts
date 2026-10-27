@@ -24,6 +24,7 @@ import {
 } from "./post.js";
 import { volumetricPlanKey, type VolumetricRequest } from "./atmosphere.js";
 import { sceneLighting, type SceneLighting } from "./scene-lighting.js";
+import { flipDepthBiasForReversedDepth, keepRenderOrderUnderReversedDepth, matchViewportDepthTexture } from "./depth.js";
 
 /**
  * Three's `_callDepth` while the post chain's scene pass renders when
@@ -73,6 +74,19 @@ export interface RenderScopeSink {
 }
 
 export type Backend = "webgpu" | "webgl";
+
+export interface EngineRendererOptions {
+  /**
+   * Reversed depth buffer (near = 1, far = 0, 32-bit float depth). Default ON:
+   * with near 0.1 and far 4000 a standard buffer leaves ~0.5 m of depth
+   * resolution at 1 km and far terrain/landmarks z-fight; reversed float depth
+   * keeps it near-uniform relative to distance out to the far plane. WebGPU
+   * only — on the WebGL2 fallback it is dropped before that backend starts
+   * (three 0.185's `getViewPosition`, GTAO and godrays still assume [-1,1]
+   * clip z there). Hosts expose `?reversedDepth=0` to turn it off for diagnosis.
+   */
+  reversedDepth?: boolean;
+}
 
 export interface BloomOptions {
   strength: number;
@@ -226,9 +240,22 @@ export class EngineRenderer {
   minScreenRadiusPx = 2.5;
   private readonly screenCull = { eye: new THREE.Vector3(), pxPerUnit: 0, minRadiusPx: 0 };
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, options: EngineRendererOptions = {}) {
     patchShadowPassAlphaTest();
-    this.renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
+    const parameters = { canvas, antialias: true, reversedDepthBuffer: options.reversedDepth ?? true };
+    this.renderer = new THREE.WebGPURenderer(parameters);
+    // The WebGL2 fallback is built from the same `parameters` and reads the
+    // flag (plus the renderer's copy, which TSL nodes consult) as it starts:
+    // clear both just before three switches backends.
+    const internals = this.renderer as unknown as { _getFallback: ((error: unknown) => unknown) | null; reversedDepthBuffer: boolean };
+    const fallback = internals._getFallback;
+    if (fallback) {
+      internals._getFallback = (error) => {
+        parameters.reversedDepthBuffer = false;
+        internals.reversedDepthBuffer = false;
+        return fallback(error);
+      };
+    }
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -254,10 +281,20 @@ export class EngineRenderer {
   async init(): Promise<Backend> {
     await this.renderer.init();
     const backend = this.renderer.backend as { isWebGPUBackend?: boolean };
+    if (backend.isWebGPUBackend && this.renderer.reversedDepthBuffer) {
+      flipDepthBiasForReversedDepth(this.renderer.backend as never);
+      matchViewportDepthTexture(true);
+      keepRenderOrderUnderReversedDepth(this.renderer as never);
+    }
     this.uploadProbe = new GpuUploadProbe(backend);
     this.uniformUploadStats = cacheUniformUploads(backend);
     this.renderObjectSweep = trackRenderObjects(this.renderer);
     return backend.isWebGPUBackend ? "webgpu" : "webgl";
+  }
+
+  /** Whether the reversed depth buffer is live (after init: always false on the WebGL2 fallback). */
+  get reversedDepth(): boolean {
+    return this.renderer.reversedDepthBuffer === true;
   }
 
   /**
@@ -681,6 +718,28 @@ export class EngineRenderer {
   /** The scene pass's RenderContext as last borrowed by a precompile (see guardAsyncBuilds). */
   private sceneContext: { context: unknown; pass: PostChain["scenePass"] } | null = null;
   private asyncBuildsGuarded = false;
+  private shaderBuildTail: Promise<void> = Promise.resolve();
+  private shaderBuildTime = 0;
+
+  /** All concurrent chunk/VFX precompiles share one frame budget. */
+  private enqueueShaderBuild(build: () => unknown): Promise<unknown> {
+    const previous = this.shaderBuildTail ?? Promise.resolve();
+    let release!: () => void;
+    this.shaderBuildTail = new Promise<void>((resolve) => { release = resolve; });
+    return (async () => {
+      await previous;
+      if ((this.shaderBuildTime ?? 0) >= PRECOMPILE_SLICE_MS) {
+        await nextFrame();
+        this.shaderBuildTime = 0;
+      }
+      const started = performance.now();
+      try { return build(); }
+      finally {
+        this.shaderBuildTime = (this.shaderBuildTime ?? 0) + performance.now() - started;
+        release();
+      }
+    })();
+  }
 
   /**
    * compileAsync's second half walks its queued render objects over many
@@ -703,30 +762,32 @@ export class EngineRenderer {
     const self = this;
     const renderer = this.renderer;
     nodes.getForRenderAsync = function (this: NonNullable<RendererInternals["_nodes"]>, renderObject: unknown) {
-      const scene = self.sceneContext;
-      if (!scene || self.chain?.scenePass !== scene.pass || (renderObject as { context?: unknown }).context !== scene.context) {
-        return original.call(this, renderObject);
-      }
-      const target = scene.pass.renderTarget;
-      const mrtNode = scene.pass.getMRT();
-      const previousTarget = renderer.getRenderTarget();
-      const previousMrt = renderer.getMRT();
-      const previousContext = internals._currentRenderContext;
-      const swap = previousTarget !== target || previousMrt !== mrtNode;
-      if (swap) {
-        renderer.setRenderTarget(target);
-        renderer.setMRT(mrtNode);
-      }
-      internals._currentRenderContext = scene.context;
-      try {
-        return Promise.resolve(this.getForRender(renderObject));
-      } finally {
-        internals._currentRenderContext = previousContext;
-        if (swap) {
-          renderer.setRenderTarget(previousTarget);
-          renderer.setMRT(previousMrt);
+      return self.enqueueShaderBuild(() => {
+        const scene = self.sceneContext;
+        if (!scene || self.chain?.scenePass !== scene.pass || (renderObject as { context?: unknown }).context !== scene.context) {
+          return original.call(this, renderObject);
         }
-      }
+        const target = scene.pass.renderTarget;
+        const mrtNode = scene.pass.getMRT();
+        const previousTarget = renderer.getRenderTarget();
+        const previousMrt = renderer.getMRT();
+        const previousContext = internals._currentRenderContext;
+        const swap = previousTarget !== target || previousMrt !== mrtNode;
+        if (swap) {
+          renderer.setRenderTarget(target);
+          renderer.setMRT(mrtNode);
+        }
+        internals._currentRenderContext = scene.context;
+        try {
+          return this.getForRender(renderObject);
+        } finally {
+          internals._currentRenderContext = previousContext;
+          if (swap) {
+            renderer.setRenderTarget(previousTarget);
+            renderer.setMRT(previousMrt);
+          }
+        }
+      });
     };
   }
 
@@ -840,11 +901,10 @@ export class EngineRenderer {
       // put the canvas back. Built then, the fragment shader has one output
       // where the scene pass's MRT target has several, and every pipeline
       // fails with "Color target has no corresponding fragment stage output".
-      // So generate it HERE, inside the borrowed window, for each object the
-      // projection pass hands over; compileAsync's own pass then finds the
-      // state cached and only has the (async) GPU pipeline left to build. The
-      // synchronous cost is one build per genuinely new material variant —
-      // rare once batches share shaders (see instancing.ts).
+      // guardAsyncBuilds borrows that state for EACH async shader build.
+      // Do not also build every shader here: that defeats three's yields and
+      // turns a large effect sampler into one multi-second synchronous task.
+      // This hook only records the objects for failed-pipeline cleanup below.
       internals._createObjectPipeline = function (this: RendererInternals, ...args) {
         originalCreate.apply(this, args);
         const [object, material, scene, camera, lightsNode, group, clippingContext, passId] = args;
@@ -854,7 +914,6 @@ export class EngineRenderer {
           );
           renderObject.drawRange = (object as THREE.Mesh).geometry.drawRange;
           renderObject.group = group;
-          this._nodes!.getForRender(renderObject);
           handed.push(renderObject);
           stats.objects += 1;
         } catch (error) {
@@ -880,15 +939,19 @@ export class EngineRenderer {
       pending = renderer.compileAsync(root, camera, targetScene);
     } finally {
       undo();
+      // compileAsync collects its render list synchronously, before its first
+      // yield. These flags belong only to that projection, not to subsequent
+      // frames while GPU pipelines compile. Holding frustumCulled=false until
+      // the promise settles makes distant precompiled meshes draw meanwhile;
+      // holding visible=false hides water/effects from those same frames.
+      for (const object of restore) object.frustumCulled = true;
+      for (const object of hidden) object.visible = true;
     }
     try {
       await pending;
     } catch (error) {
       // an optimisation, never a correctness requirement
       console.warn("[render] pipeline precompile failed:", error);
-    } finally {
-      for (const object of restore) object.frustumCulled = true;
-      for (const object of hidden) object.visible = true;
     }
     // A pipeline that fails validation off-frame stays null in three's cache
     // and the object is then never drawn in this context — a silent hole, not

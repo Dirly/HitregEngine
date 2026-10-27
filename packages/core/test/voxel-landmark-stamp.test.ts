@@ -71,6 +71,20 @@ describe("landmark stamp", () => {
     expect(none.pieces.some((p) => p.kind === "heightPatches")).toBe(false);
   });
 
+  it("pad with an explicit `area` levels that outline instead of the solid's footprint (a floor in front of a wall)", () => {
+    // the arch stands at the origin; the area is a 40 x 20 m floor 30-50 m in front of it (spec +Z), yaw 0
+    const area = [[-20, 30], [20, 30], [20, 50], [-20, 50]];
+    const out = compileOperator(doc({ yaw: 0, y: 120, blend: { mode: "pad", apron: 6, feather: 6, area } }), flat);
+    const patch = out.pieces.find((p) => p.kind === "heightPatches")!.feature as { origin: [number, number]; size: [number, number]; columns: number; heights: number[] };
+    const r = out.output.report as { footY: number; footprintCells: number };
+    expect(r.footY).toBe(120);
+    expect(r.footprintCells).toBeGreaterThan(700); // ~41 x 21 one-metre cells, not the arch's foot
+    // the patch covers the area (+ apron + feather) and not the arch's foot 30 m behind it
+    expect(patch.origin[1]).toBeGreaterThan(20 + 30 - 6 - 6 - 4);
+    const at = (x: number, z: number) => patch.heights[Math.round((z - patch.origin[1]) / 2) * patch.columns + Math.round((x - patch.origin[0]) / 2)]!;
+    expect(at(10, 60)).toBe(120); // inside the area (world = at + local): level
+  });
+
   it("applies with an inverse that restores the recipe", () => {
     const base: WorldRecipe = defaultWorldRecipe({ cellSize: 48 });
     const first = applyOperator(base, doc(), flat);

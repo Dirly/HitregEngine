@@ -4,6 +4,41 @@ What a reviewer agent checks (`docs/zone-creation.md`, "The reviewer"). Each lin
 evidence. Measurable lines first; a taste line is a fault only when the picture shows it plainly. Cite a line by its
 code (S3, D5 ...).
 
+The Place lines (P1-P5) are not taste lines (owner ruling 2026-10-22, after a zone of places passed every gate and
+read as nothing): a story element that is not in the frames, or a prop no element explains, is a FAULT. It is never a
+logged note and never a prop request. A reviewer who writes "no nets visible" and passes has failed the review.
+
+## Place (the design review on ONE finished area, then again on the whole place at the final review)
+
+The owner's `design.json` (tools/poi-review/job.mjs gate 16) states the premise, the player's journey, the areas and
+the story elements, and names one finished area with its player-height frames and the reference frames it is judged
+against. The reviewer answers from the frames, reading the design text only to check it against them.
+
+- P1 The story reads from the frames alone: before reading the premise, the reviewer writes in one line what this
+  place is and what its occupants do or did there; it then matches the premise. A read of "some huts", "a yard" or a
+  different place is a fault. The world is DARK HIGH FANTASY (owner ruling 2026-10-23): the read carries a threat, a
+  wrongness or a cost — what the place does to people, what it hides, what comes for it at night. A read that is a
+  farm chore, a trade yard or a pleasant village scene with nothing wrong in it is a fault, however well built.
+  Follow `adventure-design.md`: ordinary work plus wolves, a corpse or grim backstory is not sufficient.
+  Name the particular fantasy discovery and its visible evidence; do not infer it from a newly ominous name.
+- P2 Every story element is seen: each `elements[]` entry of design.json is visible in a named frame as built
+  geometry, a catalogue prop, a decal or a creature. One missing is a fault; a prop request does not stand in for it. A
+  creature or NPC element belongs to populate / town-npcs, not to the place: it passes when its spot is open and named.
+- P3 Nothing is random: every prop and structure in the frames is explained by an element or a journey step. The
+  reviewer names each one that is not; one or more is a fault.
+- P4 Worth visiting: a player who sees the place from the road has a reason to walk over and is paid for it there
+  (something to do, take, learn or fight, or a sight). State the attraction, what investigation reveals and its
+  particular payoff. Generic pests or a commodity chore alone do not establish that adventure.
+  Fine-but-forgettable is a fault, even when layout and quest mechanics pass.
+- P5 Finished to the bar: the finished area (at the final review, every area) stands beside the reference frames the
+  design names at the same craft (prop choice, wear, light) and beside its concept frame (drawn from the premise before
+  the build) with the same composition and set pieces. Not as crafted, or not the place the concept shows, is a fault.
+- P6 Made of the world (owner ruling 2026-10-23): at least 60% of the props and pieces in the frames are the catalogue's
+  reusable props and kits — tents, huts, lean-tos, racks, carts, boats, barrels, hurdles, bone piles, a kin's dwellings
+  — placed to the story; props custom to this place are the few that carry the one thing the story cannot say
+  otherwise. More custom than reused, or a place with no reusable kit in it, is a fault. (`job.mjs design` measures
+  the same share on design.json: at most 40% of its props may be made for this place.)
+
 ## Quality (every review, first)
 
 - Q1 No bare primitive stands in for an object (a sphere as a boulder, a box as a cauldron, blocks as a dam). Primitives
@@ -23,7 +58,8 @@ code (S3, D5 ...).
 - Z2 No two places in the zone, or in a neighbour zone, share a set piece, landmark or unique thing.
 - Z3 Most hostile places belong to groups other than the story faction; each group has its own small reason.
 - Z4 Every large place has three or more linked features with water or caves among them where the land allows.
-- Z5 Every landmark owns its own dungeon; its outside promises what the inside will be.
+- Z5 Every planned dungeon belongs to its own place; its outside promises what the inside will be.
+  Landmark status or size alone does not require a dungeon; justify destinations through adventure and zone pacing.
 - Z6 On the map: every place is reachable from a road or path, none sits on a town, places are spread so the land
   between them is used, and landmark places are seen from a road. Places stand on the ground the site finder found
   (`zonegen sites`: `sites.png` + `sites-candidates.json`, the place's `site` pick): a door at the end of its canyon

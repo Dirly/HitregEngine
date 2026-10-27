@@ -29,7 +29,7 @@ import type { RockCap, VegetationTint } from "../components/core.js";
 import { rockCapResolver, rockSkinProbe } from "./rock-cap.js";
 import { buildShoreGrid, formationMembers, formationReach, lakeProbeMemo, nearestShore, refineShore, shoreLevel, waterPlacement, type LakeProbe, type ShoreGrid, type ShorePoint } from "./formations.js";
 import { vegetationIndex, type VegetationPlan } from "./vegetation.js";
-import { seatObject, type SolidProbe } from "./seat.js";
+import { ROCK_EMBED, seatObject, type SolidProbe } from "./seat.js";
 
 export interface VoxelScatterInstance {
   /** Rule that produced it — the scatter rule's `id`. */
@@ -155,9 +155,17 @@ export function scatterSeatSize(rule: ScatterDoc, scale: number, colliderSize?: 
  * Seat one rock instance (`contact: embed`) on the ground under its footprint: the corrected base y, or null to
  * drop it (it straddles an edge or has too little ground). `base` is where the rule put it (centre ground + yOffset).
  */
+/**
+ * Share of its height a scatter rock is sunk below the lowest ground under it when seated: at least ROCK_EMBED (15%),
+ * more for a rule that asks for a deeper `yOffset`. The scatter placer, the float gate and the fall-site placer share it.
+ */
+export function scatterEmbed(rule: ScatterDoc): number {
+  return Math.max(ROCK_EMBED, -rule.yOffset * 0.5);
+}
+
 function seatRock(probe: SolidProbe, rule: ScatterDoc, x: number, z: number, base: number, yaw: number, scale: number, colliderSize?: readonly [number, number, number]): number | null {
   const size = scatterSeatSize(rule, scale, colliderSize);
-  const r = seatObject(probe, { x, z, y: base, yaw, ...size, align: rule.alignToNormal }, "embed", { embed: Math.max(0.05, -rule.yOffset * 0.5), reachDown: Math.max(4, size.height * 2) });
+  const r = seatObject(probe, { x, z, y: base, yaw, ...size, align: rule.alignToNormal }, "embed", { embed: scatterEmbed(rule), embedMin: scatterEmbed(rule), reachDown: Math.max(4, size.height * 2) });
   return r.status === "unsupported" ? null : (r.y ?? base);
 }
 
@@ -262,7 +270,7 @@ function planarFootingHolds(field: WorldField, x: number, y: number, z: number):
  */
 function memberCap(shared: { rockCap?: RockCap }, field: WorldField, rule: ScatterDoc, x: number, y: number, z: number): { rockCap?: RockCap } {
   if (!rule.cap || !shared.rockCap?.amount) return shared;
-  const band = rockSkinProbe(field).groundBand(x, y, z).band;
+  const band = rockSkinProbe(field).groundBand(x, y, z, rule.capLedge ?? 2).band;
   return band === "bare" || band === "climate" ? withRockCap(field, rule, x, y, z) : shared;
 }
 
@@ -793,7 +801,9 @@ function emitCliffMass(
       scale,
       biome: sample.id,
       ...(fitted.variant !== undefined ? { variant: fitted.variant } : {}),
-      ...memberCap((cap ??= withRockCap(field, rule, px, py, pz)), field, rule, px, py, pz),
+      // the cap is judged where the piece STANDS (its instance position, yOffset included) — the rock-skins gate reads it
+      // there; resolved at the un-offset y, a face piece on a stone band kept a turf cap (Weepwater, 2026-10-21)
+      ...memberCap((cap ??= withRockCap(field, rule, px, py + rule.yOffset * scale, pz)), field, rule, px, py + rule.yOffset * scale, pz),
     });
   }
 }
@@ -1328,7 +1338,9 @@ export function scatterCell(
               biome: sample.id,
               ...(own ? { model: own.model, ...(own.colliderSize ? { colliderSize: own.colliderSize } : {}) } : emit.modelVariants && m.pick >= 0 ? { variant: m.pick } : {}),
               ...(m.filler ? { filler: true } : {}),
-              ...(emit.water ? withWet(field, emit, cap, m.x, m.z, my, m.scale, memberSize) : cap),
+              // a member shares the anchor's cap unless it stands on stone or a climate band itself (memberCap): a turf cap
+              // shared onto a member that rolled onto bare rock was a cap fault (Hagsend, rock-skins gate 2026-10-21)
+              ...(emit.water ? withWet(field, emit, m.anchor ? cap : memberCap(cap, field, emit, m.x, m.ground, m.z), m.x, m.z, my, m.scale, memberSize) : m.anchor ? cap : memberCap(cap, field, emit, m.x, m.ground, m.z)),
             });
           });
           continue;

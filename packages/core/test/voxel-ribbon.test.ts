@@ -15,6 +15,7 @@ import {
   ribbonSurfaces,
   ribbonMaterialId,
   ribbonVerge,
+  ribbonJoins,
   wallFaceOffset,
   wallSkinOverrides,
   RIBBON_WALL_TURN_CLEAR,
@@ -151,6 +152,15 @@ describe("steep stretches", () => {
     expect(fit.report.length).toBeGreaterThan(130);
   });
 
+  it("never zig-zags a winding steep stretch along its chord: the path keeps its own line", () => {
+    // an L-shaped line up the same steep slope: one long steep stretch whose chord cuts the corner
+    const fit = fitRibbon(pathParamsSchema.parse({ points: [[-30, 0], [40, 0], [40, 70]], width: 2.4, maxGrade: 0.15, corridor: 6 }), reader((x, z) => 40 + 0.6 * (Math.max(-30, Math.min(40, x)) + 30) + 0.6 * Math.max(0, Math.min(70, z))));
+    // every centre sample stays near the authored L (within the corridor), never on the diagonal across it
+    const near = (x: number, z: number) => Math.min(Math.abs(z) + Math.max(0, x - 40, -30 - x), Math.abs(x - 40) + Math.max(0, -z, z - 70));
+    for (const sm of fit.ribbon.samples) expect(near(sm[0], sm[2])).toBeLessThan(8);
+    expect(fit.ribbon.warnings.some((w) => /winds/.test(w))).toBe(true);
+  });
+
   it("quantises a profile into whole risers, landing where it flattens", () => {
     const s = Array.from({ length: 31 }, (_, i) => i);
     const y = s.map((v) => (v < 10 ? v * 0.4 : v < 16 ? 4 : 4 + (v - 16) * 0.4)); // climb, landing, climb
@@ -186,6 +196,54 @@ describe("grading patch", () => {
   });
 });
 
+describe("grading edge on a sidehill (lattice-safe)", () => {
+  // the side drop grows along the path: a fill wall starts part-way, so the shoulder goes feathered -> walled
+  const growing = reader((x, z) => 40 - (0.15 + 0.5 * Math.min(1, Math.max(0, (x - 15) / 20))) * z);
+  const at = (p: ReturnType<typeof ribbonPatch>, x: number, z: number) => {
+    const col = Math.round((x - p.origin[0])), row = Math.round((z - p.origin[1]));
+    return { w: p.weights[row * p.columns + col]!, h: p.heights[row * p.columns + col]! };
+  };
+
+  it("fades a wall run's end into the next feathered shoulder (no step ALONG the path past a wall end)", () => {
+    const fit = fitRibbon(pathParamsSchema.parse({ points: [[0, 0], [70, 0]], width: 3, shoulder: 6, wallDrop: 1.2 }), growing);
+    const r = { id: "t", ...fit.ribbon } as RibbonDoc;
+    expect(r.samples.some((s) => s[4] < 0) && r.samples.some((s) => s[4] > 0)).toBe(true);
+    const p = ribbonPatch(r, 1);
+    // along the fill side, every metre out to the shoulder's far edge: the weight never jumps (was 0.7 -> 0 at the end)
+    for (const d of [4, 5, 6, 7, 8]) {
+      let worst = 0;
+      for (let x = 2; x < 68; x++) worst = Math.max(worst, Math.abs(at(p, x + 1, d).w - at(p, x, d).w));
+      expect(worst).toBeLessThan(0.3);
+    }
+  });
+
+  it("keeps every shoulder off a fill wall's face cut (the field reads the wall foot there: no trench edge)", () => {
+    const fit = fitRibbon(pathParamsSchema.parse({ points: [[0, 0], [70, 0]], width: 3, shoulder: 6, wallDrop: 1.2 }), growing);
+    const r = { id: "t", ...fit.ribbon } as RibbonDoc;
+    const fills = r.cuts.filter((c) => c.kind === "face" && c.n[1] >= 2.4); // fill walls cut 2.5 m out (a cut wall's lies under the path)
+    expect(fills.length).toBeGreaterThan(3);
+    const p = ribbonPatch(r, 1);
+    for (const c of fills) {
+      const s = (c.s[0] + c.s[1]) / 2, n = c.n[1] / 2;
+      const x = c.origin[0] + c.dir[0] * s - c.dir[1] * n, z = c.origin[1] + c.dir[1] * s + c.dir[0] * n;
+      expect(at(p, x, z).w).toBeLessThan(0.05);
+    }
+  });
+
+  it("levels a sharp turn continuously: the inside never steps where the nearest arm flips", () => {
+    // a 90 degree corner climbing at the grade: the two arms' levels differ by grade x arc
+    const fit = fitRibbon(pathParamsSchema.parse({ points: [[0, 0], [30, 0], [30.5, 0.5], [30.5, 30]], width: 3, maxGrade: 0.15 }), reader((x, z) => 40 + 0.14 * (x + z)));
+    const p = ribbonPatch({ id: "t", ...fit.ribbon } as RibbonDoc, 1);
+    let worst = 0;
+    for (let a = 24; a < 30; a++) for (let b = 0; b < 6; b++) {
+      const q = at(p, a, b), qx = at(p, a + 1, b), qz = at(p, a, b + 1);
+      if (q.w < 1 || qx.w < 1 || qz.w < 1) continue;
+      worst = Math.max(worst, Math.abs(qx.h - q.h), Math.abs(qz.h - q.h));
+    }
+    expect(worst).toBeLessThan(0.35);
+  });
+});
+
 describe("ribbon mesh", () => {
   const fit = fitRibbon(pathParamsSchema.parse({ points: [[-30, 0], [70, 0]], width: 2.4, steep: "steps" }), steep);
   const r = { id: "m", ...fit.ribbon } as RibbonDoc;
@@ -215,6 +273,16 @@ describe("path operator in a world", () => {
     expect(JSON.stringify(operatorSpecs().path?.schema)).toMatch(/maxGrade/);
     const { pieces } = compileOperator(path, rolling);
     expect(pieces.map((p) => `${p.kind}/${p.feature.id}`).sort()).toEqual(["heightPatches/op:lane:grade", "ribbons/op:lane:ribbon"]);
+  });
+
+  it("`calm` makes the grade patch built ground (no overhang noise over a benched path); omitted leaves it natural", () => {
+    const grade = (doc: Record<string, unknown>) => compileOperator(doc, rolling).pieces.find((p) => p.kind === "heightPatches")!.feature;
+    expect(grade(path)).not.toHaveProperty("calm");
+    expect(grade({ ...path, calm: true })).toMatchObject({ calm: true });
+    const base = defaultWorldRecipe({ cellSize: 48 });
+    const field0 = createWorldField(base);
+    const ground: OperatorFieldReader = { height: (x, z) => field0.height(x, z), voxelSize: 2, seaLevel: base.seaLevel, seed: 1 };
+    expect(worldRecipeSchema.safeParse(applyOperator(base, { ...path, calm: true }, ground).recipe).success).toBe(true);
   });
 
   it("streams a ribbon with a trimesh collider, over ground graded within 5 cm of it", () => {
@@ -302,6 +370,34 @@ describe("ribbon look", () => {
     expect(n).toBeGreaterThan((r.samples.length - 1) * 8 + 40); // extra rings round the turn
   });
 
+  it("cuts two ribbons laid end to end flush on the joint: one surface, no overlapping ends (z-fight)", () => {
+    const A = { ...doc([[0, 0], [30, 0]]), id: "a" }, B = { ...doc([[30, 0], [55, 12]]), id: "b", seed: 3 };
+    const joins = ribbonJoins([A, B]);
+    expect(joins.get("a")?.end).toBeDefined();
+    expect(joins.get("b")?.start).toBeDefined();
+    expect(joins.get("a")!.end).toBeCloseTo(joins.get("b")!.start!, 6); // the same cross-section
+    const tris = (m: ReturnType<typeof ribbonMesh>) => {
+      const P = m.positions, out: [number, number][][] = [];
+      for (let t = 0; t < m.indices.length; t += 3) out.push([0, 1, 2].map((q) => [P[m.indices[t + q]! * 3]!, P[m.indices[t + q]! * 3 + 2]!] as [number, number]));
+      return out;
+    };
+    const inside = (p: [number, number], t: [number, number][]) => {
+      const c = (a: [number, number], b: [number, number]) => (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+      const d1 = c(t[0]!, t[1]!), d2 = c(t[1]!, t[2]!), d3 = c(t[2]!, t[0]!);
+      return (d1 > 1e-6 && d2 > 1e-6 && d3 > 1e-6) || (d1 < -1e-6 && d2 < -1e-6 && d3 < -1e-6);
+    };
+    const overlap = (ma: ReturnType<typeof ribbonMesh>, mb: ReturnType<typeof ribbonMesh>) => {
+      const ta = tris(ma);
+      return tris(mb).filter((t) => { const c: [number, number] = [(t[0]![0] + t[1]![0] + t[2]![0]) / 3, (t[0]![1] + t[1]![1] + t[2]![1]) / 3]; return ta.some((u) => inside(c, u)); }).length;
+    };
+    const free = [ribbonMesh(A, -100, -100, 100, 100, 4), ribbonMesh(B, -100, -100, 100, 100, 4)];
+    expect(overlap(free[0]!, free[1]!)).toBeGreaterThan(0); // two rounded ends over each other: the z-fight
+    const cut = [ribbonMesh(A, -100, -100, 100, 100, 4, undefined, joins.get("a")), ribbonMesh(B, -100, -100, 100, 100, 4, undefined, joins.get("b"))];
+    expect(overlap(cut[0]!, cut[1]!)).toBe(0);
+    // a junction (three ends on one point) keeps its round ends
+    expect(ribbonJoins([A, B, { ...doc([[30, 0], [30, -20]]), id: "c" }]).size).toBe(0);
+  });
+
   it("dresses wall pieces in the zone stone; kit keeps its own", () => {
     expect(wallSkinOverrides({ prefab: "retaining-wall/common-h150-straight-2", role: "straight-2" }, "red-cliff")).toEqual([{ path: "piece/components/mesh/material", value: "ribbon-wall/red-cliff-rubble" }]);
     expect(wallSkinOverrides({ prefab: "retaining-wall/common-cap-2", role: "cap" }, "red-cliff")[0]!.value).toBe("ribbon-wall/red-cliff-ashlar");
@@ -340,6 +436,19 @@ describe("ribbon look", () => {
     }
   });
 
+  it("never bridges a wall run across a turn too tight for a wall (the hairpin OOM): finite, bounded pieces", () => {
+    // a kink whose inside curvature spikes for ONE sample: closing the 1-sample gap put a face at Infinity -> an
+    // endless run of modules (hg-kelp-road-3 ran 4 GB out of memory)
+    let calls = 0;
+    const g = reader((_x, z) => { if (++calls > 2e5) throw new Error("runaway wall run"); return 40 - 0.5 * z; });
+    const fit = fitRibbon(pathParamsSchema.parse({ points: [[0, 0], [20, 0], [22.3, 1.93], [25.77, 21.62]], width: 3.4, wallDrop: 0.8, wallCut: 0.8 }), g);
+    expect(fit.ribbon.pieces.length).toBeLessThan(fit.ribbon.samples.length * 2);
+    for (const p of fit.ribbon.pieces) expect(p.position.every(Number.isFinite)).toBe(true);
+    // a routed line with a corridor (switchback detour) over the same kinks finishes too
+    const routed = fitRibbon(pathParamsSchema.parse({ points: [[0, 0], [20, 0], [22.3, 1.93], [25.77, 21.62], [27, 24], [10, 30]], width: 3.4, corridor: 8, wallDrop: 0.8, wallCut: 0.8 }), steep);
+    expect(routed.ribbon.samples.every((s) => s.every(Number.isFinite))).toBe(true);
+  });
+
   it("walls a high uphill cut too and steps every run down at its ends", () => {
     const fit = fitRibbon(pathParamsSchema.parse({ points: [[0, 0], [40, 0]], width: 2.4 }), reader((_x, z) => 40 - 0.6 * z));
     const roles = fit.ribbon.pieces.map((p) => p.role);
@@ -348,5 +457,20 @@ describe("ribbon look", () => {
     expect(roles.filter((r) => r === "end-l").length).toBe(roles.filter((r) => r === "end-r").length);
     expect(roles.filter((r) => r === "end-l").length).toBeGreaterThanOrEqual(2);
     expect(fit.ribbon.pieces.every((p) => p.prefab.endsWith(p.role === "cap" ? "cap-2" : p.role))).toBe(true);
+  });
+});
+
+describe("grading patch raster (net-green 2026-10-20)", () => {
+  it("gives every cell beside a weighted one a real height: the stepped foot's fan is inside the raster's reach", () => {
+    const fit = fitRibbon(pathParamsSchema.parse({ points: [[-30, 0], [70, 0]], width: 2.4, steep: "steps" }), steep);
+    expect(fit.ribbon.flights.length).toBeGreaterThan(0);
+    const p = ribbonPatch({ id: "f", ...fit.ribbon } as RibbonDoc, 1);
+    let bad = 0;
+    for (let row = 1; row < p.rows - 1; row++) for (let col = 1; col < p.columns - 1; col++) {
+      if (!(p.weights[row * p.columns + col]! > 0)) continue;
+      for (const [a, b] of [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, 1], [-1, 1], [1, -1]] as const)
+        if (p.heights[(row + b) * p.columns + col + a]! < 30) bad++; // the ground is >= 40: a 0 is a cell never given a height
+    }
+    expect(bad).toBe(0);
   });
 });

@@ -27,6 +27,25 @@ export interface AssetRoots {
   projectsRoot: string;
 }
 
+/** Fresh JSON reads in request order; one broken file does not discard its neighbours. */
+export async function readAssetJsonBatch(roots: AssetRoots, files: unknown, scope: readonly string[] | null) {
+  if (!Array.isArray(files) || files.length > 64 || !files.every((file) =>
+    typeof file === "string" && file.endsWith(".json") &&
+    !file.includes("\\") && !file.split("/").some((part) => part === ".." || part === "") &&
+    !path.isAbsolute(file))) throw new Error("files must be at most 64 relative JSON asset paths");
+  return Promise.all((files as string[]).map(async (file) => {
+    try {
+      const target = resolveAssetFile(roots, file, scope);
+      if (![roots.assetsRoot, roots.projectsRoot].some((root) => target.startsWith(path.resolve(root) + path.sep))) {
+        throw new Error("path outside asset roots");
+      }
+      return { data: JSON.parse(await fs.promises.readFile(target, "utf8")) as unknown };
+    } catch (error) {
+      return { error: `${file}: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }));
+}
+
 const PROJECT_NAME = /^[a-z0-9][a-z0-9_-]*$/i;
 
 export function readProjectManifest(projectsRoot: string, name: string): ProjectManifest | null {

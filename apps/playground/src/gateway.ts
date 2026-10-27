@@ -15,7 +15,7 @@
  * character goes through the full creation screen (character-creation.ts).
  */
 
-import type { CharacterBuild, CharacterCreation } from "@hitreg/core";
+import type { CharacterBuild, CharacterCreation, EquipmentSlot } from "@hitreg/core";
 import { applyCreationSkin, mountCreationScreen, watchUiScale, type CreationPreview } from "./character-creation.js";
 
 export interface GatewaySession {
@@ -34,6 +34,8 @@ export interface GatewayCharacter {
   world?: string;
   /** Creation choices; absent on characters made before creation existed. */
   build?: CharacterBuild;
+  /** Saved worn item ids, supplied by main's authenticated roster. */
+  equipment?: Partial<Record<EquipmentSlot, string>>;
   /** When it was deleted (only on a restorable one). */
   deletedAt?: string;
 }
@@ -354,6 +356,8 @@ export interface GatewayPanelOptions {
 }
 
 export interface GatewayPanel {
+  /** Remove a temporary pre-world panel, including its preview and listeners. */
+  dispose(): void;
   show(screen?: "worlds" | "characters"): void;
   hide(): void;
   /** The chosen character, once Play was pressed. */
@@ -371,7 +375,7 @@ export function mountGatewayPanel(opts: GatewayPanelOptions): GatewayPanel {
   root.setAttribute("role", "dialog");
   root.setAttribute("aria-label", "Sign in");
   document.body.appendChild(root);
-  watchUiScale(root); // lives as long as the page
+  const unscale = watchUiScale(root);
   const status = document.createElement("div");
   status.className = "hg-status";
   status.textContent = `gateway ${opts.client.base}`;
@@ -661,7 +665,7 @@ export function mountGatewayPanel(opts: GatewayPanelOptions): GatewayPanel {
       whoSub.textContent = chosenOne?.build ? archetypeName(chosenOne.build.archetype) : "";
       play.disabled = del.disabled = !chosenOne;
       who.hidden = !chosenOne;
-      if (chosenOne?.build && preview) preview.update(chosenOne.build);
+      if (chosenOne?.build && preview) preview.update(chosenOne.build, chosenOne.equipment ?? {});
       if (scene?.layer) scene.layer.style.visibility = "visible";
     };
 
@@ -827,6 +831,13 @@ export function mountGatewayPanel(opts: GatewayPanelOptions): GatewayPanel {
   };
 
   const panel: GatewayPanel = {
+    dispose: () => {
+      dropScene();
+      unscale();
+      root.remove();
+      status.remove();
+      style.remove();
+    },
     show: (screen = "worlds") => {
       root.hidden = false;
       if (opts.client.session) { if (screen === "characters") renderCharacters(); else renderWorlds(); }

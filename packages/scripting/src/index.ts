@@ -38,7 +38,7 @@ export {
 export { EventBus, type EventHandler, type NetRole, type TraceEntry } from "./events.js";
 export { ScriptRegistry, type DataTypeSink } from "./registry.js";
 export { InputService } from "./input.js";
-export { ScriptRuntime, type RuntimeOptions, type RuntimeVfxFrame, type RuntimeVfxHost, type ScriptChatHost } from "./runtime.js";
+export { ScriptRuntime, MOB_SLEEP, type MobBand, type MobSleepRule, type RuntimeOptions, type RuntimeVfxFrame, type RuntimeVfxHost, type ScriptChatHost } from "./runtime.js";
 export { registerBuiltinScripts } from "./builtin.js";
 export { CharacterLook } from "./character-look.js";
 export {
@@ -71,6 +71,7 @@ export { QuestLog } from "./quest-log.js";
 export { PresenceScript, presentFor } from "./presence.js";
 export { PlayerRecords } from "./player-records.js";
 export { PortalScript } from "./portal.js";
+export { LiftScript, liftCycle, liftLength, liftProgress, isClockDrivenScript } from "./lift.js";
 export { EncounterWavesScript, WaveTracker, npcSpawnEventSchema, npcDespawnEventSchema, type WaveDef, type WaveTrackerConfig } from "./encounter-waves.js";
 export {
   actionIsLayered,
@@ -102,6 +103,10 @@ export {
   playbackRate,
   swimAim,
   swimStateFor,
+  DryWaterMemo,
+  WATER_DRY_MARGIN,
+  WATER_RESAMPLE_M,
+  WATER_RESAMPLE_STEPS,
   swimVy,
   swimming,
   ACTION_RATE_MAX,

@@ -1,6 +1,7 @@
 # PROPOSAL — Quest mechanics as registered building blocks
 
-Status: proposal, nothing built. Goal: quests that are not all "go there, kill that", assembled by agents from a
+Status: partly built — what the engine runs is the registry (`questBlocks` in @hitreg/core, spec `questBlocks`); §7 lists
+what is built and what is deliberately not. Goal: quests that are not all "go there, kill that", assembled by agents from a
 small set of reusable, schema-registered mechanics, with sameness caught by the zone lint rather than hoped away.
 
 ## 1. Inventory — what a quest could react to today
@@ -95,7 +96,9 @@ non-exclusive and self-restoring. Nothing a player does may consume or lock a wo
 
 | Block | State | Two players at once | Respawn / reset |
 |---|---|---|---|
-| clock, weather | World, read-only | Both see the same window | n/a |
+| clock, weather, tide | World, read-only | Both see the same window | n/a |
+| escort | One shared NPC body; a claim (netState `escort/<npcId>`) per escort | The first character near claims it; the other's step waits until it is back at its post | Fails (left behind `grace` s, or the NPC dead) and walks back; retry by going to it |
+| choose | Per-character flag `<choice>=<option>` | Each decides for themself | Saved with the character; never undone |
 | interact, read | Per-character progress; entity unchanged | Both progress; the entity never toggles shared | n/a |
 | object, presence | Entity shared, offer per-character | Both can accept; a presence never leaves mid-conversation | Presence follows its condition |
 | deliver | Item leaves the player; the slot never fills | Both deliver | The shown item is per-player (`reveal`) |
@@ -114,3 +117,26 @@ non-exclusive and self-restoring. Nothing a player does may consume or lock a wo
 6. Shared world flags (a zone-wide change): allow them now, or wait for server persistence?
 7. Uniqueness thresholds: hard errors from the first zone, or warnings at first?
 8. Project-registered blocks: allowed now, or engine-only until the first batch settles?
+
+## 7. Status (2026-10-20)
+
+Built (registered, run by the `quest-log` / `npc` builtins on the authority, carried by `zonegen quests` and `bind`,
+driven by `quest-play`): sources npc, object, auto, presence; conditions clock, weather, tide, quest, flag, level,
+item, coins; actions visit, kill, collect, talk, interact, read, deliver, endure, perform, escort; consequences flag
+(setFlag/clearFlag), choose, and the quest-level repeat. A kill names one creature (`tag:creature:<id>`); a bestiary
+GROUP id is refused by the lint, as bind always did, because populate tags bodies by creature, never by group.
+
+NOT built — a shared-world consequence (rising water, a beacon lit for everyone, a bridge raised). It would need world
+state the zone owns: a netState namespace keyed by zone (`zone/<zoneId>.<fact>`) written only by the zone's authority, a
+renderer/collider side that reads it (water level, a light, a mesh toggle), a condition block that reads it, and a reset
+that is part of the zone (a timer or a world-clock rule that puts it back, so one player's act never strands the next
+player's quest); with zone-scoped layers (docs/hosting.md) the fact must also live where every layer of the zone sees it,
+and survive a server restart or be defined to reset on one. Until then a "shared" consequence is per-player (a flag the
+dialogue reads) and the world itself does not change.
+
+NOT built — a reputation/faction consequence (standing with the Hagsheer wardens goes up). It would need a per-character
+standing table on the sheet or in npc memory (`npc/<bodyId>.standing[faction]`, saved with the character), a
+`consequence:standing { faction, delta }` and a `condition:standing { faction, min }` block, a list of factions the
+project declares (data, validated), and a decision on what standing changes beyond dialogue (prices, who attacks you —
+the mob faction rule in core `combatKey.faction` is a different, combat-only notion). Until then a designer uses flags
+(`choose` for a one-time allegiance) and quest `requires` chains.

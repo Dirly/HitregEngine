@@ -56,6 +56,12 @@ export interface LiveSkyOptions {
     mistThickness?: number;
     /** 0..1 how far `mistTop`/`mistThickness` replace the scene's absolute mist top (eased across a border). */
     mistLocal?: number;
+    /** The zone's dusk/dawn cloud-burn colour (replaces the day/night `clouds.sun` colour by `sunsetAmount`). */
+    sunset?: string;
+    /** 0..1 how far `sunset` replaces the day/night cloud-burn colour (eased across a border). */
+    sunsetAmount?: number;
+    /** Multiplies the day/night `clouds.sunAmount` (capped at 1). */
+    cloudGlow?: number;
   } | null;
   /** How much DAYLIGHT there is, 0..1 — a day/night script publishes it so the weather tint (a LIT colour) can be dimmed to the hour instead of lighting up midnight fog. Defaults to 1. */
   daylight?: number;
@@ -147,6 +153,10 @@ export interface RegionAt {
     /** Ground-relative mist: metres above the local low ground (see regionMoodSchema). */
     mistTop?: number;
     mistThickness?: number;
+    /** Dusk/dawn cloud-burn colour here (see regionMoodSchema). */
+    sunset?: string;
+    /** Multiplies the day/night script's cloudGlow here; omitted = 1. */
+    cloudGlow?: number;
   }>;
   /** The zone's sound (recipe `regions[].sound`), resolved over place -> zone -> parent. */
   sound?: Readonly<RegionSound>;
@@ -1063,6 +1073,20 @@ export abstract class Script {
    * remote player would stand there without their face, armour or sword.
    */
   static presentation = false;
+
+  /**
+   * Its motion is a pure function of the shared simulation clock (a lift, a ferry on a schedule): every peer and
+   * the server run it and compute the same thing, so the implicit script+rigidbody replication must leave it alone
+   * — replicating it would take its body off every client, and riders would fall through a ghost.
+   */
+  static clockDriven = false;
+
+  /**
+   * True when this script, run with these params, never moves, hides or reshapes its OWN entity or anything under
+   * it (a talkative notice board, a lamp that offers a quest). The host may then treat the entity as still: batch
+   * its subtree into static merges and freeze its transforms (the play-mode autoStatic rule). Absent = may move.
+   */
+  static stillWith?: (params: Record<string, unknown>) => boolean;
 
   ctx!: ScriptContext;
 

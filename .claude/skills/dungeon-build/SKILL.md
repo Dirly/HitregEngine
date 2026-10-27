@@ -33,7 +33,8 @@ portal play. A FAILED gate blocks `--next` and shows on the dungeon's `zonegen s
 - `stairs`: clear < 2.6 m above the nosing, clear band too wide, stepped roof, floor missing -> room kit
   `"kind": "stair"` with `ceiling` barrel/segmental/pointed/raked (natural: lofted tunnel); never a flat slab over a flight.
 - `atlas`: > 1 page, tint shifts hue or darkens, a tile outside its family band -> ONE atlas per dungeon; one stone
-  colouring, one wood tone, one metal tone; variety from pattern, wear and light, never hue.
+  colouring, one wood tone, one metal tone; variety from pattern, wear and light, never hue. Banded two-tone stone
+  declares ONE accent in plan.json `atlas.accent` {roles, hue, maxSat} (never exceptions).
 - `matte`: roughness < 0.9 (metal < 0.6) or metalness on a non-metal -> fix the project's `materials.mjs` layers.
 - `recipe`: per room built detail, props/kinds, bones, 2-5 visible light sources, decals, set piece; per passage
   bones and unlit runs; dungeon-wide prop kinds, decal textures, ambient, sourceless lights, prefabs outside a plan ->
@@ -62,6 +63,7 @@ only (a tomb over the bone cap, an intended ice shine, a passage lit only by the
 - Walk the route with the real body right after the first bake, before dressing.
 - The merged bake ships; volumes stay as the editable source. Never verify with a raised browser heap.
 - Frames fit the noised opening, overlapping into the rock; never floating proud on the old outline.
+- Water is ONE still level at the bottom (owner 2026-10-25): one surface height, no dry floor under it, nothing moving (no falls, cascades, curtains, channels; a fall is mist/vfx). The `water` gate's three checks cannot be excepted.
 - Water fills to its walls: author a pool/channel as a rough rect at its level, then `tools/water-edges.mts scene <id> --fix` re-cuts it to the walls and puts a dark card / drain where it really goes on; the `water-edges` stage must pass (no edge in open air).
 - No holes you can see through the map: the `see-through` stage (`tools/see-through.mts scene <id> --batch k/3`) draws the shipped scene with a magenta sentinel from eye height along the walk route and must pass; a hole's cause comes with it (thin DC shell: thicken the source wall to >= 3 voxels, `tools/mesh-dc/thin-walls.mjs` finds them before the bake; seam: overlap the groups; single-sided: close or double-side; culled: raise `cullingProfile.interiorReveal`). Real openings go in `authoring/see-through-openings.json` (docs/see-through.md).
 - Scale to the creature: giant halls take a coarser voxel; ramps (<= 20 %) where risers would hit the autostep limit.

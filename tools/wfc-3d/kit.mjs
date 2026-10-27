@@ -55,6 +55,7 @@ import {
 } from "./gltf.mjs";
 import { Atlas, decodeImage, solidImage } from "./atlas.mjs";
 import { collapseTileset, collapsedPrefab, previewSvg, uvCounterRotation } from "./wfc.mjs";
+import { gltfTriangles, partColliderBoxes, writePartCollider } from "./collider.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -796,6 +797,11 @@ function childIdsFor(items) {
   });
 }
 
+/** The collider model beside a part model: `wfc/<kit>/<part>.gltf` -> `wfc/<kit>/<part>.collider.gltf`. */
+export function colliderAssetIdFor(partAssetId) {
+  return partAssetId.replace(/\.(gltf|glb)$/i, "") + ".collider.gltf";
+}
+
 export function cellPrefab(tile, partsByName, kit, assetIdFor) {
   const ids = childIdsFor(tile.items);
   const entities = {
@@ -804,6 +810,14 @@ export function cellPrefab(tile, partsByName, kit, assetIdFor) {
   tile.items.forEach((it, i) => {
     const part = partsByName.get(it.part);
     const b = part.bounds;
+    // the part's collider (`part.collider`, set by importKit from its geometry; tools/wfc-3d/collider.mjs):
+    // "boxes" = a hidden child trimesh of the closed voxel boxes, "mesh" = the part's own mesh as a trimesh,
+    // "none" = no collider, absent = the bounding box (a caller that generated nothing)
+    const kind = part.collider ?? "bounds";
+    const collider =
+      kind === "bounds" ? { collider: { shape: "box", size: b.size.map((v) => Math.max(v, 0.01)), offset: b.centre } }
+      : kind === "mesh" ? { collider: { shape: "trimesh" } }
+      : {};
     entities[ids[i]] = {
       name: it.part,
       parent: "root",
@@ -817,10 +831,24 @@ export function cellPrefab(tile, partsByName, kit, assetIdFor) {
           castShadow: true,
           receiveShadow: true,
         },
-        collider: { shape: "box", size: b.size.map((v) => Math.max(v, 0.01)), offset: b.centre },
+        ...collider,
       },
       locked: false,
     };
+    if (kind === "boxes") {
+      entities[`${ids[i]}-collider`] = {
+        name: `${it.part} collider`,
+        parent: ids[i],
+        tags: [`wfc-part:${it.part}`, "collider"],
+        components: {
+          transform: {},
+          visibility: { visible: false },
+          mesh: { source: { kind: "asset", assetId: colliderAssetIdFor(assetIdFor(part)) }, static: true, castShadow: false, receiveShadow: false, hlod: false },
+          collider: { shape: "trimesh" },
+        },
+        locked: false,
+      };
+    }
   });
   const alignUv = tile.items
     .map((it, i) => ({ it, id: ids[i] }))
@@ -933,6 +961,30 @@ export async function importKit(options) {
   // prefabs + tileset
   const assetIdFor = (part) => `wfc/${kit}/${part.name}.gltf`;
   const prefabIdFor = (tile) => `wfc/${kit}/${tile.id}`;
+
+  // colliders from each part's GEOMETRY (collider.mjs), never its bounding box: a doorway keeps its hole, a deck is a
+  // slab at deck height on its posts. `<kitDir>/colliders.json` may declare a part "auto" (default: closed voxel
+  // boxes), "mesh" (its own mesh as a trimesh), "none", or { "close": metres } (the closing width for that part).
+  // Ceiling parts (roofs) default to "mesh": out of reach, and their pitch would stair into hundreds of boxes.
+  const colliderDecl = fs.existsSync(path.join(kitDir, "colliders.json")) ? JSON.parse(fs.readFileSync(path.join(kitDir, "colliders.json"), "utf8")) : {};
+  const colliderReport = {};
+  for (const { part, g } of analyzed) {
+    const decl = colliderDecl[part.name] ?? (part.role === "ceiling" ? "mesh" : "auto");
+    const file = path.join(assetsDir, "models", colliderAssetIdFor(assetIdFor(part)));
+    if (decl === "mesh" || decl === "none") {
+      part.collider = decl;
+      fs.rmSync(file, { force: true });
+      colliderReport[part.name] = { kind: decl };
+      continue;
+    }
+    if (decl !== "auto" && typeof decl !== "object") throw new Error(`colliders.json: "${part.name}" must be "auto", "mesh", "none" or { close }`);
+    const boxes = partColliderBoxes(gltfTriangles(g), { close: typeof decl === "object" ? decl.close : undefined });
+    const triangles = writePartCollider(boxes, file, `${part.name} collider`);
+    part.collider = "boxes";
+    colliderReport[part.name] = { kind: "boxes", boxes: boxes.length, triangles, top: Math.max(...boxes.map((b) => b.max[1])) };
+  }
+  log(`  colliders: ${Object.entries(colliderReport).map(([n, r]) => `${n} ${r.kind === "boxes" ? `${r.boxes} boxes` : r.kind}`).join(", ")}`);
+
   const prefabsDir = path.join(assetsDir, "prefabs", "wfc", kit);
   fs.rmSync(prefabsDir, { recursive: true, force: true });
   for (const tile of learned.tiles) {
@@ -959,6 +1011,7 @@ export async function importKit(options) {
       assetId: assetIdFor(p),
       bounds: { min: p.bounds.min, max: p.bounds.max },
       ...(p.uvAlign ? { uvAlign: p.uvAlign } : {}),
+      collider: colliderReport[p.name],
     })),
     atlas: { name: atlasName, pages: atlas.pages.length, islands: atlas.islands.size, layout: path.relative(assetsDir, layoutFile).replace(/\\/g, "/") },
     examples: examples.map((ex) => ({ file: path.basename(ex.file), placements: ex.placements, unmatched: ex.unmatched })),

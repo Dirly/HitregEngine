@@ -2,9 +2,10 @@
 // contact sheet out. The town pipeline takes one after every stage so the work can be looked at, not just linted.
 //   node tools/town-shots.mjs --base http://localhost:5288/ --scene mmo --views <views.json> --out <dir>
 // views.json: [{ "name": "gate-approach", "cam": [x, y, z], "target": [x, y, z] }, ...]  (north is -Z)
-// Needs Playwright (PLAYWRIGHT_MODULE = its index.mjs) and a dev server of the playground on --base.
+// Needs Playwright (the apps/playground devDependency; PLAYWRIGHT_MODULE / HITREG_PLAYWRIGHT override) and a dev server of the playground on --base.
 import fs from "node:fs";
 import path from "node:path";
+import { READ_ONLY_POSTS } from "./_readonly-posts.mjs";
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -17,10 +18,8 @@ const views = JSON.parse(fs.readFileSync(opt("views", ""), "utf8"));
 const outDir = path.resolve(opt("out", "shots/town"));
 const W = 1280, H = 800;
 fs.mkdirSync(outDir, { recursive: true });
-const { chromium } = await import(
-  process.env.PLAYWRIGHT_MODULE ??
-    "file:///C:/Users/Derek/AppData/Local/Temp/claude/D--Users-Derek-Desktop-HitRegStudios-Engine/29863f0b-4711-4d4d-aeda-fe4ad134b25a/scratchpad/node_modules/playwright/index.mjs"
-);
+// the apps/playground devDependency; PLAYWRIGHT_MODULE / HITREG_PLAYWRIGHT override (tools/_playwright.mjs)
+const { chromium } = await (await import("./_playwright.mjs")).loadPlaywright();
 
 const browser = await chromium.launch({ channel: "chrome", headless: true, args: ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist"] });
 const ctx = await browser.newContext({ viewport: { width: W, height: H } });
@@ -34,7 +33,7 @@ await ctx.addInitScript(() => {
 // review pictures never write: every dev-server write (scene autosave, player data) is answered here, never reaches disk
 await ctx.route(/\/__hitreg\//, (route) => {
   const r = route.request();
-  if (r.method() !== "GET" && !/\/__hitreg\/log\b/.test(r.url())) return route.fulfill({ status: 200, contentType: "application/json", body: "{\"ok\":true}" });
+  if (r.method() !== "GET" && !READ_ONLY_POSTS.test(r.url())) return route.fulfill({ status: 200, contentType: "application/json", body: "{\"ok\":true}" });
   return route.continue();
 });
 // freeze the page at the code it booted with (other sessions edit the tree; HMR would reload mid-run)

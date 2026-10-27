@@ -95,7 +95,7 @@ export class ClusteredMesh extends THREE.Mesh {
     if (cull) {
       // the camera frustum expressed in this mesh's local space
       this.projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).multiply(this.matrixWorld);
-      this.frustum.setFromProjectionMatrix(this.projView, camera.coordinateSystem);
+      this.frustum.setFromProjectionMatrix(this.projView, camera.coordinateSystem, camera.reversedDepth);
       for (let p = 0; p < 6; p++) {
         const plane = this.frustum.planes[p]!;
         this.planes[p * 4] = plane.normal.x;

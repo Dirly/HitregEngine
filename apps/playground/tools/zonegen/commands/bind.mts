@@ -265,9 +265,12 @@ export function decide(env: Env, q: PlannedQuest): Decision {
       item(t.ref);
       target = t.ref;
     } else if (t.type === "place") location(t.ref);
+    // a drop from the slain: the plan names a creature, the quest aims at its kill target (tag:creature:<id>, a rare's or
+    // boss's own); resolved here so a boss inside a dungeon puts the step in that instance
+    const dropFrom = o.action === "collect" && typeof o.params.from === "string" ? template(o.params.from) : "";
     const inst = stepInstance as InstanceScene | null;
     if (inst) instances.push({ objective: o.id, scene: inst.scene, portal: inst.portal, back: inst.back });
-    if (["interact", "read", "deliver", "talk"].includes(o.action) && (t.type === "place" || !target))
+    if (["interact", "read", "deliver", "talk", "escort"].includes(o.action) && (t.type === "place" || !target))
       why("plan-defect", `${o.id}: a ${o.action} step needs an entity to aim at, the plan names ${t.type} ${t.ref}`);
     if (o.at) location(o.at);
     const at = o.at || (t.type === "place" ? t.ref : t.type === "entity" ? (entities.get(t.ref)?.location ?? "") : "");
@@ -317,7 +320,7 @@ export function decide(env: Env, q: PlannedQuest): Decision {
       else wiring.push(`${o.id}: ${o.action} ${target} must yield ${g}; no engine block gives an item on ${o.action}: author it as ${target}'s conversation (\`give\`) or a pickup at ${at || "?"}.`);
     }
     // every item this step needs or collects that no step of the quest grants: where it really comes from
-    for (const it of new Set([...(o.action === "collect" ? [t.ref] : []), ...o.needs, ...(deliverItem ? [deliverItem] : [])])) {
+    for (const it of new Set([...(o.action === "collect" && !o.params.from ? [t.ref] : []), ...o.needs, ...(deliverItem ? [deliverItem] : [])])) {
       if (q.objectives.some((x) => x.grants.includes(it))) continue;
       const earlier = plan.graph.quests.find((x) => x.id !== q.id && q.requires.includes(x.id) && x.objectives.some((y) => y.grants.includes(it)));
       if (earlier) {
@@ -331,8 +334,11 @@ export function decide(env: Env, q: PlannedQuest): Decision {
         src ? `${o.id}: ${src.type} ${src.ref} must hand over ${it} (its conversation \`give\`s it).` : `${o.id}: nothing in the plan says where ${it} comes from.`,
       );
     }
+    if (dropFrom) wiring.push(`${o.id}: done — a quest drop: ${o.params.from} kills by the player roll ${o.params.chance ?? 1} for ${t.ref}.`);
     const params: Record<string, unknown> =
-      o.action === "deliver" ? { item: deliverItem } : o.action === "endure" ? { seconds: o.params.seconds } : o.action === "perform" ? { action: o.params.action, ...(o.params.range !== undefined ? { range: o.params.range } : {}) } : {};
+      dropFrom ? { from: dropFrom, ...(o.params.chance !== undefined ? { chance: o.params.chance } : {}) } :
+      o.action === "deliver" ? { item: deliverItem } : o.action === "endure" ? { seconds: o.params.seconds } : o.action === "perform" ? { action: o.params.action, ...(o.params.range !== undefined ? { range: o.params.range } : {}) } :
+      o.action === "escort" ? { ...(o.params.radius !== undefined ? { radius: o.params.radius } : {}), ...(o.params.grace !== undefined ? { grace: o.params.grace } : {}) } : {};
     objectives.push({
       id: o.id,
       label: `${WRITE_MARK} ${o.id}`,
@@ -370,6 +376,7 @@ export function decide(env: Env, q: PlannedQuest): Decision {
     level: q.level,
     places: placesId(env.ctx, townDocName(env, homeTown)),
     ...(source ? { source } : {}),
+    ...(q.repeat ? { repeat: q.repeat as QuestInput["repeat"] } : {}),
   };
   const parsed = questSchema.safeParse(quest);
   if (!parsed.success) for (const i of parsed.error.issues) why("compile", `${i.path.join(".")}: ${i.message}`);

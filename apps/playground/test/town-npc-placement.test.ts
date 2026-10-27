@@ -41,3 +41,11 @@ test("outside, the resident stays in world space and carries the screen-size cul
   assert.equal(RESIDENT_CULLING.minScreenPx > 0, true);
   assert.equal(RESIDENT_CULLING.interior, false);
 });
+
+test("inside a building the resident stands on its floor (the building origin), not on the terrain under it", async () => {
+  const { insideFloorY } = await import("../tools/town-npc-placement.mts");
+  // tavern at y 2 under a town at y 0: its floor is 2 m up whatever the ground below it says
+  assert.equal(insideFloorY(entities, "tavern"), 2);
+  assert.equal(insideFloorY(entities, "tavern-interior"), 2);
+  assert.equal(insideFloorY(entities, "shed"), null);
+});

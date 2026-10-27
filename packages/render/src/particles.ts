@@ -2,6 +2,8 @@ import * as THREE from "three/webgpu";
 import { PRECOMPILE_SAFE } from "./precompile-safe.js";
 import { InstancedProps, applyInstancedProps } from "./instancing.js";
 import { worldDaylight } from "./daylight.js";
+import { smokeWind } from "./chimney-smoke.js";
+import { foliageWindScale } from "./foliage-wind.js";
 import {
   attribute,
   cameraFar,
@@ -37,6 +39,10 @@ export interface ParticlesData {
   spread: number;
   turbulence: number;
   turbulenceSpeed: number;
+  /** m/s of the live wind added at birth (world space) - smoke leans downwind. */
+  windDrift?: number;
+  /** How far the unlit colour falls with the world's daylight (0..1) - smoke must not glow at night. */
+  nightDim?: number;
   fadeIn: number;
   direction: [number, number, number];
   /** Aim along the spawn offset: out = explode, in = converge on the centre. */
@@ -567,6 +573,13 @@ class Emitter {
       this.vel[i * 3] = tmpDir.x * speed;
       this.vel[i * 3 + 1] = tmpDir.y * speed;
       this.vel[i * 3 + 2] = tmpDir.z * speed;
+      // the weather's wind carries smoke downwind (birth only, like a gust): never a pooled cloud
+      const drift = world ? (this.data.windDrift ?? 0) : 0;
+      if (drift > 0) {
+        const w = drift * Math.min(2, Math.max(0.3, foliageWindScale.value as number));
+        this.vel[i * 3] = this.vel[i * 3]! + smokeWind.value.x * w;
+        this.vel[i * 3 + 2] = this.vel[i * 3 + 2]! + smokeWind.value.y * w;
+      }
       this.age[i] = 0;
       this.life[i] = Math.max(MIN_LIFE, randRange(this.data.lifetime[0], this.data.lifetime[1]));
       this.rot[i] = this.data.spin === 0 ? 0 : Math.random() * Math.PI * 2;
@@ -784,7 +797,9 @@ class Emitter {
     const orient = d.orient ?? "camera";
     const steps = d.steps ?? 0;
     const snap = d.snap ?? 0;
-    const scale = this.colorScale;
+    // unlit smoke darkens toward a moonlit floor at night instead of glowing (`nightDim`)
+    const dim = d.nightDim ?? 0;
+    const scale = this.colorScale * (dim > 0 ? 1 - dim * 0.8 * (1 - worldDaylight.value) : 1);
     for (let i = 0; i < this.alive; i++) {
       const o = offset + i;
       const rest = landed[i] === 1;

@@ -271,3 +271,15 @@ describe("npc-ui inspect targeting", () => {
     expect(plateHeightPx(20, true)).toBeCloseTo(37 * 0.7);
   });
 });
+
+describe("NpcScript.stillWith (host batching of an NPC that is a thing)", () => {
+  it("is still only when it turns nothing and never hides", async () => {
+    const { NpcScript } = await import("../src/index.js");
+    const still = NpcScript.stillWith!;
+    expect(still({ face: false })).toBe(true);
+    expect(still({ face: false, presence: {} })).toBe(true);
+    expect(still({})).toBe(false); // face defaults to true: it turns its visual
+    expect(still({ face: true })).toBe(false);
+    expect(still({ face: false, presence: { quest: "q" } })).toBe(false); // comes and goes
+  });
+});

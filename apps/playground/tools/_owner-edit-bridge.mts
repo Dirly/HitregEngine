@@ -10,6 +10,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { readableReportFile } from "./_dress-report.mts";
 import {
   entityOwnerState,
   inferApplyFrame,
@@ -77,7 +78,7 @@ export function planFrame(planFile: string, sceneFile: string | null): ApplyFram
   }
   const cached = frameCache.get(planFile);
   if (cached) return cached;
-  const report = planFile.replace(/\.json$/, ".report.json");
+  const report = readableReportFile(planFile) ?? "";
   if (!fs.existsSync(report) || !sceneFile || !fs.existsSync(sceneFile)) return null;
   const { plan: planId, placements } = readJson(report) as { plan: string; placements?: { id: string; position: [number, number, number]; yaw: number }[] };
   const scene = readJson(sceneFile) as { entities: Record<string, { tags?: string[]; components: Record<string, unknown> }> };
@@ -113,7 +114,7 @@ function dressedItem(planFile: string, planId: string, entity: string, name: str
   const ids = new Set<string>();
   try {
     for (const i of (readJson(planFile) as { items?: { id: string }[] }).items ?? []) ids.add(i.id);
-    const rep = planFile.replace(/\.json$/, ".report.json");
+    const rep = readableReportFile(planFile) ?? "";
     if (fs.existsSync(rep)) for (const p of (readJson(rep) as { placements?: { id: string }[] }).placements ?? []) ids.add(p.id);
   } catch { /* unreadable plan: everything is owner-added */ }
   const fromName = name && name.includes(": ") ? name.slice(0, name.indexOf(": ")) : "";

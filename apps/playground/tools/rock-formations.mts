@@ -39,6 +39,7 @@ import {
 } from "@hitreg/core";
 import { checkFormationMesh, terrainSolid, type FormationCheck } from "./rock-formations-check.mts";
 import { writeVolumeGlb as writeGlb } from "./_volume-glb.mts";
+import { applyOpsToSceneFile } from "./_scene-write.mts";
 
 const MIN_TRIANGLES = 60;
 const MIN_SIZE = 2;
@@ -187,7 +188,6 @@ if (sceneName) {
     if (doc.entities[id]) ops.push({ op: "remove-entity", id });
     ops.push({ op: "add-entity", id, entity } as Op);
   }
-  const next = applyOps(doc, ops, registry).doc;
-  writeFileSync(scenePath, JSON.stringify(next, null, 2) + "\n");
+  applyOpsToSceneFile(scenePath, ops, (d, o) => applyOps(d, o, registry), { label: "rock-formations" }); // fresh read under the scene lock (tools/_scene-write.mts)
   console.log(`placed ${ids.join(", ")} (${bake ? "baked GLB" : "live csg volume"}) in ${scenePath}`);
 }

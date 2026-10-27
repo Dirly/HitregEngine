@@ -79,3 +79,19 @@ describe("cover water kinds", () => {
     expect(coverWantsInland(["sea", "lake"])).toBe(true);
   });
 });
+
+describe("region mood: dusk cloud burn", () => {
+  const base = { id: "hag", name: "Hagsheer", polygon: [[0, 0], [10, 0], [10, 10]] as [number, number][] };
+  it("takes a sunset hex and a cloudGlow multiplier, both optional", () => {
+    const r = regionSchema.parse({ ...base, mood: { sunset: "#8fa6c8", cloudGlow: 0.5 } });
+    expect(r.mood?.sunset).toBe("#8fa6c8");
+    expect(r.mood?.cloudGlow).toBe(0.5);
+    const plain = regionSchema.parse({ ...base, mood: { haze: "#808080" } });
+    expect(plain.mood?.sunset).toBeUndefined();
+    expect(plain.mood?.cloudGlow).toBeUndefined();
+  });
+  it("rejects a bad colour or an out-of-range glow", () => {
+    expect(regionSchema.safeParse({ ...base, mood: { sunset: "blue" } }).success).toBe(false);
+    expect(regionSchema.safeParse({ ...base, mood: { cloudGlow: 3 } }).success).toBe(false);
+  });
+});

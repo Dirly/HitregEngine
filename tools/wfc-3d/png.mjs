@@ -49,15 +49,17 @@ export function decodePng(buf) {
     pos += 12 + len;
   }
   if (!ihdr) throw new Error("no IHDR");
-  if (ihdr.bitDepth !== 8) throw new Error(`unsupported bit depth ${ihdr.bitDepth}`);
+  // 8-bit everything; 1/2/4-bit packed palette and grey (an image generator writes 16-colour palette PNGs)
+  const bd = ihdr.bitDepth;
+  if (!(bd === 8 || ([1, 2, 4].includes(bd) && (ihdr.colorType === 0 || ihdr.colorType === 3)))) throw new Error(`unsupported bit depth ${bd}`);
   if (ihdr.interlace !== 0) throw new Error("interlaced PNG unsupported");
   const ch = CHANNELS[ihdr.colorType];
   if (!ch) throw new Error(`unsupported color type ${ihdr.colorType}`);
 
   const raw = zlib.inflateSync(Buffer.concat(idat));
   const { width: w, height: h } = ihdr;
-  const stride = w * ch;
-  const px = new Uint8Array(h * stride);
+  const stride = Math.ceil((w * ch * bd) / 8), bpp = bd < 8 ? 1 : ch;
+  let px = new Uint8Array(h * stride);
 
   // undo per-scanline filters (PNG spec 9.2)
   let rp = 0;
@@ -67,9 +69,9 @@ export function decodePng(buf) {
     const prev = row - stride;
     for (let x = 0; x < stride; x++) {
       const rawv = raw[rp + x];
-      const a = x >= ch ? px[row + x - ch] : 0;
+      const a = x >= bpp ? px[row + x - bpp] : 0;
       const b = y > 0 ? px[prev + x] : 0;
-      const c = x >= ch && y > 0 ? px[prev + x - ch] : 0;
+      const c = x >= bpp && y > 0 ? px[prev + x - bpp] : 0;
       let v;
       switch (filter) {
         case 0: v = rawv; break;
@@ -89,6 +91,12 @@ export function decodePng(buf) {
     rp += stride;
   }
 
+  // unpack sub-byte samples to one byte per sample (grey scaled to 0..255; palette indices as they are)
+  if (bd < 8) {
+    const un = new Uint8Array(w * h), mask = (1 << bd) - 1, scale = ihdr.colorType === 0 ? 255 / mask : 1;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const bit = x * bd, v = (px[y * stride + (bit >> 3)] >> (8 - bd - (bit & 7))) & mask; un[y * w + x] = Math.round(v * scale); }
+    px = un;
+  }
   // expand to RGBA8
   const out = new Uint8Array(w * h * 4);
   for (let i = 0, n = w * h; i < n; i++) {

@@ -422,3 +422,30 @@ describe("weather tint follows the daylight", () => {
     expect(noDaylight).toBe(tinted);
   });
 });
+
+describe("zone mood: dusk cloud burn", () => {
+  it("replaces the day/night cloud-burn colour by sunsetAmount, scales the glow, and hands both back on clear", () => {
+    const built = buildScene(doc({ sun: sunEntity({ shadow: { enabled: false } }), sky: skyEntity({ environment: { mode: "none" }, clouds: { coverage: 0.4 } }) }));
+    const lighting = built.lighting;
+    const dome = lighting.skyDomeUniforms()!;
+    lighting.setSkyLive({ clouds: { sun: "#e2593a", sunAmount: 0.8 } });
+    expect(dome.cloudSun.value.getHexString()).toBe("e2593a");
+    expect(dome.cloudSunAmount.value).toBeCloseTo(0.8, 5);
+
+    lighting.setSkyLive({ mood: { sunset: "#8fa6c8", sunsetAmount: 1, cloudGlow: 0.5 } });
+    expect(dome.cloudSun.value.getHexString()).toBe("8fa6c8");
+    expect(dome.cloudSunAmount.value).toBeCloseTo(0.4, 5);
+    // the day/night script keeps writing its own colour; the mood still wins
+    lighting.setSkyLive({ clouds: { sun: "#f08040", sunAmount: 1 } });
+    expect(dome.cloudSun.value.getHexString()).toBe("8fa6c8");
+    expect(dome.cloudSunAmount.value).toBeCloseTo(0.5, 5);
+    // a glow above 1 is capped at full
+    lighting.setSkyLive({ mood: { cloudGlow: 2 } });
+    expect(dome.cloudSunAmount.value).toBeCloseTo(1, 5);
+
+    lighting.setSkyLive({ mood: null });
+    expect(dome.cloudSun.value.getHexString()).toBe("f08040");
+    expect(dome.cloudSunAmount.value).toBeCloseTo(1, 5);
+    lighting.dispose();
+  });
+});

@@ -319,6 +319,27 @@ Two related fixes worth remembering because both failed *silently*:
   crossing); no rock, no strip. Same mesh for render/physics/placement, and
   the column is on the shared plane, so both neighbours agree. Where cover is
   thin an HLOD crack can show instead of a blade: the right trade.
+  **2026-10-22 — skirts clamped to the rendered section, extruded into the face.**
+  The lattice clamp still left pale shards on Skelmorrow's terraced gorge walls: a
+  downward skirt from a near-vertical MC wall ran ALONG the face and grazed out
+  of it, and on planar (DC) cliffs the lattice's trilinear zero crossing is not
+  where the exact wall renders, so a ledge-top flap stood proud of the riser
+  below, shaded as the ledge top. Now MC skirts extrude like the dual ones (into
+  the rock along the inward normal projected into the plane: down on ground, up
+  under overhangs, sideways into a wall), and every run is also clamped to the
+  cell's own cross-section on that plane, as the mesh draws it (`sectionRun`):
+  no skirt that starts into air or along the face, each strip's ends share one
+  run, and a strip whose far edge would cut across a thin air layer (a shelf
+  over its undercut) shrinks to the longest run that crosses nothing. Only
+  full-detail cells take the section clamp; an HLOD cell keeps the lattice
+  clamp and hangs its skirt 3x deeper (`COARSE_SKIRT_K`), which is what covers
+  the 1:4 join where the near cell's clamped skirt stops short (visible holes
+  at three gorge joins 138/117/28 before, 136/113/27 after; clamping both
+  sides gave 156/143/29). The A/B switch is
+  `dualMeshExperiment.skirtSection`. `tools/voxel-blades.mts` now meshes as a
+  `mesher: "auto"` scene does (DC on planar-cliff cells; `--mesher` to pick) and its
+  `skirts in air` (core `skirtExposed`, tested against the region's rendered
+  surface by ray parity, not the field) must be 0.
   **Band limits are per column, not per cell.** Each cell used to seal its
   band at its own flat floor/ceiling, so a tunnel or carve crossing one
   cell's floor but not its neighbour's was capped at two heights: open edges
@@ -1545,6 +1566,28 @@ without `waterTable` is byte-identical (packages/core/test/voxel-marsh.test.ts).
 Proving, 24 m grid, swamp+fen zones: 13.8 % wet in 2 bodies (one 4.6 m deep
 lake), median 18.9 m -> 33.5 % wet in 124 bodies, depth p50 0.25 m / p90 0.6 m,
 median 6.2 m (the table is 6 m).
+
+**Weirs: rivers held at a fen's level (2026-10-18).** The levee above keeps a river and a marsh apart, and
+that is the fault when the river runs THROUGH the fen: skelmorrow's Sallowrun stood in a 25 m trench at 3.9,
+flat for 900 m, two metres under the Drownmere fen sheet at 6.0 — a perched swamp that would drain into its own
+river. A river leaves a fen over an outlet, so the outlet is declared: `river.weirs: [{ id, at: [x, z], level? }]`
+(core `riverWeirSchema`). From the weir upstream, every point whose own level would stand under the weir's is
+held AT it (backwater, solved in `solveRiverBeds` and `refineRivers` like a lake's flush reach; water upstream
+of the held reach is never left under it), and the only drop is at the weir: a point is inserted on the weir
+and one RIVER_FALL_LIP + 0.25 m below it, so the lip is the weir's crest line. `level` defaults to the table
+of the nearest marsh upstream. Where the held river runs at the marsh table (`heldInMarsh`) there is no levee,
+no rim and no river-owned band: the banks go under the same sheet. A weir lip is a built structure, so it gets
+none of a natural fall's rock — no slot gorge, no fall walls, no planar fall banks (`Lip.weir`); the curtain
+and the plunge stay. Opt-in: a river without `weirs` is solved exactly as before
+(packages/core/test/voxel-river-weir.test.ts; skelmorrow's other rivers byte-identical). Note the banks of a
+held reach are cut from the HIGHER water: ground beside the river rises by about the level change (Gullet
+west abutment +1.3..3.3 m), so anything built or dressed on those banks is re-seated after a weir goes in.
+
+`worldgen water-logic <world> [--near x,z,r] [--list] [--stamp]` is the gate (worldgen-water-logic.mts, a
+`worldgen status` row): `river-under-fen` (a river more than 0.5 m under the marsh sheet beside it, no weir),
+`lake-no-outlet` (a river in, none out), `outlet-above-lake`, `perched-sheet` (a still lake/marsh sheet whose
+edge stands over lower dry ground or over lower water no fall explains), and `flat-reach` as a note (300 m+ of
+dead-level river nothing holds). Each finding carries its zone and coordinates.
 
 **Landform profiles: a zone's SHAPE, not its gain (2026-10-10).** `relief`/`hills`/`mesas` gains made
 every zone the same hills at a different volume. An anchor's opt-in `landform` (core `landformSchema`, fields
@@ -3204,6 +3247,17 @@ this exists for is not a stage breaking — it is a stage being silently skipped
 or run before something it depends on was re-run. Both look identical in the
 recipe afterwards.
 
+The read-only whole-world gates (`float`, `rock-skins`, `water-edges`, `water-logic` with `--stamp`) write ONLY
+their stamp into a fresh read of the recipe, dated when the sweep loaded the world (`stampGateStage`): a sweep runs
+for many minutes while other jobs edit the world, and writing back the copy it loaded would undo their edits.
+
+`floaters` (tools/voxel-floaters.mts): solid voxels cut off from the ground mass (6-connected, as marching cubes
+draws them) and smaller than `recipe.floaters.keepVoxels` (64) are cleared as data, `features.floaterClears` (lattice
+cells the field forces to air; one entry per swept 192 m square, replaced on a re-run, inverse in
+`<project>/authoring/installs/floaters.inverse.json`). Without `--apply` it is the gate; `--mesh` counts the floating
+pieces the shipping mesher actually draws (closed, positive volume; sealed air pockets and band-clipped fragments are
+not counted). Re-run it after anything that moves the ground near steep banks.
+
 A freshly generated world reports 14/17, with the three agent passes missing:
 `zone-names`, `town-names`, `zone-stories`. That is the honest state of a world
 that is generated but not yet authored.
@@ -3606,8 +3660,10 @@ under its whole footprint at the moment it is placed, and checked the same way b
   `unsupported` when nothing holds the object.
 - **Contact kinds** (catalogue `dressing.contact`; omitted = `defaultSeatContact`): `base` (flat base on the surface,
   sunk 3 cm; the centre may not hang over a drop), `legs` (every foot touches; one hanging > 15 cm is a fault),
-  `embed` (a rock sunk a fifth of its height below the LOWEST ground under it, its underside following
-  `alignToNormal` of the slope; a footprint straddling a step taller than the rock is unsupported — dropped),
+  `embed` (a rock sits IN the ground: it passes only when its underside is `ROCK_EMBED_MIN` (10%) of its height below
+  the LOWEST ground under it — a rock merely touching reads as floating on a slope; placers (scatter, fall sites,
+  `dress apply`, `float --fix`) sink it `ROCK_EMBED` (15%), plus `ROCK_EMBED_SLOPE` x the ground's grade under it, its
+  underside following `alignToNormal` of the slope; a footprint straddling a step taller than the rock is unsupported — dropped),
   `hang` (its top touches what is above, or a wall beside it), `wall` (its back touches a wall, or it stands on a
   sill). `seated` (a sitting figure, e.g. a statue on a throne or bench: it rests where its OWN underside touches —
   hips on the seat, feet on a step — the smallest gap between its underside and the solid below; legs may overhang
@@ -3703,7 +3759,10 @@ and its top wears what the ground beside it wears.** One resolver decides both, 
 - **Cap** (`groundBand`): stone ground (half or more cliff/rock under the rock) wears nothing; a CLIMATE band — a
   surface no zone restyles (in a role-tagged world every role-less surface; else the snow-like ones) — is worn as the
   ground wears it, whatever the zone's `rockCap` or a rule's fixed `cap` says; only on zone ground does the zone's
-  cap (then the rule's) apply.
+  cap (then the rule's) apply. A rock also needs `capLedge` (rule, default 2 m) of up-facing ground under it
+  (2026-10-22): one set into a wall or on a narrower shelf is bare. Before it, the probe asked what FLAT ground there
+  would grow, so every cliff-face piece (ledge bands, buttresses, scree) wore the zone grass, tinted pale beige: the
+  pale slabs on the Weepwater gorge walls (corridor: 2576 -> 2156 capped rocks, all of the change on wall pieces).
 - **Placed rocks** (rock-kit prefabs in a scene) draw with the world's rock material and the resolver's `rockCap`
   through prefab overrides: `dress apply` writes them; `skinPlacedOps` (tools/rock-skins.mts) for anything else.
   A rock drawing the model's own texture is a skin fault. Fall-site formation volumes take the zone's cliff surface
@@ -3714,6 +3773,51 @@ and its top wears what the ground beside it wears.** One resolver decides both, 
   surface; a recipe fault is a zone without a slice of its tone, a rock-material rule that resolves no skin, or a
   fall site naming a foreign wall. Wired into zonegen (`rock-skins` row per zone), `worldgen status`
   (`rock-skins` stage) and `tools/poi-review/job.mjs` gate 6 (a passing `reports/rock-skins.json` newer than the ops).
+- **Small rocks** (under `SMALL_ROCK_METRES`, 4 m: every boulder): a cliff's strata tile projected per facet onto a 1-3 m
+  boulder shows a different patch of its courses on each face, a checker ("runes" by the road). Such pieces draw with
+  the world's SMALL rock material (`<rock material>-small`, the scatter rules' `smallMaterial`; placed rocks by their
+  scaled size): the same shader, `bases` parallel to the main material's so the per-instance slice is unchanged, each
+  zone's slot holding its grainy, strata-free `rock-small.png` (beside the cliff tile; or the palette's `rockSmall`) at
+  40 texels/m. One extra batch per model at most (the render batches by model AND material). `rock-skins install` /
+  `zone-textures` write it; the gate faults a rule whose small pieces lack it, a small material off parallel / off
+  40 texels/m / off tone, and a placed small rock on the main material.
+- **Large rocks** (free-standing, from 4 m up to `LARGE_ROCK_MAX_METRES`, 16 m: boulders, fins, tors): the zone's cliff
+  tile is painted for 100 m faces and reads as a patchwork on a 5-20 m boulder. Such pieces draw with the world's LARGE
+  rock material (`<rock material>-large`, the rules' `largeMaterial`; placed rocks by scaled size), built like the
+  small one with each zone's slot holding its boulder tile `rock-large.png` (beside the cliff tile; or the palette's
+  `rockLarge`: low contrast, fine bedding/fractures/lichen, painted with the zone's `rock-small.png` as the style
+  reference so both read as one stone). Rules placed ON cliffs (`cliff`: faces, crests, buttresses, ledge bands, crags)
+  ARE the cliff face and keep the cliff tile, as does any piece of 16 m or more. The gate faults a free-standing rule
+  whose 4-16 m pieces lack `largeMaterial`, a cliff rule that has one, a large material off parallel / 40 texels/m /
+  tone, and a placed 4-16 m rock on the main material. Models that are rocks but not of the rock kit (`hoodoo`) draw
+  their own texture and are outside this system: deny or replace them per zone.
+
+## Zone palette: one tile per role, each role on its own slopes
+
+**Lesson (Hagsheer, 2026-10-21, Derek's major issue).** The rocks of a zone were not one stone and ground cover climbed
+the Weepwater gorge walls. `worldgen rock-audit` found three causes: a biome PATCH of loose cover (`scree-gravel`, slope
+window `[0.42, 1.2]`) painted the world's Gravel.png up vertical faces (25 %+ on the gorge walls); places painted ground
+tiles on their walls (`paint` ops with `faces: true` in accent shingle, gravel and pale cut-stone, 19 in Hagsheer); and
+the `moor-rock` patch laid the 18 m strata cliff tile flat on the moor. **Rule: a zone has ONE palette per role, and the
+slope decides the role** (loose cover never wins a face; the cliff tile does not lie on the flat).
+
+- **`regions[].palette`** (`regionPaletteSchema`): `ground` / `cliff` / `cap` (surface names), `rockSmall` / `rockLarge`
+  (texture ids), `builtStone` (role -> material ids). Written with `worldgen palette <world> --zone z --set f.json
+  --inverse i.json` (`--undo i.json`). A surface is in the palette by name or by its texture (river gravel is the zone
+  road's Gravel.png).
+- **Refused outside it:** `worldgen zone-textures` (the cast's ground roles and rock tiles), `rock-skins install` (the
+  zone's main / small / large rock slices; the `rock-skins` gate lists them as recipe faults), `place-build` (builtStone,
+  builtKinds, and every wall operator's materials at check), `worldgen op --apply` (a `paint` that reaches faces must name
+  a palette CLIFF tile, any other paint a palette tile; `op --check` lists them). `--allow-off-palette` overrides, with
+  a ruling.
+- **Core:** a patch whose surface is not of the cliff role fades out between `PAINT_STEEP_START` and `PAINT_STEEP_END`
+  (40-53 deg) like every feature paint, whatever its slope window says (field.ts `applyPatches`).
+- **The gate:** `worldgen rock-audit <world> --zone z [--near | --rect | --corridor "x,z;..." --width w] [--every k]
+  [--md f] [--out f]` meshes the area as render does and reads each triangle by its FACE slope (0-20 / 20-45 / 45-70 /
+  >70 deg x height band): (a) a ground tile winning a face > 45 deg, (b) a cliff tile on < 20 deg (reported, not failed),
+  (c) a tile holding 25 %+ of a triangle, a rock slice or a cap outside the palette. Fails on (a) or (c) over 0.5 % of
+  the drawn area, or on any off-palette rock. zonegen status shows it as the `palette` row (reads
+  `<zone>/reports/rock-audit.json`; STALE once the recipe changes).
 
 ## Landform operators
 
@@ -3721,206 +3825,39 @@ Agents never edit voxels or write raw carve boxes for landforms. A cliff path bu
 treads, bulging walls and a kerb over the walk line: the 2 m lattice cannot hold features that fine. Shaped ground is
 an OPERATOR: one doc with a handful of numbers, compiled by code into the low-level features the field already reads.
 
+**The 6 m gate** (`worldgen fine`, POI `job.mjs` gate 11) fails any passage / height patch / blob under 6 m in its smallest
+dimension. A world built before the rule keeps its carves in `<project>/authoring/terrain/<world>.fine-legacy.json`; a job
+the coordinator rules an exception for (e.g. a walk-in stair tunnel whose lining is kit geometry) lists those carves in
+`<world>.fine-exceptions.json` beside the lips exceptions: `{ exceptions: [{ id, job, reason, ruling, carves:
+["passages/<id>", ...] }] }`, merged by id by the job installer; gate 11 counts them as excepted for THAT job only
+(`job.mjs fine <jobDir>`; `--no-exceptions` ignores the file). The world gate (`worldgen fine` and the
+`terrain-fine` line of `worldgen status`) reads the same file and counts every listed carve as excepted by ruling
+(`worldgen fine <world> --no-exceptions` to see them as faults).
+
 **The doc.** `features.operators: [{ id, op, ...params }]`. Each `op` registers a Zod params schema (listed with its
 descriptions in the engine spec's `landformOperators`); an unknown op or a bad param fails recipe validation. Shipped:
-`terrace`, `path`, `ledges`, `cave`. Planned: `harbor`.
+`terrace`, `path`, `ledges`, `cave`, `landmark`, `scree`, `paint`, `wall`. Planned: `harbor`.
 
-**Where it expands: at install.** `worldgen op <world> --apply <file|id>` compiles the doc against the ground
-WITHOUT its own output (so re-running never stacks on itself) and writes the pieces with ids `op:<id>:*`, the same
-contract as `terraceWalls` -> `tw-*`. The field never runs operator code: `compile` reads the ground, which would be
-circular at field build and would put an area solve inside every field construction. The doc is the truth; its
-pieces are derived and regenerable, never hand-edited. The install is one `applyRecipeEdits` batch (remove the old
-`op:<id>:*`, write the doc, add the new pieces), and its inverse is kept under `<project>/authoring/terrain/undo/`
-(`--undo <file>` applies it). `--remove <id>` drops a doc and its pieces. The doc's `compiled` stamp holds a digest of
-the pieces and a fingerprint of the ground it read: `worldgen op --check` reports EDITED (a piece changed by hand),
-MISSING, or STALE (the ground moved under it: re-apply).
+**Path ribbons** (`path`, ribbon.ts): a ribbon plus one masked grade patch, levelled under the walk and feathered back
+over each shoulder. Rules the fitter keeps so the lattice can draw it: a wall run's end fades the next feathered
+shoulder in over `RIBBON_WALL_END_TAPER` (8 m) instead of a hard cut at the face; no shoulder lifts ground within 6 m of a
+FILL wall's face cut (the field reads the wall foot there, so lifted ground would end in a trench edge); inside a turn
+the level blends the branch's segments within 2 m (no step where the nearest arm flips); a wall run is never closed
+across a sample too tight for a wall (that bridge was the hairpin out-of-memory). It cannot fix a LINE whose legs run
+side by side closer than two cores and a shoulder: the fit warns `legs too close` with the place: spread the legs.
+Two ribbons laid end to end on the same anchor (within 0.5 m) are cut flush on the joint's bisector (`ribbonJoins`):
+one surface, no overlapping round ends; three ends on a point keep their round ends. `worldgen op --apply` writes the
+ribbon materials (`ribbon/<surface>[--trodden]`, `ribbon-wall/*`; a ribbon without one draws flat white-grey) and
+`worldgen op --check` fails while any is missing.
 
-**The 6 m rule.** The lattice is 2 m, so a terrain carve or patch whose smallest dimension is under 6 m (three voxels)
-fails: a passage's width/length/height, a height patch's extent, a blob's diameter. Message: "too fine for terrain: use
-a kit/hero piece or an operator". Operators obey it by construction (`compileOperator` refuses a fine piece). `tw-` and
-`bs-` cuts belong to kit walls and bridges and are exempt. Gates: `worldgen fine <world> [--near x,z,r] [--out f]`,
-the `terrain-fine` row of `worldgen status`, and `tools/poi-review/job.mjs` gate 11 (straight from the delivered
-files). Worlds built before the rule keep a legacy list (`worldgen fine --record-legacy` ->
-`<project>/authoring/terrain/<world>.fine-legacy.json`): those pass and are counted (skelmorrow 959, proving 380 on
-2026-10-15). Replacing one with an operator or a kit piece means dropping it from the list.
-
-**The preview, before any install.** `worldgen op-preview <world> --op <file|id> [--near x,z,r] [--out dir]` writes in
-seconds (5 s for a 300 m area on skelmorrow):
-- `map.png`: before | after panels, hillshade and height tint, contours (2 m thin, 10 m bold), red where steeper than
-  the 50 degree walk limit (physics `maxSlopeClimbAngle`), the operator footprint in cyan, a scale bar;
-- `preview.html`: a standalone three.js page of the area (terrain meshed in node by the engine's own mesher, the
-  zone's ground and cliff textures, a sun, orbit, a walk mode on WASD, a before/after toggle and the map). It opens
-  from disk (three from a CDN) and can be published as is. No engine boot, no streaming.
-The owner approves the look before `--apply`. Every command takes `--recipe <file>` to work on a scratch copy.
-
-**`terrace`** (`center`+`radius` or `polygon`, `stepHeight`, `smooth`, `jitter`, `minShelf`, `riserSlope`,
-`rampWidth`, `rampGrade`, `blend`, `edgeNoise`, `walls` common|stone|none, `wallMinDrop`, `seed`, optional `baseY`)
-cuts a slope into long contour shelves (a stepped town site, a hillside farm). It runs on the SHELVING CORE
-(`shelving.ts`, shared with the coming `ledges`): bands follow the `smooth`-metre smoothed contours with NO
-step-count clamp (each cell cuts or fills about half a band; the bands run on into the fade instead of ending in one
-tall cut); the band height is at least `stepHeight`, grown on steep ground so the typical shelf keeps `minShelf`, and
-never past the tallest kit wall (6.4 m). The outline is wobbled by `edgeNoise` and faded over `blend` (no drawn
-circle). Shallow shelves merge, but only down to 6 m where a merge would stand a riser above the kit max. The shelves
-form a graph; ramps (`rampWidth` >= 6, rise/`rampGrade` long, on the lower shelf) link it as a spanning tree, so
-shelves that never touch are linked through the ones between. Risers of at least `wallMinDrop` inside the full-weight
-area (3 m clear of ramps) get world-kit retaining walls: `features.kitWalls` runs `op:<id>:wall-<n>` of 2 m straights +
-caps with one face cut each (streamed like ribbon walls; `worldgen lips` exempts their faces; scatter keeps them clear).
-Output: ONE masked height patch `op:<id>:ground` plus the wall runs. Report: `bandHeight`, levels, shelves, ramps
-(`onShelf`), `unlinked` (core shelves the ramps miss — must be empty), `unlinkedFringe` (fade fragments),
-`tallRiserCells` (risers left as banks above the kit max — pick a gentler site if not 0), walls (runs, max height),
-max/mean cut and fill. Steep ground (smoothed slope above ~0.5) gives 6 m risers on ~8 m shelves: op-preview first and
-put the terrace on the gentler part of the slope. It does not wrap `worldgen terrace` (bound to towns).
-
-**`ledges`** (`center`+`radius` or `polygon`, `links` ramp|cave|auto, band/stagger/ramp/cave params, `mode`
-landmark|height) is a natural ledge system on a cliff band: the SAME shelving solve (bands, stagger, ramps, cave links
-climbing inside the rock), then — default `mode: "landmark"` — real rock baked at a fine DC voxel (`voxel` 0.5 m),
-because the 2 m lattice smears a 4 m lip and cannot overhang (`packages/core/src/voxel/ledge-landmark.ts`). The form is
-STACKED ROCK MASSES, one per shelf level: that level's outline (signed distance, its own `lipNoise` 0.5-1.5 m per level)
-extruded from the level below, faces battered back `batter` degrees and notched every ~1.5 m (strata relief), top edges
-rounded by `chamfer`. NO brows (an overhung lip read as a floating disc from below; no overhangs). Each connected ramp
-is ONE straight notch ~2.4 m wide between rock cheeks (the rest of its cells stay rock; one notch per riser stretch), its
-ends joined to their shelves by 2.6 m LANDINGS. FRINGE rule (`fringeShelves`, shelving.ts): a shelf component more than
-half in the fade band (cells under full weight) is HILLSIDE, not a ledge: the solve gives it no `shelfAnchors` entry,
-never counts it `unlinked` and lists it in `report.fringe`; the landmark lays no rock on it and needs no landing there.
-Every CORE shelf must be reachable: the landmark floods its own rock top + the ground patch from the hillside, crossing
-caves mouth to mouth, and a core shelf still cut off gets a REPAIR notch carried down (<= 0.5 grade) to the nearest
-reached shelf or hillside (`repairs`; `report.unreachable` must be 0). That flood is an estimate: the collider walk
-is the proof. `boulders` low, wide masses are fused into shelves >= 6 m across; NO pillars. Caves are bored through
-with flared mouths. Past the core the masses end at a ragged line and sink under the ground (no lerped slope). Output:
-`op:<id>:ground` (terrain kept `inset` m inside the rock, trenched under the bores) + `features.landmarks`
-`op:<id>:landmark` naming `landmarks/<id>-<digest>`, baked by `tools/ledge-landmark.mts <project> <world> <id> [--into
-<lab>] [--material <id>]` into one GLB + trimesh collider (one draw; pass a world-space `triplanar: true` cliff-stone
-material, scale ~3-6 m, so steep faces never stretch). Re-run names a new bake; undo names the old one. Reach must be
-proven against the landmark's COLLIDER, not the field. `mode: "height"` keeps the older 2.5D patch + tunnels.
-
-**Adding an operator** (OP-B's `path`, later `ledges`, `cave`, `harbor`): a module in `packages/core/src/voxel/` that
-calls `registerOperator({ op, description, schema, compile, bounds, outline? })` and is imported from
-`operators.ts`. `compile(params, reader, { id })` is pure and deterministic: it reads `reader.height(x, z)` (the
-ground without its own output), `voxelSize`, `seaLevel` and `seed`, and returns `{ features: { <kind>: [pieces with
-LOCAL ids] }, report }` for any `FEATURE_KINDS` kind (height patches, blobs, passages, roads, tunnels ...). The
-framework namespaces the ids, enforces the 6 m rule, stamps the doc and keeps the inverse; the preview, `--check` and
-the gates work unchanged. Pieces that are not terrain (a ribbon's surface mesh, kit walls) are the operator's own
-derived data, written the same way under its id.
-
-### Path ribbons (`op: "path"`)
-
-**Paths are ribbons; never carve a path into the terrain.** A path cut into the 2 m lattice draws lumpy treads,
-bulging walls and kerbs over the walk line. The `path` operator lays a smooth walk SURFACE along a spline instead
-(`packages/core/src/voxel/ribbon.ts`, registered in `operators-path.ts`):
-
-- **Data**: `{ id, op: "path", points, width, style: dirt|cobble|slab, surface?, maxGrade, steep: auto|steps|switchback,
-  corridor, maxCutFill, shoulder, edge: verge|hard, walls: auto|none, wallDrop, wallStyle }` (the engine spec has every field).
-  The style picks the zone's `road` (dirt) or `paving` (cobble, slab) tile, following a nested town zone up to its parent.
-- **Solve**: centripetal Catmull-Rom through the points, resampled at ~1 m; the longitudinal profile is the mean of the
-  largest maxGrade-Lipschitz function under the smoothed ground and the smallest one over it (cut and fill balanced),
-  smoothed, then clamped so no segment exceeds maxGrade. Where the profile would leave the ground by more than
-  `maxCutFill`, the stretch is steep: inside a `corridor` it becomes a switchback (legs capped so their grading never
-  overlaps), and whatever is still steeper than maxGrade becomes STEPS (the profile at <= 50 % quantised to whole
-  ~0.17 m risers; a flattening is a landing). A flight never winds: where the turn is tight (inner-edge curvature x
-  half width > 0.4) it lands and the rise moves to the straights, else inner treads fan to nothing and stack risers.
-- **Pieces** (`op:<id>:*`): `ribbons/…:ribbon` (samples [x, walkY, z, shoulderL, shoulderR], flights, wall pieces, wall
-  face cuts, clearing outline) and `heightPatches/…:grade` — one masked 1 m raster: levelled 4 cm under the walk
-  surface out to 1.2 m past each edge, feathered back over shoulders of at least 3.5 m (wider on a high side, bank
-  <= 1:2), so the graded footprint is >= 6 m wide by construction. Where the fill side drops more than `wallDrop`
-  (1.2 m) the side is a RETAINING WALL from the world-kit retaining-wall kit (`straight-2` + `cap-2` per 2 m module,
-  height snapped to the kit's courses), with a terrace-wall face cut in front of it (the field reads ribbon cuts like
-  terrace-wall cuts; `worldgen lips` exempts them).
-- **Streaming**: `voxelChunkDoc` emits one static `surface` mesh per ribbon per cell (a segment belongs to the cell of
-  its midpoint, a tread to the cell of its centre — no seams, nothing twice), material `ribbon/<surface>`, UVs in
-  metres along the length, a verge skirt sunk into the ground, and a `trimesh` collider cooked from the same triangles
-  (physics cooks `surface` sources). Each stair tread's sides slope down to the graded ramp beside the flight (<= ~1:2,
-  faded): a vertical tread side stands up to 0.6 m proud of the ramp, snags a body on the diagonal and draws a long
-  shaded line down the flight. Dirt is trodden earth: the zone's `road` tile through `ribbon/<road>--trodden` (a
-  smoothed, 12 % lifted copy `worldgen-ribbon materials` writes), darkening toward the worn rim. Ribbon outlines are clearings for scatter and cover.
-- **Commands**: `worldgen op <world> --apply paths.json`, `worldgen op-preview <world> --op <id>`, then
-  `tsx tools/worldgen-ribbon.mts materials <world.json>` (writes the `ribbon/<surface>` materials next to the world) and
-  `… report <world.json>` (the drawn ground must sit within 5 cm of every ramp sample).
-
-### Landmark stamp (`op: "landmark"`)
-
-Any hero shape — a natural arch, a wizard tower, a rock spire — built the way the dungeons are: solids, a fine DC
-bake, a merged mesh per material, its own trimesh collider, and a terrain blend at the foot. Core:
-`packages/core/src/voxel/landmark-stamp.ts` (spec, compile, thin-wall gate, blend) and `operators-landmark.ts`
-(the operator, the `ledges` generator). Bake: `apps/playground/tools/landmark.mts`.
-
-- **Source**: `{ csg }` (inline spec), `{ file }` (a project-relative spec JSON that `worldgen op --apply <file>`
-  inlines into `source.csg`, keeping `file`; re-apply FROM THE FILE after editing the spec — applying by id only
-  re-reads it when the path resolves from the project), `{ blender }` (mesh-dc stamp; needs `resolved`, written by
-  the baker — not built yet), `{ generator, args }` (`ledges`: the ledges solve's raw nodes + its own ground).
-- **Spec**: ordered `parts` in a local frame (origin = footprint centre at the foot, +Y up, +Z front): box, sphere,
-  ellipsoid, cylinder, cone (`top` = frustum), capsule, torus, extrude, lathe, arch, group, raw `node`. Parts apply
-  IN ORDER (`sub` carves everything before it). `role` per part; natural roles (`rock`, `cliff`, ...) get outward
-  (`grow`) noise by default, every other role is crisp. Openings are carved last and noise-protected.
-- **Thin walls**: the compile refuses any shell under 3 voxels (sampled on the noise-free solids) unless the part is
-  `thinOk`; the error names the part. `tools/landmark.mts --spec <file>` checks a spec without a world.
-- **Blend**: `bury` (foot `depth` >= 1 m under the lowest footprint ground + a `mound` feathered over >= 6 m),
-  `pad` (flat apron >= 6 m + feather >= 6 m), `none`. One masked patch `op:<id>:ground`; FINE_MIN holds.
-- **Materials**: role -> `zone` (default: a triplanar standard material of the zone's cliff surface texture, written
-  by the baker as `landmarks/<surface>`; the terrain-splat material rendered a landmark mesh near-black in play mode),
-  `zone-splat` (the world terrain material: stone faces + cover tops), `surface:<name>`, or a material asset id.
-  One draw per material across all tiles.
-- **Bake**: `landmark.mts <project> <world> <opId> [--recipe f] [--into lab] [--force] [--glb-only page.html]`:
-  tiles -> merge/weld -> drop rock buried > 1.5 m -> split per material -> decimate (0.05 m) -> GLB(s) + prefab
-  `landmarks/<opId>-<digest>`. Declared `targets`/`openings` are walked on the baked collider
-  (`_collider-reach.mts`); an unreachable one is a FAULT (exit 1, no automatic repair: fix the spec).
-  Measured: the 25 m arch proof bakes in ~3 s (974k cells, 15.5k tris, 1 draw, 0.4 MB).
-- **Gates after a bake**: `worldgen op --check`, `fine --near`, `lips --near`, `float --near`, `scatter-float --near`,
-  `op-preview --op <id>` (map + page with the landmark), and play-mode pictures.
-
-## 30. Planar cliffs and `mesher: "auto"` (opt-in)
-
-`terrain.planarCliffs` (profile `terrace`) rebuilds steep ground as walls and treads that dual contouring keeps
-sharp; `voxelWorld.mesher: "auto"` meshes only the cells the cliff mask reaches (plus `dcMargin`) with DC and the
-rest with MC. Field reference: the schema `.describe()` text (`spec.json`). Judgment that is not in the schema:
-
-- **Every consumer that stood on `height()` must stand on `field.ground()` on planar ground.** Treads open up to a
-  riser below the heightfield and lips stand above it. Scatter, ground cover and the water clip do; anything new
-  that places by height (a POI snap, a spawn) has to as well, or it floats a riser high.
-- **The mesh is the truth, not the field.** A lip or ledge thinner than a voxel is in the field and not in the
-  mesh, so placement refuses it (`planarFooting`, and `ground()` skips rock thinner than a voxel).
-- **Far detail evaluates the full-detail function.** A coarse block that built walls from its own lattice put them
-  10-19 m off the near ones; the LOD join cannot be closed by skirts (measured: depth makes no difference).
-- **Keep rock off solved features.** `featureClearance` fades planar rock out near rivers, lakes, roads and towns:
-  13 of proving's 14 falls stood on cliff-mask ground, and a terraced channel loses its water.
-- **Check a switch with `tools/voxel-seams.mts --meshers auto`** (MC|DC borders reported as `mixed`; it fails on a
-  hole or a z-fight) and `worldgen scatter-float` (planar ground counts as an edit there).
-
-### 30a. Rock built around water, sea cliffs and buttes (opt-in)
-
-`planarCliffs.falls`, `terrain.seaCliffs` and `terrain.buttes` add DC-native features on top of the terrace cliffs.
-Field reference: the schemas' `.describe()` text. Judgment that is not in the schema:
-
-- **Water features cut, they never build.** Bank and gorge walls lower the ground between two levels to the lower
-  one (`wallsDensity`); the foot of every wall stands `foot` over the water beside it. So a shoreline, a water
-  reach and a road solved on the old ground never end up under new rock, and featureClearance can stay as it was
-  for the terrace cliffs. `fill` lets a wall stand forward by a share of its bench (a little rock built up).
-- **The lip line is still the one line.** The fall's vertical face stands exactly on lipAt's line: upstream the
-  ground is the upper bed carried forward from 3 m back (all four lattice corners upstream), past it the plunge
-  floor carried back from 3.2 m. Measured on proving's 14 falls: the face at 0.00-0.05 m from the line at half and
-  a quarter of the drop on every fall, 0 curtain vertices inside rock over the channel.
-- **Banks become walls only in cliff country** (the cliff mask on the 8 m lattice, before featureClearance), and
-  never near roads or towns (the dry half of the clearance). `bankSteps` > 1 turns them into a stepped canyon.
-- **Sea cliffs and buttes live in the heightfield too.** The wall is a near-step in `height()`, so MC, the map,
-  placement and the water read it; the planar path makes it exactly vertical and adds strata. Keep their plan
-  monotone (plan amplitude / scale under ~0.1, wall-plane hand-over over 3 x jog): a line that folds back on
-  itself makes 150 m-tall knife fins.
-- **A planar feature that stands far from the heightfield's own steep ground needs its own band.** An arch opening
-  under a fin, a stack's foot: `floorAt` extends the column's planar band down, or the sample below the terrace
-  depth reads the plain heightfield and fills the opening in.
-- **A monument is a narrow tower on a big apron.** Plans are straight segments (chamfered rectangles with notches
-  bitten in, spires as thin fins), never circles: a round plan reads as an oil drum, a round spire as a smokestack.
-  About half the height is the concave apron; the sheer wall above it carries one thick cap band with an overhanging
-  lip, a recess under it and two or three thin ledges, not even stripes. Space them far apart (`cell` ~300 m).
-- **A sea stack without `stacks.shape` is a faceted prism striped by the wall's strata: it reads as a crate.** Shape
-  gives it the monument anatomy above (same plan and cap-band machinery as buttes) plus a wave-cut notch and a
-  boulder apron; sites, radii and tops do not move, so a stack chain's spans keep their slopes. Stacks stand outside
-  the zone polygon, so give the stretch `turf` or their tops fall back to the base palette's dry grass and dirt.
-- **Butte fields avoid towns, roads, rivers, lakes and big fills (raised landforms), not POI picks.** A field in
-  proving's crowded zones needs `clearance` well under the default to hold monuments at all; every monument's
-  footprint and talus must sit on full plain.
-- **Sea cliffs and butte fields clear round towns, roads, rivers, lakes and big fills — never POIs or height
-  patches.** A patch is applied over the finished profile and levels its own footprint; on the planar path the walls
-  hand the column back to the patched heightfield under it (`PlanarFeatureSource.hold`). Clearing round them pushed
-  the wall back 40-90 m and dropped any stack whose site weight fell under 0.6, so a POI or pad on a stack erased it.
-  A ROAD still clears them: `worldgen trails` (and paths) wall off each monument's, stack's and cliff wall's
-  clearance (`landmarkKeepOut`) and give a summit on one no trail.
+**Walls and causeways are swept, never stacked boxes**: the `wall` operator (`operators-wall.ts`) sweeps one profile (thickness, batter, coping, terrain-following footing, seeded per-block jitter, bevels) along a plan spline as a built landmark (UVs in metres, a material per part, per-cell collider, baked by `tools/landmark.mts <p> <world> <id>` like any landmark); variants `free` / `retaining` (+`backfill`) / `quay` / `ramp` (deck + kerbs/parapet, flights wherever steeper than `maxGrade`, risers <= 0.4 m), with buttresses, crenellated parapet, gates, stair flights and pier or into-the-hill ends; `scale: giant` wants a face texture tile >= 4.8 m (the bake warns).
+Corners: `smooth: true` (default) bends through a spline, fine for curves whose radius exceeds the half-width (the report warns
+when the inner face would fold); **sharp corners need `smooth: false`**: straight legs, each corner MITRED (every section point
+ends on the plane s = s_c -+ tan(turn/2) n, so faces, batter, footing, coping and parapet meet their continuation exactly,
+inside corners included; one solid per leg, unioned; UVs use the developed length so the stone runs on round the corner).
+Turns up to 135° (sharper: clamped and warned — add a short leg). A leg shorter than its section (a jog, a landing) is clipped
+where its two mitres meet, and every piece ending on a mitre is validated before it is kept. A line whose last point is its
+first is a closed ring (a town wall round a court: no ends, jitter wraps). Buttresses and face stairs skip corners; merlons
+wrap outside corners. Ramps get a level landing across each corner — a **switchback** is
+`points: [[0,0],[24,0],[24,6],[0,6]], smooth: false, ramp.levels at the corners` (legs >= deck width + 0.5 m apart). Step
+mode builds each block as its own solid at its own top; the foot stays >= 0.5 m under the top (ground over the top is warned).

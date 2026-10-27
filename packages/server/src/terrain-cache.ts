@@ -36,6 +36,7 @@ import { promisify } from "node:util";
 import {
   chunkKey,
   voxelChunkOptionsFrom,
+  voxelRecipeAssetRefs,
   voxelWorldSchema,
   type ChunkDoc,
   type VoxelChunkOptions,
@@ -75,17 +76,14 @@ export function serverCellOptions(data: VoxelWorldData, assetExists: TerrainCach
   return { ...voxelChunkOptionsFrom(data), collision: true, assetExists };
 }
 
-/** The scatter / POI assets that exist (what crosses to a worker instead of the `assetExists` closure). */
+/**
+ * The assets that exist of every one a cell may ask about (core `voxelRecipeAssetRefs`: scatter, POIs, terrace walls,
+ * bridge spans, kit walls, landmarks and their collider tiles) — what crosses to a worker instead of the
+ * `assetExists` closure. It once listed only scatter and POIs, so every worker-cooked server cell silently dropped its
+ * landmarks and wall pieces (no collider where the client drew one).
+ */
 export function presentAssetsFor(recipe: WorldRecipe, assetExists: TerrainCacheInputs["assetExists"]): string[] {
-  const present: string[] = [];
-  for (const rule of recipe.scatter) {
-    const id = rule.prefab ?? rule.model;
-    if (id && assetExists(id, rule.prefab ? "prefab" : "model")) present.push(id);
-  }
-  for (const poi of recipe.features.pois) {
-    if (poi.prefab && assetExists(poi.prefab, "prefab")) present.push(poi.prefab);
-  }
-  return present;
+  return voxelRecipeAssetRefs(recipe).filter((ref) => assetExists(ref.id, ref.kind)).map((ref) => ref.id);
 }
 
 /** JSON with object keys sorted, so the hash never depends on key order. */

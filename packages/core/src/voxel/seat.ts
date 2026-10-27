@@ -12,9 +12,11 @@
  *  - `base`  a flat base sits on the surface, sunk `sink` (3 cm) into it; the highest ground under the footprint
  *            carries it, and the centre may not hang over a drop (a crate on a cliff edge is `unsupported`).
  *  - `legs`  each foot touches: the highest foot carries it, the others may not hang more than `legSpread`.
- *  - `embed` a rock sinks `embed` x its height below the LOWEST ground under its footprint, so no side shows its
- *            underside; a footprint whose ground falls away by more than the rock is tall (a monument edge, a
- *            cliff lip) is `unsupported`: drop it.
+ *  - `embed` a rock sits IN the ground: it is ok only when its underside is at least `embedMin` (ROCK_EMBED_MIN, 10%)
+ *            of its height below the LOWEST ground under its footprint, so no side shows its underside or merely
+ *            touches; when not, it is sunk `embed` (ROCK_EMBED, 15%) of its height below that lowest ground, plus more
+ *            on a slope (ROCK_EMBED_SLOPE x the ground's grade under it: the bottom follows the ground). A footprint
+ *            whose ground falls away by more than the rock is tall (a monument edge, a cliff lip) is `unsupported`.
  *  - `hang`  its top touches the underside of something above (a beam, a ceiling), or failing that a wall beside it.
  *  - `wall`  its back touches a wall.
  *  - `seated` a sitting figure (a statue on a throne or bench, a seated body): it rests wherever its OWN underside
@@ -61,6 +63,13 @@ export interface SeatFootprint {
    * figure's underside steps (hips high on the seat, feet low on the step); absent = a flat underside at `y`.
    */
   underside?: (x: number, z: number) => number | null;
+  /**
+   * `base`: heights above `y` (m) of the object's own UP-facing horizontal faces low in it — a box's inner floor, a
+   * barrel's bottom, the top of a skid — but not its top. Sunk the default `sink`, such a face can land on the surface's
+   * plane and the two draws flicker (the zfight gate), so the seat picks the sink nearest the default that keeps every one
+   * at least `flatClear` off the surface.
+   */
+  flats?: readonly number[];
 }
 
 export interface SeatOptions {
@@ -68,8 +77,10 @@ export interface SeatOptions {
   tol?: number;
   /** How far a `base`/`legs` object is pressed into its surface (m). */
   sink?: number;
-  /** `embed`: fraction of the height sunk below the lowest ground. */
+  /** `embed`: fraction of the height a re-seated rock is sunk below the lowest ground (before the slope term). Default ROCK_EMBED. */
   embed?: number;
+  /** `embed`: fraction of the height that must already be below the lowest ground for the rock to be ok. Default ROCK_EMBED_MIN. */
+  embedMin?: number;
   /** How far below the base the ground is looked for (m). */
   reachDown?: number;
   /**
@@ -83,6 +94,8 @@ export interface SeatOptions {
   legSpread?: number;
   /** `hang` / `wall`: how far the surface is looked for (m). */
   reach?: number;
+  /** `base`: how far each of the footprint's `flats` must stay off the surface's plane (m): the zfight gate's 2 cm + margin. */
+  flatClear?: number;
 }
 
 export type SeatStatus = "ok" | "off" | "unsupported";
@@ -108,7 +121,29 @@ export interface SeatResult {
 
 /** A footprint sample that hit a neighbour standing in the footprint rather than ground. */
 const OBSTRUCTED = Number.NEGATIVE_INFINITY;
-const D = { tol: 0.05, sink: 0.03, embed: 0.2, reachDown: 4, minSupport: 0.6, legSpread: 0.15, reach: 3 };
+/** Share of its height a placed rock is sunk below the lowest ground under it (scatter, dress apply, float --fix). */
+export const ROCK_EMBED = 0.15;
+/** Share of its height a rock must be embedded to pass the float gate ("embedded", not "touching"). */
+export const ROCK_EMBED_MIN = 0.1;
+/** Extra share of its height sunk per unit of ground grade under the footprint (a 30° slope, grade 0.58: +9%). */
+export const ROCK_EMBED_SLOPE = 0.15;
+const D = { tol: 0.05, sink: 0.03, embed: ROCK_EMBED, embedMin: ROCK_EMBED_MIN, reachDown: 4, minSupport: 0.6, legSpread: 0.15, reach: 3, flatClear: 0.025 };
+/** Deepest a base is pressed in to clear its own low faces off the surface's plane (m). */
+const MAX_FLAT_SINK = 0.07;
+
+/**
+ * The sink (0..MAX_FLAT_SINK, nearest `sink`) that keeps every one of an object's low flat faces (`flats`, heights above
+ * its base) at least `clear` off the surface it is pressed into: one mesh owns each plane. `sink` itself when nothing in
+ * the window clears them all, or there are none.
+ */
+export function flatSafeSink(sink: number, flats: readonly number[] | undefined, clear: number): number {
+  if (!flats || flats.length === 0) return sink;
+  const ok = (s: number) => flats.every((h) => Math.abs(h - s) >= clear);
+  if (ok(sink)) return sink;
+  for (let d = 1; d <= Math.round(MAX_FLAT_SINK * 1000); d++)
+    for (const s of [sink - d / 1000, sink + d / 1000]) if (s >= 0 && s <= MAX_FLAT_SINK && ok(s)) return Math.round(s * 1000) / 1000;
+  return sink;
+}
 const round = (v: number): number => (Number.isFinite(v) ? Math.round(v * 1000) / 1000 : v);
 
 /** Footprint sample points in world plan: centre first, then the rim at 85%, then an inner ring at 45%. */
@@ -174,12 +209,18 @@ export function seatObject(probe: SolidProbe, fp: SeatFootprint, contact: SeatCo
       gap = Math.max(gap, fp.y + tilt[i]! - v); // underside above the ground here
       rise = Math.max(rise, v - (fp.y + tilt[i]!)); // ground above the underside here
     });
-    const need = Math.max(0, o.embed) * fp.height;
-    if (gap <= o.tol) return res("ok", fp.y, gap);
+    // EMBEDDED, not touching: the underside must lie `embedMin` of the height below the lowest ground. The reported
+    // gap is how far short of that it is (positive = shows its underside, or only touches)
+    const min = Math.max(0, o.embedMin) * fp.height;
+    const short = gap + min;
+    if (short <= 0.005) return res("ok", fp.y, short);
+    // the bottom follows the ground: a footprint on a grade sinks further (its ground spread over its width)
+    const grade = Math.min(1.2, spread / Math.max(0.2, 2 * Math.max(fp.halfX, fp.halfZ)));
+    const need = Math.max(min, Math.min(0.45, Math.max(0, o.embed) + ROCK_EMBED_SLOPE * grade) * fp.height);
     const target = fp.y - gap - need;
     // sunk until the lowest side is bedded, the high side would swallow it: a step or an edge taller than the rock
-    if (fp.height > 0 && rise + gap + need > fp.height * 1.05) return res("unsupported", null, gap, `straddles a ${(rise + gap).toFixed(1)} m step (rock ${fp.height.toFixed(1)} m)`);
-    return res("off", target, gap, "underside shows");
+    if (fp.height > 0 && rise + gap + min > fp.height * 1.05) return res("unsupported", null, short, `straddles a ${(rise + gap).toFixed(1)} m step (rock ${fp.height.toFixed(1)} m)`);
+    return res("off", target, short, gap > o.tol ? "underside shows" : `embedded ${Math.max(0, Math.round((-gap / Math.max(1e-6, fp.height)) * 100))}% of its height (< ${Math.round(o.embedMin * 100)}%)`);
   }
   if (contact === "legs") {
     const gap = fp.y - top;
@@ -196,8 +237,9 @@ export function seatObject(probe: SolidProbe, fp: SeatFootprint, contact: SeatCo
   const perch = Math.max(0.35, 0.7 * Math.min(fp.halfX, fp.halfZ));
   if (centre === null || centre === undefined || top - centre > perch) return res("unsupported", null, gap, "centre over a drop (perched on an edge)");
   // asked to lift (reachUp): a base sunk below its surface comes up onto it; the float gate keeps calling a sunk base ok
-  if (o.reachUp !== undefined && gap < -(o.sink + o.tol)) return res("off", top - o.sink, gap, "sunk into its surface");
-  return gap > o.tol ? res("off", top - o.sink, gap, "floating") : res("ok", fp.y, gap);
+  const sink = flatSafeSink(o.sink, fp.flats, o.flatClear);
+  if (o.reachUp !== undefined && gap < -(o.sink + o.tol)) return res("off", top - sink, gap, "sunk into its surface");
+  return gap > o.tol ? res("off", top - sink, gap, "floating") : res("ok", fp.y, gap);
 }
 
 /**

@@ -1,7 +1,7 @@
 /**
  * town-layout — stage 3 of the town pipeline: the plan's lots become world placements, checked against the ground.
  *
- *   npx tsx tools/town-layout.mts --project proving --town brinehold [--no-map]
+ *   npx tsx tools/town-layout.mts --project proving --town brinehold [--no-map] [--reground]
  *
  * Reads authoring/towns/<town>-plan.json. Each building sits on a terrace (or the town pad) at `u` metres
  * along the terrace's centreline, on the `east` (+v, the terrace's left) or `west` side of the street that
@@ -20,6 +20,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createWorldField, worldRecipeSchema, type WorldRecipe } from "@hitreg/core";
+import { walkGridBox } from "./_town-grid.mts";
+import { readJsonTracked, writeJsonFile } from "./_scene-write.mts";
 
 const argv = process.argv.slice(2);
 const opt = (name: string, fallback: string): string => {
@@ -38,7 +40,7 @@ const townsDir = path.join(projectDir, "authoring/towns");
 const townDoc = JSON.parse(fs.readFileSync(path.join(townsDir, `${townName}.json`), "utf8"));
 const plan = JSON.parse(fs.readFileSync(path.join(townsDir, `${townName}-plan.json`), "utf8"));
 const recipeFile = path.join(projectDir, "assets/worlds", `${townDoc.world}.json`);
-const recipeRaw = JSON.parse(fs.readFileSync(recipeFile, "utf8"));
+const recipeRaw = readJsonTracked(recipeFile); // tracked: the writes below refuse if another tool wrote the recipe since
 // EARTHWORKS: --terrace "id=radius[:groundY],…" widens (or re-levels) shelves in memory; --write-earthworks persists
 // them to the world recipe (validated) once the lots fit. The program decides how much flat ground a town needs.
 // "id=radius[:groundY][@dx;dz]" — @ moves the whole shelf (e.g. seaward onto filled ground)
@@ -279,9 +281,10 @@ function evaluate(b: any, bu: number, sideName: string, setback: number, terrace
 // building's ENVELOPE (+0.4 m of player) is solid. A lot is only valid if every placed door — its own included — is
 // reachable from the first gate. The walker (town-walk --doors) then proves it on the real physics.
 const gate0 = town.gates[0]?.at as P | undefined;
-const GX0 = Math.floor(town.center[0] - town.radius - (town.falloff ?? 0) - 40);
-const GZ0 = Math.floor(town.center[1] - town.radius - (town.falloff ?? 0) - 40);
-const GN = Math.ceil((town.radius + (town.falloff ?? 0) + 40) * 2);
+const GRID_BOX = walkGridBox(town); // pad + every terrace (lots can stand outside the pad), +40 m
+const GX0 = Math.floor(GRID_BOX[0]);
+const GZ0 = Math.floor(GRID_BOX[1]);
+const GN = Math.ceil(Math.max(GRID_BOX[2] - GRID_BOX[0], GRID_BOX[3] - GRID_BOX[1]));
 const GH = new Float32Array(GN * GN);
 const GOK = new Uint8Array(GN * GN);
 for (let j = 0; j < GN; j++)
@@ -431,12 +434,31 @@ try {
 } catch { /* no survey yet */ }
 
 const round = (v: number): number => Math.round(v * 100) / 100;
+// A re-run must not move an installed building. After the first run the FLOOR HEIGHT belongs to town-settle (or a
+// raised-foundation pass) and the installed model stands at it, so a lot that comes out exactly where the layout already
+// has it (same centre, yaw and full outline) keeps the groundY already written; re-deriving it from the shelf dropped
+// every Cindermoot floor 0.7-1.2 m on a plan-only re-run. --reground takes the shelf height again (then town-settle).
+const layoutFile = path.join(townsDir, `${townName}-layout.json`);
+type Prev = { id: string; centre: P; yaw: number; full?: P[]; groundY?: number };
+const prevLots = new Map<string, Prev>(!argv.includes("--reground") && fs.existsSync(layoutFile)
+  ? (JSON.parse(fs.readFileSync(layoutFile, "utf8")) as { buildings?: Prev[] }).buildings?.map((b) => [b.id, b] as [string, Prev]) ?? []
+  : []);
+let keptFloors = 0;
+const floorOf = (p: Placed): number => {
+  const was = prevLots.get(p.id);
+  const same = !!was && typeof was.groundY === "number" && JSON.stringify(was.centre) === JSON.stringify(p.centre.map(round)) && was.yaw === round(p.yaw)
+    && JSON.stringify(was.full ?? null) === JSON.stringify(p.full.map((c) => c.map(round)));
+  if (!same) return p.groundY;
+  keptFloors++;
+  return was!.groundY!;
+};
 const out = {
   town: townName,
   townId: town.id,
   cell: CELL,
   buildings: placed.map((p) => ({
     ...p,
+    groundY: floorOf(p),
     centre: p.centre.map(round),
     yaw: round(p.yaw),
     facing: p.facing.map(round),
@@ -447,7 +469,8 @@ const out = {
     residents: plan.residents.filter((r: { home: string; work: string }) => r.home === p.id || r.work === p.id).map((r: { id: string; home: string; work: string }) => ({ id: r.id, home: r.home === p.id, work: r.work === p.id })),
   })),
 };
-fs.writeFileSync(path.join(townsDir, `${townName}-layout.json`), `${JSON.stringify(out, null, 1)}\n`);
+fs.writeFileSync(layoutFile, `${JSON.stringify(out, null, 1)}\n`);
+if (keptFloors) console.log(`  kept the written floor height of ${keptFloors} unmoved lot(s) (--reground re-derives them)`);
 for (const p of placed) console.log(`  ${p.problems.length ? "FAIL" : "ok  "} ${p.id.padEnd(22)} ${p.size.join("x")} at [${p.centre.map((v) => v.toFixed(1))}] y ${p.groundY.toFixed(1)} faces ${(p.yaw * 180 / Math.PI).toFixed(0)}°${p.problems.length ? "  — " + p.problems.join("; ") : ""}`);
 
 // ---- the plan map: the survey picture with the lots drawn and labelled (SVG -> PNG through Playwright) ----
@@ -488,10 +511,8 @@ if (!argv.includes("--no-map")) {
   const svgFile = path.join(townsDir, "survey", `${townName}-plan.svg`);
   fs.writeFileSync(svgFile, svg);
   try {
-    const { chromium } = await import(
-      process.env.PLAYWRIGHT_MODULE ??
-        "file:///C:/Users/Derek/AppData/Local/Temp/claude/D--Users-Derek-Desktop-HitRegStudios-Engine/29863f0b-4711-4d4d-aeda-fe4ad134b25a/scratchpad/node_modules/playwright/index.mjs"
-    );
+    // @ts-expect-error plain JS module
+    const { chromium } = await (await import("./_playwright.mjs")).loadPlaywright();
     const browser = await chromium.launch({ channel: "chrome", headless: true });
     const page = await browser.newPage({ viewport: { width: VW, height: VH } });
     await page.setContent(`<body style="margin:0">${svg}</body>`);
@@ -554,8 +575,7 @@ if (argv.includes("--write-lanes")) {
     written.push(`${id} (${Math.round(u1 - u0)} m${best && best.d < 60 ? `, joined ${best.d.toFixed(0)} m` : ""})`);
   }
   worldRecipeSchema.parse(recipeRaw);
-  fs.writeFileSync(recipeFile, `${JSON.stringify(recipeRaw, null, 2)}
-`);
+  writeJsonFile(recipeFile, recipeRaw, { label: "town-layout" });
   console.log(`lanes written: ${written.join(", ") || "none"}`);
 }
 // PADS: --write-pads writes one foundation pad per building into the town (a terrace along the depth of the building,
@@ -573,7 +593,7 @@ if (PADS && argv.includes("--write-pads")) {
       tw.terraces.push({ id: `${town.id}-pad-${q.id}`, points: [front.map(round), back.map(round)], radius: round(halfW + 1.5), falloff: 3, groundY: q.groundY, flatten: 1, tags: ["building-foundation"] });
     }
     worldRecipeSchema.parse(recipeRaw);
-    fs.writeFileSync(recipeFile, `${JSON.stringify(recipeRaw, null, 2)}\n`);
+    writeJsonFile(recipeFile, recipeRaw, { label: "town-layout" });
     console.log(`pads written: ${placed.length} (re-run road-regrade over the town, then town-survey)`);
   }
 }
@@ -581,8 +601,7 @@ if (earthworks.length && argv.includes("--write-earthworks")) {
   // Written even while lots still fail: the roads' banks were sampled from the OLD ground and only a
   // road-regrade over the new shelves (run next) can show what the shelves really give.
   if (problems.length) console.log("earthworks written although the layout still fails — regrade the roads, then re-run");
-  { fs.writeFileSync(recipeFile, `${JSON.stringify(recipeRaw, null, 2)}
-`); console.log(`earthworks written to ${path.relative(process.cwd(), recipeFile)}: ${earthworks.map((e) => `${e.id} r ${e.radius}`).join(", ")} — re-run road-regrade, town-survey and town-walk`); }
+  { writeJsonFile(recipeFile, recipeRaw, { label: "town-layout" }); console.log(`earthworks written to ${path.relative(process.cwd(), recipeFile)}: ${earthworks.map((e) => `${e.id} r ${e.radius}`).join(", ")} — re-run road-regrade, town-survey and town-walk`); }
 }
 if (problems.length) {
   console.log(`LAYOUT FAILED (${problems.length}):`);

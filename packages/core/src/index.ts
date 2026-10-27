@@ -23,6 +23,8 @@ export {
   cullingProfileSchema,
   type CullingData,
   type CullingProfileData,
+  landmarkComponentSchema,
+  type LandmarkComponentData,
   meshSchema,
   lightSchema,
   cameraSchema,
@@ -173,10 +175,19 @@ export {
   type SubsceneData,
 } from "./chunks.js";
 export {
+  FocusVelocity,
+  streamLeadPoint,
+  computeLeadChunkStates,
+  cellLoadPriority,
+  DEFAULT_STREAM_LEAD,
+  type StreamLeadOptions,
+} from "./stream-lead.js";
+export {
   supercellForCell,
   supercellOrigin,
   groupCellsBySupercell,
   isStaticRenderEntity,
+  landmarkOf,
   assembleHlodBuildDoc,
   hlodCacheKey,
   HLOD_GENERATOR_VERSION,
@@ -325,6 +336,7 @@ export {
   dressingSocketSchema,
   dressingOrigin,
   isLooseClutter,
+  DRESSING_TAGS,
   registerDressingComponent,
   type DressingData,
   type DressingInput,
@@ -393,6 +405,7 @@ export {
   loadingScreenOf,
   type LoadingScreen,
   portalArrivalSpot,
+  portalArrivalCandidates,
   PORTAL_TRIGGER_DEFAULTS,
   portalVolumeOf,
   portalVolumeDistance,
@@ -405,8 +418,8 @@ export {
   type PortalTravel,
 } from "./portal.js";
 export { LANDING_NETSTATE, landingKey, landingSchema, registerLandingNetState, isLanding, clearLanding } from "./landing.js";
-export { STAFF_NETSTATE, STAFF_ROLES, staffKey, staffSchema, registerStaffNetState, staffRole } from "./staff.js";
-export type { StaffRole } from "./staff.js";
+export { STAFF_NETSTATE, STAFF_ROLES, STAFF_TELEPORT_EVENT, staffKey, staffSchema, staffTeleportSchema, staffTeleportRefusal, registerStaffNetState, staffRole } from "./staff.js";
+export type { StaffRole, StaffTeleportRequest } from "./staff.js";
 export { NOTICE_NETSTATE, noticeKey, noticeSchema, registerNoticeNetState, readNotice } from "./notice.js";
 export {
   MOB_EVENTS,
@@ -456,3 +469,5 @@ export {
 export * from "./game-ui.js";
 export * from "./quest-blocks.js";
 export * from "./npc/index.js";
+export * from "./zfight.js";
+export { COOLDOWN_NETSTATE, cooldownKey, cooldownSchema, registerCooldownNetState } from "./cooldown.js";

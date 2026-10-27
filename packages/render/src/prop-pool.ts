@@ -1,7 +1,7 @@
 import * as THREE from "three/webgpu";
 import type { VegetationTint } from "@hitreg/core";
 import { encodeVegetationTint } from "./vegetation-tint.js";
-import type { GLTF } from "three/addons/loaders/GLTFLoader.js";
+import type { LoadedModel } from "./gltf-dedupe.js";
 import type { FoliageLodSystem, InstancedPropBatch } from "./foliage-lod.js";
 import { InstancedProps } from "./instancing.js";
 import { impostorGeometry, impostorInstanceData, type ImpostorInstanceData } from "./impostor.js";
@@ -75,7 +75,7 @@ interface Group {
   assetId: string;
   node: string | undefined;
   submeshes: GltfSubmesh[];
-  gltf: GLTF;
+  gltf: LoadedModel;
   flags: PoolFlags;
   /** The batch's material override (a scatter rule's `material`, e.g. the world's rock-cap), or null for the model's own. */
   override: THREE.Material | null;
@@ -139,7 +139,7 @@ export class InstancedPropPool {
   add(
     assetId: string,
     node: string | undefined,
-    gltf: GLTF,
+    gltf: LoadedModel,
     submeshes: GltfSubmesh[],
     flags: PoolFlags,
     entries: readonly PoolEntry[],

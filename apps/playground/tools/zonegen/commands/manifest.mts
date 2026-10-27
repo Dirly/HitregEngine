@@ -212,7 +212,7 @@ export function manifestRows(ctx: Ctx, zone: string, f: Finding[]): { rows: Row[
   };
   for (const l of g.locations)
     l.needs.forEach((need, i) => add({ id: `${l.id}#${i + 1}`, kind: "prop", for: l.id, status: built(l.id) ? "have" : "request", by: "opus", how: "the location's POI owner (poi-creator) builds it and catalogues it (docs/prop-cataloging.md)", note: need }));
-  for (const e of g.entities) add({ id: e.id, kind: "entity", for: e.location, status: live.ids.has(e.id) ? "have" : "request", by: "opus", how: `POI owner places a ${e.kind} entity (npc builtin${e.kind === "readable" ? ", readable: true" : e.kind === "presence" ? " + presence" : ", face: false"})`, note: e.what });
+  for (const e of g.entities) add({ id: e.id, kind: "entity", for: e.location, status: live.ids.has(e.id) ? "have" : "request", by: "opus", how: `POI owner places a ${e.kind} entity (npc builtin${e.kind === "readable" ? ", readable: true" : e.kind === "presence" ? " + presence" : e.kind === "escort" ? " + escort route" : ", face: false"})`, note: e.what });
 
   // audio: a zone bed, and one per dungeon (docs/audio.md: template + catalog entry, never a one-off prompt)
   const audioHas = (key: string): boolean => assetDirs(p.projectDir, "audio").some((d) => filesUnder(d, (n) => n.includes(key)).length > 0);

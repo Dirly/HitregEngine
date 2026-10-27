@@ -29,15 +29,19 @@ import * as THREE from "three/webgpu";
 import {
   appearanceOf,
   bodyModelOf,
+  dressCharacter,
   partRulesSchema,
   partsHiddenBy,
   placementOf,
   type CharacterBuild,
   type CharacterCreation,
+  type EquipmentSlot,
+  type LookPiece,
 } from "@hitreg/core";
 import { applyModelAppearance, loadGltf, PortraitView, type SkinSheet } from "@hitreg/render";
 import type { CreationPreview } from "./character-creation.js";
 import { STAGE_FOG, STAGE_FRAMING, clearingStage } from "./creation-stage.js";
+import { selectionEquipment } from "./selection-equipment.js";
 
 /** The colour slot material that recolours skin texels rather than a material. */
 const SKIN = "Skin";
@@ -305,6 +309,42 @@ export function createCreationPreview(
     return { pieces: [...byModel.values()], body };
   };
 
+  const wornPieces = (build: CharacterBuild, items: LookPiece[], roots: Map<string, THREE.Object3D>) => {
+    const dressed = dressCharacter({
+      creation, appearance: build.appearance, items,
+      rules: (model) => {
+        let rules = null;
+        roots.get(model)?.traverse((node) => {
+          const parsed = partRulesSchema.safeParse(node.userData["rules"]);
+          if (parsed.success) rules = parsed.data;
+        });
+        return rules;
+      },
+      sheets: (model) => {
+        let sheets: Set<string> | null = null;
+        roots.get(model)?.traverse((node) => {
+          const tiles = node.userData["tiles"];
+          if (tiles && typeof tiles === "object") sheets = new Set(Object.keys(tiles));
+        });
+        return sheets;
+      },
+    });
+    const all: Piece[] = [];
+    let body: Piece | null = null;
+    for (const look of dressed.models.values()) {
+      if (look.parts.length === 0) continue;
+      const hideBones = appearanceOf(creation, build).flatMap(({ slot, option }) =>
+        !slot.preview && option.model === look.model ? option.hideBones ?? [] : []);
+      const piece: Piece = {
+        model: look.model, socket: look.mount?.socket ?? "", ...(look.mount ?? {}),
+        parts: new Set(look.parts), groups: look.groups, hideBones,
+      };
+      if (look.model === dressed.body) body = piece;
+      else if (look.mount) all.push(piece);
+    }
+    return { pieces: all, body };
+  };
+
   /** What the shown parts of a model cover on the others, from the model's own `rules`. */
   const hiddenBy = (root: THREE.Object3D, piece: Piece): Set<string> => {
     let out = new Set<string>();
@@ -425,8 +465,10 @@ export function createCreationPreview(
     });
   };
 
-  const show = async (build: CharacterBuild): Promise<void> => {
+  const show = async (build: CharacterBuild, equipment?: Partial<Record<EquipmentSlot, string>>): Promise<void> => {
     const mine = ++generation;
+    const worn = equipment === undefined ? null : await selectionEquipment(equipment);
+    if (!alive || mine !== generation) return;
     const url = resolveModel(bodyModelOf(creation, build));
     if (url && url !== bodyUrl) {
       bodyUrl = url;
@@ -438,22 +480,37 @@ export function createCreationPreview(
     // a body-slot option may scale the whole character (female = 0.96 of the rig)
     const bodyScale = appearanceOf(creation, build).find(({ slot }) => slot.body)?.option.scale ?? 1;
     view.model.scale.setScalar(bodyScale);
-    const { pieces: wanted, body } = piecesOf(build, bodyModelOf(creation, build));
+    const bodyModel = bodyModelOf(creation, build);
+    const roots = new Map<string, THREE.Object3D>([[bodyModel, view.model]]);
+    const outfit = worn === null ? piecesOf(build, bodyModel) : wornPieces(build, worn, roots);
+    const wanted = outfit.pieces;
     const loaded: Array<{ piece: Piece; scene: THREE.Object3D }> = [];
     for (const piece of wanted) {
       const pieceUrl = resolveModel(piece.model);
       if (!pieceUrl) continue;
       try {
-        loaded.push({ piece, scene: (await loadGltf(pieceUrl)).scene });
+        const scene = (await loadGltf(pieceUrl)).scene;
+        roots.set(piece.model, scene);
+        loaded.push({ piece, scene });
       } catch (error) {
         console.warn(`[creation] ${piece.model}: model failed to load:`, error);
       }
       if (!alive || mine !== generation || !view) return;
     }
+    // Once the models' tables are available, remap sheets and apply their part-hiding rules.
+    if (worn !== null) {
+      const final = wornPieces(build, worn, roots);
+      outfit.body = final.body;
+      for (const entry of loaded) {
+        const piece = final.pieces.find((p) => p.model === entry.piece.model);
+        if (piece) entry.piece = piece;
+        else entry.piece.parts = new Set();
+      }
+    }
     for (const old of pieces.splice(0)) old.removeFromParent();
     hideBody(view.model, loaded.flatMap(({ piece }) => piece.hideBones));
     // what each model's shown parts cover on the others (the body's too)
-    const bodyPiece: Piece = body ?? { model: bodyModelOf(creation, build), socket: "", parts: null, hideBones: [] };
+    const bodyPiece: Piece = outfit.body ?? { model: bodyModel, socket: "", parts: null, hideBones: [] };
     const covers = new Map<THREE.Object3D, Set<string>>([[view.model, hiddenBy(view.model, bodyPiece)]]);
     for (const { piece, scene } of loaded) covers.set(scene, hiddenBy(scene, piece));
     const hiddenFor = (self: THREE.Object3D): Set<string> => {
@@ -495,7 +552,7 @@ export function createCreationPreview(
   };
 
   return {
-    update: (build) => void show(build),
+    update: (build, equipment) => void show(build, equipment).catch((error: unknown) => console.warn("[creation] preview failed:", error)),
     setYaw: (radians) => {
       yaw = radians;
       view?.setYaw(radians);

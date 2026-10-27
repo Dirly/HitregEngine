@@ -3,6 +3,7 @@ import { HorizonCuller, HorizonOccluderMap, OCCLUDED_LAYER, type HorizonOptions 
 import type { SceneDoc } from "@hitreg/core";
 import type { InstancedPropPool } from "./prop-pool.js";
 import type { StaticBatchHandle } from "./static-batch.js";
+import { applyLandmarkFog, type LandmarkFog } from "./landmark-fog.js";
 
 /**
  * Culling units: things that are shown or hidden WHOLE, by three tests that
@@ -40,8 +41,28 @@ export interface CullUnitOptions {
   reveal?: number;
   /** Instances in the prop pool that belong to the unit: all of `owner`'s, or only those of `ids`. */
   pool?: { pool: InstancedPropPool; owner: object; ids: ReadonlySet<string> | null };
+  /**
+   * A landmark (the `landmark` component): every renderable the unit owns draws with the landmark fog variant of its
+   * material (landmark-fog.ts), adopted late-loaded meshes included, and restored when the unit lets go of it.
+   */
+  landmark?: LandmarkFog;
+  /**
+   * Stands on streamed terrain (base-scene placed content in a chunk-streamed world): hidden from every pass while
+   * the system's `ground` says no terrain is drawn under the centre of its bounds — a town or a stair must not hang
+   * in the sky over cells that have not streamed in. Content that streams WITH its cell never needs it.
+   */
+  grounded?: boolean;
   /** Enclosing unit — hidden when it is. Register the parent first. */
   parent?: CullUnit;
+}
+
+/**
+ * Where terrain is drawn, for `grounded` units (ChunkManager implements it). `version` must change whenever an
+ * answer may have changed (a cell or HLOD part published or dropped): units are re-judged only then, never per frame.
+ */
+export interface GroundCoverage {
+  readonly groundVersion: number;
+  coversGround(x: number, z: number): boolean;
 }
 
 const GONE = 2;
@@ -61,6 +82,9 @@ export class CullUnit {
   occluded = false;
   small = false;
   outside = false;
+  /** `grounded` verdict: no terrain drawn under it; re-judged when the ground version (or the unit's bounds) change. */
+  ungrounded = false;
+  groundVersion = NaN;
   /** What is applied now (SHOWN/OCCLUDED/GONE), after the parent's. */
   applied = SHOWN;
   poolHidden = false;
@@ -75,6 +99,8 @@ export interface CullingStats {
   occluded: number;
   small: number;
   interior: number;
+  /** `grounded` units hidden because no terrain is drawn under them yet. */
+  ungrounded: number;
   /** Renderables currently hidden, of those units manage. */
   hiddenRenderables: number;
   renderables: number;
@@ -115,11 +141,16 @@ export class CullingSystem {
    * shadow as well — only safe beyond the shadow cascades.
    */
   shadowDistance = 120;
+  /** Where terrain is drawn, for `grounded` units; null = every unit stands on ground (no streamed world). */
+  ground: GroundCoverage | null = null;
+  /** Runtime switch for the ground gate (A/B, the far-draw probe). */
+  groundGate = true;
   private last: CullingStats = {
     units: 0,
     occluded: 0,
     small: 0,
     interior: 0,
+    ungrounded: 0,
     hiddenRenderables: 0,
     renderables: 0,
     horizonSamples: 0,
@@ -163,7 +194,9 @@ export class CullingSystem {
                 previous.renderables.splice(at, 1);
                 previous.masks.splice(at, 1);
               }
+              if (previous.options.landmark && !unit.options.landmark) applyLandmarkFog(node, null);
             }
+            if (unit.options.landmark) applyLandmarkFog(node, unit.options.landmark);
             this.owner.set(node, unit);
             unit.renderables.push(node);
             unit.masks.push(node.layers.mask);
@@ -194,6 +227,7 @@ export class CullingSystem {
     for (let i = 0; i < unit.renderables.length; i++) {
       const node = unit.renderables[i]!;
       node.layers.mask = unit.masks[i]!;
+      if (unit.options.landmark) applyLandmarkFog(node, null);
       if (this.owner.get(node) === unit) this.owner.delete(node);
     }
     this.setPoolHidden(unit, false);
@@ -211,14 +245,14 @@ export class CullingSystem {
     const started = performance.now();
     if (!this.enabled) {
       for (const unit of this.units) this.apply(unit, SHOWN, false);
-      this.last = { ...this.last, occluded: 0, small: 0, interior: 0, hiddenRenderables: 0, ms: 0 };
+      this.last = { ...this.last, occluded: 0, small: 0, interior: 0, ungrounded: 0, hiddenRenderables: 0, ms: 0 };
       return;
     }
     camera.updateMatrixWorld();
     camera.getWorldPosition(eye);
     this.horizon.setEye(eye.x, eye.y, eye.z);
     projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    frustum.setFromProjectionMatrix(projView, camera.coordinateSystem);
+    frustum.setFromProjectionMatrix(projView, camera.coordinateSystem, camera.reversedDepth);
     const perspective = camera as THREE.PerspectiveCamera;
     const tanHalf = perspective.isPerspectiveCamera ? Math.tan((perspective.fov * Math.PI) / 360) / perspective.zoom : 0;
 
@@ -227,11 +261,14 @@ export class CullingSystem {
       occluded: 0,
       small: 0,
       interior: 0,
+      ungrounded: 0,
       hiddenRenderables: 0,
       renderables: 0,
       horizonSamples: 0,
       ms: 0,
     };
+    const ground = this.groundGate ? this.ground : null;
+    const groundVersion = ground ? ground.groundVersion : NaN;
     // Models load asynchronously: a cell or POI can gain meshes after it
     // registered (the first use of a glTF). Adopt them a couple of units a
     // frame — until then they are simply never hidden, which is safe.
@@ -244,13 +281,24 @@ export class CullingSystem {
         unit.poolVersion = o.pool.pool.ownerVersion(o.pool.owner);
         unit.testBox.copy(unit.box);
         if (o.pool.pool.boundsOf(o.pool.owner, o.pool.ids, poolBox)) unit.testBox.union(poolBox);
+        unit.groundVersion = NaN;
       } else if (unit.poolVersion < 0) {
         unit.poolVersion = 0;
         unit.testBox.copy(unit.box);
+        unit.groundVersion = NaN;
       }
       const box = unit.testBox;
       if (box.isEmpty()) continue;
       box.getBoundingSphere(sphere);
+
+      // over unloaded ground: judged on chunk events (the version), not every frame
+      if (!o.grounded || !ground) {
+        unit.ungrounded = false;
+        unit.groundVersion = NaN; // judged afresh when the gate (or a ground source) comes back
+      } else if (unit.groundVersion !== groundVersion) {
+        unit.groundVersion = groundVersion;
+        unit.ungrounded = !ground.coversGround((box.min.x + box.max.x) / 2, (box.min.z + box.max.z) / 2);
+      }
 
       if (o.interior) {
         const d = box.distanceToPoint(eye);
@@ -265,12 +313,12 @@ export class CullingSystem {
       // the horizon only for what could be on screen: off-screen, frustum
       // culling already skips it, and its old verdict is re-judged the frame
       // it comes back into view, before anything draws it
-      if (o.occlusion !== false && !unit.small && !unit.outside && frustum.intersectsBox(box)) {
+      if (o.occlusion !== false && !unit.ungrounded && !unit.small && !unit.outside && frustum.intersectsBox(box)) {
         unit.occluded = this.horizon.isBoxOccluded(box, unit.occluded ? 0 : OCCLUDE_MARGIN);
       }
 
       const parent = o.parent?.applied ?? SHOWN;
-      const own = unit.small || unit.outside ? GONE : unit.occluded ? OCCLUDED : SHOWN;
+      const own = unit.ungrounded || unit.small || unit.outside ? GONE : unit.occluded ? OCCLUDED : SHOWN;
       const state = Math.max(parent, own);
       let poolHide = state === GONE;
       if (state === OCCLUDED) {
@@ -279,7 +327,8 @@ export class CullingSystem {
       }
       this.apply(unit, state, poolHide);
 
-      if (unit.small) stats.small++;
+      if (unit.ungrounded) stats.ungrounded++;
+      else if (unit.small) stats.small++;
       else if (unit.outside) stats.interior++;
       else if (unit.occluded) stats.occluded++;
       stats.renderables += unit.renderables.length;
@@ -344,6 +393,8 @@ export interface CullRoot {
   members: Set<string>;
   /** The nearest enclosing root, or null. */
   parent: string | null;
+  /** The `landmark` this root draws under (its own or an enclosing root's), defaults applied. */
+  landmark?: LandmarkFog;
 }
 
 const POI_DEFAULTS: CullRootSettings = { occlusion: true, minScreenPx: 0, interior: false, reveal: 12 };
@@ -392,13 +443,19 @@ export function cullRootsOf(doc: SceneDoc): CullRoot[] {
   const visit = (id: string, enclosing: CullRoot | null): void => {
     const entity = doc.entities[id]!;
     const data = entity.components["culling"] as Partial<CullRootSettings> | undefined;
+    const own = landmarkSettings(entity.components["landmark"]);
     let here = enclosing;
-    if (data || entity.tags?.includes("poi")) {
+    if (data || own || entity.tags?.includes("poi")) {
+      const settings = applyCullingProfile({ ...POI_DEFAULTS, ...(data ?? {}) }, profile);
+      // a landmark reads from afar: never hidden by size, never an interior (behind terrain still hides it)
+      if (own) Object.assign(settings, { minScreenPx: 0, interior: false });
+      const landmark = own ?? enclosing?.landmark;
       here = {
         id,
-        settings: applyCullingProfile({ ...POI_DEFAULTS, ...(data ?? {}) }, profile),
+        settings,
         members: new Set(),
         parent: enclosing?.id ?? null,
+        ...(landmark ? { landmark } : {}),
       };
       roots.push(here);
     }
@@ -407,6 +464,15 @@ export function cullRootsOf(doc: SceneDoc): CullRoot[] {
   };
   for (const id of children.get(null) ?? []) visit(id, null);
   return roots;
+}
+
+/** A `landmark` component's data with the schema defaults (core landmarkComponentSchema), or null. */
+export function landmarkSettings(data: unknown): LandmarkFog | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as Partial<LandmarkFog>;
+  const reach = typeof d.fogReach === "number" && Number.isFinite(d.fogReach) ? d.fogReach : 600;
+  const silhouette = typeof d.silhouette === "number" && Number.isFinite(d.silhouette) ? d.silhouette : 0.6;
+  return { fogReach: Math.max(50, reach), silhouette: Math.min(1, Math.max(0, silhouette)) };
 }
 
 /** entity id -> the id of the innermost root it belongs to. */
@@ -426,7 +492,7 @@ export function registerCullRoots(
   roots: readonly CullRoot[],
   objects: ReadonlyMap<string, THREE.Object3D>,
   batch: StaticBatchHandle | null,
-  context: { parent?: CullUnit; pool?: { pool: InstancedPropPool; owner: object } } = {},
+  context: { parent?: CullUnit; grounded?: boolean; pool?: { pool: InstancedPropPool; owner: object } } = {},
 ): CullUnit[] {
   const units = new Map<string, CullUnit>();
   for (const root of roots) {
@@ -441,8 +507,10 @@ export function registerCullRoots(
       minScreenPx: root.settings.minScreenPx,
       interior: root.settings.interior,
       reveal: root.settings.reveal,
+      ...(root.landmark ? { landmark: root.landmark } : {}),
       ...(context.pool ? { pool: { ...context.pool, ids: root.members } } : {}),
       ...(parent ? { parent } : {}),
+      ...(context.grounded ? { grounded: true } : {}),
     });
     units.set(root.id, unit);
   }

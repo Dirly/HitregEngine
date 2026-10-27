@@ -1,10 +1,12 @@
 import * as THREE from "three/webgpu";
 import type { VegetationTint } from "@hitreg/core";
+import { RAPIDS_FOAM_SPEED, RAPIDS_FOAM_MAX, RAPIDS_SOLID_SPEED } from "@hitreg/core";
 import { applyInstanceVegetationTint, encodeVegetationTint } from "./vegetation-tint.js";
 import { applyInstanceRockCap, buildRockCapMaterial, instanceTintOf, isRockCapMaterial, rockImpostorLook } from "./rock-cap.js";
 import { buildPortalMaterial } from "./portal-material.js";
 import { EFFECT_GROUP, STATIC_BATCH_FLAG } from "./static-batch.js";
-import { modelScope, nameEmbeddedTextures, shareModelMaterials } from "./gltf-dedupe.js";
+import { modelScope, nameEmbeddedTextures, retainModel, shareDecodedImages, shareModelMaterials, type LoadedModel } from "./gltf-dedupe.js";
+import { LoadQueue } from "./load-queue.js";
 import { applyAtlasMaterials } from "./town-atlas.js";
 import { enableSkinnedBounds } from "./skinned-bounds.js";
 import { enableSkinnedShadowRange } from "./skinned-shadows.js";
@@ -64,7 +66,7 @@ import {
   dFdx,
   dFdy,
 } from "three/tsl";
-import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { applyFoliageNormals } from "./foliage-normals.js";
 import { waterWakeUniforms } from "./water-wake.js";
 import { seaAbyss, seaBreakers, seaGlint, seaSkyReflection, seaSwell, seaWhitecaps, type SeaParams } from "./water-sea.js";
@@ -142,17 +144,20 @@ import {
 } from "./material-maps.js";
 
 // kits load once and instance many times
-const gltfCache = new Map<string, Promise<GLTF>>();
+const gltfCache = new Map<string, Promise<LoadedModel>>();
+// A town can request hundreds of models together. Limiting only HTTP leaves
+// all their base64/image decoding alive concurrently, multiplying peak RAM.
+const gltfLoads = new LoadQueue(6);
 // urls currently fetching/parsing (not yet in gltfCache's resolved state) —
 // the host surfaces this count so "is it stuck or just loading" is visible
 // instead of a silent, indefinite freeze (see gltfLoadingCount).
 const gltfPending = new Set<string>();
 
-export function loadGltf(url: string): Promise<GLTF> {
+export function loadGltf(url: string): Promise<LoadedModel> {
   let pending = gltfCache.get(url);
   if (!pending) {
     gltfPending.add(url);
-    pending = (gltfLoader ??= new GLTFLoader())
+    pending = gltfLoads.run(() => (gltfLoader ??= new GLTFLoader().register(shareDecodedImages))
       .loadAsync(url)
       .then(async (gltf) => {
         // name embedded kit textures by content first, so the sharing below
@@ -186,7 +191,11 @@ export function loadGltf(url: string): Promise<GLTF> {
           if (!mesh.isSkinnedMesh) return;
           mesh.material = Array.isArray(mesh.material) ? mesh.material.map(rimmedCopy) : rimmedCopy(mesh.material);
         });
-        return gltf;
+        return retainModel(gltf);
+      }))
+      .catch((error: unknown) => {
+        gltfCache.delete(url); // a transient failed load must be retryable
+        throw error;
       })
       .finally(() => gltfPending.delete(url));
     gltfCache.set(url, pending);
@@ -1518,6 +1527,8 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // set by the texture block below and read by the foam; null when this water
   // has no surface texture, in which case the foam keeps its plain band
   let foamBreakup: THREE.Node<"float"> | null = null;
+  /** Field-flow water: the texture stretched ALONG the current (long streaks, narrow across), scrolling with it. */
+  let streakBreakup: THREE.Node<"float"> | null = null;
   /** The surface texture's luminance here (null without a texture): breaks up the fresnel rim. */
   let detailLum: THREE.Node<"float"> | null = null;
 
@@ -1601,8 +1612,12 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
         // (two lookups blended by the slope: scaling one coordinate by the
         // slope instead stretches the texture wildly across the brink)
         const alongFall = add(mul(world.x, dir.x), mul(world.y, dir.y));
-        const scroll = mul(time, float(w.fallSpeed ?? 7));
-        const faceSample = tslTexture(fallMap, mul(vec2(acrossFall, add(positionWorld.y, scroll)), fallScale)).xyz;
+        // STRANDS: the sheet is broken across into bands (~3 m) that fall at their own pace and shade (a slower,
+        // darker edge strand beside a fast white one), so a curtain is never one uniform striped sheet
+        const strand = hash(add(abs(floor(div(acrossFall, float(3.2)))), float(11)));
+        const strandShade = mix(float(0.8), float(1.08), hash(add(abs(floor(div(acrossFall, float(5.1)))), float(29))));
+        const scroll = mul(time, mul(float(w.fallSpeed ?? 7), mix(float(0.62), float(1.12), strand)));
+        const faceSample = mul(tslTexture(fallMap, mul(vec2(acrossFall, add(positionWorld.y, scroll)), fallScale)).xyz, strandShade);
         const brinkSample = tslTexture(fallMap, mul(vec2(acrossFall, add(mul(alongFall, float(-1)), scroll)), fallScale)).xyz;
         const fallSample = mix(faceSample, brinkSample, mul(sub(float(1), geomSteep), isCurtain)) as unknown as THREE.Node<"vec3">;
         // a curtain is fall water from its roll down (its level top rows are
@@ -1669,6 +1684,17 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     const foamUv = add(mul(foamWorld, mul(scale, float(2.3))), foamScroll);
     const foamSample = tslTexture(map, foamUv);
     foamBreakup = foamSample.x.add(foamSample.y).add(foamSample.z).mul(float(1 / 3));
+    if (fieldFlow) {
+      // rapids froth as streaks running with the current: the uv carries the flow vector, so the tile is laid
+      // along it (stretched ~6x down-stream) and scrolls at the water's own speed
+      const speed = max(length(uv()), float(1e-3));
+      const along = div(uv(), speed);
+      const across = vec2(mul(along.y, float(-1)), along.x);
+      const sU = mul(dot(world, across), mul(scale, float(2.6)));
+      const sV = sub(mul(dot(world, along), mul(scale, float(0.42))), mul(time, mul(speed, mul(scale, float(0.42)))));
+      const streak = tslTexture(map, vec2(sU, sV));
+      streakBreakup = streak.x.add(streak.y).add(streak.z).mul(float(1 / 3));
+    }
     void loadWaterTexture(map, data, options);
   }
 
@@ -1780,16 +1806,31 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // texture so it streams in patches instead of painting the step solid.
   // (never on a curtain: its rolled lip is flat enough to froth, and that
   // froth read as a white bar along every fall's top)
+  // Never a flat fill: the froth is STREAKED along the current, its threshold eroded by the same streaks (so a
+  // ledge's lip is a ragged edge, not a straight line across the river), and capped at RAPIDS_FOAM_MAX so the
+  // water's own texture and normals still show through. At a ledge's foot (RAPIDS_SOLID_SPEED) the gaps close up
+  // but the streaks stay.
+  const streaks = streakBreakup ?? foamBreakup;
+  const rapidSpeed = streaks ? add(length(uv()), mul(sub(streaks, float(0.35)), float(1.2))) : length(uv());
   const rapids = fieldFlow
     ? mul(sub(float(1), isCurtain), mul(
-        smoothstep(float(1.2), float(3.2), length(uv())),
-        foamBreakup ? saturate(mul(sub(foamBreakup, float(0.3)), float(2.5))) : float(0.6),
+        smoothstep(float(RAPIDS_FOAM_SPEED[0]), float(RAPIDS_FOAM_SPEED[1]), rapidSpeed), // white-water.ts: rapidsFoam
+        mul(
+          float(RAPIDS_FOAM_MAX),
+          streaks
+            ? mix(
+                saturate(mul(sub(streaks, float(0.25)), float(3))),
+                saturate(add(mul(sub(streaks, float(0.3)), float(1.2)), float(0.7))),
+                smoothstep(float(RAPIDS_SOLID_SPEED[0]), float(RAPIDS_SOLID_SPEED[1]), length(uv())),
+              )
+            : float(0.6),
+        ),
       ))
     : float(0);
   // (on a fall face the fall texture carries the white water; the froth only tops it up)
   // (a fall face stands a hand in front of its rock, so the depth-based shore
   // foam would paint all of it white: steep faces keep their fall texture)
-  let foamAmount = max(max(mul(foamEdge, sub(float(1), steepness)), wakeFroth), mul(mul(rapids, float(0.75)), sub(float(1), mul(steepness, float(0.7)))));
+  let foamAmount = max(max(mul(foamEdge, sub(float(1), steepness)), wakeFroth), mul(rapids, sub(float(1), mul(steepness, float(0.7)))));
   // the sea's breaker lines rolling in to the beach, and whitecaps out on the swell
   if (sea) {
     const breakers = seaBreakers(sea, shoreDistance, worldXZ, foamBreakup, Math.max(1, Math.round(w.foamSteps ?? 3)), swell, verticalDepth);
@@ -1815,7 +1856,8 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     // soft at its outer edge (the field eases the speed back down past the
     // band), broken up by the CONTINUOUS texture luminance, not the snapped
     // foam grid (that read as beige blocks), and brighter than the albedo cap
-    const plunge = mul(mul(smoothstep(float(2.4), float(3.4), length(uv())), sub(float(1), steepness)), sub(float(1), isCurtain));
+    // (a plunge only: the field writes 3.4 m/s there and never more than RIVER_MAX_SPEED on a river or a ledge)
+    const plunge = mul(mul(smoothstep(float(3.15), float(3.4), length(uv())), sub(float(1), steepness)), sub(float(1), isCurtain));
     const churn = detailLum ? saturate(add(mul(sub(detailLum, float(0.3)), float(3)), float(0.55))) : float(0.85);
     base = mix(base as THREE.Node<"vec3">, mul(tslColor(w.foamColor) as unknown as THREE.Node<"vec3">, float(1.35)), mul(plunge, churn));
   }
@@ -2975,8 +3017,9 @@ function flushInstancedPending(pending: Map<string, PendingInstance[]>, options:
         const byNode = new Map<string, PendingInstance[]>();
         for (const entry of entries) {
           // Different visibility/LOD policies must not inherit the first
-          // instance's settings just because they reference the same model.
-          const key = JSON.stringify([entry.node, entry.lod, entry.lodDistance, entry.lodProxy,
+          // instance's settings just because they reference the same model. The material too: a batch draws ONE
+          // (a rock rule's small pieces wear its `smallMaterial`, the large ones `material`).
+          const key = JSON.stringify([entry.node, entry.material ?? null, entry.lod, entry.lodDistance, entry.lodProxy,
             entry.castShadow, entry.receiveShadow]);
           const bucket = byNode.get(key);
           if (bucket) bucket.push(entry);
@@ -3095,7 +3138,7 @@ export function cachedImpostor(
 export interface ImpostorPageItem {
   assetId: string;
   node: string | undefined;
-  gltf: GLTF;
+  gltf: LoadedModel;
   submeshes: GltfSubmesh[];
   matrices: readonly THREE.Matrix4[];
   vegetationTints?: readonly (VegetationTint | undefined)[];
@@ -3206,7 +3249,7 @@ export function impostorPageBatchFor(
 export function impostorBatchFor(
   assetId: string,
   node: string | undefined,
-  gltf: GLTF,
+  gltf: LoadedModel,
   submeshes: GltfSubmesh[],
   matrices: readonly THREE.Matrix4[],
   options: BuildOptions,
@@ -3520,7 +3563,7 @@ export interface GltfSubmesh {
  * merging (`hlod-proxy.ts`), so both bake submesh-local transforms
  * identically. Returns `null` if `node` doesn't resolve (caller warns).
  */
-export function extractGltfSubmeshes(gltf: GLTF, node: string | undefined): GltfSubmesh[] | null {
+export function extractGltfSubmeshes(gltf: LoadedModel, node: string | undefined): GltfSubmesh[] | null {
   let source: THREE.Object3D = gltf.scene;
   if (node) {
     const found = gltf.scene.getObjectByName(node);
@@ -3549,7 +3592,7 @@ export function extractGltfSubmeshes(gltf: GLTF, node: string | undefined): Gltf
 
 function instanceGltfInto(
   assetId: string,
-  gltf: GLTF,
+  gltf: LoadedModel,
   node: string | undefined,
   entries: PendingInstance[],
   options: BuildOptions,

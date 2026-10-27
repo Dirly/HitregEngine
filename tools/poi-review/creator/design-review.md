@@ -4,6 +4,10 @@ Use this for the early blockout/finish sample and the final read-only review. In
 
 ## Questions the owner must resolve
 
+- **Fantasy adventure:** Apply `docs/world-standards/adventure-design.md`. What specific fantasy discovery
+  draws the player, what does investigation reveal, and what is its payoff? Point to visible features and actual
+  supported play. A medieval trade with generic danger, a darker name or lore hidden in the brief is returned under
+  P1/P4 even if it is well arranged. Proposed ruins, caves, crypts or nests require their real physical conversion.
 - **Purpose and history:** Who built/uses/occupies this place, what do they do, what changed, and how can the player read that? Layout and condition should tell the same story. Repeating a fresh-dirt prop over every grave implies a new burial ground or mass casualty; it does not establish an old cemetery. Ruin/abandonment is more than bones scattered beside ordinary camp supplies.
 - **Spatial logic:** Where do people and goods enter, work, gather and leave? A focal structure or landmark needs a relationship to the approach and the activities around it. Markers, crosses, basins, benches and cages need a legible use, bearing and position. A basin might belong at a chapel approach or washing area when the story calls for it; a randomly placed basin has no inferred purpose.
 - **Edges and access:** Inspect boundaries against roads, paths, drains, cliffs and nearby structures in the actual game. A passing lane ray does not excuse an enclosure cutting across an established road. Check setbacks and travel width after the final boundary and vegetation are placed; purposeful road changes require the brief's authorization and a working replacement connection.

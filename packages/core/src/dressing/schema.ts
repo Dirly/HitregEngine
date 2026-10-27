@@ -134,15 +134,25 @@ export type SocketLevel = z.infer<typeof socketLevelSchema>;
 
 export const socketAnchorSchema = z.object({
   id: z.string().min(1),
-  kind: z.string().min(1).describe("What the point is for: \"door-side\", \"sign-bracket\", \"hearth\", \"counter\", \"altar\", \"bed-nook\", \"stall\". A plan places by id; the kind lets a designer find it."),
+  kind: z
+    .string()
+    .min(1)
+    .describe(
+      "What the point is for: \"door-side\", \"sign-bracket\", \"door-sign\" (a town exterior's wall point at the centre of a building's door opening, lintel + 0.3 m: a hanging sign hangs with its BOTTOM edge there), \"window\" (a window opening: position its centre, size its [w, h, depth]; nothing hangs in front of it), \"door-sign-beside\" / \"sign-beside\" (a wall point beside a door, within 1.5 m of its edge, where a PROJECTING sign hangs when the wall over the door has no room), \"door-sign-post\" (a FLOOR point 1.0-1.5 m beside a door edge on its window-free side, where a freestanding sign post (tags sign + post) stands when the eave leaves no room for a board), " +
+        "\"hearth\", \"counter\", \"altar\", \"bed-nook\", \"stall\". A plan places by id; the kind lets a designer find it.",
+    ),
   level: z.number().int().min(0).default(0),
   position: xyz.describe("Local metres. The placed prop's origin lands here."),
   yaw: z.number().default(0).describe("Degrees about +Y the placed prop faces (0 = local +Z)."),
   mount: z.enum(["floor", "wall", "ceiling"]).describe("Which prop mount this point takes."),
   outdoor: z.boolean().default(false).describe("True for points outside the shell (door torches, a sign bracket, a stall pitch)."),
+  prefer: z
+    .number()
+    .optional()
+    .describe("Beside-the-door sign anchors (`sign-beside`, `door-sign-beside`): the preferred bottom edge of the hung sign, metres above `position` (the door's lintel). The sign hangs that high when its height fits under `size[1]`, lower when not, never below `position` (head room)."),
   size: xyz
     .optional()
-    .describe("[w, h, d] metres of the fixture this point stands for, when the model says so (a hearth's fire opening, from its `.markers.json`). `dress fixtures` sizes the fire from it."),
+    .describe("[w, h, d] metres of the fixture this point stands for, when the model says so (a hearth's fire opening, from its `.markers.json`; a window's opening). `dress fixtures` sizes the fire from it. On a sign-bracket / door-sign: the clear space for the sign above the anchor (h = up to the eave or roof overhang; the `sign-over-door` check refuses a sign taller than that)."),
 });
 export type SocketAnchor = z.infer<typeof socketAnchorSchema>;
 
@@ -209,18 +219,40 @@ export const dressingPlaceSchema = z.discriminatedUnion("kind", [
       kind: z.literal("auto"),
       room: z.string().min(1).describe("The room (map room id, e.g. \"G-1\") it goes in. The resolver picks the spot."),
       prefer: z
-        .enum(["wall", "corner", "open", "near"])
+        .enum(["wall", "corner", "open", "near", "row"])
         .optional()
         .describe(
-          "`wall`: back to a wall, centred on the longest free stretch. `corner`: back to a wall, tucked into a corner. `open`: in the open floor, " +
-            "aligned to the room, as far from everything as the room allows. `near`: as close to `near` as fits, facing it when in the open. " +
+          "`wall`: back to a wall, centred on the longest free stretch (also for a free-standing piece such as a lectern or a vat). `corner`: back to a wall, tucked into a corner. `open`: in the open floor, " +
+            "aligned to the room, as far from everything as the room allows. `near`: as close to `near` as fits, facing it when in the open (`near: \"hearth\"` may stand at the hearth clearance's edge). " +
+            "`row`: in the open, FACING `near`, on its axis: the `row` items with the same `near` are laid out together as rows every 1.1-1.3 m from it back along the room, a 1.2 m centre aisle on its axis, " +
+            "spread over the nave up to the door line (the plan says how many; pews before an altar, benches before a pulpit). " +
+            "A GRAVE (a prop tagged grave/headstone/cross/tomb) with `row` needs no `near`: the room's graves are laid out together as a graveyard, rows 2-2.5 m apart, stones 1.2-1.8 m apart on one lattice, all facing the `near` item or the yard's entry, every row taking its share so they fill the yard, the walking paths kept. " +
             "Omitted: `wall` for wall-backed and either-way props, `open` for free-standing ones (`near` when `near` is given).",
         ),
       near: z
         .string()
         .optional()
-        .describe("An earlier item id in this plan, or an anchor kind of the map (hearth, door, stair, sconce...): the spot is chosen as close to it as fits."),
+        .describe(
+          "An earlier item id in this plan, or an anchor kind of the map (hearth, door, stair, sconce...): the spot is chosen as close to it as fits. " +
+            "Room spots: `back-wall` (the room's end farthest from its main door) and `apse` (the same end when it is rounded): a piece there faces back " +
+            "toward the door (an altar facing its nave; an altar in a chapel defaults to it); `ceiling-centre` (the middle of the room's ridge: its chandelier; in a room longer than 1.6x its width, a LINE of spots along the ridge every 6-8 m, the first centred, each further chandelier taking the next). " +
+            "A sign-tagged prop takes the first free door-sign / sign-bracket anchor instead (the one whose id holds `near`, when given).",
+        ),
       wall: z.string().optional().describe("Only this wall id (with `wall`/`corner`)."),
+      arrangement: z
+        .string()
+        .optional()
+        .describe(
+          "Outdoor LAYOUT: the id of a plan `arrangements[]` vignette (a camp, a work line, a yard, a shrine, a midden, a lookout, a graveyard) this item belongs to. " +
+            "The resolver lays it out by the vignette's rule (seats round the fire facing in, tents 3-5 m out facing the fire, racks in a line along an edge...) instead of `prefer`; " +
+            "`part` says which role it plays (omitted = read from the prop: a fire is the camp's centre, a seat a seat, a tent a tent, the rest the kit).",
+        ),
+      part: z
+        .string()
+        .optional()
+        .describe(
+          "Its role in the `arrangement`: camp centre|seat|tent|kit; work-line line|end; yard cart|front|bench|tool; shrine centre|offering; midden heap; lookout seat; graveyard grave. Omitted = inferred from the prop.",
+        ),
     })
     .describe(
       "Placement by intent: name the room and a preference; the resolver picks a free spot deterministically (never on a path, keep-clear zone or " +
@@ -229,6 +261,27 @@ export const dressingPlaceSchema = z.discriminatedUnion("kind", [
     ),
 ]);
 export type DressingPlace = z.infer<typeof dressingPlaceSchema>;
+
+/**
+ * A quest object placed by name: the item's prop IS the object a quest names (a strongbox, a ledger on a desk, a bell
+ * on a post). `dress apply` gives the placed instance the quest entity id EXACTLY, so the zone's quest plan binds.
+ */
+export const dressingQuestSchema = z
+  .object({
+    entity: z
+      .string()
+      .min(1)
+      .regex(/^[a-z0-9][a-z0-9-]*$/, "a quest entity id: lowercase letters, digits, -")
+      .describe("Quest entity id, declared in the zone's quests.json `entities[]` with `location` = this plan's town or place. The placed instance gets exactly this scene id."),
+    readable: z.boolean().optional().describe("Opens as a read (a ledger, a slate) rather than a talk. Omitted = true when the declared entity's kind is `readable`."),
+    radius: z.number().positive().max(10).optional().describe("Interaction radius, metres. Omitted = 2.5."),
+    dialogue: z.string().min(1).optional().describe("Dialogue asset id. Omitted = `zones/<zone>/<entity>`, the file the quest's text task writes and `zonegen wire` expects."),
+  })
+  .describe(
+    "This item is a declared quest object (quests.json `entities`, kind object|readable): one plan item per object. `dress apply` places it with the entity id, " +
+      "tags `interactable` + `zone:<zone>` + the place's tag, and the `npc` builtin (readable, face: false, radius, dialogue, places). The prop is chosen by name like any item.",
+  );
+export type DressingQuest = z.infer<typeof dressingQuestSchema>;
 
 export const dressingItemSchema = z
   .object({
@@ -255,6 +308,7 @@ export const dressingItemSchema = z
         "Values for the placed prefab's declared props (a hearth fire's `size`), written onto the instance by `dress apply`. Single props only; " +
           "omit to take the prefab's defaults, which is what keeps a shared look editable in one place.",
       ),
+    quest: dressingQuestSchema.optional(),
   })
   .superRefine((item, ctx) => {
     if ((item.prop === "") === (item.set === "")) ctx.addIssue({ code: "custom", path: ["prop"], message: "give exactly one of `prop` or `set`" });
@@ -299,6 +353,7 @@ export const dressingSetSchema = z
     set.items.forEach((item, index) => {
       if (item.set !== "") ctx.addIssue({ code: "custom", path: ["items", index, "set"], message: "a set may not contain sets" });
       if (item.mirror !== undefined) ctx.addIssue({ code: "custom", path: ["items", index, "mirror"], message: "`mirror` is for plan items placing a set" });
+      if (item.quest) ctx.addIssue({ code: "custom", path: ["items", index, "quest"], message: "`quest` goes on the plan item placing the set (its anchor piece becomes the quest object)" });
       if (index > 0 && item.place.kind !== "floor" && item.place.kind !== "on")
         ctx.addIssue({ code: "custom", path: ["items", index, "place"], message: "set members are placed with `floor` (relative to the anchor) or `on` (a sibling)" });
     });
@@ -343,6 +398,49 @@ export const dressingObstacleSchema = z.object({
 });
 export type DressingObstacle = z.infer<typeof dressingObstacleSchema>;
 
+/** The outdoor vignette kinds the resolver lays out by rule (`arrangements[]`). */
+export const ARRANGEMENT_KINDS = ["camp", "work-line", "yard", "shrine", "midden", "lookout", "graveyard"] as const;
+export type ArrangementKind = (typeof ARRANGEMENT_KINDS)[number];
+
+export const dressingArrangementSchema = z
+  .object({
+    id: z.string().min(1).regex(/^[a-z0-9][a-z0-9._-]*$/i, "letters, digits, . _ - only"),
+    kind: z
+      .enum(ARRANGEMENT_KINDS)
+      .describe(
+        "`camp`: fire at the centre, seats/logs 1.2-1.8 m off its edge facing in, tents/bedrolls 3-5 m out facing the fire, a kit pile beside a tent. " +
+          "`work-line`: racks/frames/benches in a line along an edge (shore, wall, structure front) 1.5-2.5 m apart, square to it. " +
+          "`yard`: a cart by the gate (where the approach enters), barrels and crates against the structure front, tools by a bench. " +
+          "`shrine`: altar/cairn at the centre facing the approach, offerings in a crescent in front (candles go `on` the altar). " +
+          "`midden`: heaps in a cluster at the site's back edge (farthest from the approach). `lookout`: a seat/brazier at the crest edge facing out over the view. " +
+          "`graveyard`: graves in rows filling the yard (as `prefer: \"row\"`).",
+      ),
+    room: z.string().min(1).describe("The site area (map room id) it stands in."),
+    anchor: z
+      .string()
+      .optional()
+      .describe(
+        "What it is built round, read from the site map's anchors: an anchor id (`core/hearth-seat-1`, or `hearth-seat-1` within the room), `kind:<anchor kind>` " +
+          "(the room's anchor of that kind nearest its centre: hearth, door, water-edge, approach-end, structure, structure-front), `structure:<id>` (a placed structure: `site-sockets` " +
+          "anchors `<area>/structure-<id>`) or `structure:<id> front` (its front, the face toward the area: `<area>/front-<id>`), or `item:<plan item id>` (an earlier item). " +
+          "Omitted: the resolver spreads the room's unanchored vignettes evenly along its long axis, 6-12 m apart, 2 m off the walking lanes and door lines.",
+      ),
+    at: xz.optional().describe("A fixed centre (map metres) instead of an anchor; rarely needed."),
+    facing: z
+      .union([z.enum(["approach", "in", "out", "anchor"]), xz])
+      .optional()
+      .describe(
+        "Which way the vignette's front looks: `approach` (toward where the walking route enters the area), `in` (toward the area's centre), `out` (away from it: a lookout), " +
+          "`anchor` (the anchor's own facing), or a direction [dx, dz]. Omitted: lookout out, midden in, yard/work-line the anchor's facing, the rest approach.",
+      ),
+    note: z.string().default(""),
+  })
+  .describe(
+    "An outdoor VIGNETTE: a purposeful group the resolver lays out by rule (a camp round its fire, a work line along the shore, a yard before a hut). Items join it with " +
+      "`{ \"kind\": \"auto\", \"room\", \"arrangement\": \"<id>\", \"part\"? }`; several vignettes spread over a site instead of one patch of clutter (owner walk 2026-10-21).",
+  );
+export type DressingArrangement = z.infer<typeof dressingArrangementSchema>;
+
 export const dressingPlanSchema = z
   .object({
     id: z.string().min(1).describe("Usually `<town>/<building instance>` or `<poi>/<space>`."),
@@ -371,8 +469,44 @@ export const dressingPlanSchema = z
       .default([])
       .describe("Placed geometry on this space's floor that the socket map does not show (statues, pillars, set-piece models): no prop may overlap one."),
     items: z.array(dressingItemSchema).default([]),
+    arrangements: z
+      .array(dressingArrangementSchema)
+      .default([])
+      .describe("Outdoor sites: the vignettes (camp, work-line, yard, shrine, midden, lookout, graveyard) items are laid out in. Each item names its vignette in its `auto` place."),
+    clearing: z
+      .union([
+        z.literal(false),
+        z.object({
+          cover: z.boolean().optional().describe("Also clear ground cover (grass, flowers). Omit: kept on an outdoor (site) map, cleared indoors."),
+          pad: z.number().min(0).max(20).default(2).describe("Metres past the room's bounds the clearing reaches."),
+        }),
+      ])
+      .optional()
+      .describe(
+        "On a voxel-world scene `dress apply` writes one vegetation clearing per room it installs (world `features.clearings`, " +
+          "owner `dress-<plan>`, a disc of the room's bounds + `pad`, scatter cleared) so no tree grows through a dressed camp; " +
+          "re-applying replaces them, `dress unclear` removes them. false = none.",
+      ),
   })
-  .superRefine((plan, ctx) => uniqueItemIds(plan.items, ctx))
+  .superRefine((plan, ctx) => {
+    uniqueItemIds(plan.items, ctx);
+    const arr = new Set<string>();
+    plan.arrangements.forEach((a, index) => {
+      if (arr.has(a.id)) ctx.addIssue({ code: "custom", path: ["arrangements", index, "id"], message: `duplicate arrangement id "${a.id}"` });
+      arr.add(a.id);
+    });
+    plan.items.forEach((item, index) => {
+      const p = item.place;
+      if (p.kind === "auto" && p.arrangement && !arr.has(p.arrangement))
+        ctx.addIssue({ code: "custom", path: ["items", index, "place", "arrangement"], message: `"${p.arrangement}" is not in plan.arrangements (${[...arr].join(", ") || "none"})` });
+    });
+    const seen = new Set<string>();
+    plan.items.forEach((item, index) => {
+      if (!item.quest) return;
+      if (seen.has(item.quest.entity)) ctx.addIssue({ code: "custom", path: ["items", index, "quest", "entity"], message: `quest entity "${item.quest.entity}" is placed twice` });
+      seen.add(item.quest.entity);
+    });
+  })
   .describe(
     "A designer's choices for one space (authoring/dressing/plans/<id>.json, checked by `dress check`, installed by `dress apply`): which props and sets, on which " +
       "wall, floor point, ceiling point or socket. No transforms: the resolver computes them from the socket map and each prop's `dressing` declaration.",

@@ -122,3 +122,11 @@ describe("ambient-particles: zone layers from the recipe", () => {
     runtime.dispose();
   });
 });
+
+describe("ambient-particles: a layer's own wind bearing", () => {
+  it("keeps the compass bearing (wrapped) and defaults to the weather's wind", () => {
+    expect(normalizeLayer({ id: "spray" }).bearing).toBe(-1);
+    expect(normalizeLayer({ id: "spray", bearing: 285 }).bearing).toBe(285);
+    expect(normalizeLayer({ id: "spray", bearing: -75 }).bearing).toBe(285);
+  });
+});

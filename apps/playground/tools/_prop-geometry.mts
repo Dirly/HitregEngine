@@ -18,7 +18,21 @@ import { closure, PROJECTS } from "./_closure.mjs";
  * effects and palettes in foundation). Returns the own path when nothing exists, for messages.
  */
 const closureCache = new Map<string, string[]>();
+/** Folders searched BEFORE an assets dir and its closure (`<root>/<kind>/<rel>`): a job's own delivered files. */
+const firstRoots = new Map<string, string[]>();
+
+/**
+ * Make `locate(assets, ...)` (and so materialTex / prefabGeometry) look in a POI job's own folder first: its
+ * `materials/`, `textures/`, `materials/textures/`, `assets/<kind>/` — the materials a job delivers are copied into the
+ * project only by its installer, so a pre-install gate (art-check, gate 15) measured them as missing (KS-7 had to copy
+ * them by hand).
+ */
+export function preferJobAssets(assets: string, jobDir: string): void {
+  firstRoots.set(assets, [jobDir, path.join(jobDir, "assets"), path.join(jobDir, "materials")]);
+}
+
 export function locate(assets: string, kind: string, rel: string): string {
+  for (const r of firstRoots.get(assets) ?? []) { const f = path.join(r, kind, rel); if (fs.existsSync(f)) return f; }
   const own = path.join(assets, kind, rel);
   if (fs.existsSync(own)) return own;
   let roots = closureCache.get(assets);
@@ -34,7 +48,7 @@ export function locate(assets: string, kind: string, rel: string): string {
 export type V3 = [number, number, number];
 /** The texture a triangle samples: its texel size, the material's `repeat`, and a key naming it. */
 export interface TexInfo { key: string; size: [number, number]; repeat: [number, number]; /** image file (material assets); row = (1 - v) * H when flipY (TextureLoader), v * H otherwise (glTF) */ file?: string; flipY?: boolean }
-export interface Tri { a: V3; b: V3; c: V3; uv?: [number, number][]; material?: string; /** authored normal (mean of vertex normals), when the mesh has them */ n?: V3; /** base-colour texture it samples (texel density) */ tex?: TexInfo }
+export interface Tri { a: V3; b: V3; c: V3; uv?: [number, number][]; material?: string; /** authored normal (mean of vertex normals), when the mesh has them */ n?: V3; /** base-colour texture it samples (texel density) */ tex?: TexInfo; /** which draw it belongs to: material name @ node.primitive (zfight) */ draw?: string; /** prefab sub-entity that drew it, pid:eid (zfight) */ part?: string; /** terrain-splat layer this triangle mostly draws (its _SPLATWEIGHT argmax), for splat texel density */ splat?: number }
 export interface PropGeometry {
   tris: Tri[];
   min: V3;
@@ -145,10 +159,17 @@ export function gltfTris(file: string, m: M4, material: string | undefined, out:
   const walk = (ni: number, parent: M4) => {
     const n = json.nodes[ni], local = n.matrix ?? trs(n.translation, n.rotation, n.scale), w = mul(parent, local);
     if (n.mesh != null)
-      for (const p of json.meshes[n.mesh].primitives) {
+      for (const [pi, p] of (json.meshes[n.mesh].primitives as any[]).entries()) {
         if ((p.mode ?? 4) !== 4) continue;
         const pos = accessor(g, p.attributes.POSITION);
         const uv = p.attributes.TEXCOORD_0 != null ? accessor(g, p.attributes.TEXCOORD_0) : null;
+        // town-atlas.ts samples repeated authored UVs inside this page rectangle.
+        // Keep repeats unwrapped for density/stretch: fract at vertices would erase whole tiles.
+        const atlas = !material && json.materials?.[p.material]?.extras?.hitregAtlas && p.attributes._ATLASRECT != null
+          ? accessor(g, p.attributes._ATLASRECT) : null;
+        const sampledUv = (k: number): [number, number] => atlas
+          ? [atlas[k * 4] + uv![k * 2] * atlas[k * 4 + 2], atlas[k * 4 + 1] + uv![k * 2 + 1] * atlas[k * 4 + 3]]
+          : [uv![k * 2], uv![k * 2 + 1]];
         const nor = p.attributes.NORMAL != null ? accessor(g, p.attributes.NORMAL) : null;
         const N = (ks: number[]): V3 | undefined => {
           if (!nor) return undefined;
@@ -159,10 +180,18 @@ export function gltfTris(file: string, m: M4, material: string | undefined, out:
         };
         const idx = p.indices != null ? accessor(g, p.indices) : Array.from({ length: pos.length / 3 }, (_, k) => k);
         const ptex = material ? tex : gltfTex(g, file, p.material);
+        // terrain-splat weights (_SPLATWEIGHT, _SPLATWEIGHT2..): each triangle's dominant layer (texel density of a splat bake)
+        const sw: number[][] = [];
+        for (let k = 0; ; k++) { const a = p.attributes["_SPLATWEIGHT" + (k ? String(k + 1) : "")]; if (a == null) break; sw.push(accessor(g, a)); }
+        const splatOf = (ks: number[]): number | undefined => {
+          let best = -1, bw = 0;
+          sw.forEach((arr, k) => { for (let j = 0; j < 4; j++) { const w2 = ks.reduce((t, v) => t + arr[v * 4 + j], 0); if (w2 > bw) { bw = w2; best = k * 4 + j; } } });
+          return best >= 0 ? best : undefined;
+        };
         const P = (k: number) => apply(w, [pos[k * 3], pos[k * 3 + 1], pos[k * 3 + 2]]);
         for (let t = 0; t + 2 < idx.length; t += 3) {
           const [i0, i1, i2] = [idx[t], idx[t + 1], idx[t + 2]];
-          out.push({ a: P(i0), b: P(i1), c: P(i2), material, tex: ptex, n: N([i0, i1, i2]), uv: uv ? [i0, i1, i2].map((k) => [uv[k * 2], uv[k * 2 + 1]] as [number, number]) : undefined });
+          out.push({ a: P(i0), b: P(i1), c: P(i2), material, tex: ptex, draw: `${material ?? json.materials?.[p.material]?.name ?? "mat" + (p.material ?? "-")}@${ni}.${pi}`, n: N([i0, i1, i2]), ...(sw.length ? { splat: splatOf([i0, i1, i2]) } : {}), uv: uv ? [i0, i1, i2].map(sampledUv) : undefined });
         }
       }
     for (const c of n.children ?? []) walk(c, w);
@@ -171,7 +200,7 @@ export function gltfTris(file: string, m: M4, material: string | undefined, out:
 }
 /** Primitive meshes: their `size` is the full bounding box on every shape; a box stands in for the shape. */
 /** UVs only on boxes (stretch = one tile per face; world = face metres / `scale`), for texel density. */
-function boxTris(size: number[], m: M4, out: Tri[], look?: { material?: string; tex?: TexInfo; box?: boolean; uv?: { mode?: string; scale?: number[] } }): void {
+export function boxTris(size: number[], m: M4, out: Tri[], look?: { material?: string; tex?: TexInfo; box?: boolean; uv?: { mode?: string; scale?: number[] } }): void {
   const [x, y, z] = size.map((s) => s / 2);
   const c = (sx: number, sy: number, sz: number) => apply(m, [sx * x, sy * y, sz * z]);
   const world = look?.uv?.mode === "world", sc = look?.uv?.scale ?? [1, 1];
@@ -240,6 +269,7 @@ export function prefabGeometry(assets: string, id: string): PropGeometry {
     };
     for (const [eid, e] of Object.entries(ents)) {
       const c = e.components ?? {}, m = worldOf(eid);
+      const t0 = geo.tris.length;
       if (c.vfx?.effect) geo.effects.push(c.vfx.effect);
       if (c.light) geo.lights++;
       if (c.mesh?.source?.kind === "asset") {
@@ -248,7 +278,7 @@ export function prefabGeometry(assets: string, id: string): PropGeometry {
         else { const mat = typeof c.mesh.material === "string" ? c.mesh.material : undefined; gltfTris(f, m, mat, geo.tris, materialTex(assets, mat)); }
       } else if (c.mesh?.source?.kind === "primitive") {
         const mat = typeof c.mesh.material === "string" ? c.mesh.material : undefined;
-        boxTris(c.mesh.source.size ?? [1, 1, 1], m, geo.tris, { material: mat, tex: materialTex(assets, mat), box: (c.mesh.source.shape ?? "box") === "box", uv: c.mesh.uv });
+        boxTris(c.mesh.source.size ?? [1, 1, 1], m, geo.tris, { material: mat, tex: materialTex(assets, mat), box: (c.mesh.source.shape ?? "box") === "box", uv: c.mesh.source.uv ?? c.mesh.uv });
       }
       else if (c.mesh?.source) geo.warnings.push(`mesh source kind ${c.mesh.source.kind} not measured (${eid})`);
       if (c.prefab?.prefabId) {
@@ -258,6 +288,7 @@ export function prefabGeometry(assets: string, id: string): PropGeometry {
         const nm = eid === rootId ? rootM : mul(worldOf(e.parent), trs(t.position, t.rotation, t.scale));
         visit(c.prefab.prefabId, nm, depth + 1);
       }
+      for (let k = t0; k < geo.tris.length; k++) geo.tris[k]!.part ??= `${pid}:${eid}`;
     }
   };
   visit(id, I4, 0);
@@ -286,13 +317,18 @@ export interface Measure {
 export function onFace(v: number, target: number, extent: number): boolean {
   return Math.abs(v - target) <= Math.max(0.03, extent * 0.04);
 }
-export function measure(geo: PropGeometry): Measure {
+/** `footing`: metres of the mesh below the origin plane that are footing to be buried (a kit building shell: its floor
+ *  top is y=0 and its footing runs 3.2 m down): the origin is still its foot when the bounds start that far below it. */
+export function measure(geo: PropGeometry, footing = 0): Measure {
   const size = geo.max.map((v, k) => r3(v - geo.min[k])) as V3;
   const at = (k: number) => (size[k] > 1e-6 ? r3(-geo.min[k] / size[k]) : 0.5);
   const cx = (geo.min[0] + geo.max[0]) / 2, cy = (geo.min[1] + geo.max[1]) / 2, cz = (geo.min[2] + geo.max[2]) / 2;
   const xC = onFace(0, cx, size[0]), zC = onFace(0, cz, size[2]), yC = onFace(0, cy, size[1]);
+  // A flat ground card (ash, a spill, a rug of leaves: under 5 cm thick) is held a few cm ABOVE its foot so it never
+  // shares the ground's plane (one mesh owns each plane): an origin up to 10 cm under it is still its foot.
+  const liftedCard = size[1] <= 0.05 && geo.min[1] >= 0 && geo.min[1] <= 0.1;
   let origin: OriginClass = "off";
-  if (xC && zC && onFace(0, geo.min[1], size[1])) origin = "foot";
+  if (xC && zC && (onFace(0, geo.min[1], size[1]) || liftedCard || (footing > 0 && onFace(-footing, geo.min[1], size[1])))) origin = "foot";
   else if (xC && zC && onFace(0, geo.max[1], size[1])) origin = "top";
   else if (xC && onFace(0, geo.min[2], size[2]) && yC) origin = "back";
   return { size, min: geo.min.map(r3) as V3, max: geo.max.map(r3) as V3, origin, originAt: [at(0), at(1), at(2)], triangles: geo.tris.length };
@@ -412,6 +448,48 @@ export function supportBelow(geo: PropGeometry, p: V3): number {
   return rayY(geo.tris, p[0], p[1] + 0.02, p[2], -1) - 0.02;
 }
 
+/** Heights of every UP-facing triangle (normal y > 0.5) over (x, z). */
+function upFacesAt(tris: Tri[], x: number, z: number): number[] {
+  const out: number[] = [];
+  for (const t of tris) {
+    const { a, b, c } = t;
+    if (x < Math.min(a[0], b[0], c[0]) || x > Math.max(a[0], b[0], c[0]) || z < Math.min(a[2], b[2], c[2]) || z > Math.max(a[2], b[2], c[2])) continue;
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, nl = Math.hypot(nx, ny, nz);
+    if (!(nl > 0) || ny / nl <= 0.5) continue;
+    const d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+    if (Math.abs(d) < 1e-12) continue;
+    const l1 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d, l2 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d, l3 = 1 - l1 - l2;
+    if (l1 < -1e-6 || l2 < -1e-6 || l3 < -1e-6) continue;
+    out.push(l1 * a[1] + l2 * b[1] + l3 * c[1]);
+  }
+  return out;
+}
+
+/** How far (m) from a socket's declared height its real top may be looked for (a shelf board's own top, not the next board). */
+export const SOCKET_TOP_REACH = 0.3;
+
+/**
+ * The REAL top of a host's mesh at a surface socket: over a 5 x 5 grid inside the socket's rectangle (inset 15 %), the
+ * up-facing face nearest the declared height (within SOCKET_TOP_REACH: a shelf's own board, a crate's lid, never the
+ * shelf above or a wagon's canopy); the median of those. A surface socket's height must be this, not a typed number:
+ * candles on crates were re-seated by `float --fix` onto the real lid, then put back at the declared height by the next
+ * `dress apply`. null when no up-facing face is within reach (supportBelow reports a socket over nothing).
+ */
+export function surfaceTopUnder(geo: PropGeometry, socket: { position: number[]; size: number[] }): number | null {
+  const [x, y, z] = socket.position as [number, number, number], hx = (socket.size[0] ?? 0) * 0.35, hz = (socket.size[1] ?? 0) * 0.35;
+  const hs: number[] = [];
+  for (let i = 0; i < 5; i++) for (let k = 0; k < 5; k++) {
+    const px = x - hx + (2 * hx * i) / 4, pz = z - hz + (2 * hz * k) / 4;
+    let best: number | null = null;
+    for (const h of upFacesAt(geo.tris, px, pz)) if (Math.abs(h - y) <= SOCKET_TOP_REACH && (best === null || Math.abs(h - y) < Math.abs(best - y))) best = h;
+    if (best !== null) hs.push(best);
+  }
+  if (!hs.length) return null;
+  hs.sort((a, b) => a - b);
+  return hs[Math.floor(hs.length / 2)]!;
+}
+
 // ------------------------------------------------------- texel density ----
 export interface UvIsland { worldArea: number; texelArea: number; tex: string }
 export interface Density {
@@ -422,6 +500,10 @@ export interface Density {
   area: number;
   texturedArea: number;
   flatArea: number;
+  /** m² of the textured area drawn by a world-projected material (triplanar / terrain-splat), measured from its scale. */
+  projectedArea?: number;
+  /** Per material (or texture key when the prefab names none): m² and the area-weighted median texels/m, projected or UV. */
+  byMaterial?: Record<string, { area: number; median: number; projected: boolean }>;
   /** Textures sampled, by key, with their pixel size. */
   textures: { key: string; size: [number, number] }[];
   /** Per texture: page pixels per real texel where the art was blown up nearest by a whole factor (1 = none). */
@@ -474,9 +556,16 @@ export function blowUp(img: PixelPage, pts: [number, number][]): number {
   }
   return 1;
 }
-export function texelDensity(geo: PropGeometry, opts: { grid?: number; pixels?: (t: TexInfo) => PixelPage | null } = {}): Density {
+/**
+ * `projected`: texels per metre of a triangle whose material projects its texture in WORLD space and ignores the
+ * mesh's UVs (triplanar: px / triplanarScale; terrain-splat: its layer's px / uvScale), null for a UV material.
+ * Those triangles count as textured at that density (a landmark's DC rock is most of its area), never as skipped.
+ */
+export function texelDensity(geo: PropGeometry, opts: { grid?: number; pixels?: (t: TexInfo) => PixelPage | null; projected?: (t: Tri) => number | null } = {}): Density {
   const grid = opts.grid ?? 256;
   const pairs: [number, number][] = [], texs = new Map<string, [number, number]>();
+  const perMat = new Map<string, { pairs: [number, number][]; projected: boolean }>();
+  const note = (t: Tri, d: number, A: number, projected: boolean) => { const k = t.material ?? t.tex?.key ?? "(none)"; const e = perMat.get(k) ?? { pairs: [], projected }; e.pairs.push([d, A]); perMat.set(k, e); };
   // nearest blow-up per texture, over the texels this prop samples (not tiling textures: those are not a region)
   const effective: Record<string, number> = {};
   if (opts.pixels) {
@@ -498,7 +587,7 @@ export function texelDensity(geo: PropGeometry, opts: { grid?: number; pixels?: 
     }
     for (const [key, e] of samples) if (e) { const k = blowUp(e.img, e.pts); if (k > 1) effective[key] = k; }
   }
-  let area = 0, texturedArea = 0, flatArea = 0;
+  let area = 0, texturedArea = 0, flatArea = 0, projectedArea = 0;
   const byTex = new Map<string, { t: Tri; uv: [number, number][] }[]>();
   // islands: union-find over UV vertices (quantized) within each texture
   const parent: number[] = [], vid = new Map<string, number>();
@@ -508,6 +597,8 @@ export function texelDensity(geo: PropGeometry, opts: { grid?: number; pixels?: 
     const A = triArea(t.a, t.b, t.c);
     if (!(A > 1e-9)) continue;
     area += A;
+    const pd = opts.projected?.(t);
+    if (pd != null && pd > 0) { texturedArea += A; projectedArea += A; pairs.push([pd, A]); note(t, pd, A, true); continue; }
     if (!t.tex || !t.uv) continue;
     const [w, h] = t.tex.size, [rx, ry] = t.tex.repeat;
     texs.set(t.tex.key, t.tex.size);
@@ -516,7 +607,7 @@ export function texelDensity(geo: PropGeometry, opts: { grid?: number; pixels?: 
     const kb = effective[t.tex.key] ?? 1, texel = (uvA * w * h) / (kb * kb), d = Math.sqrt(texel / A);
     if (d < 1) { flatArea += A; continue; }
     texturedArea += A;
-    pairs.push([d, A]);
+    pairs.push([d, A]); note(t, d, A, false);
     const list = byTex.get(t.tex.key) ?? []; list.push({ t, uv }); byTex.set(t.tex.key, list);
     const ids = uv.map(([u, v]) => {
       const k = `${t.tex!.key}|${Math.round(u * 1e5)}|${Math.round(v * 1e5)}`;
@@ -557,14 +648,51 @@ export function texelDensity(geo: PropGeometry, opts: { grid?: number; pixels?: 
     for (const n of count) { if (n) covered++; if (n > 1) multi++; }
   }
   return {
-    median: wQuantile(pairs, 0.5), p10: wQuantile(pairs, 0.1), area, texturedArea, flatArea,
+    median: wQuantile(pairs, 0.5), p10: wQuantile(pairs, 0.1), area, texturedArea, flatArea, projectedArea,
+    byMaterial: Object.fromEntries([...perMat].map(([k, e]) => [k, { area: e.pairs.reduce((s, p) => s + p[1], 0), median: wQuantile(e.pairs, 0.5), projected: e.projected }])),
     textures: [...texs].map(([key, size]) => ({ key, size })), effective,
     overlap: covered ? multi / covered : 0, coverage: cells ? covered / cells : 0,
     islands: [...isl.values()],
   };
 }
 /** Forget cached models and material textures (after a tool rewrote them on disk). */
-export function clearGeometryCaches(): void { gltfCache.clear(); matTexCache.clear(); }
+export function clearGeometryCaches(): void { gltfCache.clear(); matTexCache.clear(); projCache.clear(); }
+
+/**
+ * Texels per metre of a WORLD-PROJECTED material, per triangle, or null for a UV material: `triplanar` = map px /
+ * triplanarScale (metres per repeat); `terrain-splat` = the triangle's dominant layer (Tri.splat) px / its uvScale
+ * (no splat weights: the area-weighted mean is unknown, so the layers' median); `rock-cap` = its bases' median px / metres.
+ * The density a player sees on a landmark's DC rock or a splat bake, which mesh UVs say nothing about.
+ */
+const projCache = new Map<string, ((t: Tri) => number | null) | null>();
+export function projectedTexels(assets: string): (t: Tri) => number | null {
+  const pxOf = (map: unknown): number | null => {
+    if (typeof map !== "string") return null;
+    const f = locate(assets, "textures", map);
+    const s = fs.existsSync(f) ? imageSize(fs.readFileSync(f)) : null;
+    return s ? s[0] : null;
+  };
+  const med = (v: number[]) => { const s = v.filter((x) => x > 0).sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)]! : null; };
+  const of = (material: string): ((t: Tri) => number | null) | null => {
+    const k = `${assets}|${material}`;
+    if (projCache.has(k)) return projCache.get(k)!;
+    let fn: ((t: Tri) => number | null) | null = null;
+    const mf = locate(assets, "materials", `${material}.json`);
+    const md = fs.existsSync(mf) ? readJson(mf) : null;
+    if (md?.triplanar && md.map) { const px = pxOf(md.map), s = Number(md.triplanarScale ?? 1); if (px && s > 0) { const v = px / s; fn = () => v; } }
+    else if (md?.shader === "terrain-splat" && Array.isArray(md.splat?.layers)) {
+      const layers = (md.splat.layers as { map?: string; uvScale?: number }[]).map((l) => { const px = pxOf(l.map); return px && l.uvScale ? px / l.uvScale : 0; });
+      const m = med(layers);
+      fn = (t) => (t.splat != null && layers[t.splat]! > 0 ? layers[t.splat]! : m);
+    } else if (md?.shader === "rock-cap" && Array.isArray(md.rockCap?.bases)) {
+      const m = med((md.rockCap.bases as { map?: string; metres?: number }[]).map((b) => { const px = pxOf(b.map); return px && b.metres ? px / b.metres : 0; }));
+      if (m) fn = () => m;
+    }
+    projCache.set(k, fn);
+    return fn;
+  };
+  return (t) => (t.material ? of(t.material)?.(t) ?? null : null);
+}
 
 // ------------------------------------------------------------ scenes ----
 export interface SceneEntityGeometry {
@@ -578,6 +706,9 @@ export interface SceneEntityGeometry {
   max: V3;
   /** World-space triangles, nine numbers each. */
   world: number[];
+  /** Per world triangle: the draw (material @ node.primitive) and the prefab part that drew it (zfight). */
+  draws: (string | undefined)[];
+  parts: (string | undefined)[];
 }
 
 /**
@@ -609,7 +740,7 @@ export function sceneGeometry(assets: string, doc: { entities: Record<string, an
       prefabId = c.prefab.prefabId as string;
       let g = prefabCache.get(prefabId);
       if (!g) prefabCache.set(prefabId, (g = prefabGeometry(assets, prefabId)));
-      tris.push(...g.tris);
+      for (const t of g.tris) tris.push(t); // a generated compound holds more triangles than a spread call takes
     } else if (c.mesh?.source?.kind === "asset") {
       const f = locate(assets, "models", c.mesh.source.assetId);
       if (fs.existsSync(f)) gltfTris(f, I4, undefined, tris);
@@ -627,13 +758,14 @@ export function sceneGeometry(assets: string, doc: { entities: Record<string, an
     if (!tris.length) continue;
     const m = worldOf(eid);
     const mn: V3 = [Infinity, Infinity, Infinity], mx: V3 = [-Infinity, -Infinity, -Infinity];
-    const w: number[] = [];
+    const w: number[] = [], draws: (string | undefined)[] = [], parts: (string | undefined)[] = [];
+    for (const t of tris) draws.push(t.draw ?? t.material), parts.push(t.part);
     for (const t of tris)
       for (const p of [t.a, t.b, t.c]) {
         for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], p[k]); mx[k] = Math.max(mx[k], p[k]); }
         w.push(m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13], m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]);
       }
-    out.push({ id: eid, name: e.name, prefabId, m, min: mn, max: mx, world: w });
+    out.push({ id: eid, name: e.name, prefabId, m, min: mn, max: mx, world: w, draws, parts });
   }
   return out;
 }

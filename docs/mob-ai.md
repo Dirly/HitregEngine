@@ -161,6 +161,12 @@ started, and same-faction mobs within `alertRadius` take the same target. An
 assist arrives as a **seed of threat**, not as a forced target — so whoever
 actually hits the mob still takes it off the friend who shouted, which is what
 stops a whole camp tunnelling one player while a second carves through them.
+A shout never crosses a storey or rock: reach is 3D, an answer more than
+`ALERT_MAX_HEIGHT_GAP` (3 m) above/below the shouter is refused, the answerer
+needs line of sight to the shouter or the target, and a target known only from
+a shout is dropped after `ALERT_SIGHT_GRACE` (2 s) unseen unless it hit the mob
+(nor is it re-shouted until seen). Sight is traced from an eye kept under the
+ceiling, so a tall mob in a low gallery cannot see the terrace above.
 
 ## Placing camps
 

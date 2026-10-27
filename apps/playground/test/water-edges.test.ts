@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { applyOps, ComponentRegistry, registerCoreComponents, type SceneDoc } from "@hitreg/core";
-import { sceneWaterEdges, waterFixOps, isWaterBody, seaHorizon, ensureDarkVeils, darkFinishEntities } from "../tools/water-edges.mts";
+import { sceneWaterEdges, waterFixOps, isWaterBody, seaHorizon, ensureDarkVeils, darkFinishEntities, facingColumns, withLandmarks } from "../tools/water-edges.mts";
 import { decodePng } from "../tools/_png.mjs";
 import { standardStages } from "../../../tools/dungeon-pipeline/pipeline.mjs";
 import { waterEdgesBlock } from "../../../tools/poi-review/job.mjs";
@@ -108,4 +108,25 @@ test("water-edges: only a sea-level body gets the world-edge horizon, and only p
   assert.equal(sea(3000, 0), false, "an edge inside the world is judged as any other");
   assert.equal(seaHorizon(field, { surfaceY: 12, ...plane }), undefined, "a placed lake above the sea never is");
   assert.equal(seaHorizon(null, { surfaceY: 0, ...plane }), undefined, "nor a dungeon's pool");
+});
+
+test("an internal seam (a wall face's top under its coping's underside) is no boundary, in either triangle order (RETTING)", () => {
+  // a 1 m wall body 0..1 high under a coping 1..1.3: the body's top (up) and the coping's underside (down) meet at y = 1
+  const quad = (y: number, up: boolean) => (up ? [0, y, 0, 0, y, 1, 1, y, 1, 0, y, 0, 1, y, 1, 1, y, 0] : [0, y, 0, 1, y, 1, 0, y, 1, 0, y, 0, 1, y, 0, 1, y, 1]);
+  const bodyTop = quad(1, true), copingUnder = quad(1, false), copingTop = quad(1.3, true), bodyBottom = quad(0, false);
+  for (const soup of [[...bodyTop, ...copingUnder, ...copingTop, ...bodyBottom], [...copingUnder, ...bodyTop, ...copingTop, ...bodyBottom]]) {
+    const inside = facingColumns(soup);
+    assert.equal(inside(0.5, 0.97, 0.5), true, "just under the seam: inside the wall");
+    assert.equal(inside(0.5, 1.1, 0.5), true, "in the coping");
+    assert.equal(inside(0.5, 1.4, 0.5), false, "over the coping");
+  }
+});
+
+test("the world's baked landmarks (a basin kerb) join the scene the water-edges solid is built from (RETTING)", () => {
+  const doc = { entities: { a: { name: "a", parent: null, components: {} } } } as unknown as SceneDoc;
+  assert.equal(withLandmarks(doc, { features: {} }), doc);
+  const out = withLandmarks(doc, { features: { landmarks: [{ id: "op:kerb:landmark", prefab: "landmarks/kerb-1", position: [10, 0, 5] }] } }) as any;
+  assert.deepEqual(out.entities["landmark:op:kerb:landmark"].components.prefab.prefabId, "landmarks/kerb-1");
+  assert.deepEqual(out.entities["landmark:op:kerb:landmark"].components.transform.position, [10, 0, 5]);
+  assert.ok(out.entities.a);
 });

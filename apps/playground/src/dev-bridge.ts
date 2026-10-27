@@ -299,11 +299,13 @@ export function postContext(deps: DevBridgeDeps): void {
 
   const inView: Array<{ id: string; name: string; distance: number }> = [];
   projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-  frustum.setFromProjectionMatrix(projScreen);
+  frustum.setFromProjectionMatrix(projScreen, camera.coordinateSystem, camera.reversedDepth);
   for (const [id, entity] of Object.entries(store.doc.entities)) {
     const object = built.objects.get(id);
     if (!object) continue;
-    object.getWorldPosition(worldPos);
+    // the world matrix the last frame rendered with: getWorldPosition re-derives every ancestor
+    // matrix, and over a whole scene once a second that was ~30k matrix updates in one frame
+    worldPos.setFromMatrixPosition(object.matrixWorld);
     if (frustum.containsPoint(worldPos)) {
       inView.push({
         id,

@@ -138,3 +138,23 @@ export {
   type SpellViolation,
 } from "./audit.js";
 export { FOOTPRINT_TOLERANCE, fitModule, fitSpellToVolume, footprintOverflows, moduleReach, scaleFootprint, volumeRadius } from "./fit.js";
+export {
+  CHIMNEY_SMOKE,
+  SMOKE_CLASSES,
+  SMOKE_MIN_LUMINANCE,
+  SMOKE_MIN_NIGHT_DIM,
+  SMOKE_MIN_WIND_DRIFT,
+  SMOKE_VISIBLE_OPACITY,
+  checkSmoke,
+  chimneyPlume,
+  hexLuminance,
+  measurePlume,
+  smokeCaps,
+  smokeLayers,
+  type PlumeMeasure,
+  type SmokeCap,
+  type SmokeClass,
+  type SmokeFault,
+  type SmokeLayer,
+  type SmokeSource,
+} from "./smoke.js";

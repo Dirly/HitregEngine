@@ -18,6 +18,8 @@ import { getOperator, operatorDocSchema, operatorParams } from "./operator-regis
 import { ribbonSchema } from "./ribbon.js";
 import { kitWallSchema } from "./kit-walls.js";
 import { landmarkSchema } from "./ledge-landmark.js";
+import { groundPaintBounds, groundPaintSchema } from "./ground-paint.js";
+import { rockSetBounds, rockSetSchema } from "./rock-sets.js";
 
 /**
  * TERRAFORM — editing a world recipe as atomic, invertible batches.
@@ -67,6 +69,8 @@ export const FEATURE_KINDS = [
   "ribbons",
   "kitWalls",
   "landmarks",
+  "groundPaints",
+  "rockSets",
 ] as const;
 
 export type FeatureKind = (typeof FEATURE_KINDS)[number];
@@ -87,6 +91,8 @@ const FEATURE_SCHEMAS: Record<FeatureKind, z.ZodType> = {
   ribbons: ribbonSchema,
   kitWalls: kitWallSchema,
   landmarks: landmarkSchema,
+  groundPaints: groundPaintSchema,
+  rockSets: rockSetSchema,
 };
 
 /** A feature after validation — every kind carries an `id`. */
@@ -244,6 +250,11 @@ export function featureFootprint(kind: FeatureKind, feature: unknown): Footprint
       const p = (f["position"] as number[] | undefined) ?? [0, 0, 0];
       return pointsBounds([[p[0]!, p[2]!]], Number(f["radius"] ?? 0) + 4);
     }
+    case "groundPaints":
+      // splat only, but the cells it covers must re-mesh to show it
+      return groundPaintBounds(f as never);
+    case "rockSets":
+      return rockSetBounds(f as never);
     case "kitWalls": {
       // the wall pieces and their face cuts (n reaches a few metres to the low side)
       const pts = ((f["pieces"] as { position: number[] }[] | undefined) ?? []).map((p) => [p.position[0]!, p.position[2]!]);
@@ -430,7 +441,7 @@ export function applyRecipeEdits(recipe: WorldRecipe, edits: readonly RecipeEdit
   });
 
   // the optional kinds (operators, ribbons, kitWalls) are dropped when empty: no `operators: []` noise, and undoing the first install restores the recipe exactly
-  for (const kind of ["operators", "ribbons", "kitWalls", "landmarks"] as const) {
+  for (const kind of ["operators", "ribbons", "kitWalls", "landmarks", "groundPaints", "rockSets"] as const) {
     if (features[kind].length === 0) delete (features as Partial<Record<FeatureKind, AnyFeature[]>>)[kind];
   }
   return {

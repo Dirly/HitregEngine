@@ -1,5 +1,5 @@
 import { cultureFits, dressingOrigin, isLooseClutter, mergeVocabulary, scaleFits, type DressingData, type DressingSocket, type DressingVocabulary } from "../components/dressing.js";
-import { GROUND_STEP, GROUND_ZERO, HEAD_STEP, type DressingObstacle, type DressingPlace, type DressingPlan, type DressingSet, type SocketLevel, type SocketMap, type SocketWall } from "./schema.js";
+import { GROUND_STEP, GROUND_ZERO, HEAD_STEP, type ArrangementKind, type DressingArrangement, type DressingObstacle, type DressingPlace, type DressingPlan, type DressingSet, type SocketAnchor, type SocketLevel, type SocketMap, type SocketRoom, type SocketWall } from "./schema.js";
 
 /**
  * resolveDressing — a plan + a socket map + the props' own declarations ->
@@ -22,6 +22,11 @@ export interface DressingPlacement {
   yaw: number;
   /** Only when a generated link is stretched; otherwise omitted. */
   scale?: [number, number, number];
+  /**
+   * A local rotation (quaternion x, y, z, w) applied BEFORE `yaw`: a model laid on its side by its `pose` (a book lying flat
+   * on a table). Omitted = none. The final rotation is yaw(about +Y) * tilt.
+   */
+  tilt?: [number, number, number, number];
 }
 
 export interface DressingFinding {
@@ -48,9 +53,10 @@ export interface DressingResolveOptions {
   maxCover?: number;
   /** Most loose containers (sacks, crates, barrels, boxes) standing on a room's floor; default `defaultRoomBudget`. */
   looseBudget?: (areaM2: number, role: string) => number;
-  /** Flames allowed per level (rooms with maxHead >= 5 m raise it to `flamesLargeHall`). Default 4 / 6. */
+  /** Fewest flames a level is allowed, however small. Default 6 (`FLAME_MIN`). */
   flames?: number;
-  flamesLargeHall?: number;
+  /** Floor area per flame: a level may burn one flame per this many m² of its rooms' floor (at least `flames`). Default 12 (`FLAME_AREA`). */
+  flameArea?: number;
   /** Fewest items for a room of a given area (a set counts as its members); default `defaultMinItems`: 1 per 15 m², at least 2, at most 6. */
   minItems?: (areaM2: number) => number;
   /** Metres a SOLID floor prop keeps off walking-path ('x') and stair-approach ('A') cells. Default 0, or DUNGEON_PATH_MARGIN in a dungeon. */
@@ -96,6 +102,10 @@ export interface DressingRoomReview {
   centreClutter: number;
   scaleViolations: number;
   cultureViolations: number;
+  /** Highest clear height over the room (its ridge), metres. */
+  ridge?: number;
+  /** A tall-roofed chapel/hall/tavern room (ridge >= TALL_RIDGE) that has its chandelier, or false when it has none; omitted for other rooms. */
+  chandelier?: boolean;
   /** Did this room have the centre rule on (dungeon, or `keepCentre`)? */
   keepCentre: boolean;
 }
@@ -228,13 +238,13 @@ function corners(r: Rect): V2[] {
 
 /** Penetration depth of two oriented rectangles (SAT); <= 0 when they do not overlap. */
 function overlapDepth(a: Rect, b: Rect): number {
-  const axes: V2[] = [];
-  for (const r of [a, b]) axes.push([Math.cos(r.yaw), -Math.sin(r.yaw)], [Math.sin(r.yaw), Math.cos(r.yaw)]);
-  const ca = corners(a), cb = corners(b);
+  // per axis: both half-extents projected, less the centres' distance on it (no allocation: the resolver's hot path)
+  const ac = Math.cos(a.yaw), as = Math.sin(a.yaw), bc = Math.cos(b.yaw), bs = Math.sin(b.yaw), dx = b.cx - a.cx, dz = b.cz - a.cz;
   let depth = Infinity;
-  for (const [ax, az] of axes) {
-    const pa = ca.map(([x, z]) => x * ax + z * az), pb = cb.map(([x, z]) => x * ax + z * az);
-    depth = Math.min(depth, Math.min(Math.max(...pa) - Math.min(...pb), Math.max(...pb) - Math.min(...pa)));
+  for (let i = 0; i < 4; i++) {
+    const nx = i === 0 ? ac : i === 1 ? as : i === 2 ? bc : bs, nz = i === 0 ? -as : i === 1 ? ac : i === 2 ? -bs : bc;
+    const d = a.hw * Math.abs(ac * nx - as * nz) + a.hd * Math.abs(as * nx + ac * nz) + b.hw * Math.abs(bc * nx - bs * nz) + b.hd * Math.abs(bs * nx + bc * nz) - Math.abs(dx * nx + dz * nz);
+    if (d < depth) depth = d;
   }
   return depth;
 }
@@ -243,6 +253,26 @@ function overlapDepth(a: Rect, b: Rect): number {
 
 class Grid {
   constructor(readonly lv: SocketLevel) {}
+  /** The level's own lane cells per body (laneBody), before any prop stands. */
+  readonly laneBase = new Map<string, Uint8Array>();
+  private sums = new Map<string, Int32Array>();
+  /** How many cells of a kind (`z`: stair/well/doorway/entry, else the cell code) lie in a cell box: an O(1) summed-area lookup. */
+  count(kind: string, c0: number, r0: number, c1: number, r1: number): number {
+    const C = this.lv.columns, R = this.lv.rows, W = C + 1;
+    let t = this.sums.get(kind);
+    if (!t) {
+      t = new Int32Array(W * (R + 1));
+      for (let r = 0; r < R; r++)
+        for (let c = 0; c < C; c++) {
+          const ch = this.lv.cells[r]?.[c] ?? " ", hit = kind === "z" ? !!HAZARD_NAME[ch] : ch === kind;
+          t[(r + 1) * W + c + 1] = (hit ? 1 : 0) + t[r * W + c + 1]! + t[(r + 1) * W + c]! - t[r * W + c]!;
+        }
+      this.sums.set(kind, t);
+    }
+    c0 = Math.max(0, c0); r0 = Math.max(0, r0); c1 = Math.min(C - 1, c1); r1 = Math.min(R - 1, r1);
+    if (c1 < c0 || r1 < r0) return 0;
+    return t[(r1 + 1) * W + c1 + 1]! - t[r0 * W + c1 + 1]! - t[(r1 + 1) * W + c0]! + t[r0 * W + c0]!;
+  }
   /** Floor height at a point: `floorY`, plus the level's `ground` raster when it has one (an outdoor site on uneven ground). */
   y(x: number, z: number): number {
     const gr = this.lv.ground;
@@ -266,28 +296,47 @@ class Grid {
     return this.inside(c, r) ? (this.lv.cells[r]?.[c] ?? " ") : " ";
   }
   /** Clear height in metres, NaN where there is no floor. */
+  private heads?: Float64Array;
   head(c: number, r: number): number {
-    const ch = this.inside(c, r) ? this.lv.head[r]?.[c] : undefined;
-    if (ch === undefined || ch === ".") return NaN;
-    const v = parseInt(ch, 36);
-    return Number.isFinite(v) ? v * HEAD_STEP : NaN;
+    if (!this.inside(c, r)) return NaN;
+    let hs = this.heads;
+    if (!hs) {
+      const C = this.lv.columns;
+      hs = this.heads = new Float64Array(C * this.lv.rows);
+      for (let rr = 0; rr < this.lv.rows; rr++)
+        for (let cc = 0; cc < C; cc++) {
+          const ch = this.lv.head[rr]?.[cc];
+          const v = ch === undefined || ch === "." ? NaN : parseInt(ch, 36);
+          hs[rr * C + cc] = Number.isFinite(v) ? v * HEAD_STEP : NaN;
+        }
+    }
+    return hs[r * this.lv.columns + c]!;
   }
+  private roomIds?: Map<string, string>;
   roomAt(c: number, r: number): string {
     const ch = this.inside(c, r) ? this.lv.room[r]?.[c] : undefined;
     if (ch === undefined || ch === ".") return "";
+    let ids = this.roomIds;
+    if (!ids) {
+      ids = this.roomIds = new Map();
+      for (const room of this.lv.rooms) ids.set(room.index.toString(36), room.id);
+    }
+    const hit = ids.get(ch);
+    if (hit !== undefined) return hit;
     const idx = parseInt(ch, 36);
     return this.lv.rooms.find((room) => room.index === idx)?.id ?? "";
   }
   /** Cells whose centre lies inside the rectangle; the cell under its centre when none does. */
   cells(r: Rect): V2[] {
-    const cs = corners(r);
-    const [c0, r0] = this.cellOf(Math.min(...cs.map((p) => p[0])), Math.min(...cs.map((p) => p[1])));
-    const [c1, r1] = this.cellOf(Math.max(...cs.map((p) => p[0])), Math.max(...cs.map((p) => p[1])));
+    const co = Math.cos(r.yaw), si = Math.sin(r.yaw), ex = r.hw * Math.abs(co) + r.hd * Math.abs(si), ez = r.hw * Math.abs(si) + r.hd * Math.abs(co);
+    const { origin, step } = this.lv;
+    const c0 = Math.floor((r.cx - ex - origin[0]) / step), r0 = Math.floor((r.cz - ez - origin[1]) / step);
+    const c1 = Math.floor((r.cx + ex - origin[0]) / step), r1 = Math.floor((r.cz + ez - origin[1]) / step);
     const out: V2[] = [];
     for (let rr = r0; rr <= r1; rr++)
       for (let cc = c0; cc <= c1; cc++) {
-        const [x, z] = this.centre(cc, rr), [lx, lz] = toLocal(r, x, z);
-        if (Math.abs(lx) < r.hw - 0.01 && Math.abs(lz) < r.hd - 0.01) out.push([cc, rr]);
+        const dx = origin[0] + (cc + 0.5) * step - r.cx, dz = origin[1] + (rr + 0.5) * step - r.cz;
+        if (Math.abs(dx * co - dz * si) < r.hw - 0.01 && Math.abs(dx * si + dz * co) < r.hd - 0.01) out.push([cc, rr]);
       }
     if (out.length === 0) out.push(this.cellOf(r.cx, r.cz));
     return out;
@@ -332,6 +381,13 @@ interface Work {
   mirror?: boolean;
   /** The plan item is a declared set piece (may stand in a keep-clear centre). */
   setPiece?: boolean;
+  /** Placed by `auto` near the hearth on purpose (fireside seating): standing at the hearth clearance's edge is the point, not a warning. */
+  byHearth?: boolean;
+  /** The place as the plan wrote it, before an `auto` place was turned into a concrete one. */
+  asked?: WorkPlace;
+  /** The outdoor vignette it was laid out in, and its part there (`arrangement` auto places). */
+  vignette?: Vignette;
+  vpart?: string;
 }
 
 interface Res {
@@ -351,6 +407,8 @@ interface Res {
   /** Interval on a wall face: t range and height range above the floor. */
   onWall?: { wall: string; t0: number; t1: number; y0: number; y1: number };
   chain: DressingPlacement[];
+  /** Laid on its side by its pose (DressingPlacement.tilt). */
+  tilt?: [number, number, number, number];
 }
 
 interface Ctx {
@@ -365,12 +423,40 @@ interface Ctx {
   dungeon: boolean;
   zones: Map<number, Zones>;
   obst: Obst[];
+  doorLines: Map<number, DoorLine[]>;
+  /** Pew-row layouts, one per (level, room, what the rows face): computed for the first row item, filled by the rest. */
+  rows: Map<string, RowLayout>;
+  /** Graveyard layouts, one per (level, room): computed for the first grave, filled by the rest. */
+  graves: Map<string, GraveLayout>;
+  /** Outdoor vignettes by arrangement id (or why one could not be laid out), and the rooms already laid out. */
+  vignettes: Map<string, Vignette | string>;
+  vignetteRooms: Set<string>;
+  /** Door / opening / hallway-mouth clear boxes per level (`opening-clear`). */
+  openings: Map<number, Opening[]>;
+  /** The caller set `minItems` (a test, a trial): the outdoor density floor is theirs too. */
+  minItemsGiven: boolean;
 }
 
 /** Default fewest items for a room: a believable floor without padding (a 90 m² hall needs 6, a 9 m² closet 2). Fewer, better things. */
 /** A pocket under 4 m² (an alcove a pillar or a noised wall cuts off a room) holds one piece; real rooms at least 2. */
 export const defaultMinItems = (areaM2: number): number => (areaM2 < 4 ? 1 : Math.min(6, Math.max(2, Math.floor(areaM2 / 15))));
 const STORE_ROLES = new Set(["storage", "cellar"]);
+
+/**
+ * Room roles that name a MIX of the catalogue's roles (props declare only the base ones): a cottage is a hall, a bedroom
+ * and a kitchen at once; a guardroom is a hall with bunks; a living room is a hall.
+ */
+export const ROOM_ROLE_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  cottage: ["hall", "bedroom", "kitchen"],
+  guardroom: ["hall", "bedroom"],
+  living: ["hall"],
+};
+/** Roles with every alias expanded to the base roles it stands for (aliases kept, order kept, no repeats). */
+export function expandRoomRoles(roles: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const r of roles) for (const x of [r, ...(ROOM_ROLE_ALIASES[r] ?? [])]) if (x && !out.includes(x)) out.push(x);
+  return out;
+}
 /** Default loose-container budget: 1 per 25 m², 1..3; a storage room or cellar 1 per 4 m², at least 4. */
 export const defaultLooseBudget = (areaM2: number, role: string): number =>
   STORE_ROLES.has(role) ? Math.max(4, Math.floor(areaM2 / 4)) : Math.min(3, Math.max(1, Math.floor(areaM2 / 25)));
@@ -550,7 +636,9 @@ function mountRefusal(data: DressingData, place: WorkPlace, anchorMount: string 
   if (m === "surface")
     return `${prop} is a surface prop: it only goes \`on\` a surface or hang socket of another item (a table top, a shelf board), never ${placeName(place)}; the floor is never a fallback`;
   if (m === "slot") return `${prop} is a slot prop (slotKind "${data.slotKind}"): it only goes \`on\` a slot socket that accepts "${data.slotKind}", never ${placeName(place)}`;
-  if (m === "floor") return `${prop} stands on the floor: place it with \`floor\` or \`wall\` (back to a wall), not ${placeName(place)}`;
+  if (m === "floor")
+    return `${prop} stands on the floor: place it with \`auto\`, \`floor\` or \`wall\` (back to a wall), not ${placeName(place)}` +
+      (k === "on" ? `; only \`surface\` props go on a table, shelf or altar (props menu lists them under "on tables and shelves", e.g. a low candelabra instead of a standing one)` : "");
   if (m === "wall") return `${prop} hangs on a wall: place it with { kind: "wall", wall, t, height }, not ${placeName(place)}`;
   return `${prop} hangs from the ceiling: place it with { kind: "ceiling", level, at }, not ${placeName(place)}`;
 }
@@ -576,7 +664,8 @@ function wallFrame(wall: SocketWall): { u: V2; len: number } {
 
 function spanCheck(ctx: Ctx, w: Work, wall: SocketWall, t: number, width: number): void {
   const t0 = t - width / 2, t1 = t + width / 2;
-  if (wall.spans.some(([a, b]) => t0 >= a - EPS && t1 <= b + EPS)) return;
+  // 1 mm slack: auto places record t to the millimetre, so a piece snug to a span's end may round a hair past it
+  if (wall.spans.some(([a, b]) => t0 >= a - 0.001 && t1 <= b + 0.001)) return;
   const ranges = centreRanges(wall, width);
   let best: number | undefined;
   for (const [a, b] of ranges) {
@@ -720,7 +809,7 @@ function fitFloor(ctx: Ctx, w: Work, data: DressingData, g: Grid, r: Rect, wall?
     for (const [ch, { d, p }] of nearest) {
       if (ch === "H") {
         // Inside is refused above; within the hard buffer of it is only warned (the clearance already IS the buffer).
-        if (!hearth && d < ctx.opts.hardBuffer - EPS)
+        if (!hearth && !w.byHearth && d < ctx.opts.hardBuffer - EPS)
           warn(ctx, w.id, "hearth-clearance", `${w.prop} is ${f2(d)} m from the hearth clearance at ${at2(p[0], p[1])}; ${f2(ctx.opts.hardBuffer)} m keeps the hearth comfortable to use`);
         continue;
       }
@@ -830,7 +919,7 @@ function resolveDirect(ctx: Ctx, w: Work, data: DressingData): Res | undefined {
       return res;
     }
     // A wall-mounted prop.
-    const [hMin, hMax] = data.wallHeight;
+    const [hMin, hMax] = wallBand(data, wall);
     const height = p.height ?? (hMin + hMax) / 2;
     if (height < hMin - EPS || height > hMax + EPS)
       vio(ctx, w.id, "wall-height", `${w.prop}'s bottom edge may hang ${f2(hMin)}..${f2(hMax)} m above the floor; the plan says ${f2(height)} m`);
@@ -901,7 +990,11 @@ function resolveDirect(ctx: Ctx, w: Work, data: DressingData): Res | undefined {
       vio(ctx, w.id, "stair-clearance", `anchor "${a.id}" is a ${a.kind} mark: the way on or off a stair, kept clear; nothing is placed on it (move ${w.id} elsewhere)`);
       return undefined;
     }
-    const yaw = a.yaw * DEG, box = boxFromOrigin(a.position, yaw, data.size, dressingOrigin(data));
+    // a sign hangs with its bottom edge on its door-sign anchor (lintel + 0.3 m), never over the door head
+    // (beside a door: as high as `prefer` (the lintel) when it fits under the clear height, lower when not, never below the anchor)
+    const bottom = BESIDE_ANCHORS.has(a.kind) ? a.position[1] + Math.min(a.prefer ?? 0, Math.max(0, (a.size?.[1] ?? Infinity) - data.size[1])) : a.position[1];
+    const ay = hangsOnSignAnchor(a.kind, data) ? bottom + signLift(data) : a.position[1];
+    const yaw = a.yaw * DEG, box = boxFromOrigin([a.position[0], ay, a.position[2]], yaw, data.size, dressingOrigin(data));
     const g = ctx.grids.get(a.level);
     let room = "";
     // an outdoor anchor of a measured site (a level with a `ground` raster) stands on that grid: its room, its footprint
@@ -916,7 +1009,7 @@ function resolveDirect(ctx: Ctx, w: Work, data: DressingData): Res | undefined {
       }
     }
     settingCheck(ctx, w, data, a.outdoor);
-    const res: Res = { work: w, data, level: a.level, room, outdoor: a.outdoor, ...(onGrid ? {} : { outdoorAnchor: true }), box, origin: [a.position[0], a.position[1], a.position[2]], chain: [] };
+    const res: Res = { work: w, data, level: a.level, room, outdoor: a.outdoor, ...(onGrid ? {} : { outdoorAnchor: true }), box, origin: [a.position[0], ay, a.position[2]], chain: [] };
     if (data.mount === "floor" && onGrid) {
       if (data.solid) res.floor = rectOf(box);
       else res.cover = rectOf(box);
@@ -976,11 +1069,19 @@ function socketRefusal(sock: DressingSocket, data: DressingData, relYaw: number)
 
 function resolveChildren(ctx: Ctx, host: Res, kids: Work[], out: Map<string, Res>): void {
   const sockets = host.data.provides;
+  const tilts = new Map<string, Posed>();
   const uses = new Map<string, SocketItem[]>(sockets.map((s) => [s.id, []]));
   const used = (s: DressingSocket): number => uses.get(s.id)!.length;
+  const shelfHost = isShelf(host.data);
   for (const w of kids) {
-    const data = ctx.input.prop(w.prop)!;
+    const posed = poseOf(ctx.input.prop(w.prop)!, shelfHost);
+    const data = posed.data;
     const p = w.place as OnPlace;
+    if (posed.upright && isBook(data) && !shelfHost)
+      vio(ctx, w.id, "book-upright",
+        `${w.prop} is a book standing up on ${host.work.id} (${host.work.prop}): books lie flat on tables, desks and chests and stand upright only on shelves; ` +
+          `declare \`pose: { surface: "flat", shelf: "upright" }\` in its dressing sidecar (then \`props sync\`)`);
+    if (posed.tilt) tilts.set(w.id, posed);
     if (sockets.length === 0) {
       vio(ctx, w.id, "no-socket", `${host.work.prop} ("${host.work.id}") provides no sockets; put ${w.prop} on something that does (a table, a shelf)`);
       continue;
@@ -1050,8 +1151,14 @@ function resolveChildren(ctx: Ctx, host: Res, kids: Work[], out: Map<string, Res
         box = { cx: pt[0], cz: pt[2], y0: s.kind === "hang" ? pt[1] - H : pt[1], yaw, w: W, h: H, d: D };
         origin = originOf(box, dressingOrigin(it.data));
       }
+      const posed = tilts.get(it.w.id);
+      if (posed?.tilt && s.kind !== "slot") {
+        // the model's own origin, once laid down, sits off the laid box's foot: move it so the box rests on the board
+        const [lx, lz] = rot(yaw, posed.lift[0], posed.lift[2]);
+        origin = [box.cx + lx, box.y0 + posed.lift[1], box.cz + lz];
+      }
       settingCheck(ctx, it.w, it.data, host.outdoor);
-      out.set(it.w.id, { work: it.w, data: it.data, level: host.level, room: host.room, outdoor: host.outdoor, box, origin, chain: [] });
+      out.set(it.w.id, { work: it.w, data: it.data, level: host.level, room: host.room, outdoor: host.outdoor, box, origin, chain: [], ...(posed?.tilt && s.kind !== "slot" ? { tilt: posed.tilt } : {}) });
     }
   }
 }
@@ -1162,28 +1269,39 @@ interface Lane {
  * against the prop's real rectangle (not its raster), is at least `radius`.
  */
 function laneBody(g: Grid, solids: Rect[], seeds: number[], offs: V2[], radius: number): Lane {
-  const { columns: C, rows: R } = g.lv, N = C * R;
-  const pass = new Uint8Array(N);
-  for (let r = 0; r < R; r++)
-    for (let c = 0; c < C; c++) {
-      let ok = true;
-      for (const [dc, dr] of offs) {
-        const nc = c + dc, nr = r + dr;
-        if (!g.inside(nc, nr) || !WALKABLE.has(g.ch(nc, nr))) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok) {
-        const [x, z] = g.centre(c, r);
-        for (const s of solids)
-          if (rectDist(s, x, z) < radius - EPS) {
+  const { columns: C, rows: R, origin, step } = g.lv, N = C * R;
+  // the map's own lane cells (the body's disc on walkable geometry) are fixed per level and body: computed once
+  const key = `${radius}|${offs.length}`;
+  let base = g.laneBase.get(key);
+  if (!base) {
+    base = new Uint8Array(N);
+    for (let r = 0; r < R; r++)
+      for (let c = 0; c < C; c++) {
+        let ok = true;
+        for (const [dc, dr] of offs) {
+          const nc = c + dc, nr = r + dr;
+          if (!g.inside(nc, nr) || !WALKABLE.has(g.ch(nc, nr))) {
             ok = false;
             break;
           }
+        }
+        base[r * C + c] = ok ? 1 : 0;
       }
-      pass[r * C + c] = ok ? 1 : 0;
-    }
+    g.laneBase.set(key, base);
+  }
+  // then each solid closes the lane centres nearer than the radius to its real rectangle (only the cells around it)
+  const pass = base.slice();
+  for (const s of solids) {
+    const co = Math.abs(Math.cos(s.yaw)), si = Math.abs(Math.sin(s.yaw));
+    const ex = s.hw * co + s.hd * si + radius, ez = s.hw * si + s.hd * co + radius;
+    const c0 = Math.max(0, Math.floor((s.cx - ex - origin[0]) / step)), c1 = Math.min(C - 1, Math.floor((s.cx + ex - origin[0]) / step));
+    const r0 = Math.max(0, Math.floor((s.cz - ez - origin[1]) / step)), r1 = Math.min(R - 1, Math.floor((s.cz + ez - origin[1]) / step));
+    for (let r = r0; r <= r1; r++)
+      for (let c = c0; c <= c1; c++) {
+        const k = r * C + c;
+        if (pass[k] && rectDist(s, origin[0] + (c + 0.5) * step, origin[1] + (r + 0.5) * step) < radius - EPS) pass[k] = 0;
+      }
+  }
   const reach = new Uint8Array(N), st: number[] = [], n = Math.ceil(1.5 / g.step);
   for (const s of seeds) {
     // A seed snaps to the nearest lane cell within 1.5 m.
@@ -1355,6 +1473,26 @@ function routeCheck(ctx: Ctx, placed: Res[]): void {
   }
 }
 
+/** A prop thinner than this (metres, across its mounting face) gets the plane-clearing standoff by default. */
+export const MOUNT_THIN = 0.03;
+/** Default standoff of a thin prop: its face clears the zfight gate's 2 cm plane gap (tools/zfight.mts). */
+export const MOUNT_CLEAR = 0.021;
+/** Default standoff of a thicker wall prop off its wall. */
+export const MOUNT_WALL = 0.005;
+/**
+ * How far a placed prop is held off what it mounts on (`mountOffset`, else the defaults above), as a world offset:
+ * a wall prop along its wall's normal, a thin floor covering or thin surface item straight up. Two coplanar faces flicker.
+ */
+export function mountStandoff(r: { data: DressingData; box: { yaw: number } }): V3 {
+  const d = r.data;
+  if (d.mount === "wall") {
+    const off = d.mountOffset ?? (d.size[2] < MOUNT_THIN ? MOUNT_CLEAR : MOUNT_WALL), f = fwd(r.box.yaw);
+    return [f[0] * off, 0, f[1] * off];
+  }
+  if (d.mount === "floor" || d.mount === "surface") return [0, d.mountOffset ?? (d.size[1] < MOUNT_THIN ? MOUNT_CLEAR : 0), 0];
+  return [0, 0, 0];
+}
+
 function pairChecks(ctx: Ctx, placed: Res[]): void {
   // Members of one set are authored together (a chair tucked under its desk), so they may touch.
   const same = (a: Res, b: Res): boolean => a.work.group !== "" && a.work.group === b.work.group;
@@ -1366,6 +1504,11 @@ function pairChecks(ctx: Ctx, placed: Res[]): void {
       if (a.floor && b.floor && a.level === b.level) {
         const d = overlapDepth(a.floor, b.floor);
         if (d > 0.01) vio(ctx, a.work.id, "overlap", `${a.work.prop} overlaps ${b.work.id} (${b.work.prop}) on the floor; move it at least ${f2(d)} m apart`);
+      }
+      if (a.data.mount === "ceiling" && b.data.mount === "ceiling" && a.level === b.level) {
+        const d = Math.hypot(a.box.w, a.box.d) / 2 + Math.hypot(b.box.w, b.box.d) / 2 - Math.hypot(a.box.cx - b.box.cx, a.box.cz - b.box.cz);
+        if (overlapDepth(rectOf(a.box), rectOf(b.box)) > 0.01)
+          vio(ctx, a.work.id, "overlap", `${a.work.prop} hangs in the same spot as ${b.work.id} (${b.work.prop}): one hanging light per spot (two z-fight); move it at least ${f2(Math.max(d, 0.01))} m apart or leave one out`);
       }
       if (a.onWall && b.onWall && a.onWall.wall === b.onWall.wall) {
         const dt = Math.min(a.onWall.t1, b.onWall.t1) - Math.max(a.onWall.t0, b.onWall.t0);
@@ -1420,7 +1563,8 @@ function planChecks(ctx: Ctx, placed: Res[]): void {
     if (!plan.rooms[id]) vio(ctx, id, "room-missing", `room ${id} (level ${info.level}, ${f2(info.area)} m²) is not in plan.rooms: give it a role and furnish it`);
     const n = counts.get(id) ?? 0, need = ctx.opts.minItems(info.area);
     if (n === 0) vio(ctx, id, "room-empty", `room ${id} (level ${info.level}, ${f2(info.area)} m²) has no items; it needs at least ${need}`);
-    else if (n < need) vio(ctx, id, "room-sparse", `room ${id} (${f2(info.area)} m²) has ${n} item${n === 1 ? "" : "s"}; it needs at least ${need}`);
+    // an outdoor site's floor scales with its area (layoutChecks `site-sparse`), not a room's handful
+    else if (n < need && (ctx.minItemsGiven || plan.space?.kind !== "site")) vio(ctx, id, "room-sparse", `room ${id} (${f2(info.area)} m²) has ${n} item${n === 1 ? "" : "s"}; it needs at least ${need}`);
     // Density: "more" is not "better". A lived-in room is mostly open floor.
     const role = plan.rooms[id]?.role ?? "";
     const here = placed.filter((r) => r.room === id && r.level === info.level && r.floor);
@@ -1442,7 +1586,7 @@ function planChecks(ctx: Ctx, placed: Res[]): void {
   }
   for (const r of placed) {
     const spec = r.room ? plan.rooms[r.room] : undefined;
-    const roles = spec ? [spec.role, ...(spec.also ?? [])] : [];
+    const roles = spec ? expandRoomRoles([spec.role, ...(spec.also ?? [])]) : [];
     // only things that stand, hang or mount in the room say what the room is; surface and slot items follow the furniture they sit on
     if (r.data.mount !== "floor" && r.data.mount !== "wall" && r.data.mount !== "ceiling") continue;
     if (roles.length && r.data.rooms.length && !r.data.rooms.some((x) => roles.includes(x)))
@@ -1450,11 +1594,1281 @@ function planChecks(ctx: Ctx, placed: Res[]): void {
   }
   for (const [level, g] of ctx.grids) {
     const fires = placed.filter((r) => r.level === level && r.data.fire);
-    const hall = g.lv.rooms.some((r) => r.maxHead >= 5);
-    const limit = hall ? ctx.opts.flamesLargeHall : ctx.opts.flames;
+    const area = g.lv.rooms.reduce((a, r) => a + r.area, 0), limit = Math.max(ctx.opts.flames, Math.floor(area / ctx.opts.flameArea));
     if (fires.length > limit)
-      vio(ctx, "", "flame-budget", `level ${level} has ${fires.length} flames (${fires.map((r) => r.work.id).join(", ")}); the budget is ${limit}${hall ? " (large hall)" : ""}: remove ${fires.length - limit} or use unlit props`);
+      vio(ctx, "", "flame-budget",
+        `level ${level} has ${fires.length} flames (${fires.map((r) => r.work.id).join(", ")}); the budget is ${limit} (one per ${ctx.opts.flameArea} m² of its ` +
+          `${f2(area)} m² floor, at least ${ctx.opts.flames}): remove ${fires.length - limit} or use unlit props`);
   }
+}
+
+/** A wall light (sconce) on a wall taller than TALL_WALL may hang up to TALL_WALL_LIGHT m: a hall's windows sit high. */
+export const TALL_WALL = 4;
+export const TALL_WALL_LIGHT: readonly [number, number] = [1.6, 2.4];
+/** Where a wall prop's bottom edge may hang on this wall: its declared `wallHeight`, widened for a light on a tall wall. */
+function wallBand(d: DressingData, wall: SocketWall): [number, number] {
+  const [lo, hi] = d.wallHeight;
+  if (wall.height <= TALL_WALL || !(d.use.includes("light") || d.fire)) return [lo, hi];
+  return [Math.min(lo, TALL_WALL_LIGHT[0]), Math.max(hi, TALL_WALL_LIGHT[1])];
+}
+
+/** A level burns one flame per FLAME_AREA m² of floor, never fewer than FLAME_MIN: a big hall reads lit, a cottage stays a cottage. */
+export const FLAME_AREA = 12;
+export const FLAME_MIN = 6;
+
+// ---- owner rulings 2026-10-20: chapels, door lines, books, candelabras, signs, chandeliers ----------------------
+
+/** A room this tall under its ridge (a chapel, a hall under a big A-frame) takes a chandelier at its ceiling centre. */
+export const TALL_RIDGE = 4.5;
+/** Rooms smaller than this are never asked for a chandelier, however tall (a tower, a stair hall). */
+const CHANDELIER_MIN_AREA = 20;
+/** The rooms a chandelier belongs in when their roof is tall: the church, the house's hall, the tavern room. */
+const CHANDELIER_ROLES = new Set(["chapel", "hall", "tavern"]);
+/** A tall-roofed chapel, hall or tavern room (its own role, not an `also`): it hangs a chandelier at its ceiling centre. */
+function wantsChandelier(ctx: Ctx, rm: SocketRoom): boolean {
+  const spec = ctx.input.plan.rooms[rm.id];
+  return !!spec && rm.maxHead >= TALL_RIDGE && rm.area >= CHANDELIER_MIN_AREA && expandRoomRoles([spec.role]).some((r) => CHANDELIER_ROLES.has(r));
+}
+/** How far a door line runs into the room past the doorway or entry lane, metres. */
+export const DOOR_LINE = 3;
+/** A standing candelabra keeps at least this much floor between itself and a table. */
+export const CANDELABRA_TABLE_GAP = 1.2;
+/** An altar's far edge stands within this of the chapel's back wall / apse. */
+const ALTAR_BACK = 1.0;
+/** Anchor kinds a sign hangs on: the town exterior's door-sign above each door, a building map's sign-bracket; and the
+ *  floor-mount `door-sign-post` beside a door whose eave leaves no room for a board (a freestanding sign POST). */
+const SIGN_ANCHORS = new Set(["door-sign", "sign-bracket", "door-sign-beside", "sign-beside", "door-sign-post"]);
+/**
+ * A freestanding sign POST (tags sign + post, floor mount) stands beside its door: its centre this far along the wall
+ * from the door's EDGE, metres [min, max], on the window-free side. Owner ruling 2026-10-21 (Cindermoot smithy,
+ * candle-shop, stables: eave at 2.42 m, no wall for a board): a sign hangs over the door, beside it, or on a post.
+ */
+export const SIGN_POST_REACH: readonly [number, number] = [1.0, 1.5];
+/** Beside-the-door sign anchors: a projecting sign (tag `projecting`, arm out of the wall) hangs there when the wall over the door has no room. */
+const BESIDE_ANCHORS = new Set(["door-sign-beside", "sign-beside"]);
+/** A beside-the-door sign's bracket plate stands at most this far along the wall from the door's edge, metres. */
+export const SIGN_BESIDE_REACH = 1.5;
+/**
+ * A sign hangs centred over its door: its box centre at most this far along the wall from the door-sign anchor (the
+ * door opening's centre), metres. Owner walk 2026-10-21: "store signs are not all over the doors, some crash into windows".
+ */
+export const SIGN_DOOR_DX = 0.3;
+/** A hanging sign on a door-sign / sign-bracket anchor HANGS ABOVE it: the anchor is the lowest point of the sign (lintel + 0.3 m). */
+const hangsOnSignAnchor = (kind: string, d: DressingData): boolean => SIGN_ANCHORS.has(kind) && d.mount === "wall" && !!d.tags?.includes("sign");
+/** Origin height above a sign's bottom edge, by its declared origin. */
+const signLift = (d: DressingData): number => { const o = dressingOrigin(d); return o === "back" ? d.size[1] / 2 : o === "top" ? d.size[1] : 0; };
+
+const hasTag = (d: DressingData, t: string): boolean => !!d.tags?.includes(t);
+const isBook = (d: DressingData): boolean => hasTag(d, "book") || d.fits.includes("book");
+/** A shelf host: boards things stand up on (a bookshelf), not a top things lie on (a table, a chest). */
+const isShelf = (d: DressingData): boolean => d.use.includes("shelf") && !d.use.includes("table");
+const isChandelier = (d: DressingData): boolean => hasTag(d, "chandelier") || (d.mount === "ceiling" && d.use.includes("light") && Math.max(d.size[0], d.size[2]) >= 1);
+const isTable = (d: DressingData): boolean => d.mount === "floor" && d.use.includes("table") && !hasTag(d, "lectern") && !hasTag(d, "altar") && !d.neverInDoorLine;
+/** A pew, or a bench-long seat standing in for one. */
+const isPew = (r: Res): boolean => hasTag(r.data, "pew") || (r.data.mount === "floor" && r.data.use.includes("seat") && Math.max(r.box.w, r.box.d) >= 1.2);
+function roomRoles(ctx: Ctx, room: string): string[] {
+  const spec = ctx.input.plan.rooms[room];
+  return spec ? expandRoomRoles([spec.role, ...(spec.also ?? [])]) : [];
+}
+
+/** A surface item's declaration as it lies on this host (its `pose`), with the rotation and origin lift that lays it down. */
+interface Posed {
+  data: DressingData;
+  /** Stands upright as placed (taller than its thinnest horizontal side). */
+  upright: boolean;
+  tilt?: [number, number, number, number];
+  /** The model origin's offset from the laid box's foot, in the item's yawed frame. */
+  lift: V3;
+}
+function poseOf(d: DressingData, shelf: boolean): Posed {
+  const [W, H, D] = d.size;
+  const upright = H > Math.min(W, D) + EPS;
+  const want = shelf ? d.pose?.shelf : d.pose?.surface;
+  if (!upright || want !== "flat" || dressingOrigin(d) !== "foot") return { data: d, upright, lift: [0, 0, 0] };
+  const h = Math.SQRT1_2;
+  // thin across X (covers facing the sides): roll a quarter turn about its front axis (Z), a cover up
+  if (W <= D) return { data: { ...d, size: [H, W, D] }, upright: false, tilt: [0, 0, h, h], lift: [H / 2, W / 2, 0] };
+  // thin front to back: tip it onto its back (a quarter turn about X), its front up
+  return { data: { ...d, size: [W, D, H] }, upright: false, tilt: [-h, 0, 0, h], lift: [0, D / 2, H / 2] };
+}
+
+/** A doorway's or entry lane's clear width carried DOOR_LINE m into the rooms on each side. */
+interface DoorLine {
+  rect: Rect;
+  label: string;
+}
+function doorLinesOf(ctx: Ctx, level: number): DoorLine[] {
+  const have = ctx.doorLines.get(level);
+  if (have) return have;
+  const g = ctx.grids.get(level), out: DoorLine[] = [];
+  if (g) {
+    const cols = g.lv.columns, ent = ctx.input.map.entry;
+    const open = (c: number, r: number): boolean => WALKABLE.has(g.ch(c, r));
+    for (const ch of ["E", "D"])
+      for (const comp of components(g, ch)) {
+        let c0 = Infinity, c1 = -Infinity, r0 = Infinity, r1 = -Infinity;
+        for (const k of comp) {
+          const c = k % cols, r = (k - c) / cols;
+          [c0, c1, r0, r1] = [Math.min(c0, c), Math.max(c1, c), Math.min(r0, r), Math.max(r1, r)];
+        }
+        const [x0, z0] = g.centre(c0, r0), [x1, z1] = g.centre(c1, r1);
+        const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, hx = (x1 - x0 + g.step) / 2, hz = (z1 - z0 + g.step) / 2;
+        // the way a player walks through it: an entry lane runs along the door's facing; a doorway joins the two sides open onto floor
+        let alongX: boolean;
+        if (ch === "E" && ent) alongX = Math.abs(ent.facing[0]) > Math.abs(ent.facing[1]);
+        else {
+          const cm = Math.round((c0 + c1) / 2), rm = Math.round((r0 + r1) / 2);
+          const xOpen = open(c0 - 1, rm) && open(c1 + 1, rm), zOpen = open(cm, r0 - 1) && open(cm, r1 + 1);
+          alongX = xOpen === zOpen ? hx < hz : xOpen;
+        }
+        const rect: Rect = alongX ? { cx, cz, hw: hx + DOOR_LINE, hd: hz, yaw: 0 } : { cx, cz, hw: hx, hd: hz + DOOR_LINE, yaw: 0 };
+        out.push({ rect, label: `${ch === "E" ? "entry lane" : "doorway"} at ${at2(cx, cz)}` });
+      }
+  }
+  ctx.doorLines.set(level, out);
+  return out;
+}
+function doorLineHit(ctx: Ctx, level: number, r: Rect): DoorLine | undefined {
+  return doorLinesOf(ctx, level).find((l) => overlapDepth(r, l.rect) > 0.02);
+}
+
+/** The room's main door and the way into the room from it: the map's entry on the ground floor, else its doorways. */
+function doorOf(ctx: Ctx, level: number, room: string): { at: V2; facing: V2 } | undefined {
+  const g = ctx.grids.get(level)!, ent = ctx.input.map.entry;
+  if (ent && level === Math.min(...ctx.grids.keys()))
+    for (let d = 0.25; d <= 6 + EPS; d += g.step) {
+      const [c, r] = g.cellOf(ent.position[0] + ent.facing[0] * d, ent.position[1] + ent.facing[1] * d);
+      if (g.roomAt(c, r) === room) return { at: [...ent.position], facing: [...ent.facing] };
+    }
+  const rm = g.lv.rooms.find((r) => r.id === room);
+  if (!rm) return undefined;
+  let sx = 0, sz = 0, n = 0;
+  for (let r = 0; r < g.lv.rows; r++)
+    for (let c = 0; c < g.lv.columns; c++) {
+      if (g.ch(c, r) !== "D" || !([[1, 0], [-1, 0], [0, 1], [0, -1]] as const).some(([dc, dr]) => g.roomAt(c + dc, r + dr) === room)) continue;
+      const [x, z] = g.centre(c, r);
+      [sx, sz, n] = [sx + x, sz + z, n + 1];
+    }
+  if (!n) return undefined;
+  const at: V2 = [sx / n, sz / n], dx = rm.centre[0] - at[0], dz = rm.centre[1] - at[1], l = Math.hypot(dx, dz) || 1;
+  return { at, facing: [dx / l, dz / l] };
+}
+
+/** The far end of a room from its main door (an apse when diagonal walls close that end): where an altar stands. */
+interface Back {
+  at: V2;
+  facing: V2;
+  door: V2;
+  /** Distance along `facing` from the door to the room's farthest floor. */
+  depth: number;
+  apse: boolean;
+}
+function backOf(ctx: Ctx, level: number, room: string): Back | undefined {
+  const door = doorOf(ctx, level, room);
+  if (!door) return undefined;
+  const g = ctx.grids.get(level)!;
+  const proj = (x: number, z: number): number => (x - door.at[0]) * door.facing[0] + (z - door.at[1]) * door.facing[1];
+  const cells: V2[] = [];
+  let depth = -Infinity;
+  for (let r = 0; r < g.lv.rows; r++)
+    for (let c = 0; c < g.lv.columns; c++)
+      if (g.roomAt(c, r) === room) {
+        const p = g.centre(c, r);
+        cells.push(p);
+        depth = Math.max(depth, proj(p[0], p[1]));
+      }
+  if (!cells.length) return undefined;
+  const end = cells.filter((p) => proj(p[0], p[1]) >= depth - 0.75);
+  const at: V2 = [end.reduce((a, p) => a + p[0], 0) / end.length, end.reduce((a, p) => a + p[1], 0) / end.length];
+  const apse = g.lv.walls.some(
+    (w) => w.room === room && Math.abs(w.normal[0]) > 0.2 && Math.abs(w.normal[1]) > 0.2 && proj((w.a[0] + w.b[0]) / 2, (w.a[1] + w.b[1]) / 2) >= depth - 4,
+  );
+  return { at, facing: door.facing, door: door.at, depth, apse };
+}
+
+/** The middle of a room's highest ceiling (under its ridge): where its chandelier hangs. */
+function ridgeCentre(g: Grid, rm: SocketRoom): V2 {
+  const cells: [number, number, number][] = [];
+  let top = -Infinity;
+  for (let r = 0; r < g.lv.rows; r++)
+    for (let c = 0; c < g.lv.columns; c++) {
+      if (g.roomAt(c, r) !== rm.id) continue;
+      const h = g.head(c, r);
+      if (!Number.isFinite(h)) continue;
+      cells.push([c, r, h]);
+      top = Math.max(top, h);
+    }
+  const ridge = cells.filter(([, , h]) => h >= top - 0.5);
+  if (!ridge.length) return [...rm.centre];
+  const pts = ridge.map(([c, r]) => g.centre(c, r));
+  const mx = pts.reduce((a, p) => a + p[0], 0) / pts.length, mz = pts.reduce((a, p) => a + p[1], 0) / pts.length;
+  // the ridge's middle, or the ridge cell nearest it (an L-shaped hall)
+  return pts.reduce((b, p) => (Math.hypot(p[0] - mx, p[1] - mz) < Math.hypot(b[0] - mx, b[1] - mz) ? p : b));
+}
+
+// ---- long halls: pew rows along the nave, a chandelier line under the ridge ------------------------------------
+
+/** Pew rows stand this far apart, front to front (pew depth + knee gap): the tightest and the loosest. */
+export const ROW_PITCH: readonly [number, number] = [1.1, 1.3];
+/** The centre aisle between the two banks of pews, metres. */
+export const ROW_AISLE = 1.2;
+/** Side by side in one row, pews keep this gap. */
+const ROW_SIDE_GAP = 0.2;
+/** Rows must cover at least this share of the nave (altar step to door line), else `chapel-pews`. */
+export const ROW_NAVE_SHARE = 0.5;
+/** Under a tall roof a chandelier's chain lets it down until its bottom hangs this high over the floor. */
+export const CHANDELIER_HANG = 4;
+/** A room this much longer than wide is a long hall: its chandeliers hang in a line under the ridge. */
+export const LONG_HALL = 1.6;
+/** Chandeliers in a long hall hang this far apart along the ridge (room length / count, clamped). */
+export const CEILING_LINE: readonly [number, number] = [6, 8];
+
+/** The nave a row layout fills: along `axis` from `target`, from the step in front of it to the door line (DOOR_LINE in a long
+ *  nave of 10 m or more, less in a shorter one: a 4 m chapel keeps only the stair/doorway buffer) or the room's end. */
+function naveOf(ctx: Ctx, g: Grid, level: number, room: string, target: V2, axis: V2, front: number): { start: number; end: number } {
+  let end = -Infinity;
+  for (let r = 0; r < g.lv.rows; r++)
+    for (let c = 0; c < g.lv.columns; c++)
+      if (g.roomAt(c, r) === room) {
+        const [x, z] = g.centre(c, r);
+        end = Math.max(end, (x - target[0]) * axis[0] + (z - target[1]) * axis[1] + g.step / 2);
+      }
+  const door = doorOf(ctx, level, room);
+  if (door) {
+    const d = (door.at[0] - target[0]) * axis[0] + (door.at[1] - target[1]) * axis[1];
+    if (d > front) end = Math.min(end, d - Math.min(DOOR_LINE, Math.max(0, (d - front - 4) / 2)));
+  }
+  return { start: front, end };
+}
+
+interface RowLayout {
+  /** Slot centres in fill order: row by row from the front, inner seats first, alternating sides. */
+  slots: { at: V2; row: number }[];
+  yaw: number;
+  pitch: number;
+  want: number;
+  nave: { start: number; end: number };
+}
+
+/** The plan items that fill one row layout: `auto` + `prefer: "row"` + the same room and `near`. */
+function rowItems(ctx: Ctx, room: string, near: string): number {
+  return ctx.input.plan.items.filter((it) => it.place.kind === "auto" && it.place.prefer === "row" && it.place.room === room && it.place.near === near).length;
+}
+
+/**
+ * Lay out the pews of one room facing one target: rows every ROW_PITCH from the target's step back along `axis`, a
+ * ROW_AISLE centre aisle on the target's line, as many seats per row as the room's free floor takes, spread over the
+ * nave (the pitch loosens toward ROW_PITCH[1] when the count leaves room) and never past the door line.
+ */
+function rowLayout(ctx: Ctx, g: Grid, level: number, room: string, near: string, w: Work, data: DressingData, target: V2, axis: V2, front: number): RowLayout {
+  const key = `${level}|${room}|${near}`, have = ctx.rows.get(key);
+  if (have) return have;
+  const [W, H, D] = data.size, lat: V2 = [-axis[1], axis[0]], yaw = yawOf([-axis[0], -axis[1]]);
+  const want = Math.max(1, rowItems(ctx, room, near)), nave = naveOf(ctx, g, level, room, target, axis, front);
+  const [x0, x1, z0, z1] = g.lv.rooms.find((r) => r.id === room)!.bbox, reach = Math.hypot(x1 - x0, z1 - z0);
+  let comfy = true;
+  const fits = (along: number, side: number): V2 | undefined => {
+    const at: V2 = [target[0] + axis[0] * along + lat[0] * side, target[1] + axis[1] * along + lat[1] * side];
+    const box: Box = { cx: at[0], cz: at[1], y0: g.y(at[0], at[1]), yaw, w: W, h: H, d: D };
+    const piece = floorRes(w, data, level, box, room, false);
+    // a seat squeezed against a stair or doorway buffer is left out of the rows (the apse end narrows instead), unless the
+    // room is too small to seat the plan without it
+    return autoPieceRefusal(ctx, g, room, piece, undefined, []) || (comfy && autoComfort(ctx, g, [piece]) > 0) ? undefined : at;
+  };
+  // the aisle: on the target's line, or on the walking path that runs down the nave beside it (the map keeps it clear anyway)
+  let mid0 = 0, half = ROW_AISLE / 2;
+  {
+    const a = nave.start + (nave.end - nave.start) / 2, path: number[] = [];
+    for (let s = -2; s <= 2 + EPS; s += g.step / 2) {
+      const [c, r] = g.cellOf(target[0] + axis[0] * a + lat[0] * s, target[1] + axis[1] * a + lat[1] * s);
+      if (g.ch(c, r) === "x") path.push(s);
+    }
+    if (path.length) {
+      const lo = Math.min(...path) - g.step / 2, hi = Math.max(...path) + g.step / 2;
+      [mid0, half] = [(lo + hi) / 2, Math.max(ROW_AISLE / 2, (hi - lo) / 2 + ctx.opts.pathMargin)];
+    }
+  }
+  // one row's seats: from the aisle edge outward on each side, sliding past what refuses them (a pillar, a buttress)
+  const row = (along: number): V2[][] => {
+    const sides: V2[][] = [[], []];
+    [1, -1].forEach((sgn, i) => {
+      for (let s = half + W / 2; s <= reach; ) {
+        const at = fits(along, mid0 + sgn * s);
+        if (at) [sides[i]!.push(at), (s += W + ROW_SIDE_GAP)];
+        else s += g.step;
+      }
+    });
+    return sides;
+  };
+  const first = nave.start + D / 2, len = nave.end - nave.start;
+  const lay = (): { slots: RowLayout["slots"]; pitch: number } => {
+    // seats per row from a row in the middle of the nave (the apse end may be narrower)
+    const mid = row(first + Math.max(0, (len - D) / 2)).reduce((a, s) => a + s.length, 0) || 1;
+    const rows = Math.ceil(want / mid);
+    const pitch = Math.min(ROW_PITCH[1], Math.max(ROW_PITCH[0], rows > 1 ? (len - D) / (rows - 1) : ROW_PITCH[1]));
+    const slots: RowLayout["slots"] = [];
+    // every row to the door line: the plan's count takes the front ones, the rest are spares for a slot the lane refuses
+    for (let i = 0; ; i++) {
+      const along = first + i * pitch;
+      if (along + D / 2 > nave.end + EPS) break;
+      const [a, b] = row(along);
+      for (let k = 0; k < Math.max(a!.length, b!.length); k++) for (const s of [a![k], b![k]]) if (s) slots.push({ at: s, row: i });
+    }
+    return { slots, pitch };
+  };
+  let best = lay();
+  if (best.slots.length < want) {
+    comfy = false;
+    const tight = lay();
+    if (tight.slots.length > best.slots.length) best = tight;
+  }
+  const out: RowLayout = { slots: best.slots, yaw, pitch: best.pitch, want, nave };
+  ctx.rows.set(key, out);
+  return out;
+}
+
+// ---- graveyards: headstones in rows over the whole yard (owner walk 2026-10-21) ------------------------------------
+// "None of these graves are spaced out, they are all clustered in the centre": a churchyard's graves stand in ROWS, head-
+// stones aligned along each row, all facing the same way, the rows filling the yard with its lanes kept.
+
+/** What a grave is, by its catalogue `tags`: a headstone, a grave cross, a tomb or a grave slab. */
+export const GRAVE_TAGS = ["grave", "headstone", "cross", "tomb"] as const;
+/** Grave rows stand this far apart, front to front: the loosest first, tighter when the plan asks for more graves than fit. */
+export const GRAVE_PITCH: readonly [number, number] = [2.0, 2.5];
+/** Headstones along one row stand this far apart, centre to centre (the same: loosest first). */
+export const GRAVE_SPACING: readonly [number, number] = [1.2, 1.8];
+/** A graveyard holds at least one grave per this many m² of its placeable yard (`graveyard-sparse`). */
+export const GRAVE_YARD_M2 = 10;
+/** `graveyard-rows`: graves clump when more than this share of them stand within GRAVE_CLUMP_R m of the yard's centroid. */
+export const GRAVE_CLUMP = 0.4;
+export const GRAVE_CLUMP_R = 2;
+/** `graveyard-rows`: the graves must span at least this share of the yard's free extent along the rows and across them. */
+export const GRAVE_SPREAD = 0.4;
+/** A room with this many graves or more is a graveyard: its graves are checked as one. */
+export const GRAVE_MIN = 4;
+const isGrave = (d: DressingData): boolean => GRAVE_TAGS.some((t) => hasTag(d, t));
+
+interface GraveLayout {
+  /** Slot centres in fill order: the plan's graves spread over every row, then the spares. */
+  slots: { at: V2; row: number }[];
+  yaw: number;
+  pitch: number;
+  spacing: number;
+  rows: number;
+  capacity: number;
+  want: number;
+}
+
+/** The plan's graves laid out in rows in one room (`prefer` row + a grave tag; `near` optional). */
+function graveItems(ctx: Ctx, room: string): DressingData[] {
+  const out: DressingData[] = [];
+  for (const it of ctx.input.plan.items) {
+    if (it.place.kind !== "auto" || it.place.prefer !== "row" || it.place.room !== room || !it.prop) continue;
+    const d = ctx.input.prop(it.prop);
+    if (d && isGrave(d)) out.push(d);
+  }
+  return out;
+}
+
+/** Where a yard's graves face from when the plan names nothing: the map's entry, its doorway, else its entry lanes ('E'). */
+function yardFront(ctx: Ctx, g: Grid, level: number, room: string): V2 | undefined {
+  const door = doorOf(ctx, level, room);
+  if (door) return door.at;
+  let best: number[] | undefined;
+  for (const comp of components(g, "E")) if (!best || comp.length > best.length) best = comp;
+  if (!best) return undefined;
+  let sx = 0, sz = 0;
+  for (const k of best) {
+    const c = k % g.lv.columns, [x, z] = g.centre(c, (k - c) / g.lv.columns);
+    [sx, sz] = [sx + x, sz + z];
+  }
+  return [sx / best.length, sz / best.length];
+}
+
+/**
+ * The yard a graveyard fills: the room's free cells ENCLOSED by its walls (both straight lines out of the cell along x, or
+ * both along z, meet a wall or a built footprint before they leave the room: the site disc may cut a walled square's corners), when the room has a walled yard (at least a third of its free
+ * floor enclosed); else every free cell (an unwalled burial ground). A site area is a disc round its walls: no grave stands
+ * on the knowe outside the kirkyard wall.
+ */
+function yardMask(g: Grid, room: string): (c: number, r: number) => boolean {
+  const C = g.lv.columns, R = g.lv.rows, free = new Uint8Array(C * R);
+  let n = 0;
+  for (let r = 0; r < R; r++)
+    for (let c = 0; c < C; c++) {
+      const ch = g.ch(c, r);
+      if (g.roomAt(c, r) === room && (ch === "." || ch === "o")) [free[r * C + c], n] = [1, n + 1];
+    }
+  // a ray from a free cell is closed when it meets a blocked cell ('#', a built footprint) before it leaves the room
+  const closed = (c: number, r: number, dc: number, dr: number): boolean => {
+    for (let cc = c + dc, rr = r + dr; cc >= 0 && rr >= 0 && cc < C && rr < R; cc += dc, rr += dr) {
+      if (free[rr * C + cc]) continue;
+      const ch = g.ch(cc, rr);
+      if (ch === "#") return true;
+      if (g.roomAt(cc, rr) !== room && ch !== "x") return false;
+    }
+    return false;
+  };
+  const yard = new Uint8Array(C * R);
+  let m = 0;
+  for (let r = 0; r < R; r++)
+    for (let c = 0; c < C; c++)
+      if (free[r * C + c] && ((closed(c, r, 1, 0) && closed(c, r, -1, 0)) || (closed(c, r, 0, 1) && closed(c, r, 0, -1)))) [yard[r * C + c], m] = [1, m + 1];
+  const walled = m >= n / 3;
+  return (c, r) => g.inside(c, r) && !!(walled ? yard[r * C + c] : free[r * C + c]);
+}
+
+/**
+ * Lay out a graveyard: rows across the yard every GRAVE_PITCH, headstones every GRAVE_SPACING along each row on one
+ * lattice (so they line up row to row), all facing the front (the `near` target, else the yard's entry); the loosest
+ * lattice that seats the plan's count, tighter only when it must. Every row of the yard takes its share of the graves,
+ * spread evenly across the row, so the rows fill the yard instead of a block at one end; walking paths and keep-clear
+ * zones refuse their slots (the lanes stay open).
+ */
+function graveLayout(ctx: Ctx, g: Grid, level: number, room: string, w: Work, target: V2 | undefined, targetYaw: number | undefined): GraveLayout {
+  const key = `${level}|${room}|graves`, have = ctx.graves.get(key);
+  if (have) return have;
+  const rm = g.lv.rooms.find((r) => r.id === room)!;
+  const items = graveItems(ctx, room), want = Math.max(1, items.length);
+  const W = Math.max(...items.map((d) => d.size[0])), H = Math.max(...items.map((d) => d.size[1])), D = Math.max(...items.map((d) => d.size[2]));
+  const proto = items[0]!;
+  // the axis the rows run back along: the target item's own front, else from the target (or the yard's entry) into the yard
+  const front = target ?? yardFront(ctx, g, level, room);
+  let a: V2 = targetYaw !== undefined ? fwd(targetYaw) : front ? [rm.centre[0] - front[0], rm.centre[1] - front[1]] : [0, 1];
+  if (Math.hypot(a[0], a[1]) < EPS) a = [0, 1];
+  const axis: V2 = Math.abs(a[0]) >= Math.abs(a[1]) ? [Math.sign(a[0]) || 1, 0] : [0, Math.sign(a[1]) || 1];
+  const lat: V2 = [-axis[1], axis[0]], yaw = yawOf([-axis[0], -axis[1]]);
+  const O: V2 = front ?? rm.centre;
+  // the yard's free floor in (along, across) coordinates
+  const inYard = yardMask(g, room);
+  let a0 = Infinity, a1 = -Infinity, t0 = Infinity, t1 = -Infinity;
+  for (let r = 0; r < g.lv.rows; r++)
+    for (let c = 0; c < g.lv.columns; c++) {
+      if (!inYard(c, r)) continue;
+      const [x, z] = g.centre(c, r), al = (x - O[0]) * axis[0] + (z - O[1]) * axis[1], ac = (x - O[0]) * lat[0] + (z - O[1]) * lat[1];
+      [a0, a1, t0, t1] = [Math.min(a0, al), Math.max(a1, al), Math.min(t0, ac), Math.max(t1, ac)];
+    }
+  // the lattice is centred on the walking path down the yard (the lane between two columns of stones), else on the front's line
+  let tc = 0;
+  {
+    const mid = (a0 + a1) / 2, path: number[] = [];
+    for (let s = t0; s <= t1 + EPS; s += g.step) {
+      const [c, r] = g.cellOf(O[0] + axis[0] * mid + lat[0] * s, O[1] + axis[1] * mid + lat[1] * s);
+      if (g.ch(c, r) === "x") path.push(s);
+    }
+    if (path.length) {
+      // the path run nearest the front's line (the lane in from the entry; a creature clearing is a wide blob beside it)
+      const runs: number[][] = [];
+      for (const s of path) {
+        const cur = runs.at(-1);
+        if (cur && s - cur.at(-1)! <= g.step + EPS) cur.push(s);
+        else runs.push([s]);
+      }
+      const mid2 = (r: number[]): number => (r[0]! + r.at(-1)!) / 2;
+      tc = mid2(runs.reduce((b, r) => (Math.abs(mid2(r)) < Math.abs(mid2(b)) ? r : b)));
+    }
+  }
+  let comfy = true;
+  const fits = (along: number, side: number): V2 | undefined => {
+    const at: V2 = [O[0] + axis[0] * along + lat[0] * side, O[1] + axis[1] * along + lat[1] * side];
+    const box: Box = { cx: at[0], cz: at[1], y0: g.y(at[0], at[1]), yaw, w: W, h: H, d: D };
+    const [cc, rr] = g.cellOf(at[0], at[1]);
+    if (!inYard(cc, rr)) return undefined;
+    const piece = floorRes(w, proto, level, box, room, false);
+    // a stone squeezed against an entry lane or a doorway buffer is left out, unless the yard is too small for the plan without it
+    return autoPieceRefusal(ctx, g, room, piece, undefined, []) || (comfy && autoComfort(ctx, g, [piece]) > 0) ? undefined : at;
+  };
+  const lattice = (pitch: number, spacing: number): { at: V2; t: number }[][] => {
+    const rows: { at: V2; t: number }[][] = [];
+    const k0 = Math.floor((t0 - tc) / spacing - 0.5), k1 = Math.ceil((t1 - tc) / spacing + 0.5);
+    for (let along = a0 + Math.max(pitch / 2, D / 2 + 0.3); along <= a1 - D / 2 + EPS; along += pitch) {
+      const row: { at: V2; t: number }[] = [];
+      for (let k = k0; k <= k1; k++) {
+        const t = tc + (k + 0.5) * spacing, at = fits(along, t);
+        if (at) row.push({ at, t });
+      }
+      if (row.length) rows.push(row);
+    }
+    return rows;
+  };
+  const tries: [number, number][] = [
+    [GRAVE_PITCH[1], GRAVE_SPACING[1]],
+    [(GRAVE_PITCH[0] + GRAVE_PITCH[1]) / 2, (GRAVE_SPACING[0] + GRAVE_SPACING[1]) / 2],
+    [GRAVE_PITCH[0], GRAVE_SPACING[0]],
+  ];
+  let rows: { at: V2; t: number }[][] = [], pitch = tries[0]![0], spacing = tries[0]![1], cap = 0;
+  for (const [p, s] of tries) {
+    if (s < W + 0.3 && rows.length) continue; // never closer than a hand's breadth between two stones
+    const r = lattice(p, s), n = r.reduce((x, row) => x + row.length, 0);
+    if (n > cap || !rows.length) [rows, pitch, spacing, cap] = [r, p, s, n];
+    if (n >= want) break;
+  }
+  if (cap < want && comfy) {
+    comfy = false;
+    const [p, s] = tries.at(-1)!, r = lattice(p, s), n = r.reduce((x, row) => x + row.length, 0);
+    if (n > cap) [rows, pitch, spacing, cap] = [r, p, s, n];
+  }
+  // the plan's count takes whole COLUMNS of the lattice (evenly spread over it), so the stones line up row to row and
+  // every row of the yard is used; the fewest columns that seat the plan, the rest of the slots are spares
+  const fill = Math.min(want, cap), col = (t: number): number => Math.round((t - tc) / spacing - 0.5);
+  const cols = [...new Set(rows.flatMap((row) => row.map((e) => col(e.t))))].sort((x, y) => x - y);
+  let chosen = new Set(cols);
+  for (let m = 1; m <= cols.length; m++) {
+    const set = new Set(Array.from({ length: m }, (_, j) => cols[Math.floor(((j + 0.5) * cols.length) / m)]!));
+    if (rows.reduce((n, row) => n + row.filter((e) => set.has(col(e.t))).length, 0) >= fill) { chosen = set; break; }
+  }
+  const slots: GraveLayout["slots"] = [], spares: GraveLayout["slots"] = [];
+  rows.forEach((row, i) => [...row].sort((x, y) => x.t - y.t).forEach((e) => (chosen.has(col(e.t)) ? slots : spares).push({ at: e.at, row: i })));
+  const out: GraveLayout = { slots: [...slots, ...spares], yaw, pitch, spacing, rows: rows.length, capacity: cap, want };
+  ctx.graves.set(key, out);
+  return out;
+}
+
+/**
+ * `graveyard-rows` (a violation): a yard's graves stand in 2+ rows and spread over it — not more than GRAVE_CLUMP of them
+ * within GRAVE_CLUMP_R m of the yard's centroid, and spanning GRAVE_SPREAD of its free extent along the rows and across.
+ * `graveyard-sparse` (a violation): a graveyard holds one grave per GRAVE_YARD_M2 m² of its placeable yard.
+ */
+function graveyardCheck(ctx: Ctx, level: number, rm: SocketRoom, here: Res[], placeable: number): void {
+  const graves = here.filter((r) => r.floor && isGrave(r.data));
+  if (graves.length < GRAVE_MIN) return;
+  const g = ctx.grids.get(level)!;
+  const how =
+    `{ "kind": "auto", "room": "${rm.id}", "prefer": "row" } on each grave (the resolver lays them in rows ${GRAVE_PITCH[0]}-${GRAVE_PITCH[1]} m apart, ` +
+    `stones ${GRAVE_SPACING[0]}-${GRAVE_SPACING[1]} m apart, over the whole yard)`;
+  // the yard: its free cells' centroid and extent along the graves' facing axis and across it
+  const f = fwd(graves[0]!.box.yaw);
+  const axis: V2 = Math.abs(f[0]) >= Math.abs(f[1]) ? [Math.sign(f[0]) || 1, 0] : [0, Math.sign(f[1]) || 1], lat: V2 = [-axis[1], axis[0]];
+  const inYard = yardMask(g, rm.id);
+  let sx = 0, sz = 0, n = 0, a0 = Infinity, a1 = -Infinity, t0 = Infinity, t1 = -Infinity;
+  for (let r = 0; r < g.lv.rows; r++)
+    for (let c = 0; c < g.lv.columns; c++) {
+      if (!inYard(c, r)) continue;
+      const [x, z] = g.centre(c, r), al = x * axis[0] + z * axis[1], ac = x * lat[0] + z * lat[1];
+      [sx, sz, n, a0, a1, t0, t1] = [sx + x, sz + z, n + 1, Math.min(a0, al), Math.max(a1, al), Math.min(t0, ac), Math.max(t1, ac)];
+    }
+  if (!n) return;
+  const cen: V2 = [sx / n, sz / n];
+  let rows = 0, last = -Infinity;
+  for (const v of graves.map((p) => p.box.cx * axis[0] + p.box.cz * axis[1]).sort((x, y) => x - y)) if (v - last > 0.6) [rows, last] = [rows + 1, v];
+  const near = graves.filter((p) => Math.hypot(p.box.cx - cen[0], p.box.cz - cen[1]) <= GRAVE_CLUMP_R).length;
+  const al = graves.map((p) => p.box.cx * axis[0] + p.box.cz * axis[1]), ac = graves.map((p) => p.box.cx * lat[0] + p.box.cz * lat[1]);
+  const spanA = (Math.max(...al) - Math.min(...al)) / Math.max(a1 - a0, EPS), spanT = (Math.max(...ac) - Math.min(...ac)) / Math.max(t1 - t0, EPS);
+  const faults: string[] = [];
+  if (rows < 2) faults.push(`they stand in ${rows} row`);
+  if (near / graves.length > GRAVE_CLUMP + EPS)
+    faults.push(`${near} of ${graves.length} (${Math.round((near / graves.length) * 100)}%, at most ${Math.round(GRAVE_CLUMP * 100)}%) stand within ${GRAVE_CLUMP_R} m of the yard's centre ${at2(cen[0], cen[1])}`);
+  if (spanA < GRAVE_SPREAD - EPS || spanT < GRAVE_SPREAD - EPS)
+    faults.push(
+      `they span ${Math.round(spanA * 100)}% of the yard along the rows' axis and ${Math.round(spanT * 100)}% across it ` +
+        `(${f2(a1 - a0)} x ${f2(t1 - t0)} m free; at least ${Math.round(GRAVE_SPREAD * 100)}% each way)`,
+    );
+  if (faults.length) vio(ctx, rm.id, "graveyard-rows", `graveyard ${rm.id}'s ${graves.length} graves clump: ${faults.join("; ")}. Graves stand in rows filling the yard: ${how}`);
+  const yardM2 = Math.min(placeable, n * g.step * g.step), need = Math.floor(yardM2 / GRAVE_YARD_M2);
+  if (graves.length < need)
+    vio(ctx, rm.id, "graveyard-sparse",
+      `graveyard ${rm.id} (${f2(yardM2)} m² of placeable yard) has ${graves.length} graves; a churchyard holds at least one per ${GRAVE_YARD_M2} m² (${need}): plan ${need - graves.length} more, ${how}`);
+}
+
+/** Spots for a long hall's chandeliers: along the ridge every CEILING_LINE m (room length / count), the first at the ridge centre. */
+function ceilingLine(g: Grid, rm: SocketRoom, count: number): V2[] {
+  const [x0, x1, z0, z1] = rm.bbox, lx = x1 - x0, lz = z1 - z0, long = Math.max(lx, lz);
+  const c = ridgeCentre(g, rm);
+  if (long < LONG_HALL * Math.min(lx, lz) || count < 2) return [c];
+  const axis: V2 = lx >= lz ? [1, 0] : [0, 1], gap = Math.min(CEILING_LINE[1], Math.max(CEILING_LINE[0], long / count));
+  const out: V2[] = [];
+  for (let k = 0; out.length < count && k <= 2 * count + 2; k++) {
+    const n = k === 0 ? 0 : k % 2 ? (k + 1) / 2 : -k / 2, at: V2 = [c[0] + axis[0] * n * gap, c[1] + axis[1] * n * gap];
+    const [cc, rr] = g.cellOf(at[0], at[1]);
+    if (g.roomAt(cc, rr) === rm.id) out.push(at);
+  }
+  return out;
+}
+/** How many chandeliers a tall-roofed room's ceiling wants: one, or one per CEILING_LINE[1] m of a long hall. */
+function chandeliersWanted(rm: SocketRoom): number {
+  const [x0, x1, z0, z1] = rm.bbox, lx = x1 - x0, lz = z1 - z0, long = Math.max(lx, lz);
+  return long < LONG_HALL * Math.min(lx, lz) ? 1 : Math.max(1, Math.floor(long / CEILING_LINE[1]));
+}
+
+/** A standing candelabra the plan put on a wall, in a corner or by the altar on purpose. */
+function candelabraExempt(r: Res, placed: Res[]): boolean {
+  const a = r.work.asked ?? r.work.place;
+  if (a.kind === "wall" || a.kind === "anchor") return true;
+  if (a.kind !== "auto") return false;
+  if (a.prefer === "wall" || a.prefer === "corner" || a.near === "altar") return true;
+  const it = a.near ? placed.find((x) => x.work.id === a.near || x.work.group === a.near) : undefined;
+  return !!it && hasTag(it.data, "altar");
+}
+
+function chapelCheck(ctx: Ctx, level: number, rm: SocketRoom, here: Res[]): void {
+  const back = backOf(ctx, level, rm.id);
+  const where = back?.apse ? "apse" : "back-wall", whereText = back?.apse ? "apse (the rounded end)" : "back wall (the end farthest from the main door)";
+  const altars = here.filter((r) => r.floor && hasTag(r.data, "altar"));
+  if (!altars.length)
+    warn(ctx, rm.id, "chapel-altar", `chapel ${rm.id} has no altar: add one against its ${whereText}, facing the nave ({ "kind": "auto", "room": "${rm.id}", "near": "${where}" }, an altar prop)`);
+  for (const a of back ? altars : []) {
+    const proj = (x: number, z: number): number => (x - back!.door[0]) * back!.facing[0] + (z - back!.door[1]) * back!.facing[1];
+    const short = back!.depth - Math.max(...corners(a.floor!).map(([x, z]) => proj(x, z)));
+    const f = fwd(a.box.yaw), faces = -(f[0] * back!.facing[0] + f[1] * back!.facing[1]);
+    if (short > ALTAR_BACK + EPS)
+      warn(ctx, a.work.id, "chapel-altar", `${a.work.prop} stands ${f2(short)} m short of chapel ${rm.id}'s ${whereText}: the altar stands against it, facing the nave ({ "kind": "auto", "room": "${rm.id}", "near": "${where}" })`);
+    else if (faces < 0.7) warn(ctx, a.work.id, "chapel-altar", `${a.work.prop} at the back of chapel ${rm.id} does not face the nave (toward the main door): turn it ({ "kind": "auto", "room": "${rm.id}", "near": "${where}" } faces it right)`);
+  }
+  const altar = altars[0], pews = here.filter((r) => r.floor && isPew(r));
+  const axis: V2 = altar ? fwd(altar.box.yaw) : back ? [-back.facing[0], -back.facing[1]] : [0, 1];
+  // a pew faces the altar when it stands in front of it turned back up the nave (the outer seats of a wide front row too)
+  const facing = altar
+    ? pews.filter((p) => {
+        const f = fwd(p.box.yaw), dx = p.box.cx - altar.box.cx, dz = p.box.cz - altar.box.cz;
+        return dx * axis[0] + dz * axis[1] > 0 && f[0] * axis[0] + f[1] * axis[1] < -0.7;
+      })
+    : pews;
+  let rows = 0, last = -Infinity;
+  for (const v of facing.map((p) => p.box.cx * axis[0] + p.box.cz * axis[1]).sort((x, y) => x - y)) if (v - last > 0.4) [rows, last] = [rows + 1, v];
+  if (rows < 2)
+    warn(ctx, rm.id, "chapel-pews",
+      `chapel ${rm.id} has ${!pews.length ? "no pews" : altar ? `${facing.length} pew(s) facing the altar in ${rows} row(s)` : `${pews.length} pew(s) and no altar to face`}: pews stand in 2+ rows, one behind ` +
+        `another, facing the altar (each { "kind": "auto", "room": "${rm.id}", "prefer": "row", "near": "<the altar item>" }, after the altar)`);
+  // the rows fill the nave, not a block at one end: they cover ROW_NAVE_SHARE of it from the altar step to the door line
+  if (altar && facing.length) {
+    const g = ctx.grids.get(level)!, at: V2 = [altar.box.cx, altar.box.cz];
+    const nave = naveOf(ctx, g, level, rm.id, at, axis, altar.box.d / 2 + Math.max(altar.data.clearance, 0.3));
+    const along = facing.map((p) => (p.box.cx - at[0]) * axis[0] + (p.box.cz - at[1]) * axis[1]);
+    const span = Math.max(...along.map((a, i) => a + facing[i]!.box.d / 2)) - Math.min(...along.map((a, i) => a - facing[i]!.box.d / 2));
+    const len = nave.end - nave.start, share = len > 0 ? span / len : 1;
+    if (share < ROW_NAVE_SHARE - EPS) {
+      const per = Math.max(1, Math.round(facing.length / Math.max(rows, 1))), need = Math.ceil((ROW_NAVE_SHARE * len - facing[0]!.box.d) / ROW_PITCH[1]) + 1;
+      vio(ctx, rm.id, "chapel-pews",
+        `chapel ${rm.id}'s ${facing.length} pews in ${rows} rows cover ${f2(span)} m of its ${f2(len)} m nave (${Math.round(share * 100)}%, altar step to the door line); ` +
+          `rows fill at least ${Math.round(ROW_NAVE_SHARE * 100)}%: place them { "kind": "auto", "prefer": "row", "near": "${altar.work.group || altar.work.id}" } (the resolver spreads them ` +
+          `${ROW_PITCH[0]}-${ROW_PITCH[1]} m apart) and plan about ${need * per} (${need} rows of ${per})`);
+    }
+  }
+}
+
+/** The owner's rulings of 2026-10-20, as checks (books are checked where they are laid, in resolveChildren). */
+/**
+ * `sign-over-door` (a violation): a hanging sign sits centred over its door (within SIGN_DOOR_DX of the door-sign anchor,
+ * along the wall), under the eave (its top within the anchor's measured clear height, `size[1]`), and clear of every
+ * window (the map's `window` anchors, with the opening's size) and every other wall prop.
+ */
+function signChecks(ctx: Ctx, placed: Res[]): void {
+  const signAnchors = ctx.input.map.anchors.filter((a) => SIGN_ANCHORS.has(a.kind));
+  const windows = ctx.input.map.anchors.filter((a) => a.kind === "window");
+  const yRange = (b: Box): [number, number] => [b.y0, b.y0 + b.h];
+  const yHit = (a: [number, number], b: [number, number]): boolean => Math.min(a[1], b[1]) - Math.max(a[0], b[0]) > 0.02;
+  for (const r of placed) {
+    if (r.data.mount === "floor" && hasTag(r.data, "sign") && hasTag(r.data, "post")) { signPostCheck(ctx, r, windows); continue; }
+    if (r.data.mount !== "wall" || !hasTag(r.data, "sign")) continue;
+    const id = r.work.id, b = r.box, what = `${id} (${r.work.prop})`;
+    const own = r.work.place.kind === "anchor" ? signAnchors.find((a) => a.id === (r.work.place as { anchor: string }).anchor) : undefined;
+    const a = own ?? signAnchors.filter((x) => x.level === r.level).sort((p, q) => Math.hypot(p.position[0] - b.cx, p.position[2] - b.cz) - Math.hypot(q.position[0] - b.cx, q.position[2] - b.cz))[0];
+    if (!a || Math.hypot(a.position[0] - b.cx, a.position[2] - b.cz) > 3) {
+      if (r.outdoor) vio(ctx, id, "sign-over-door", `${what} is a hanging sign with no door-sign anchor within 3 m: a sign hangs over a building's door, beside it, or on a post; place it on its door-sign-<building> anchor`);
+      continue;
+    }
+    const ay = a.yaw * DEG, t: V2 = [Math.cos(ay), -Math.sin(ay)];
+    const along = (p: V3, q: { cx: number; cz: number } | V3): number => Array.isArray(q) ? (q[0] - p[0]) * t[0] + (q[2] - p[2]) * t[1] : (q.cx - p[0]) * t[0] + (q.cz - p[2]) * t[1];
+    const projecting = hasTag(r.data, "projecting");
+    if (BESIDE_ANCHORS.has(a.kind)) {
+      // beside the door: a projecting sign, its bracket plate within SIGN_BESIDE_REACH of the door's edge
+      if (!projecting) vio(ctx, id, "sign-over-door", `${what} hangs beside a door flat on the wall; beside a door only a PROJECTING sign (arm out of the wall, tag projecting) hangs; a flat sign goes over the door`);
+      const door = ctx.input.map.anchors.find((x) => (x.kind === "door-sign" || x.kind === "sign-bracket") && x.id === a.id.replace(/-[lr]$/, ""));
+      if (door) {
+        const edge = Math.abs(along(door.position, a.position)) - (door.size?.[0] ?? 1.2) / 2;
+        if (edge > SIGN_BESIDE_REACH + EPS) vio(ctx, id, "sign-over-door", `${what}'s bracket is ${edge.toFixed(2)} m from the edge of its door; a sign hangs over the door, or beside it within ${SIGN_BESIDE_REACH} m of its edge`);
+      }
+    } else {
+      const dx = along(a.position, b);
+      if (Math.abs(dx) > SIGN_DOOR_DX + EPS) vio(ctx, id, "sign-over-door", `${what} is ${Math.abs(dx).toFixed(2)} m along the wall from the centre of its door (anchor ${a.id}); a sign hangs centred over the door (<= ${SIGN_DOOR_DX} m) or beside it on a projecting arm: use the door-sign or door-sign-<building>-l/-r anchor`);
+    }
+    if (a.size && b.y0 + b.h > a.position[1] + a.size[1] + 0.01)
+      vio(ctx, id, "sign-over-door", `${what} reaches ${(b.y0 + b.h - a.position[1]).toFixed(2)} m above its anchor ${a.id}, but the eave/roof overhang leaves ${a.size[1].toFixed(2)} m: hang a projecting sign beside the door (its door-sign-<building>-l/-r anchor) instead`);
+    const rect = rectOf(b), ys = yRange(b);
+    for (const wn of windows) {
+      if (!wn.size) continue;
+      // the opening plus 0.5 m in front of it: a sign hanging there covers the window
+      // (a projecting sign also keeps 0.3 m to the side of a window: its board would sit across the window's edge)
+      const wy = wn.yaw * DEG, f = fwd(wy), wr: Rect = { cx: wn.position[0] + f[0] * 0.25, cz: wn.position[2] + f[1] * 0.25, hw: wn.size[0] / 2 + (projecting ? 0.3 : 0), hd: 0.25, yaw: wy };
+      const h = wn.size[1];
+      if (overlapDepth(rect, wr) > 0.01 && yHit(ys, [wn.position[1] - h / 2, wn.position[1] + h / 2]))
+        vio(ctx, id, "sign-over-door", `${what} hangs in front of window ${wn.id}: a sign hangs over or beside the door, clear of every window`);
+    }
+    for (const o of placed) {
+      if (o === r || o.data.mount !== "wall" || o.level !== r.level) continue;
+      if (overlapDepth(rect, rectOf(o.box)) > 0.01 && yHit(ys, yRange(o.box))) vio(ctx, id, "sign-over-door", `${what} runs into wall prop ${o.work.id} (${o.work.prop})`);
+    }
+  }
+}
+
+/** The third form of `sign-over-door`: a freestanding sign post beside a door (SIGN_POST_REACH from its edge), clear of windows. */
+function signPostCheck(ctx: Ctx, r: Res, windows: readonly SocketAnchor[]): void {
+  const id = r.work.id, b = r.box, what = `${id} (${r.work.prop})`;
+  const doors = ctx.input.map.anchors.filter((a) => a.kind === "door-sign" || a.kind === "sign-bracket");
+  const own = r.work.place.kind === "anchor" ? (r.work.place as { anchor: string }).anchor.replace(/-post-[lr]$/, "") : "";
+  const door = doors.find((a) => a.id === own) ?? [...doors].sort((p, q) => Math.hypot(p.position[0] - b.cx, p.position[2] - b.cz) - Math.hypot(q.position[0] - b.cx, q.position[2] - b.cz))[0];
+  if (!door || Math.hypot(door.position[0] - b.cx, door.position[2] - b.cz) > 4) {
+    if (r.outdoor) vio(ctx, id, "sign-over-door", `${what} is a sign post with no door within 4 m: a sign post stands beside a building's door (its door-sign-<building>-post-l/-r anchor)`);
+    return;
+  }
+  const ay = door.yaw * DEG, t: V2 = [Math.cos(ay), -Math.sin(ay)];
+  const edge = Math.abs((b.cx - door.position[0]) * t[0] + (b.cz - door.position[2]) * t[1]) - (door.size?.[0] ?? 1.2) / 2;
+  if (edge < SIGN_POST_REACH[0] - EPS || edge > SIGN_POST_REACH[1] + EPS)
+    vio(ctx, id, "sign-over-door", `${what} stands ${edge.toFixed(2)} m from the edge of door ${door.id}; a sign post stands ${SIGN_POST_REACH[0]}-${SIGN_POST_REACH[1]} m beside the door (its door-sign-<building>-post-l/-r anchor)`);
+  const rect = rectOf(b);
+  for (const wn of windows) {
+    if (!wn.size || wn.position[1] - wn.size[1] / 2 > door.position[1] + 1.5) continue; // upper-floor windows are above the board
+    const wy = wn.yaw * DEG, f = fwd(wy), wr: Rect = { cx: wn.position[0] + f[0] * 0.75, cz: wn.position[2] + f[1] * 0.75, hw: wn.size[0] / 2 + 0.3, hd: 0.75, yaw: wy };
+    if (overlapDepth(rect, wr) > 0.01) vio(ctx, id, "sign-over-door", `${what} stands in front of window ${wn.id}: a sign post goes on the window-free side of the door`);
+  }
+}
+
+function ruleChecks(ctx: Ctx, placed: Res[]): void {
+  const plan = ctx.input.plan;
+  for (const r of placed) {
+    const d = r.data;
+    if (d.neverInDoorLine && r.floor) {
+      const hit = doorLineHit(ctx, r.level, r.floor);
+      if (hit)
+        vio(ctx, r.work.id, "door-line",
+          `${r.work.prop} stands in the line of the ${hit.label} (its clear width carried ${DOOR_LINE} m into the room): a lectern or podium is never planted in front of a door; ` +
+            `put it against a side wall or at the far end (auto places skip door lines)`);
+    }
+    if (hasTag(d, "sign") && r.room && !r.outdoor && !r.outdoorAnchor) {
+      const here = ctx.input.map.anchors.filter((a) => SIGN_ANCHORS.has(a.kind) && a.mount === d.mount).map((a) => a.id);
+      vio(ctx, r.work.id, "sign-indoors",
+        `${r.work.prop} is a sign inside room ${r.room}: signs are exterior only and hang above a building's door (the town exterior's door-sign-<building> anchor` +
+          `${here.length ? `, or this map's ${here.join(", ")}` : ""}); take it out of the room`);
+    }
+    if (hasTag(d, "candelabra") && d.mount === "floor" && r.floor && !candelabraExempt(r, placed))
+      for (const t of placed) {
+        if (t === r || !t.floor || t.level !== r.level || !isTable(t.data)) continue;
+        const gap = Math.max(0, -overlapDepth(r.floor, t.floor));
+        if (gap >= CANDELABRA_TABLE_GAP - EPS) continue;
+        vio(ctx, r.work.id, "candelabra-table",
+          `${r.work.prop} stands ${f2(gap)} m from ${t.work.id} (${t.work.prop}): a standing candelabra never stands beside a table. The table's light is the LOW candelabra ` +
+            `(a surface candelabra placed { "kind": "on", "item": "${t.work.group || t.work.id}" }); a standing one goes against a wall, in a corner or by the altar (auto prefer "wall"/"corner", or near the altar)`);
+        break;
+      }
+  }
+  for (const [level, g] of ctx.grids)
+    for (const rm of g.lv.rooms) {
+      const spec = plan.rooms[rm.id];
+      if (!spec) continue;
+      const here = placed.filter((r) => r.level === level && r.room === rm.id);
+      if (roomRoles(ctx, rm.id).includes("chapel")) chapelCheck(ctx, level, rm, here);
+      graveyardCheck(ctx, level, rm, here, placeableFloor(g.lv).find((x) => x.room === rm.id)?.placeable ?? rm.area);
+      const hung = here.filter((r) => isChandelier(r.data)).length, wanted = chandeliersWanted(rm);
+      if (wantsChandelier(ctx, rm) && hung < wanted)
+        warn(ctx, rm.id, "no-chandelier",
+          `room ${rm.id} (${spec.role}, ${f2(rm.area)} m², ridge ${f2(rm.maxHead)} m) is tall-roofed and has ${hung ? `${hung} chandelier(s)` : "no chandelier"}: ` +
+            (wanted > 1
+              ? `a long hall hangs a line of ${wanted} under its ridge, ${CEILING_LINE[0]}-${CEILING_LINE[1]} m apart (each { "kind": "auto", "room": "${rm.id}", "near": "ceiling-centre" } takes the next spot)`
+              : `hang one at its ceiling centre ({ "kind": "auto", "room": "${rm.id}", "near": "ceiling-centre" }, a chandelier prop)`));
+    }
+}
+
+// ---- outdoor LAYOUT: vignettes (owner walk 2026-10-21) ---------------------------------------------------------------
+// "Pretty much all of them just look like clutter in a small area, they don't look designed... is it looking for a small
+// square place to put things?": an outdoor area went through the room resolver (prefer wall / open on its socket map), so
+// its props piled into one patch. A site is laid out in VIGNETTES instead: a camp round its fire, a work line along the
+// shore, a yard before a hut, a shrine, a midden at the back, a lookout on the crest; each by its own rule, spread over
+// the area 6-12 m apart, 2 m off the walking lanes and door lines.
+
+/** Unanchored vignettes stand this far apart, centre to centre (closer is refused, farther only when the area is that big). */
+export const VIGNETTE_SPACING: readonly [number, number] = [6, 12];
+/** A vignette's members keep this far off a walking lane's edge (the approach, the footpaths) and a door line. */
+export const VIGNETTE_LANE_M = 2;
+/** Camp seats/logs stand this far off the fire's edge, facing it. */
+export const CAMP_SEAT_GAP: readonly [number, number] = [1.2, 1.8];
+/** Camp tents/bedrolls stand this far off the fire's edge, their doors toward it. */
+export const CAMP_TENT_GAP: readonly [number, number] = [3, 5];
+/** A work line's racks/frames/benches stand this far apart along their edge. */
+export const WORK_PITCH: readonly [number, number] = [1.5, 2.5];
+/** Nothing solid stands within this many metres in front of a door, an opening or a hallway mouth (`opening-clear`), indoors and out. */
+export const OPENING_CLEAR = 1.2;
+/** Outdoor density: the fewest props per 100 m² of an area's placeable ground, by area role (`site-sparse`); at least 2. */
+export const SITE_DENSITY: Readonly<Record<string, number>> = { camp: 1.2, yard: 1.0, ruin: 1.0, shore: 0.6, path: 0.4, "cave-mouth": 0.8 };
+/** Outdoor density cap: the most props per 100 m² of placeable ground (`site-dense`). */
+export const SITE_DENSITY_CAP = 6;
+/** `site-spread`: no SITE_CELL_M x SITE_CELL_M cell of an area holds more than SITE_SPREAD of its props (vignette members excepted). */
+export const SITE_CELL_M = 5;
+export const SITE_SPREAD = 0.35;
+/** `site-clutter`: a prop in no vignette with SITE_CLUTTER_N or more others within SITE_CLUTTER_R m is clutter. */
+export const SITE_CLUTTER_R = 3;
+export const SITE_CLUTTER_N = 6;
+/** Outdoors a loose `prefer: "open"` piece is scored up to this many metres away from what already stands (spread, not heaped). */
+export const SITE_OPEN_SPREAD = 8;
+/** Rough radius of each vignette kind's footprint, metres (spacing, lane keep and the centre's open-ground test). */
+export const VIGNETTE_RADIUS: Readonly<Record<ArrangementKind, number>> = { camp: 6, "work-line": 5, yard: 5, shrine: 3, midden: 3, lookout: 2.5, graveyard: 0 };
+
+/** The role an item plays in its vignette when the plan names none: read from the prop's id and declaration. */
+export function arrangementPart(kind: ArrangementKind, prop: string, d: DressingData): string {
+  const id = prop.toLowerCase();
+  const fire = d.fire || /fire|brazier|pyre|hearth|bonfire|firepit/.test(id);
+  const seat = d.use.includes("seat") || /seat|stool|log|bench|chair|stump/.test(id);
+  const tent = d.category === "bedding" || /tent|bedroll|lean-to|shelter|bedding/.test(id);
+  switch (kind) {
+    case "camp":
+      return fire ? "centre" : seat ? "seat" : tent ? "tent" : "kit";
+    case "work-line":
+      return isLooseClutter(d) ? "end" : "line";
+    case "yard":
+      return /cart|wagon|barrow/.test(id) ? "cart" : /bench|table|anvil|block|trestle/.test(id) ? "bench" : /tool|axe|saw|hammer|grind|whet/.test(id) ? "tool" : "front";
+    case "shrine":
+      return hasTag(d, "altar") || /altar|cairn|shrine|idol|statue|totem|standing-stone|monolith/.test(id) ? "centre" : "offering";
+    case "midden":
+      return "heap";
+    case "lookout":
+      return "seat";
+    case "graveyard":
+      return "grave";
+  }
+}
+
+/** One laid-out vignette: where it stands, which way its front looks, and the edge it lines (work-line, yard). */
+interface Vignette {
+  id: string;
+  kind: ArrangementKind;
+  room: string;
+  level: number;
+  centre: V2;
+  /** Unit vector its front looks along. */
+  facing: V2;
+  /** Radius of the thing at its centre (the fire's edge, the structure's footprint), metres. */
+  core: number;
+  /** The edge it lines: a point on it, its normal into the vignette, and whether the line faces the edge (water). */
+  edge?: { base: V2; n: V2; faceIn: boolean };
+  /** Where the walking route enters the area (the cart's gate). */
+  entry: V2;
+  /** A camp's tents that are STRUCTURES (site anchors `structure-*tent*|shelter|hut|lean-to`): its kit piles beside them. */
+  tents: { at: V2; r: number }[];
+  /** How it was placed, for the auto note. */
+  how: string;
+}
+
+const nrm = (v: V2): V2 => {
+  const l = Math.hypot(v[0], v[1]);
+  return l < EPS ? [0, 1] : [v[0] / l, v[1] / l];
+};
+const segDist = (p: V2, a: V2, b: V2): number => {
+  const dx = b[0] - a[0], dz = b[1] - a[1], l2 = dx * dx + dz * dz || 1, t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2));
+  return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dz);
+};
+/** Metres from a point to the nearest walking lane's EDGE (the level's paths) and door line (a door anchor carried DOOR_LINE m out). */
+function laneClearance(ctx: Ctx, level: number, p: V2): number {
+  const g = ctx.grids.get(level)!;
+  let d = Infinity;
+  for (const path of g.lv.paths ?? []) {
+    const pts = path.points;
+    for (let i = 0; i < pts.length; i++) d = Math.min(d, segDist(p, pts[i]!, pts[Math.min(i + 1, pts.length - 1)]!) - path.width / 2);
+  }
+  for (const a of ctx.input.map.anchors) {
+    if (a.level !== level || (a.kind !== "door" && a.kind !== "cave-mouth")) continue;
+    const f = fwd(a.yaw * DEG), o: V2 = [a.position[0], a.position[2]];
+    d = Math.min(d, segDist(p, o, [o[0] + f[0] * DOOR_LINE, o[1] + f[1] * DOOR_LINE]) - 0.8);
+  }
+  return d;
+}
+
+/** The free floor cells of a room ('o' / '.'), as centres. */
+function freeCells(g: Grid, room: string): V2[] {
+  const out: V2[] = [];
+  for (let r = 0; r < g.lv.rows; r++)
+    for (let c = 0; c < g.lv.columns; c++) {
+      const ch = g.ch(c, r);
+      if ((ch === "o" || ch === ".") && g.roomAt(c, r) === room) out.push(g.centre(c, r));
+    }
+  return out;
+}
+/** Where the walking route enters the room: an `approach-end` anchor, else the middle of its entry ('E') cells, else its door. */
+function entryPoint(ctx: Ctx, level: number, room: string): V2 | undefined {
+  const g = ctx.grids.get(level)!;
+  const a = ctx.input.map.anchors.find((x) => x.level === level && x.kind === "approach-end" && (x.id.startsWith(`${room}/`) || !x.id.includes("/")));
+  if (a) return [a.position[0], a.position[2]];
+  let sx = 0, sz = 0, n = 0;
+  for (let r = 0; r < g.lv.rows; r++)
+    for (let c = 0; c < g.lv.columns; c++)
+      if (g.ch(c, r) === "E" && g.roomAt(c, r) === room) {
+        const [x, z] = g.centre(c, r);
+        [sx, sz, n] = [sx + x, sz + z, n + 1];
+      }
+  if (n) return [sx / n, sz / n];
+  return doorOf(ctx, level, room)?.at;
+}
+
+/** A plan anchor reference -> a point, facing and size, or why not. */
+function vignetteAnchor(ctx: Ctx, level: number, room: string, ref: string, out: Map<string, Res>, setAnchor: Map<string, string>): { at: V2; facing?: V2; radius: number; kind: string } | string {
+  if (ref.startsWith("item:")) {
+    const id = ref.slice(5), it = out.get(id) ?? out.get(setAnchor.get(id) ?? "");
+    if (!it) return `anchor "${ref}": item "${id}" is not placed before this vignette's first member (items resolve in plan order)`;
+    return { at: [it.box.cx, it.box.cz], facing: fwd(it.box.yaw), radius: Math.max(it.box.w, it.box.d) / 2, kind: "item" };
+  }
+  const anchors = ctx.input.map.anchors.filter((a) => a.level === level);
+  let id = ref;
+  const st = /^structure:(\S+)(\s+front)?$/.exec(ref);
+  if (st) id = `${room}/${st[2] ? "front" : "structure"}-${st[1]}`;
+  let a: SocketAnchor | undefined;
+  if (ref.startsWith("kind:")) {
+    const k = ref.slice(5), rm = ctx.grids.get(level)!.lv.rooms.find((r) => r.id === room)!;
+    const mine = (x: SocketAnchor): number => (x.id.startsWith(`${room}/`) ? 0 : 1);
+    const dc = (x: SocketAnchor): number => Math.hypot(x.position[0] - rm.centre[0], x.position[2] - rm.centre[1]);
+    a = anchors.filter((x) => x.kind === k).sort((x, y) => mine(x) - mine(y) || dc(x) - dc(y))[0];
+  } else a = anchors.find((x) => x.id === id) ?? anchors.find((x) => x.id === `${room}/${id}`);
+  if (!a) {
+    const near = anchors.filter((x) => x.id.startsWith(`${room}/`) && !/^(edge|path-side|hearth-seat)/.test(x.id.slice(room.length + 1))).map((x) => x.id);
+    return `anchor "${ref}" is not an anchor of map "${ctx.input.map.id}" on level ${level}${near.length ? ` (room ${room} has ${near.join(", ")})` : ""}: re-measure with site-sockets or name another`;
+  }
+  return { at: [a.position[0], a.position[2]], facing: fwd(a.yaw * DEG), radius: a.size ? Math.max(a.size[0], a.size[2]) / 2 : 0, kind: a.kind };
+}
+
+/** Lay out every vignette of a room once: anchored ones on their anchors, the rest spread along the room's long axis. */
+function vignettesOf(ctx: Ctx, level: number, room: string, out: Map<string, Res>, setAnchor: Map<string, string>): void {
+  const key = `${level}|${room}`;
+  if (ctx.vignetteRooms.has(key)) return;
+  ctx.vignetteRooms.add(key);
+  const g = ctx.grids.get(level)!, rm = g.lv.rooms.find((r) => r.id === room)!;
+  const specs = (ctx.input.plan.arrangements ?? []).filter((a) => a.room === room);
+  const entry = entryPoint(ctx, level, room) ?? ([rm.centre[0], rm.centre[1] - 1] as V2);
+  const free = freeCells(g, room);
+  const placed: V2[] = [];
+  const facingOf = (spec: DressingArrangement, c: V2, anchorFacing?: V2): V2 => {
+    const f = spec.facing ?? (spec.kind === "lookout" ? "out" : spec.kind === "midden" ? "in" : (spec.kind === "yard" || spec.kind === "work-line") && anchorFacing ? "anchor" : "approach");
+    if (Array.isArray(f)) return nrm(f as V2);
+    if (f === "anchor" && anchorFacing) return nrm(anchorFacing);
+    const toC = nrm([rm.centre[0] - c[0], rm.centre[1] - c[1]]);
+    if (f === "in") return toC;
+    if (f === "out") return [-toC[0], -toC[1]];
+    const e: V2 = [entry[0] - c[0], entry[1] - c[1]];
+    return Math.hypot(e[0], e[1]) < 1 ? toC : nrm(e);
+  };
+  const placedR: number[] = [];
+  const tentsNear = (c: V2): { at: V2; r: number }[] =>
+    ctx.input.map.anchors
+      .filter((a) => a.level === level && a.kind === "structure" && /tent|shelter|hut|lean-to/.test(a.id) && Math.hypot(a.position[0] - c[0], a.position[2] - c[1]) < 10)
+      .map((a) => ({ at: [a.position[0], a.position[2]] as V2, r: a.size ? Math.max(a.size[0], a.size[2]) / 2 : 1.5 }));
+  const set = (spec: DressingArrangement, v: Omit<Vignette, "id" | "kind" | "room" | "level" | "entry" | "tents">): void => {
+    ctx.vignettes.set(spec.id, { id: spec.id, kind: spec.kind, room, level, entry, tents: spec.kind === "camp" ? tentsNear(v.centre) : [], ...v });
+    placed.push(v.centre);
+    placedR.push(VIGNETTE_RADIUS[spec.kind] + v.core);
+  };
+  // anchored (or fixed) first
+  for (const spec of specs) {
+    if (spec.kind === "graveyard") {
+      ctx.vignettes.set(spec.id, { id: spec.id, kind: spec.kind, room, level, entry, tents: [], centre: rm.centre, facing: [0, 1], core: 0, how: "graves in rows" });
+      continue;
+    }
+    if (spec.at) {
+      set(spec, { centre: [spec.at[0], spec.at[1]], facing: facingOf(spec, spec.at as V2), core: 0, how: `at ${at2(spec.at[0], spec.at[1])}` });
+      continue;
+    }
+    if (!spec.anchor) continue;
+    const a = vignetteAnchor(ctx, level, room, spec.anchor, out, setAnchor);
+    if (typeof a === "string") {
+      ctx.vignettes.set(spec.id, a);
+      continue;
+    }
+    const lining = spec.kind === "work-line" || spec.kind === "yard";
+    // a water-edge pitch faces the water: the line's normal points back from it and its racks face the water
+    const water = a.kind === "water-edge";
+    const n: V2 = a.facing ? (water ? [-a.facing[0], -a.facing[1]] : a.facing) : nrm([rm.centre[0] - a.at[0], rm.centre[1] - a.at[1]]);
+    const centre: V2 = lining ? [a.at[0] + n[0] * 2.5, a.at[1] + n[1] * 2.5] : a.at;
+    set(spec, { centre, facing: facingOf(spec, centre, n), core: a.radius, ...(lining ? { edge: { base: a.at, n, faceIn: water } } : {}), how: `on ${spec.anchor}` });
+  }
+  // the rest spread along the long axis (a midden at the back edge, a lookout on the crest)
+  const rest = specs.filter((s) => s.kind !== "graveyard" && !s.anchor && !s.at);
+  if (!rest.length) return;
+  let mx = 0, mz = 0;
+  for (const p of free) [mx, mz] = [mx + p[0], mz + p[1]];
+  const N = Math.max(1, free.length);
+  [mx, mz] = [mx / N, mz / N];
+  let sxx = 0, szz = 0, sxz = 0;
+  for (const p of free) {
+    const dx = p[0] - mx, dz = p[1] - mz;
+    [sxx, szz, sxz] = [sxx + dx * dx, szz + dz * dz, sxz + dx * dz];
+  }
+  const th = 0.5 * Math.atan2(2 * sxz, sxx - szz), ax: V2 = [Math.cos(th), Math.sin(th)], lat: V2 = [-ax[1], ax[0]];
+  const along = free.map((p) => (p[0] - mx) * ax[0] + (p[1] - mz) * ax[1]).sort((a, b) => a - b);
+  const a0 = along[Math.floor(along.length * 0.05)] ?? 0, a1 = along[Math.floor(along.length * 0.95)] ?? 0;
+  const openShare = (c: V2, r: number): number => {
+    let n = 0, ok = 0;
+    for (let dz = -r; dz <= r + EPS; dz += 0.5)
+      for (let dx = -r; dx <= r + EPS; dx += 0.5) {
+        if (dx * dx + dz * dz > r * r) continue;
+        n++;
+        const [cc, rr] = g.cellOf(c[0] + dx, c[1] + dz), ch = g.ch(cc, rr);
+        if ((ch === "o" || ch === ".") && g.roomAt(cc, rr) === room) ok++;
+      }
+    return n ? ok / n : 0;
+  };
+  const samples = free.filter((_, i) => i % 3 === 0);
+  const back = nrm([mx - entry[0], mz - entry[1]]);
+  rest.forEach((spec, i) => {
+    const R = VIGNETTE_RADIUS[spec.kind];
+    const t = rest.length === 1 ? (a0 + a1) / 2 : a0 + ((i + 0.5) / rest.length) * (a1 - a0);
+    const target: V2 = [mx + ax[0] * t, mz + ax[1] * t];
+    let best: V2 | undefined, bestS = Infinity;
+    for (const p of samples) {
+      const lane = laneClearance(ctx, level, p);
+      if (lane < VIGNETTE_LANE_M + 1 - EPS) continue;
+      const share = openShare(p, Math.min(2, R * 0.5));
+      if (share < 0.6) continue;
+      // spacing: centre to centre, and clear of each placed vignette's own footprint (a camp's ring reaches past 6 m)
+      const nearest = placed.length ? Math.min(...placed.map((q) => Math.hypot(q[0] - p[0], q[1] - p[1]))) : Infinity;
+      const crowd = placed.length ? Math.max(...placed.map((q, j) => (placedR[j]! + R) * 0.7 - Math.hypot(q[0] - p[0], q[1] - p[1]))) : -Infinity;
+
+      let s: number;
+      if (spec.kind === "midden") s = -((p[0] - entry[0]) * back[0] + (p[1] - entry[1]) * back[1]); // the back edge: farthest from the approach
+      else if (spec.kind === "lookout") s = -((p[0] - mx) * back[0] + (p[1] - mz) * back[1]) - 0.3 * Math.hypot(p[0] - mx, p[1] - mz); // the crest: out past the far side
+      else s = Math.hypot(p[0] - target[0], p[1] - target[1]) * 0.5 + Math.abs((p[0] - mx) * lat[0] + (p[1] - mz) * lat[1]) * 0.2;
+      if (nearest < VIGNETTE_SPACING[0]) s += 100 + (VIGNETTE_SPACING[0] - nearest) * 10;
+      else if (nearest > VIGNETTE_SPACING[1] && Number.isFinite(nearest)) s += (nearest - VIGNETTE_SPACING[1]) * 0.5;
+      if (crowd > 0) s += 50 + crowd * 10;
+      s += (1 - share) * 4 - Math.min(lane, 6) * 0.2;
+      if (s < bestS) [best, bestS] = [p, s];
+    }
+    if (!best) {
+      ctx.vignettes.set(spec.id, `vignette "${spec.id}" (${spec.kind}) finds no open ground in room ${room} ${VIGNETTE_LANE_M + 1} m off every walking lane and door line: anchor it (\`anchor\`) or widen the area`);
+      return;
+    }
+    const b = best, near = placed.length ? Math.min(...placed.map((q) => Math.hypot(q[0] - b[0], q[1] - b[1]))) : Infinity;
+    set(spec, { centre: b, facing: facingOf(spec, b), core: 0, how: `spread${Number.isFinite(near) ? `, ${f2(near)} m from the next` : " on the long axis"}` });
+  });
+}
+
+/** The vignette an item belongs to (laid out with its room's others on first use), or why it cannot be. */
+function vignetteFor(ctx: Ctx, level: number, room: string, id: string, out: Map<string, Res>, setAnchor: Map<string, string>): Vignette | string {
+  const spec = (ctx.input.plan.arrangements ?? []).find((a) => a.id === id);
+  if (!spec) return `arrangement "${id}" is not in plan.arrangements`;
+  if (spec.room !== room) return `arrangement "${id}" stands in room ${spec.room}, not ${room}`;
+  vignettesOf(ctx, level, room, out, setAnchor);
+  return ctx.vignettes.get(id) ?? `arrangement "${id}" was not laid out`;
+}
+
+/** This member's index among its vignette's members of the same part (plan order), and how many the plan has. */
+function partIndex(ctx: Ctx, w: Work, v: Vignette, part: string): { k: number; n: number } {
+  let k = -1, n = 0;
+  for (const it of ctx.input.plan.items) {
+    const p = it.place;
+    if (p.kind !== "auto" || p.arrangement !== v.id) continue;
+    const d = it.prop ? ctx.input.prop(it.prop) : undefined;
+    const pt = p.part ?? (d ? arrangementPart(v.kind, it.prop, d) : "kit");
+    if (pt !== part) continue;
+    if (it.id === (w.group || w.id)) k = n;
+    n++;
+  }
+  return { k: Math.max(0, k), n: Math.max(1, n) };
+}
+
+/** Candidate spots (map XZ + yaw radians) for one vignette member, best first. */
+function vignetteSlots(v: Vignette, part: string, k: number, n: number, d: DressingData, mates: Res[]): { at: V2; yaw: number }[] {
+  const out: { at: V2; yaw: number }[] = [];
+  const c = v.centre, f = v.facing, side: V2 = [f[1], -f[0]], depth = Math.max(d.size[0], d.size[2]) / 2;
+  const ang0 = Math.atan2(f[1], f[0]);
+  const polar = (r: number, a: number): V2 => [c[0] + Math.cos(a) * r, c[1] + Math.sin(a) * r];
+  const facingC = (p: V2): number => yawOf([c[0] - p[0], c[1] - p[1]]);
+  // member k of n takes its share of the arc first, then the neighbouring angles
+  const ring = (radii: number[], arc0: number, arc1: number): void => {
+    const base = arc0 + ((k + 0.5) / n) * (arc1 - arc0), steps = [0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6, 8, -8, 10, -10, 12];
+    for (const s of steps)
+      for (const r of radii) {
+        const p = polar(r, base + s * (Math.PI / 24));
+        out.push({ at: p, yaw: facingC(p) });
+      }
+  };
+  const lineAt = (base: V2, n0: V2, off: number, t: number, yaw: number): { at: V2; yaw: number } => {
+    const u: V2 = [n0[1], -n0[0]];
+    return { at: [base[0] + n0[0] * off + u[0] * t, base[1] + n0[1] * off + u[1] * t], yaw };
+  };
+  const core = Math.max(v.core, ...mates.filter((m) => m.work.vpart === "centre").map((m) => Math.max(m.box.w, m.box.d) / 2));
+  switch (v.kind) {
+    case "camp": {
+      if (part === "centre") {
+        for (let r = 0; r <= 3; r += 0.5) for (let i = 0; i < (r ? 8 : 1); i++) out.push({ at: polar(r, ang0 + (i * Math.PI) / 4), yaw: yawOf(f) });
+        break;
+      }
+      // the approach side (its front) stays open: seats round the far 240 degrees, tents round the back half
+      if (part === "seat") {
+        ring([1.5, 1.3, 1.7, 1.2, 1.8].map((x) => core + depth + x), ang0 + Math.PI / 3, ang0 + (5 * Math.PI) / 3);
+        break;
+      }
+      if (part === "tent") {
+        ring([4, 3.5, 4.5, 3, 5].map((x) => core + depth + x), ang0 + Math.PI / 2, ang0 + (3 * Math.PI) / 2);
+        break;
+      }
+      // kit: beside a tent (a placed tent member, else a tent that is a structure), else on the tent ring
+      const tents = [...mates.filter((m) => m.work.vpart === "tent").map((m) => ({ at: [m.box.cx, m.box.cz] as V2, r: Math.max(m.box.w, m.box.d) / 2 })), ...v.tents];
+      for (let i = 0; i < tents.length; i++) {
+        const t = tents[(k + i) % tents.length]!, r = Math.hypot(t.at[0] - c[0], t.at[1] - c[1]), a = Math.atan2(t.at[1] - c[1], t.at[0] - c[0]);
+        const off = (t.r + depth + 0.6) / Math.max(r, 1);
+        for (const s of [1, -1, 1.5, -1.5]) {
+          const p = polar(r, a + s * off);
+          out.push({ at: p, yaw: facingC(p) });
+        }
+      }
+      ring([3.2, 3.8, 2.8, 4.4].map((x) => core + depth + x), ang0 + Math.PI / 2, ang0 + (3 * Math.PI) / 2);
+      break;
+    }
+    case "work-line":
+    case "yard": {
+      const e = v.edge ?? { base: [c[0] - f[0] * 2.5, c[1] - f[1] * 2.5] as V2, n: f, faceIn: false };
+      const face = e.faceIn ? yawOf([-e.n[0], -e.n[1]]) : yawOf(e.n);
+      if (v.kind === "work-line" || part === "front") {
+        const pitches = v.kind === "work-line" ? [2, 1.75, 2.25, 1.5, 2.5] : [1.1, 1.3, 1.6];
+        // member k's own slot on the line first; where the edge is blocked the whole line slides along it a slot at a time
+        // (the members keep the pitch between them), then steps out from the edge
+        const lineN = mates.filter((m) => m.work.vpart === "line").length || 1;
+        for (const shift of [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5])
+          for (const off of [0.6, 1.0, 1.5, 2.2])
+            for (const pitch of pitches) {
+              const t = part === "end" ? (k % 2 ? -1 : 1) * (((lineN - 1) / 2) * 2 + 1.6 + Math.floor(k / 2) * 1.1) + shift * pitch : (k - (n - 1) / 2 + shift) * pitch;
+              out.push(lineAt(e.base, e.n, off + d.size[2] / 2, t, face));
+            }
+        break;
+      }
+      if (part === "cart") {
+        const into = nrm([c[0] - v.entry[0], c[1] - v.entry[1]]), sd: V2 = [into[1], -into[0]];
+        for (const dIn of [3.5, 4.5, 5.5, 2.8, 6.5]) for (const s of [2.6, -2.6, 3.4, -3.4, 4.2, -4.2]) out.push({ at: [v.entry[0] + into[0] * dIn + sd[0] * s, v.entry[1] + into[1] * dIn + sd[1] * s], yaw: yawOf(into) });
+        break;
+      }
+      const bench = mates.find((m) => m.work.vpart === "bench");
+      if (part === "tool" && bench) {
+        const b: V2 = [bench.box.cx, bench.box.cz], u = fwd(bench.box.yaw + Math.PI / 2), off = bench.box.w / 2 + depth + 0.4;
+        for (const s of [1, -1, 1.6, -1.6]) out.push({ at: [b[0] + u[0] * off * s, b[1] + u[1] * off * s], yaw: bench.box.yaw });
+      }
+      for (const sgn of [1, -1]) for (const dd of [2.5, 3.2, 4]) out.push(lineAt(e.base, e.n, dd, sgn * (2.5 + k * 1.2), face));
+      break;
+    }
+    case "shrine": {
+      if (part === "centre") {
+        for (let r = 0; r <= 2; r += 0.5) for (let i = 0; i < (r ? 8 : 1); i++) out.push({ at: polar(r, ang0 + (i * Math.PI) / 4), yaw: yawOf(f) });
+        break;
+      }
+      ring([1.6, 1.3, 2.0, 2.2].map((x) => core + depth + x), ang0 - Math.PI / 3, ang0 + Math.PI / 3);
+      break;
+    }
+    case "midden": {
+      const ga = Math.PI * (3 - Math.sqrt(5));
+      for (let i = 0; i < 40; i++) {
+        const j = (k + i) % 40, r = 1.1 * Math.sqrt(j + 0.3) + depth * 0.5;
+        out.push({ at: polar(r, j * ga), yaw: yawOf(f) + j * 0.8 });
+      }
+      break;
+    }
+    case "lookout": {
+      for (const s of [0, 1, -1, 2, -2, 3, -3])
+        for (const back of [0, 0.6, 1.2]) {
+          const t = (k - (n - 1) / 2 + s) * 1.4;
+          out.push({ at: [c[0] + side[0] * t - f[0] * back, c[1] + side[1] * t - f[1] * back], yaw: yawOf(f) });
+        }
+      break;
+    }
+    case "graveyard":
+      break;
+  }
+  return out;
+}
+
+/** The yaw a vignette member should face by its part's rule (`facing-sense`), radians; undefined when its part has none. */
+function partFacing(v: Vignette, part: string, at: V2): { yaw: number; what: string } | undefined {
+  const toC = yawOf([v.centre[0] - at[0], v.centre[1] - at[1]]);
+  if (v.kind === "camp" && (part === "seat" || part === "tent")) return { yaw: toC, what: "the fire" };
+  if (v.kind === "shrine" && part === "offering") return { yaw: toC, what: "the shrine" };
+  if (v.kind === "lookout") return { yaw: yawOf(v.facing), what: "the view" };
+  if (v.kind === "work-line" && part === "line" && v.edge) return { yaw: yawOf(v.edge.faceIn ? [-v.edge.n[0], -v.edge.n[1]] : v.edge.n), what: v.edge.faceIn ? "the water" : "square off its edge" };
+  return undefined;
+}
+const angleOff = (a: number, b: number): number => Math.abs((((a - b + 3 * Math.PI) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) - Math.PI);
+
+// ---- openings: nothing in front of a door, an opening or a hallway mouth, indoors and out ---------------------------
+// Derek saw props in front of hallway openings in dungeons too: the doorway hard buffer (0.6 m all round) let a crate stand
+// in a doorway's walk line. OPENING_CLEAR m in front of every doorway ('D'), building entry, and outdoor door / cave mouth
+// is clear of solid props.
+interface Opening {
+  rect: Rect;
+  label: string;
+}
+function openingsOf(ctx: Ctx, level: number): Opening[] {
+  const have = ctx.openings.get(level);
+  if (have) return have;
+  const g = ctx.grids.get(level), out: Opening[] = [];
+  if (g) {
+    const site = ctx.input.plan.space?.kind === "site" || !!g.lv.ground;
+    for (const l of doorLinesOf(ctx, level)) {
+      if (site && l.label.startsWith("entry")) continue; // an outdoor area's rim entry is its approach lane (the lanes keep it)
+      // a door line carries DOOR_LINE m along its walk axis: cut back to OPENING_CLEAR
+      const r = l.rect, cut = DOOR_LINE - OPENING_CLEAR;
+      out.push({ rect: r.hw > r.hd ? { ...r, hw: r.hw - cut } : { ...r, hd: r.hd - cut }, label: l.label });
+    }
+    for (const a of ctx.input.map.anchors) {
+      if (a.level !== level || (a.kind !== "door" && a.kind !== "cave-mouth")) continue;
+      const f = fwd(a.yaw * DEG), half = a.kind === "cave-mouth" ? 2 : 1, mid = (OPENING_CLEAR - 0.5) / 2;
+      // the anchor stands just outside the opening: the clear box runs from 0.5 m behind it to OPENING_CLEAR in front
+      out.push({ rect: { cx: a.position[0] + f[0] * mid, cz: a.position[2] + f[1] * mid, hw: half, hd: (OPENING_CLEAR + 0.5) / 2, yaw: a.yaw * DEG }, label: `${a.kind} ${a.id}` });
+    }
+  }
+  ctx.openings.set(level, out);
+  return out;
+}
+function openingHit(ctx: Ctx, level: number, r: Rect): Opening | undefined {
+  return openingsOf(ctx, level).find((o) => overlapDepth(r, o.rect) > 0.05);
+}
+
+/**
+ * `opening-clear` everywhere; vignette `facing-sense`; and on an outdoor site (plan `space.kind` "site"): density by area
+ * (`site-sparse` / `site-dense`), spread (`site-spread`) and loose clutter (`site-clutter`).
+ */
+function layoutChecks(ctx: Ctx, placed: Res[]): void {
+  for (const r of placed) {
+    if (!r.floor || !r.data.solid) continue;
+    const hit = openingHit(ctx, r.level, r.floor);
+    if (hit)
+      vio(ctx, r.work.id, "opening-clear",
+        `${r.work.prop} stands within ${OPENING_CLEAR} m in front of the ${hit.label}: a door, opening or hallway mouth keeps its front clear (auto places skip it); move it aside`);
+  }
+  for (const r of placed) {
+    if (!r.work.vignette || !r.work.vpart) continue;
+    const want = partFacing(r.work.vignette, r.work.vpart, [r.box.cx, r.box.cz]);
+    if (!want) continue;
+    const off = angleOff(r.box.yaw, want.yaw);
+    if (off > Math.PI / 4 + EPS)
+      vio(ctx, r.work.id, "facing-sense", `${r.work.prop} (${r.work.vignette.kind} ${r.work.vpart}) faces ${Math.round(off / DEG)} deg off ${want.what}: ${r.work.vpart === "seat" ? "seats face the fire" : `it faces ${want.what}`}`);
+  }
+  if (ctx.input.plan.space?.kind !== "site") return;
+  for (const [level, g] of ctx.grids)
+    for (const rm of g.lv.rooms) {
+      const spec = ctx.input.plan.rooms[rm.id];
+      if (!spec) continue;
+      const here = placed.filter((r) => r.level === level && r.room === rm.id && (r.data.mount === "floor" || r.data.mount === "wall"));
+      const placeable = placeableFloor(g.lv).find((x) => x.room === rm.id)?.placeable ?? rm.area;
+      if (!ctx.minItemsGiven) {
+        const per = SITE_DENSITY[spec.role] ?? 1, need = Math.max(2, Math.ceil((per * placeable) / 100)), cap = Math.max(need, Math.floor((SITE_DENSITY_CAP * placeable) / 100));
+        if (here.length && here.length < need)
+          vio(ctx, rm.id, "site-sparse", `site area ${rm.id} (${spec.role}, ${f2(placeable)} m² placeable) has ${here.length} props; an outdoor area holds at least ${per} per 100 m² (${need}): add a vignette or members`);
+        if (here.length > cap) vio(ctx, rm.id, "site-dense", `site area ${rm.id} (${f2(placeable)} m² placeable) has ${here.length} props; at most ${SITE_DENSITY_CAP} per 100 m² (${cap})`);
+      }
+      // spread: no 5 m cell holds more than 35% of the area's props, vignette members excepted (they cluster by design)
+      if (here.length >= 4) {
+        const x0 = rm.bbox[0], z0 = rm.bbox[2], cells = new Map<string, Res[]>();
+        for (const r of here) {
+          const k = `${Math.floor((r.box.cx - x0) / SITE_CELL_M)},${Math.floor((r.box.cz - z0) / SITE_CELL_M)}`;
+          (cells.get(k) ?? cells.set(k, []).get(k)!).push(r);
+        }
+        for (const [k, list] of cells) {
+          const loose = list.filter((r) => !r.work.vignette);
+          if (loose.length >= 3 && loose.length > SITE_SPREAD * here.length + EPS)
+            vio(ctx, rm.id, "site-spread",
+              `site area ${rm.id}: ${loose.length} of its ${here.length} props (${Math.round((loose.length / here.length) * 100)}%, at most ${Math.round(SITE_SPREAD * 100)}%) stand in one ${SITE_CELL_M} m cell ` +
+                `(${k}: ${loose.map((r) => r.work.id).join(", ")}) and in no vignette: lay the area out in vignettes (plan \`arrangements\`: camp, work-line, yard, shrine, midden, lookout) spread over it`);
+        }
+      }
+      for (const r of here) {
+        if (r.work.vignette) continue;
+        const near = here.filter((o) => o !== r && Math.hypot(o.box.cx - r.box.cx, o.box.cz - r.box.cz) <= SITE_CLUTTER_R).length;
+        if (near >= SITE_CLUTTER_N)
+          vio(ctx, r.work.id, "site-clutter", `${r.work.prop} is in no vignette and has ${near} props within ${SITE_CLUTTER_R} m: a heap of things is clutter, not a design; give it a vignette (\`arrangement\`) or leave it out`);
+      }
+    }
 }
 
 // ---- placement by intent (`auto` places) -----------------------------------
@@ -1484,7 +2898,13 @@ const AUTO_SPACED = 0.45;
 /** Spots along a wall are tried every AUTO_T metres. */
 const AUTO_T = 0.125;
 /** Exact lane checks tried before giving up on an item. */
-const AUTO_LANE_TRIES = 40;
+const AUTO_LANE_TRIES = 100;
+/** Of those, the first ones tried strictly in score order before the tries spread out (AUTO_LANE_SPREAD). */
+const AUTO_LANE_EXACT = 40;
+/** Score added to a spot inside a stair/doorway warn buffer or a hearth's comfort buffer (see autoComfort). */
+const AUTO_UNCOMFORTABLE = 20;
+/** A spot this close (metres) to one whose lane check failed is skipped untried: the tries spread over the room. */
+const AUTO_LANE_SPREAD = 0.6;
 
 const mirrorRel = (p: RelPlace): RelPlace => ({ ...p, at: [-p.at[0], p.at[1]], yaw: -p.yaw });
 
@@ -1542,16 +2962,26 @@ function autoPieceRefusal(ctx: Ctx, g: Grid, room: string, p: Res, wall: SocketW
   if (!d.solid) return undefined;
   if (!exemptCentre(p.work, d) && centreHit(ctx, g, p.level, rect)) return "the room's keep-clear centre";
   if (marginHit(g, rect, ctx.opts.pathMargin)) return "the walk-line margin";
+  if (openingHit(ctx, p.level, rect)) return "in front of a door or opening";
+  if (d.neverInDoorLine && doorLineHit(ctx, p.level, rect)) return "a door line";
   // stair / well / doorway / entry hard buffer
   const reach = ctx.opts.hardBuffer + Math.hypot(rect.hw, rect.hd) + g.step;
   const [c0, r0] = g.cellOf(rect.cx - reach, rect.cz - reach), [c1, r1] = g.cellOf(rect.cx + reach, rect.cz + reach);
-  for (let rr = r0; rr <= r1; rr++)
-    for (let c = c0; c <= c1; c++) if (HAZARD_NAME[g.ch(c, rr)] && g.distToCell(rect, c, rr) < ctx.opts.hardBuffer - EPS) return "too close to a stair or doorway";
+  if (g.count("z", c0, r0, c1, r1))
+    for (let rr = r0; rr <= r1; rr++)
+      for (let c = c0; c <= c1; c++) if (HAZARD_NAME[g.ch(c, rr)] && g.distToCell(rect, c, rr) < ctx.opts.hardBuffer - EPS) return "too close to a stair or doorway";
+  const reachP = Math.hypot(rect.hw, rect.hd);
   for (const s of standing) {
     if (s.level !== p.level) continue;
-    if (s.floor && -overlapDepth(rect, s.floor) < AUTO_GAP - EPS) return `too close to ${s.work.id}`;
-    const strip = clearStrip(s);
-    if (strip && overlapDepth(strip, rect) > 0.01) return `in front of ${s.work.id}`;
+    // far apart (centres beyond both footprints, the other's clearance strip and 1.5x the gap: a separation measured on the
+    // rectangles' own axes is at least the true distance / sqrt 2): nothing below can hit
+    const rs = Math.max(Math.hypot(s.box.w, s.box.d) / 2, s.floor ? Math.hypot(s.floor.hw, s.floor.hd) : 0) + Math.max(0, s.data.clearance);
+    const far = Math.hypot(s.box.cx - rect.cx, s.box.cz - rect.cz) > reachP + rs + AUTO_GAP * 1.5 + 0.05;
+    if (!far) {
+      if (s.floor && -overlapDepth(rect, s.floor) < AUTO_GAP - EPS) return `too close to ${s.work.id}`;
+      const strip = clearStrip(s);
+      if (strip && overlapDepth(strip, rect) > 0.01) return `in front of ${s.work.id}`;
+    }
     if (p.onWall && s.onWall && s.onWall.wall === p.onWall.wall) {
       const dt = Math.min(s.onWall.t1, p.onWall.t1) - Math.max(s.onWall.t0, p.onWall.t0), dy = Math.min(s.onWall.y1, p.onWall.y1) - Math.max(s.onWall.y0, p.onWall.y0);
       if (dt > 0.01 && dy > 0.01) return `under ${s.work.id} on the wall`;
@@ -1570,30 +3000,36 @@ function autoPieceRefusal(ctx: Ctx, g: Grid, room: string, p: Res, wall: SocketW
 }
 
 /** Soft cost of standing inside the comfortable buffers (the resolver warns there): stairs/doorways under warnBuffer, a hearth's clearance under hardBuffer. */
-function autoComfort(ctx: Ctx, g: Grid, pieces: Res[]): number {
+function autoComfort(ctx: Ctx, g: Grid, pieces: Res[], hearthOk = false): number {
   let cost = 0;
   for (const p of pieces) {
     if (!p.floor) continue;
     const rect = p.floor, reach = ctx.opts.warnBuffer + Math.hypot(rect.hw, rect.hd) + g.step;
     const [c0, r0] = g.cellOf(rect.cx - reach, rect.cz - reach), [c1, r1] = g.cellOf(rect.cx + reach, rect.cz + reach);
     let dh = Infinity, dz = Infinity;
+    if (!g.count("z", c0, r0, c1, r1) && (hearthOk || !g.count("H", c0, r0, c1, r1))) continue;
     for (let rr = r0; rr <= r1; rr++)
       for (let c = c0; c <= c1; c++) {
         const ch = g.ch(c, rr);
         if (HAZARD_NAME[ch]) dz = Math.min(dz, g.distToCell(rect, c, rr));
         else if (ch === "H") dh = Math.min(dh, g.distToCell(rect, c, rr));
       }
-    cost += Math.max(0, ctx.opts.warnBuffer - dz) + Math.max(0, ctx.opts.hardBuffer - dh);
+    cost += Math.max(0, ctx.opts.warnBuffer - dz) + (hearthOk ? 0 : Math.max(0, ctx.opts.hardBuffer - dh));
   }
-  return cost;
+  // any intrusion ranks behind every comfortable spot: a set is never squeezed against a hearth or door while the room has room
+  return cost > EPS ? AUTO_UNCOMFORTABLE + cost : 0;
 }
 
 /** Nearest gap from these pieces to anything standing (capped), for spacing scores. */
 function autoGap(pieces: Res[], standing: Res[]): number {
   let gap = AUTO_SPACED;
   for (const p of pieces)
-    if (p.floor)
-      for (const s of standing) if (s.floor && s.level === p.level) gap = Math.min(gap, Math.max(0, -overlapDepth(p.floor, s.floor)));
+    if (p.floor) {
+      const reach = Math.hypot(p.floor.hw, p.floor.hd) + AUTO_SPACED * 1.5; // axis separation >= distance / sqrt 2
+      for (const s of standing)
+        if (s.floor && s.level === p.level && Math.hypot(s.floor.cx - p.floor.cx, s.floor.cz - p.floor.cz) <= reach + Math.hypot(s.floor.hw, s.floor.hd))
+          gap = Math.min(gap, Math.max(0, -overlapDepth(p.floor, s.floor)));
+    }
   return gap;
 }
 
@@ -1602,6 +3038,8 @@ function autoTarget(ctx: Ctx, level: number, room: string, near: string, out: Ma
   const it = out.get(near) ?? out.get(setAnchor.get(near) ?? "");
   if (it) return it.level === level ? [it.box.cx, it.box.cz] : undefined;
   const g = ctx.grids.get(level)!, rm = g.lv.rooms.find((r) => r.id === room)!;
+  if (near === "back-wall" || near === "apse") return backOf(ctx, level, room)?.at;
+  if (near === "ceiling-centre") return ridgeCentre(g, rm);
   const lowest = Math.min(...ctx.grids.keys());
   if ((near === "door" || near === "entry") && ctx.input.map.entry && level === lowest) return [...ctx.input.map.entry.position];
   const kinds = near === "stair" ? ["stair-foot", "stair-head", "stair-approach"] : [near];
@@ -1640,8 +3078,26 @@ function autoLaneOk(ctx: Ctx, g: Grid, level: number, before: Res[], baseLane: L
  * normal resolution and every check run on it. Returns false (with a violation saying how much room was left) when nothing fits.
  */
 function resolveAuto(ctx: Ctx, w: Work, data: DressingData, members: AutoMember[], out: Map<string, Res>, setAnchor: Map<string, string>): boolean {
-  const p = w.place as AutoPlace;
+  w.asked ??= w.place;
+  let p = w.place as AutoPlace;
   const what = w.group ? `set item "${w.group}"` : `${w.id} (${w.prop})`;
+  // a sign hangs outside over a door: the first free door-sign / sign-bracket anchor (the one whose id holds `near`, when given)
+  if (hasTag(data, "sign")) {
+    const taken = new Set([...out.values()].map((r) => (r.work.place.kind === "anchor" ? r.work.place.anchor : "")));
+    const projecting = hasTag(data, "projecting");
+    const free = ctx.input.map.anchors.filter((a) => SIGN_ANCHORS.has(a.kind) && a.mount === data.mount && !taken.has(a.id) && BESIDE_ANCHORS.has(a.kind) === projecting);
+    const a = (p.near ? free.find((x) => x.id === p.near || x.id.includes(p.near!)) : undefined) ?? free[0];
+    if (!a) {
+      vio(ctx, w.id, "sign-indoors",
+        `${what} is a sign: signs hang outside above a door, never in a room; map "${ctx.input.map.id}" has no free ${data.mount}-mount door-sign anchor, ` +
+          `so place it on the town exterior's door-sign-<building> anchor ({ kind: "anchor", anchor }) or leave it out`);
+      return false;
+    }
+    w.place = { kind: "anchor", anchor: a.id };
+    ctx.autos.push({ item: w.group || w.id, place: w.place, mirror: false, note: "sign: over the door" });
+    return true;
+  }
+  if (!p.near && hasTag(data, "altar") && roomRoles(ctx, p.room).includes("chapel")) p = { ...p, near: "back-wall" };
   let level = -1, g: Grid | undefined;
   for (const [l, gg] of ctx.grids) if (gg.lv.rooms.some((r) => r.id === p.room)) [level, g] = [l, gg];
   if (!g) {
@@ -1658,7 +3114,42 @@ function resolveAuto(ctx: Ctx, w: Work, data: DressingData, members: AutoMember[
       `${what}: \`near: "${p.near}"\` is neither an earlier item in this plan on level ${level} nor an anchor kind of this map (door, stair, ${[...new Set(ctx.input.map.anchors.map((a) => a.kind))].join(", ")})`);
     return false;
   }
+  // outdoor LAYOUT: a vignette member is laid out by its arrangement's rule (floor props; a graveyard's graves in rows)
+  let vig: Vignette | undefined, vpart = "";
+  if (p.arrangement) {
+    const v = vignetteFor(ctx, level, p.room, p.arrangement, out, setAnchor);
+    if (typeof v === "string") {
+      vio(ctx, w.id, "arrangement", `${what}: ${v}`);
+      return false;
+    }
+    vpart = p.part ?? arrangementPart(v.kind, w.prop, data);
+    w.vignette = v;
+    w.vpart = vpart;
+    if (v.kind === "graveyard") p = { ...p, prefer: "row" };
+    else if (data.mount === "floor") vig = v;
+  }
   const prefer = p.prefer ?? (p.near ? "near" : data.mount === "floor" && data.against === "free" ? "open" : "wall");
+  // against the back wall / in the apse: it faces back down the room toward the door (an altar faces its nave)
+  const back = p.near === "back-wall" || p.near === "apse" ? backOf(ctx, level, p.room) : undefined;
+  // graves in rows need no target: they face the yard's entry and fill the whole yard (graveLayout)
+  const graveMode = prefer === "row" && isGrave(data) && data.against !== "wall";
+  if (prefer === "row" && !target && !graveMode) {
+    vio(ctx, w.id, "auto-near", `${what}: \`prefer: "row"\` needs \`near\` (what the rows face: an altar item, the hearth...)`);
+    return false;
+  }
+  // rows face back along one axis: the target item's own front (a lectern faces its congregation), else from the anchor
+  // into the room, snapped to the room's axes
+  let rowAxis: V2 | undefined, rowFront = 0.5;
+  if (prefer === "row" && target && !graveMode) {
+    const it = out.get(p.near!) ?? out.get(setAnchor.get(p.near!) ?? "");
+    if (it) rowFront = it.box.d / 2 + Math.max(it.data.clearance, 0.3);
+    const a: V2 = it ? fwd(it.box.yaw) : [room.centre[0] - target[0], room.centre[1] - target[1]];
+    rowAxis = Math.abs(a[0]) >= Math.abs(a[1]) ? [Math.sign(a[0]) || 1, 0] : [0, Math.sign(a[1]) || 1];
+  }
+  // fireside seating stands at the hearth clearance's edge on purpose
+  const hearthOk = p.near === "hearth";
+  // a free-standing piece goes to a wall when the designer says so (a lectern, a vat): "free" only means it needs no wall
+  const wallAsked = p.prefer === "wall" || p.prefer === "corner";
   const walls = grid.lv.walls.filter((wl) => wl.room === p.room && (!p.wall || wl.id === p.wall));
   if (p.wall && !walls.length) {
     vio(ctx, w.id, "auto-wall", `${what}: wall "${p.wall}" is not a wall of room ${p.room} (its walls: ${grid.lv.walls.filter((wl) => wl.room === p.room).map((wl) => wl.id).join(", ")})`);
@@ -1666,21 +3157,69 @@ function resolveAuto(ctx: Ctx, w: Work, data: DressingData, members: AutoMember[
   }
   const record = (place: DressingPlace, mirror: boolean): void => {
     w.place = place;
+    if (hearthOk) {
+      w.byHearth = true;
+      for (const m of members) m.w.byHearth = true;
+    }
     if (mirror)
       for (const m of members) {
         m.place = mirrorRel(m.place);
         m.w.place = m.place;
       }
-    ctx.autos.push({ item: w.group || w.id, place, mirror, note: `prefer ${prefer}${p.near ? ` near ${p.near}` : ""}` });
+    ctx.autos.push({ item: w.group || w.id, place, mirror, note: vig ? `${vig.kind} ${vig.id}: ${vpart} (${vig.how})` : `prefer ${prefer}${p.near ? ` near ${p.near}` : ""}` });
   };
 
   // -- ceiling props: over the room centre, or over the item they are near
   if (data.mount === "ceiling") {
-    let at: V2 = target ?? room.centre;
+    let at: V2 = target ?? (isChandelier(data) && room.maxHead >= TALL_RIDGE ? ridgeCentre(grid, room) : room.centre);
     const [c, r] = grid.cellOf(at[0], at[1]);
     if (grid.roomAt(c, r) !== p.room) at = room.centre;
-    const [cc, rr] = grid.cellOf(at[0], at[1]), head = grid.head(cc, rr);
-    const drop = data.chain && Number.isFinite(head) ? Math.max(0, Math.min(1, Math.floor((head - data.size[1] - WALK_HEAD - 0.1) * 4) / 4)) : 0;
+    // never two hanging things in one spot (two chandeliers on the room centre z-fight): the nearest cell of the room clear
+    // of every ceiling prop already hung on this level
+    const radius = Math.hypot(data.size[0], data.size[2]) / 2;
+    const hung = standing.filter((s) => s.level === level && s.data.mount === "ceiling");
+    const clear = (x: number, z: number): boolean => hung.every((s) => Math.hypot(x - s.box.cx, z - s.box.cz) >= radius + Math.hypot(s.box.w, s.box.d) / 2 + 0.25);
+    // a long hall's chandeliers hang in a line under the ridge: this one takes the first free spot of the line
+    if (isChandelier(data) && (p.near === "ceiling-centre" || (!p.near && room.maxHead >= TALL_RIDGE))) {
+      const count = ctx.input.plan.items.filter((it) => {
+        if (it.place.kind !== "auto" || it.place.room !== p.room || (it.place.near && it.place.near !== "ceiling-centre")) return false;
+        const d = it.prop ? ctx.input.prop(it.prop) : undefined;
+        return !!d && isChandelier(d);
+      }).length;
+      const spot = ceilingLine(grid, room, count).find(([x, z]) => {
+        const [ci, ri] = grid.cellOf(x, z), h = grid.head(ci, ri);
+        return clear(x, z) && !(Number.isFinite(h) && h < data.size[1] + WALK_HEAD);
+      });
+      if (spot) at = spot;
+    }
+    if (!clear(at[0], at[1])) {
+      let best: V2 | undefined, bestD = Infinity;
+      const [x0, x1, z0, z1] = room.bbox;
+      for (let z = z0; z <= z1 + EPS; z += grid.step)
+        for (let x = x0; x <= x1 + EPS; x += grid.step) {
+          const [ci, ri] = grid.cellOf(x, z);
+          if (grid.roomAt(ci, ri) !== p.room || !clear(x, z)) continue;
+          const h = grid.head(ci, ri);
+          if (Number.isFinite(h) && h < data.size[1] + WALK_HEAD) continue;
+          const dd = Math.hypot(x - at[0], z - at[1]);
+          if (dd < bestD - EPS) [best, bestD] = [[x, z], dd];
+        }
+      if (!best) {
+        vio(ctx, w.id, "auto-no-room", `${what} finds no spot under the ceiling of room ${p.room} clear of ${hung.map((s) => s.work.id).join(", ")}: one hanging light per spot; leave it out or use a wall or standing light`);
+        return false;
+      }
+      at = best;
+    }
+    // the lowest ceiling over its footprint (a narrow ridge: the slopes either side are lower than the cell at its centre)
+    let head = Infinity;
+    for (const [c2, r2] of grid.cells({ cx: at[0], cz: at[1], hw: data.size[0] / 2, hd: data.size[2] / 2, yaw: 0 })) {
+      const h = grid.head(c2, r2);
+      if (Number.isFinite(h)) head = Math.min(head, h);
+    }
+    // a chain of up to 1 m; under a tall roof a chandelier comes down on its chain to CHANDELIER_HANG m over the floor (lit from
+    // 10 m up, a nave stays black)
+    const avail = Math.floor((head - data.size[1] - WALK_HEAD - 0.1) * 4) / 4, low = Math.floor((head - data.size[1] - CHANDELIER_HANG) * 4) / 4;
+    const drop = data.chain && Number.isFinite(head) ? Math.max(0, Math.min(Math.max(1, isChandelier(data) ? low : 0), avail)) : 0;
     record({ kind: "ceiling", level, at: [+at[0].toFixed(3), +at[1].toFixed(3)], yaw: 0, drop }, false);
     return true;
   }
@@ -1688,11 +3227,10 @@ function resolveAuto(ctx: Ctx, w: Work, data: DressingData, members: AutoMember[
   // -- wall-hung props: centred on the longest free stretch of the room's walls (or nearest the target)
   if (data.mount === "wall") {
     const [W, H] = data.size;
-    const height = (data.wallHeight[0] + data.wallHeight[1]) / 2;
     let best: { wall: SocketWall; t: number; h: number; score: number } | undefined;
     for (const wl of walls) {
-      const hh = Math.min(height, wl.height - H);
-      if (hh < data.wallHeight[0] - EPS) continue;
+      const [lo, hi] = wallBand(data, wl), hh = Math.min((lo + hi) / 2, wl.height - H);
+      if (hh < lo - EPS) continue;
       const ts: number[] = [];
       for (const [a, b] of centreRanges(wl, W))
         for (let t = a; t <= b + EPS; t += AUTO_T) {
@@ -1759,8 +3297,21 @@ function resolveAuto(ctx: Ctx, w: Work, data: DressingData, members: AutoMember[
     return true;
   };
   const [W, H, D] = data.size;
+  // a vignette member: its part's slots, in order (its share of the ring / line first); 2 m off the lanes when it can
+  if (vig) {
+    const v = vig, mates = standing.filter((s) => s.work.vignette?.id === v.id);
+    const { k, n } = partIndex(ctx, w, v, vpart);
+    vignetteSlots(v, vpart, k, n, data, mates).forEach((s, i) => {
+      const box: Box = { cx: s.at[0], cz: s.at[1], y0: grid.y(s.at[0], s.at[1]), yaw: s.yaw, w: W, h: H, d: D };
+      const pieces = autoPieces(w, data, members, box, p.room, level, false);
+      if (!pieceOk(pieces)) return;
+      const lane = laneClearance(ctx, level, s.at) - Math.max(W, D) / 2;
+      const deg = +((((s.yaw / DEG) % 360) + 360) % 360).toFixed(1);
+      cands.push({ place: { kind: "floor", level, at: [+s.at[0].toFixed(3), +s.at[1].toFixed(3)], yaw: deg }, mirror: false, pieces, score: i * 0.01 + (lane < VIGNETTE_LANE_M ? 5 + VIGNETTE_LANE_M - lane : 0) });
+    });
+  }
   // wall candidates: back to a wall, every AUTO_T along each free span
-  if (prefer !== "open" && data.against !== "free") {
+  if (!vig && prefer !== "open" && prefer !== "row" && (data.against !== "free" || wallAsked)) {
     for (const wl of walls.filter((x) => H <= x.height + EPS))
       for (const mirror of mirrors) {
         const ok: { t: number; pieces: Res[] }[] = [];
@@ -1781,60 +3332,134 @@ function resolveAuto(ctx: Ctx, w: Work, data: DressingData, members: AutoMember[
             if (prefer === "corner") score = Math.min(o.t - W / 2, len - (o.t + W / 2)) * 4 - span * 0.01;
             else if (prefer === "near" && target) score = rectDist(rectOf(o.pieces[0]!.box), target[0], target[1]);
             else score = span * 0.5 + Math.abs(o.t - mid) * 2; // centred on the snuggest free stretch it fits: long stretches stay whole for later items
-            score += (AUTO_SPACED - gap) * 2 + autoComfort(ctx, grid, o.pieces) * 6 + (mirror ? 0.001 : 0);
+            score += (AUTO_SPACED - gap) * 2 + autoComfort(ctx, grid, o.pieces, hearthOk) * 6 + (mirror ? 0.001 : 0);
             cands.push({ place: { kind: "wall", wall: wl.id, t: +o.t.toFixed(3) }, mirror, pieces: o.pieces, score });
           }
         }
       }
   }
-  // open-floor candidates: centres on the cell grid, turned to the room's axes
-  if ((prefer === "open" || prefer === "near" || data.against === "free" || !cands.length) && data.against !== "wall") {
+  // rows (pews before an altar): the slots of the room's row layout, front row first; the first free one wins
+  const rowMode = !graveMode && prefer === "row" && !!target && !!rowAxis && data.against !== "wall";
+  const nearItem = graveMode && p.near ? out.get(p.near) ?? out.get(setAnchor.get(p.near) ?? "") : undefined;
+  const glay = graveMode ? graveLayout(ctx, grid, level, p.room, w, target, nearItem?.box.yaw) : undefined;
+  if (glay)
+    glay.slots.forEach((s, i) => {
+      const box: Box = { cx: s.at[0], cz: s.at[1], y0: grid.y(s.at[0], s.at[1]), yaw: glay.yaw, w: W, h: H, d: D };
+      const pieces = autoPieces(w, data, members, box, p.room, level, false);
+      if (pieceOk(pieces)) cands.push({ place: { kind: "floor", level, at: [+s.at[0].toFixed(3), +s.at[1].toFixed(3)], yaw: (Math.round(glay.yaw / DEG) + 360) % 360 }, mirror: false, pieces, score: i });
+    });
+  const lay = rowMode ? rowLayout(ctx, grid, level, p.room, p.near!, w, data, target!, rowAxis!, rowFront) : undefined;
+  if (lay)
+    lay.slots.forEach((s, i) => {
+      const box: Box = { cx: s.at[0], cz: s.at[1], y0: grid.y(s.at[0], s.at[1]), yaw: lay.yaw, w: W, h: H, d: D };
+      const pieces = autoPieces(w, data, members, box, p.room, level, false);
+      if (pieceOk(pieces)) cands.push({ place: { kind: "floor", level, at: [+s.at[0].toFixed(3), +s.at[1].toFixed(3)], yaw: (Math.round(lay.yaw / DEG) + 360) % 360 }, mirror: false, pieces, score: i });
+    });
+  // open-floor candidates: centres on the cell grid, turned to the room's axes (for rows, when every row seat is taken or
+  // would close a lane: any free spot behind the target facing it, short of the door line)
+  const siteOpen = ctx.input.plan.space?.kind === "site" && prefer === "open" && !p.near;
+  const openCands = (): void => {
     const [x0, x1, z0, z1] = room.bbox, longX = x1 - x0 >= z1 - z0;
+    // a lone piece with no clearance strip stands on the same floor turned half way round (only its facing differs)
+    const symmetric = !members.length && data.clearance <= 0 && mirrors.length === 1;
     for (let z = z0; z <= z1 + EPS; z += grid.step)
       for (let x = x0; x <= x1 + EPS; x += grid.step) {
         const [c, r] = grid.cellOf(x, z);
         if (grid.roomAt(c, r) !== p.room) continue;
+        const half: ({ gap: number; comfort: number } | null)[] = [];
         for (const deg of [0, 90, 180, 270])
           for (const mirror of mirrors) {
             const box: Box = { cx: x, cz: z, y0: grid.y(x, z), yaw: deg * DEG, w: W, h: H, d: D };
             const pieces = autoPieces(w, data, members, box, p.room, level, mirror);
-            if (!pieceOk(pieces)) continue;
-            const gap = autoGap(pieces, standing);
+            const same = symmetric && deg >= 180 ? half[(deg - 180) / 90] : undefined;
+            if (same === null) continue;
+            if (same === undefined && !pieceOk(pieces)) {
+              if (symmetric && deg < 180) half[deg / 90] = null;
+              continue;
+            }
+            const gap = same ? same.gap : autoGap(pieces, standing), comfort = same ? same.comfort : autoComfort(ctx, grid, pieces, hearthOk);
+            if (symmetric && deg < 180) half[deg / 90] = { gap, comfort };
             // tidy: the anchor's long side along the room's long axis
             const across = (deg % 180 === 0) === (W >= D) === longX ? 0 : 0.05;
             let score: number;
-            if (prefer === "near" && target) {
+            if (lay && target && rowAxis) {
+              const f = fwd(box.yaw);
+              if (f[0] * rowAxis[0] + f[1] * rowAxis[1] > -0.99) continue;
+              const dx = x - target[0], dz = z - target[1], along = dx * rowAxis[0] + dz * rowAxis[1];
+              if (along - D / 2 < rowFront - EPS || along + D / 2 > lay.nave.end + EPS) continue; // behind the step, short of the door line
+              if (gap < AUTO_SPACED - EPS) continue; // room to sit between rows
+              score = along + Math.abs(dx * rowAxis[1] - dz * rowAxis[0]) * 0.35;
+            } else if (prefer === "near" && target && back) {
+              const f = fwd(box.yaw);
+              if (-(f[0] * back.facing[0] + f[1] * back.facing[1]) < 0.7) continue; // faces the nave, never the wall
+              score = rectDist(rectOf(box), target[0], target[1]);
+            } else if (prefer === "near" && target) {
               const f = fwd(box.yaw), dx = target[0] - x, dz = target[1] - z, dl = Math.hypot(dx, dz) || 1;
               score = rectDist(rectOf(box), target[0], target[1]) + (1 - (f[0] * dx + f[1] * dz) / dl) * 0.2;
             } else if (roomRules(ctx, p.room).keepCentre) {
               // walls and corners fill first: the open spot nearest the room's edge (outside its keep-clear centre)
               const zd = ctx.zones.get(level)!.dist, [cc, rr] = grid.cellOf(x, z);
               score = (zd[rr * grid.lv.columns + cc] ?? 0) + across;
+            } else if (siteOpen) {
+              // outdoors a loose piece goes where the site is emptiest: away from what already stands (never a heap; `site-clutter`)
+              const near = standing.reduce((m, s) => (s.level === level && s.floor ? Math.min(m, Math.hypot(s.box.cx - x, s.box.cz - z)) : m), Infinity);
+              score = -autoRoom(grid, p.room, pieces) + across - Math.min(near, SITE_OPEN_SPREAD) * 0.6 + Math.hypot(x - room.centre[0], z - room.centre[1]) * 0.02;
             } else score = -autoRoom(grid, p.room, pieces) + across + Math.hypot(x - room.centre[0], z - room.centre[1]) * 0.02;
-            score += (AUTO_SPACED - gap) * 2 + autoComfort(ctx, grid, pieces) * 6 + (mirror ? 0.001 : 0) + deg * 1e-5;
+            score += (lay ? 0 : (AUTO_SPACED - gap) * 2) + comfort * 6 + (mirror ? 0.001 : 0) + deg * 1e-5;
             cands.push({ place: { kind: "floor", level, at: [+x.toFixed(3), +z.toFixed(3)], yaw: deg }, mirror, pieces, score });
           }
       }
-  }
-  cands.sort((a, b) => a.score - b.score);
+  };
+  if (!vig && !lay && !glay && (prefer === "open" || prefer === "near" || (data.against === "free" && !wallAsked) || !cands.length) && data.against !== "wall") openCands();
   const seeds = laneSeeds(ctx, grid, level), radius = ctx.opts.laneWidth / 2;
   const baseLane = seeds.length
     ? laneBody(grid, standing.filter((s) => s.level === level && s.floor).map((s) => s.floor!), seeds, laneOffsets(grid.step, radius), radius)
     : undefined;
-  let tries = 0;
-  for (const c of cands) {
-    if (tries++ >= AUTO_LANE_TRIES) break;
-    if (!autoLaneOk(ctx, grid, level, standing, baseLane, c.pieces)) continue;
-    record(c.place, c.mirror);
-    return true;
+  if (pick()) return true;
+  if (vig) {
+    vio(ctx, w.id, "auto-no-room",
+      `${what} (${f2(W)} x ${f2(D)} m) finds no ${vpart} spot in ${vig.kind} "${vig.id}" (${vig.how}, centre ${at2(vig.centre[0], vig.centre[1])})` +
+        `${refused.size ? `: spots tried were refused for ${[...refused].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${k} (${n})`).join(", ")}` : cands.length ? " without closing a lane" : ""}. ` +
+        `Anchor the vignette elsewhere, give it fewer members, or choose a smaller piece`);
+    return false;
+  }
+  if (lay) {
+    cands.length = 0;
+    openCands();
+    if (pick()) return true;
   }
   const size = `${f2(W)} x ${f2(D)} m${members.length ? ` with ${members.length} member(s), ${f2(addM2)} m² in all` : ""}`;
   vio(ctx, w.id, "auto-no-room",
     `${what} (${size}${data.against === "wall" ? ", back to a wall" : ""}) does not fit in room ${p.room}${p.wall ? ` on wall ${p.wall}` : ""}` +
+      (glay ? ` (the yard's rows: ${glay.capacity} grave slots in ${glay.rows} rows, ${f2(glay.pitch)} m apart, stones ${f2(glay.spacing)} m apart; the plan asks for ${glay.want})` : "") +
+      (lay ? ` (its rows: ${lay.slots.length} seats every ${f2(lay.pitch)} m over ${f2(lay.nave.end - lay.nave.start)} m of nave, the door line kept clear; the plan asks for ${lay.want})` : "") +
       `${cands.length ? ` without closing a ${f2(ctx.opts.laneWidth)} m lane` : ""}; left: ${autoLeft(ctx, grid, p.room, standing, walls)}` +
       `${refused.size ? `; spots tried were refused for ${[...refused].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${k} (${n})`).join(", ")}` : ""}. ` +
       `Earlier items win: choose a smaller piece or another room${data.against === "wall" ? "" : ", prefer \"open\""}, or move it earlier in the plan`);
   return false;
+
+  /** The best candidate that keeps every lane open, recorded; false when none does. */
+  function pick(): boolean {
+    cands.sort((a, b) => a.score - b.score);
+    let tries = 0;
+    const failed: [number, number, boolean][] = [];
+  for (const c of cands) {
+    const at = c.pieces[0]!.box, along = Math.abs(Math.sin(at.yaw)) < 0.5;
+    // the best AUTO_LANE_EXACT spots are tried in order; after that the tries spread over the room (a spot near one
+    // that closed a lane would close it too)
+    if (tries >= AUTO_LANE_EXACT && failed.some(([x, z, a]) => a === along && Math.hypot(at.cx - x, at.cz - z) < AUTO_LANE_SPREAD)) continue;
+    if (tries++ >= AUTO_LANE_TRIES) break;
+    if (!autoLaneOk(ctx, grid, level, standing, baseLane, c.pieces)) { failed.push([at.cx, at.cz, along]); continue; }
+    record(c.place, c.mirror);
+    if (autoComfort(ctx, grid, c.pieces, hearthOk) > 0)
+      warn(ctx, w.id, "auto-tight",
+        `${what} (${f2(W)} x ${f2(D)} m${members.length ? `, ${f2(addM2)} m² with its set` : ""}) has no spot in room ${p.room} that keeps ${f2(ctx.opts.hardBuffer)} m off the hearth clearance and ` +
+          `${f2(ctx.opts.warnBuffer)} m off stairs and doorways, so it stands at the best one left (the warnings below say how close). Accept it, or ` +
+          `${members.length ? "place its pieces as single items (each finds its own spot), " : ""}choose a smaller piece, or move it earlier in the plan`);
+    return true;
+  }
+    return false;
+  }
 }
 
 /** Runs of consecutive values on the AUTO_T grid. */
@@ -1988,6 +3613,8 @@ function reviewRooms(ctx: Ctx, placed: Res[]): DressingRoomReview[] {
         scaleViolations: vioBy("wrong-scale", room.id),
         cultureViolations: vioBy("wrong-culture", room.id),
         keepCentre: roomRules(ctx, room.id).keepCentre,
+        ridge: room.maxHead,
+        ...(wantsChandelier(ctx, room) ? { chandelier: placed.some((r) => r.level === level && r.room === room.id && isChandelier(r.data)) } : {}),
       });
     }
   }
@@ -2005,8 +3632,8 @@ export function resolveDressing(input: DressingResolveInput): DressingResolveRes
       laneWidth: o.laneWidth ?? DEFAULT_LANE_WIDTH,
       maxCover: o.maxCover,
       looseBudget: o.looseBudget ?? defaultLooseBudget,
-      flames: o.flames ?? 4,
-      flamesLargeHall: o.flamesLargeHall ?? 6,
+      flames: o.flames ?? FLAME_MIN,
+      flameArea: o.flameArea ?? FLAME_AREA,
       minItems: o.minItems ?? defaultMinItems,
       pathMargin: o.pathMargin ?? (dungeon ? DUNGEON_PATH_MARGIN : 0),
     },
@@ -2019,6 +3646,13 @@ export function resolveDressing(input: DressingResolveInput): DressingResolveRes
     dungeon,
     zones: new Map(),
     obst: [],
+    doorLines: new Map(),
+    rows: new Map(),
+    graves: new Map(),
+    vignettes: new Map(),
+    vignetteRooms: new Set(),
+    openings: new Map(),
+    minItemsGiven: !!o.minItems,
   };
   for (const lv of input.map.levels) {
     if (ctx.grids.has(lv.level)) vio(ctx, "", "map-invalid", `map "${input.map.id}" has level ${lv.level} twice`);
@@ -2173,17 +3807,22 @@ export function resolveDressing(input: DressingResolveInput): DressingResolveRes
   routeCheck(ctx, placed);
   planChecks(ctx, placed);
   placeChecks(ctx, placed);
+  ruleChecks(ctx, placed);
+  signChecks(ctx, placed);
+  layoutChecks(ctx, placed);
   const review = reviewRooms(ctx, placed);
 
   const placements: DressingPlacement[] = [];
   for (const r of placed) {
+    const [ox, oy, oz] = mountStandoff(r);
     placements.push({
       id: r.work.id,
       prop: r.work.prop,
       level: r.level,
       room: r.room,
-      position: [+r.origin[0].toFixed(4), +r.origin[1].toFixed(4), +r.origin[2].toFixed(4)],
+      position: [+(r.origin[0] + ox).toFixed(4), +(r.origin[1] + oy).toFixed(4), +(r.origin[2] + oz).toFixed(4)],
       yaw: +r.box.yaw.toFixed(6),
+      ...(r.tilt ? { tilt: r.tilt } : {}),
     });
     placements.push(...r.chain);
   }

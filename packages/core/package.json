@@ -3,7 +3,8 @@
   "version": "0.0.1",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./voxel-worker": "./src/voxel/worker.ts"
   },
   "scripts": {
     "test": "vitest run",

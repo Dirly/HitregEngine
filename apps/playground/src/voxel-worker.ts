@@ -10,7 +10,8 @@ import {
   type VoxelMeshSource,
   type WorldField,
   type WorldRecipe,
-} from "@hitreg/core";
+} from "@hitreg/core/voxel-worker";
+import { contentKey, VoxelDiskCache } from "./voxel-disk-cache.js";
 
 /**
  * Generates voxel cells off the main thread.
@@ -40,6 +41,7 @@ interface InitMessage {
   options: Omit<VoxelChunkOptions, "assetExists">;
   /** `assetExists` is a function and cannot be cloned — the main thread sends the answers instead. */
   presentAssets: string[];
+  cacheKey?: string;
 }
 
 interface CellMessage {
@@ -92,22 +94,24 @@ interface SupercellMessage {
 
 export type VoxelWorkerRequest = InitMessage | CellMessage | MeshMessage | SupercellMessage;
 
-export type VoxelWorkerResponse =
+export type VoxelWorkerResponse = (
   | { kind: "ready" }
   | { kind: "cell"; id: number; doc: ChunkDoc; meshes: Array<{ source: VoxelMeshSource; mesh: VoxelMesh }> }
   | { kind: "cell"; id: number; error: string }
   | { kind: "mesh"; id: number; mesh: VoxelMesh | null }
   | { kind: "mesh"; id: number; error: string }
   | { kind: "supercell"; id: number; buckets: Array<{ key: string; mesh: VoxelMesh }> }
-  | { kind: "supercell"; id: number; error: string };
+  | { kind: "supercell"; id: number; error: string }
+) & { cacheHit?: boolean };
 
 let field: WorldField | null = null;
 let world = "";
 let options: VoxelChunkOptions = {};
+let diskCache: VoxelDiskCache | null = null;
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
-ctx.onmessage = (event: MessageEvent<VoxelWorkerRequest>) => {
+ctx.onmessage = async (event: MessageEvent<VoxelWorkerRequest>) => {
   const message = event.data;
   if (message.kind === "init") {
     field = createWorldField(message.recipe);
@@ -117,10 +121,29 @@ ctx.onmessage = (event: MessageEvent<VoxelWorkerRequest>) => {
     // exist is dropped rather than throwing, because prefab expansion throws on
     // an unknown prefab and that would take the terrain and collider with it.
     options = { ...message.options, assetExists: (id) => present.has(id) };
+    diskCache = message.cacheKey ? new VoxelDiskCache(message.cacheKey) : null;
     ctx.postMessage({ kind: "ready" } satisfies VoxelWorkerResponse);
     return;
   }
   if (!field) return; // asked for before init: the pool never does this
+  const { id: _id, ...job } = message;
+  const cacheKey = diskCache ? await contentKey(job) : "";
+  const cached = cacheKey ? await diskCache?.get<Exclude<VoxelWorkerResponse, { kind: "ready" }>>(cacheKey) : null;
+  if (cached && !("error" in cached)) {
+    const meshes = cached.kind === "cell" ? cached.meshes.map((entry) => entry.mesh)
+      : cached.kind === "supercell" ? cached.buckets.map((entry) => entry.mesh) : cached.mesh ? [cached.mesh] : [];
+    const transfers = new Set<ArrayBuffer>();
+    for (const mesh of meshes) for (const value of Object.values(mesh)) {
+      if (ArrayBuffer.isView(value)) transfers.add(value.buffer as ArrayBuffer);
+    }
+    ctx.postMessage({ ...cached, id: message.id, cacheHit: true }, [...transfers]);
+    return;
+  }
+  const send = async (response: VoxelWorkerResponse, transfer: Transferable[]): Promise<void> => {
+    // IDB must finish cloning before ownership of the mesh arrays transfers.
+    if (cacheKey) await diskCache?.put(cacheKey, response);
+    ctx.postMessage({ ...response, cacheHit: false }, transfer);
+  };
   if (message.kind === "supercell") {
     try {
       const out: Array<{ key: string; mesh: VoxelMesh }> = [];
@@ -142,7 +165,7 @@ ctx.onmessage = (event: MessageEvent<VoxelWorkerRequest>) => {
           ...((merged.layerIndex && merged.layerWeight ? [merged.layerIndex.buffer, merged.layerWeight.buffer] : []) as ArrayBuffer[]),
         );
       }
-      ctx.postMessage({ kind: "supercell", id: message.id, buckets: out } satisfies VoxelWorkerResponse, transfer);
+      await send({ kind: "supercell", id: message.id, buckets: out }, transfer);
     } catch (error) {
       ctx.postMessage({
         kind: "supercell",
@@ -159,7 +182,7 @@ ctx.onmessage = (event: MessageEvent<VoxelWorkerRequest>) => {
       // reference to the buffers we are about to neuter.
       const mesh = buildVoxelMesh(field, message.source);
       const empty = mesh.triangleCount === 0;
-      ctx.postMessage(
+      await send(
         { kind: "mesh", id: message.id, mesh: empty ? null : mesh } satisfies VoxelWorkerResponse,
         empty
           ? []
@@ -209,7 +232,7 @@ ctx.onmessage = (event: MessageEvent<VoxelWorkerRequest>) => {
         );
       }
     }
-    ctx.postMessage({ kind: "cell", id: message.id, doc, meshes } satisfies VoxelWorkerResponse, transfer);
+    await send({ kind: "cell", id: message.id, doc, meshes }, transfer);
   } catch (error) {
     ctx.postMessage({
       kind: "cell",

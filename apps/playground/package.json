@@ -24,7 +24,8 @@
     "dungeon": "tsx tools/dungeon.mts",
     "dress": "tsx tools/dress.mts",
     "props": "tsx tools/props.mts",
-    "zonegen": "tsx tools/zonegen.mts"
+    "zonegen": "tsx tools/zonegen.mts",
+    "settle": "tsx tools/settle.mts"
   },
   "dependencies": {
     "@hitreg/comms": "workspace:*",
@@ -40,6 +41,8 @@
   },
   "devDependencies": {
     "@types/three": "^0.185.1",
+    "playwright": "1.47.2",
+    "sharp": "0.34.3",
     "tsx": "^4.23.0",
     "typescript": "^5.7.0",
     "vite": "^8.1.4"

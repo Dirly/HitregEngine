@@ -80,6 +80,22 @@ function cellSurface(field: WorldField, cx: number, cz: number): CellSurface {
   };
 }
 
+/** A height patch REACHES (x, z): its rectangle (+ `pad` m) holds (x, z) and, for a masked patch (`weights`), some
+ *  sample within `pad` + its feather of (x, z) has weight. L (place-build gibbet-rise 2026-10-20): a diagonal footpath's
+ *  grade patch is a 122 x 109 m rectangle of mostly zero weight; by its rectangle alone an old hoodoo 48 m off the path
+ *  ("ground none", background in the live world) was charged to the place. */
+export function patchReaches(h: { origin: number[]; size: number[]; columns?: number; rows?: number; weights?: number[] | null; feather?: number }, x: number, z: number, pad = 4): boolean {
+  const [ox, oz] = h.origin as [number, number], [sx, sz] = h.size as [number, number];
+  if (!(x > ox - pad && z > oz - pad && x < ox + sx + pad && z < oz + sz + pad)) return false;
+  const w = h.weights, cols = h.columns ?? 0, rows = h.rows ?? 0;
+  if (!w || cols < 2 || rows < 2) return true;
+  const r = pad + (h.feather ?? 2), cx = sx / (cols - 1), cz = sz / (rows - 1);
+  const c0 = Math.max(0, Math.floor((x - r - ox) / cx)), c1 = Math.min(cols - 1, Math.ceil((x + r - ox) / cx));
+  const r0 = Math.max(0, Math.floor((z - r - oz) / cz)), r1 = Math.min(rows - 1, Math.ceil((z + r - oz) / cz));
+  for (let j = r0; j <= r1; j++) for (let i = c0; i <= c1; i++) if ((w[j * cols + i] ?? 0) > 0 && Math.hypot(ox + i * cx - x, oz + j * cz - z) <= r) return true;
+  return false;
+}
+
 export function commandScatterFloat(host: ScatterFloatHost): void {
   const { argv } = host;
   const opt = (name: string): string | undefined => {
@@ -228,7 +244,7 @@ export function commandScatterFloat(host: ScatterFloatHost): void {
     // planar cliffs (terrain.planarCliffs) rebuild the ground as treads and walls: a fault there is placement's,
     // never the 2 m mesh's disagreement with the heightfield
     if (field.planarNear(r.x, r.z)) return true;
-    if (patches.some((h) => r.x > h.origin[0] - 4 && r.z > h.origin[1] - 4 && r.x < h.origin[0] + h.size[0] + 4 && r.z < h.origin[1] + h.size[1] + 4)) return true;
+    if (patches.some((h) => patchReaches(h as never, r.x, r.z, 4))) return true;
     // a carve counts only where it CHANGED the ground within 3 m: a tunnel
     // 300 m under a mountain is near in plan and irrelevant to the grass
     for (let k = -1; k < 8; k++) {

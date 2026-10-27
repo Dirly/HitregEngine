@@ -100,6 +100,16 @@ the `dressing` component and the `socket-map` / `dressing-set` /
 - **quest-play proves logic, not balance.** It sets the clock through the day-night script and freezes it, buys a
   delivery item from the NPC that sells it, and on an endure step stands its ground and keeps the test body alive,
   printing a BALANCE NOTE with the health it had to restore.
+- **A repeatable is the quest-level `repeat` block** (`{ after: <world hours> | "day", limit? }`, consequence slot):
+  once complete its own source offers it again after `after` on the world clock (`world/day * 24 + world/hour`),
+  objectives reset, rewards pay again; the lint validates it, bind carries it, and quest-play proves the wait and plays
+  it a second time (row `run: 2`).
+- **Tide, escort, an exclusive choice.** `if: { tide: low }` (high/ebb/low/flood: one world function of the clock,
+  12.4 h period); an `escort` step targets an `escort` entity (or a resident) whose `npc` builtin carries an `escort`
+  route, `params: { radius?, grace? }`; `then: [{ do: choose, choice, option }]` on two or more steps makes them
+  alternatives (flag `<choice>=<option>`, the rest locked). A kill names a creature, never a bestiary group id.
+  quest-play drives the tide through /time, proves an escort fails when left behind before walking it home, and proves
+  a locked option does not progress.
 
 ## One master per layout, fresh workers, one writer
 
@@ -157,6 +167,19 @@ Engine-wide, not per world. Full intake rules: `docs/prop-cataloging.md`.
   areas/anchors/keep-outs in `handoff.json` `siteDressing` (fields in the tool header; default: a 14 m camp
   per hearth); one fresh Sonnet per area dresses it (`brief-for dress-site --poi <id> --area <area>`), and
   the coordinator applies. Gate: `site-dress <poi>` in `zonegen status`.
+
+Quest objects are plan items too. A quest binds only to a scene entity with the exact id its zone's `quests.json`
+`entities[]` declares (kind object|readable, at a `location`). A plan item carries it as `quest: { entity,
+readable?, radius?, dialogue? }` on a prop or set chosen by name like any item (a strongbox, a book on the vestry
+shelf, a bell on a post; no stand-ins). `dress check` refuses an entity that is undeclared, declared at another
+location than the plan's town (`<town>--<building>` plan id) or POI, a presence, or already in another plan, and
+warns for a declared object of that location in no plan. `dress apply` (building or site plan, same path) gives the
+placed instance (a set's anchor piece) the entity id exactly, tags `quest-object interactable zone:<z>` plus
+`town:<t> building:<b>` or `poi:<id>`, and the `npc` builtin (face false, radius 2.5, `readable` from the declared
+kind, dialogue `zones/<zone>/<entity>` as `zonegen wire` expects, places = the zone's places table); re-apply
+replaces it and the inverse removes it. `zonegen quest-objects <world> --project <p> --zone <z> [--town|--poi]` lists
+what each location declares, which plan places it and whether the scene has it; `brief-for dress-building` /
+`dress-site` print the same list. Hand-written per-zone entity installers are retired.
 
 ## What a builder may generate
 
@@ -238,7 +261,9 @@ bearing it should face — and whether a place already stands on it. Writes `zon
 (ranked) and `sites.png` (the review map with the candidates, wall lines, empty discs and path faults drawn); the
 gate report is `sites.json`. Errors: a path that climbs 25 m or more and stops at nothing, a hairpin run that tops out
 at nothing (a pass only warns), a plateau or large flat landform with under a quarter of it near a place, the
-largest empty disc of land over 450 m, fewer than 4 places (towns + reservations of 20 m or more) per km2 of land.
+largest empty disc of land over `EMPTY_MAX`, and the share of the zone's dry land claimed by place and town
+footprints (by size tier) outside `AREA_CLAIM` (min/max, plus a floor for medium and large places and towns), all in
+`tools/zonegen/commands/_site-finder.mts`.
 Warnings: a route that climbs a crest only to give the height back, unused strong candidates. `--out` writes every
 file elsewhere (a read-only look at a live world). The brief records each place's pick in `places[].site`; the
 reserve lint refuses a reservation centred off it. The engine is `tools/zonegen/commands/_site-finder.mts` (no I/O;
@@ -254,6 +279,13 @@ reserve lint refuses a reservation centred off it. The engine is `tools/zonegen/
 - `town-walk.mts`, `dress check`, `props status`, the POI creator's
   `progress.json` and a dungeon's own `pipeline.mjs` are the evidence the
   status rows read.
+- `town-wall-clear.mts --project <p> --town <t>` rebuilds every baked `wall` operator near a town and measures it
+  against the shipped building models as placed: a wall reaching into a building, or within 0.5 m of one, fails
+  (Cindermoot 2026-10-25). Run it after a town wall is applied and whenever a building model is re-exported.
+- `holes.mts <world> --project <p> --zone <z>` (heavy lock) casts every column of the zone (1 m on places and
+  roads) against the colliders the SERVER holds for a body standing there and fails where seen ground (terrain or
+  a landmark render mesh) has nothing under it: row `holes`, STALE after any recipe/scene change. The server also
+  logs `[server:ground] ... fell through ...` with coordinates whenever it lifts a fallen player back up.
 
 ## Zone ground: a palette's tiles, applied by one command
 

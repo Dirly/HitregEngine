@@ -54,7 +54,17 @@
         "poi-props/hanging-lantern",
         "fixtures/lantern-glow",
         "poi-props/brazier",
-        "posed-props/campfire-indoor"
+        "posed-props/campfire-indoor",
+        "giant-camp/giant-fire-pit",
+        "giant-camp/giant-hearth",
+        "ogre-giant-craft/hollow-stone-oil-bowl",
+        "frogkin-lily-camp/reed-pitch-torch",
+        "frogkin-lily-camp/gourd-wall-sconce",
+        "frogkin-props/glow-grub-lamp",
+        "crockin-river-culture/bound-reed-pitch-torch",
+        "crockin-river-culture/lotus-oil-brazier",
+        "giant-camp/beacon-fire",
+        "giant-camp/window-glow"
       ],
       "note": "one fire at the heart (camp-props/bonfire for giants, ogres or any big camp), torches or lanterns at the edge."
     },
@@ -82,6 +92,14 @@
         "poi-props/brazier"
       ],
       "note": "cold blue-white glow carries it: lanterns and glows tinted ice-blue (#b8d0ff) in niches and along the galleries; ONE fire, the bonfire in a hearth hall where the living gather. Detail pass: cold-tinted variants of lantern-glow / hanging-lantern."
+    },
+    "lych-span": {
+      "for": "the Lych Span: a road bridge with a gate tower, lit at night by its own lamp posts and gate lanterns (warm, the house street-lamp range)",
+      "use": [
+        "town-lights/lamp-post-lit",
+        "town-lights/hanging-lantern-lit"
+      ],
+      "note": "lamp posts on the pier refuges, one hanging lantern at each deck end; nothing else burns on the deck. Lights come from the prefabs (fixtures/looks/street-lamp-glow: 11 / range 10), no extra lights."
     }
   }
 }

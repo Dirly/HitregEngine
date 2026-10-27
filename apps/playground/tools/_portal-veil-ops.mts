@@ -27,6 +27,8 @@ export interface StatedPortal {
   fit?: Record<string, unknown>;
   /** The veil's material when not the shared swirl (a dark finish: the way into a dungeon reads as dark depth). Must resolve in the scene project's closure (portal-cover checks). */
   material?: string;
+  /** An arrival anchor's measured overflow spots (`portalAnchor.queue`, written by portal-cover --fit). */
+  queue?: (number | null)[];
 }
 export type StatedFile = Record<string, Record<string, StatedPortal>>;
 
@@ -72,6 +74,13 @@ export function portalVeilOps(doc: SceneDoc, sceneId: string, stated: StatedFile
     if (opts.only && !opts.only.has(id)) continue;
     const veil = `${id}-veil`;
     const sc = e.components["script"] as Script | undefined;
+    // an arrival anchor's measured queue (kept through rebuilds like the veils)
+    const sq = stated[sceneId]?.[id]?.queue;
+    const pa = e.components["portalAnchor"] as Record<string, unknown> | undefined;
+    if (sq && pa && !opts.remove && JSON.stringify(pa["queue"]) !== JSON.stringify(sq)) {
+      ops.push({ op: "set-component", id, component: "portalAnchor", data: { ...pa, queue: sq } } as Op);
+      lines.push(`  ${id}: arrival queue ${JSON.stringify(sq)} (stated)`);
+    }
     const walk = sc?.name === "portal" && sc.params?.["mode"] === "trigger";
     // replaced when the portal still stands; taken down when it does not (a sealed passage) or on remove
     if (doc.entities[veil] && (doc.entities[veil].tags ?? []).includes("zone-boundary")) ops.push({ op: "remove-entity", id: veil });

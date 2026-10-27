@@ -1,0 +1,378 @@
+{
+ "source": "Engine/apps/playground/projects/foundation/source/skeleton/skeleton.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "Engine/apps/playground/projects/foundation/source/skeleton/skeleton-unwrapped",
+ "metresPerUnit": 1,
+ "texelsPerMetre": 195,
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 40,
+ "atlas": {
+  "size": 512,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "slots": {
+  "skull": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "skull-crown": {
+   "color": "#8c0000",
+   "fit": "contain",
+   "label": "skull top"
+  },
+  "skull-under": {
+   "color": "#ff8080",
+   "fit": "contain",
+   "label": "skull base"
+  },
+  "jaw": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "label": "jaw bone"
+  },
+  "spine": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "label": "spine bone"
+  },
+  "ribs-side": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "label": "ribs side"
+  },
+  "ribs-front": {
+   "color": "#8c8c00",
+   "fit": "contain",
+   "label": "ribs front"
+  },
+  "ribs-back": {
+   "color": "#c0c060",
+   "fit": "contain",
+   "label": "ribs back"
+  },
+  "pelvis": {
+   "color": "#00ff00",
+   "fit": "contain",
+   "label": "pelvis bone"
+  },
+  "pelvis-front": {
+   "color": "#008c00",
+   "fit": "contain",
+   "label": "pelvis front"
+  },
+  "clavicle": {
+   "color": "#00ff80",
+   "fit": "contain",
+   "label": "collar bone"
+  },
+  "humerus": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "label": "upper arm bone"
+  },
+  "forearm": {
+   "color": "#00008c",
+   "fit": "contain",
+   "label": "forearm bone"
+  },
+  "hand": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "label": "hand bones"
+  },
+  "femur": {
+   "color": "#0080ff",
+   "fit": "contain",
+   "label": "thigh bone"
+  },
+  "shin": {
+   "color": "#00468c",
+   "fit": "contain",
+   "label": "shin bone"
+  },
+  "foot": {
+   "color": "#46008c",
+   "fit": "contain",
+   "label": "foot bones"
+  }
+ },
+ "parts": {
+  "Skull": {
+   "slot": "skull",
+   "method": "sphere",
+   "front": "+x",
+   "v": "height",
+   "face": {
+    "half": 40,
+    "scale": 2,
+    "blend": 25
+   },
+   "split": [
+    {
+     "slot": "skull-crown",
+     "facing": "+y",
+     "above": 0.75,
+     "u": "-z",
+     "v": "+x",
+     "flare": 0.15
+    },
+    {
+     "slot": "skull-under",
+     "facing": "-y",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-x"
+    }
+   ]
+  },
+  "Jaw": {
+   "slot": "jaw",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.3
+  },
+  "Spine": {
+   "slot": "spine",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4
+  },
+  "Ribcage": {
+   "slot": "ribs-side",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.3,
+   "split": [
+    {
+     "slot": "ribs-front",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.2,
+     "where": {
+      "x": [
+       0.5,
+       1
+      ]
+     }
+    },
+    {
+     "slot": "ribs-back",
+     "facing": "-x",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-y",
+     "flare": 0.2,
+     "where": {
+      "x": [
+       0,
+       0.5
+      ]
+     }
+    }
+   ]
+  },
+  "Pelvis": {
+   "slot": "pelvis",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.3,
+   "split": [
+    {
+     "slot": "pelvis-front",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.2,
+     "where": {
+      "x": [
+       0.5,
+       1
+      ]
+     }
+    }
+   ]
+  },
+  "Clavicle": {
+   "slot": "clavicle",
+   "method": "plane",
+   "u": "-z",
+   "v": "+x",
+   "flare": 0.4
+  },
+  "Humerus": {
+   "slot": "humerus",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.45
+  },
+  "Forearm": {
+   "slot": "forearm",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.45
+  },
+  "Hand": {
+   "slot": "hand",
+   "method": "plane",
+   "view": [
+    0.15,
+    0,
+    -0.99
+   ],
+   "flare": 0.15
+  },
+  "Femur": {
+   "slot": "femur",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.45
+  },
+  "Shin": {
+   "slot": "shin",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.45
+  },
+  "Foot": {
+   "slot": "foot",
+   "method": "plane",
+   "u": "+x",
+   "v": "+z",
+   "flare": 0.3
+  }
+ },
+ "layout": {
+  "row": [
+   {
+    "col": [
+     {
+      "col": [
+       "skull-crown",
+       "skull",
+       "skull-under"
+      ],
+      "align": "center"
+     },
+     {
+      "row": [
+       "jaw",
+       "clavicle"
+      ]
+     },
+     {
+      "row": [
+       "hand",
+       "foot"
+      ]
+     }
+    ]
+   },
+   {
+    "col": [
+     {
+      "row": [
+       "ribs-side",
+       "ribs-front",
+       "ribs-back"
+      ]
+     },
+     {
+      "row": [
+       "pelvis",
+       "pelvis-front"
+      ]
+     }
+    ]
+   },
+   {
+    "row": [
+     "spine",
+     "humerus",
+     "forearm",
+     "femur",
+     "shin"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "skull",
+   "at": [
+    0.14,
+    1.7,
+    0.035
+   ],
+   "shape": "eye",
+   "size": 10
+  },
+  {
+   "slot": "skull",
+   "at": [
+    0.14,
+    1.7,
+    -0.035
+   ],
+   "shape": "eye",
+   "size": 10
+  },
+  {
+   "slot": "skull",
+   "at": [
+    0.148,
+    1.665,
+    0
+   ],
+   "shape": "dot",
+   "size": 8
+  },
+  {
+   "slot": "skull",
+   "from": [
+    0.135,
+    1.625,
+    -0.035
+   ],
+   "to": [
+    0.135,
+    1.625,
+    0.035
+   ],
+   "shape": "line"
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Skull",
+   "Jaw",
+   "Spine",
+   "Ribcage",
+   "Pelvis",
+   "Clavicle",
+   "Humerus",
+   "Forearm",
+   "Hand",
+   "Femur",
+   "Shin",
+   "Foot"
+  ]
+ ]
+}

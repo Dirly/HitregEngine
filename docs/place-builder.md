@@ -1,0 +1,261 @@
+# Place builder
+
+`apps/playground/tools/place-build.mts` (registered as `hitreg.place-build`, `tools/place-build/`) builds a small or
+medium outdoor place from DATA: a place archetype, the zone brief's place, its reservation and the measured ground.
+The agent picks the archetype and a few overrides; the tool lays the pads, places catalogued structures, sweeps the
+walls, lays the footpaths, clears the ground, writes the first dressing plans and runs every install gate. Hero
+places (a landmark that needs its own concept and bespoke geometry: a sea arch chapel, a waterfall stair) stay with
+an Opus owner (`poi-creator`).
+
+Geometry is deliberately simple (owner ruling 2026-10-19: WoW Classic / EverQuest): a pad, 1-3 catalogued
+structures, one landmark with `fogReach`, a few dressing areas and clearings per pocket. Strong textures do the work.
+
+## Archetypes
+
+`projects/world-kit/authoring/place-archetypes/<id>.json`, validated by `placeArchetypeSchema`
+(`apps/playground/tools/_place-archetype.mts`; every field is `.describe()`d there). Shipped: `camp`, `croft-row`,
+`shrine`, `graveyard`, `beach-landing`, `work-yard`, `den`, `watch-ruin`, `halt-yard`, `cuttings`, `castle`, `lone-tower`
+(`place-build archetypes` lists them). An archetype is a core pocket (the landmark) and up to four more pockets placed
+at `at x spread[tier]` in the place frame (+z toward the approach). Each pocket: a pad, structures (slots with a
+catalogued prefab and `choices`), walls (the `wall` operator: ring, square, line), a dressing area with a first plan
+of props BY NAME, a creature clearing. `propRequests` keep a spot open for what the catalogue lacks.
+
+Overrides: `--set core.marker=parish-weep/weep-lych-gate` swaps a slot's prefab; `--set spread.medium=100`,
+`--set core.radius=12` set fields. The sets are saved in the job's `brief.json` and re-used by the next `plan`.
+
+## Commands (from apps/playground, each inside the heavy-job lock)
+
+```
+T="node --max-old-space-size=6144 node_modules/tsx/dist/cli.mjs tools/place-build.mts"
+$T plan  <world> --zone <z> --location <id> [--archetype a] [--set k=v ...] [--at x,z | --at auto] [--faces E | auto] [--roam 1.5]   # job dir, never the world
+$T all   <world> --zone <z> --location <id> [--port 5291] [--shots-timeout <min>]  # plan -> lab -> build -> gates -> shots (cap default max(15 min, views x 2 x 50 s); a spot stalled 90 s is skipped: `TIMEOUT spot <name>`)
+$T build|gates|shots <world> --zone <z> --location <id> [--only lips,float]    # one stage again
+$T approach <world> --zone <z> --location <id>                               # re-plan the APPROACH only (recorded site, no search): track in, ribbon out; then lab, build, gates, install
+$T dress <world> --zone <z> --location <id>                                  # re-lay the DRESSING only (vignettes by pocket role, from the LIVE plans: swaps and quest objects kept); then lab, build, gates, install
+$T props <world> --zone <z> --location <id>                                  # the layout's hero-prop sheet (reports/layout-props.png, no browser)
+$T evidence <world> --zone <z> --location <id>                               # progress.json evidence.readShot from taken shots
+$T install <world> --zone <z> --location <id> [--dry-run | --uninstall]        # coordinator, after a fresh review
+$T quality <world> --zone <z> [--shots] [--only a,b] [--port p]              # every installed place of the zone graded in the LIVE world
+```
+
+`quality` writes `<zone>/reports/poi-quality.md` (+ .json), weakest first, on four measured lines (`tools/_place-quality.mts`):
+the core's built footprint across vs 1.5 x its tier's core floor, loose props per 100 m2 of the core area, walls in the
+terrain cliff tile, and the landmark's (or smoke column's) pixel height in the noon read shot (floor `READ_PX_MIN` 16 px on
+the 1280 x 720, 60 deg frame). `--shots` first re-takes core-close (core-front on older jobs), aerial-150 and the read view of the joined approach for
+every place in ONE light-shots run (`<zone>/reports/poi-quality/<world>/<place>--<view>-12.png`).
+
+Zone defaults: `<zone>/place-build.json` `{ "builtStone": { "face", "cap", "footing" } }` = the material ids every
+place-build wall (and a skirt whose structure's own base material is no material asset) takes; `plan` refuses ids
+missing from the closure.
+
+A pinned core (`--at`) ignores the brief's `site.faces` (it described another spot) and faces the nearest approach point 40 m+ away, which can be the OTHER approach's end: `--faces <compass>` names the front (kept in brief.json). A landmark owner writes `<job>/contract.json` `{ idea, mustRead[], views[] }` BEFORE the grey box (HERO-BRIDGE discipline: one idea, 3 fixed cameras incl. the 300 m road view, `camera` + `target` each); every `plan` merges those views into `views.json` and `shots` takes them.
+
+The job dir is `zonegen/<world>/zones/<z>/pois/<id>/`: `handoff.json` (routes for poi-walk, `siteDressing`, measured
+size, landmark, viewpoints), `ops.json`, `world-ops.json` (pads), `operators.json` (walls, footpaths),
+`clearings.json`, `encounter-clearings.json`, `dressing/<id>-<pocket>.json`, `views.json`, `prop-requests.json`,
+`reports/` (`plan.json`, one report per gate, `gates.json` = the table) and `evidence/` (noon and dusk sheets).
+The lab is `projects/pb-<id>/`, remade from the live world and scene by `all` / `lab`. A Sonnet dresser refines the
+plans in `dressing/`; `build` re-applies them.
+
+## Layout (the owner's composition)
+
+Knobs (`--set`) cannot carry a composition: the Tinkers' Camp passed every measured gate and was RETURNED because the
+builder decided where things went (TOOLS-LAYOUT 2026-10-24). The owner writes `<job>/layout.json` (schema
+`placeLayoutSchema` in `tools/_place-archetype.mts`, every field described):
+
+```
+{ "version": 1, "frame": "place", "origin": [x, z],
+  "pieces": [{ "id", "element", "kind": "structure"|"prop"|"fire"|"decal", "prefab", "at": [x, z], "yaw"?, "scale"?, "pocket"?, "role"?, "landmark"?, "over"?: [ids], "quest"?: "<slot>" }],
+  "views":  [{ "name", "camera": [x, y, z], "target": [x, y, z] }],
+  "ground": [{ "id", "element"?, "kind": "wear"|"mud"|"ash"|"paving"|"rubble", "at": [x, z], "radius"?, "texture"? }] }
+```
+
+- **Frame**: the place frame `views` use: origin the plan centre (`reports/plan.json` `centre`), +z toward the approach,
+  +x its right, y over padY. `origin` pins the core there, so no later site search moves the composition.
+- **Exact or refused**: `plan` places every piece at its `at`/`yaw`, settled to the ground there (structures and props
+  through the structure path: seat, skirt, cover clearing, keep-clear; a fire is the fire slot; a decal lies at ground
+  height and is never a solid). A piece that overlaps another (yawed footprints from the catalogue `dressing.size` x
+  scale), stands in water, on ground steeper than `USABLE_SLOPE` (0.6), outside the reserved ground, or names an
+  uncatalogued prefab or a non-vfx fire is a `LAYOUT:` fault in `plan.json` `faults[]` naming the piece (exit 1). Nothing
+  is moved. `over: [ids]` exempts those pairs (both directions): a gantry straddling the bell, a tarp over a crate.
+- **Quest pieces**: `quest: "<slot>"` puts that quest slot's prop (the `quest.<slot>=` set, else the piece's prefab) at
+  the piece's `at`/`yaw` as a fixed floor item (`quest.entity`) of the core plan, never at the auto spot; it is not also built.
+- **Hero props made at size**: a codex-craft piece scaled over x1.2 (`CODEX_SCALE_MAX`) WARNs `made too small: re-request
+  at <m> m`; `props request add --size <m>` stores the height and the Codex brief says it is made at that size.
+- **The layout is the whole composition**: the archetype's structures, its `read.beacon` (and the silhouette tower)
+  and its pockets' listed `dressing.props` are not added. The archetype still gives terrain (pocket fits, pads), walls,
+  clearings, encounters, the quest slots and the FILLER, which treats every piece's footprint as occupied ground. A pocket
+  named by pieces (`pocket`) is centred on them. Layout `views` replace the `views` set (contract.json views still win).
+- **Walls share the frame**: under a layout the core pocket's `walls` (`<pocket>.walls` sets) stand at their written `at` /
+  `points` in the same place frame as the pieces; the tier spread (`spreadToFloor`, floor / fit) is undone for them, so a
+  chapel drawn at [28,-4] beside a bell at [16,-2] is 12 m from it, not 35 (Exiles' Bell 2026-10-24).
+- **Wet ground**: a piece whose footprint touches wet ground is refused unless it says `wet: true` (drowned steps
+  running into a loch, a pier, a reed clump). The flag is a statement of intent, not a fix: a hall marked wet still
+  floods. Seating is unchanged (the piece seats on the ground under it, under the water).
+- **Lift and the landmark**: a piece's `lift` (metres) stands it above its seat — raised foundations for a kit building
+  whose floor slab is at y=0 (0.6 m like town buildings; Ashen Vow 2026-10-24: the slab on the pad was a 410 m² z-fight).
+  The archetype schema still wants exactly one landmark BEFORE the layout applies, so a set keeps a placeholder (the fire's
+  default, or a wall's); when a layout piece carries `landmark`, every archetype wall's landmark is dropped and the piece
+  is the one the silhouette rule and the approach read judge.
+- **Coverage** (checked in `plan`, where the catalogue is at hand): every design.json element made of a catalogue prop
+  has a piece or a ground patch, every piece names an element (`element <id> has no layout piece`,
+  `piece <id> names unknown element <e>`). structure:/creature:/terrain:/decal:/water:/text:/light: entries are exempt,
+  and so is an element whose props are all the place's quest props (the dressing plan places the quest entity).
+- **Ground wear**: each `ground` entry is a groundPaints disc (the pocket `floor` path), surface by kind from
+  `WEAR_SURFACES` (`<world>-<zone>-road` / `-ground` / `dirt` for wear, `-mud` / `mud`, `-ash` / `ash`, `-paving` /
+  `paving` / `cut-stone`) or `texture`; a kind the recipe has no surface for is a refusal naming it. Every disc is at
+  least 4 m radius (`GROUND_MIN_RADIUS_M`, default 4) with a 1 m feather; `wear` takes the DARKEST candidate by recipe
+  colour (Hagsheer: its ground, not the pale gravel road); `rubble` is 6-10 catalogued `rock-kit/boulder-s-*` stones in
+  the disc (`slot:rubble`), skinned by rock-skins.
+- **Before a chain**: `$T props <world> --zone <z> --location <id>` renders every piece (the props proof soft renderer,
+  no browser) into `reports/layout-props.png` with its id, its element's `shows` and its catalogued size, and prints the
+  size-band WARN (fire > 3 m, prop > 6 m, structure < 1 m; also `WARN:` notes in `plan.json`). Look at it first.
+
+## Lifts (a structure kind beside a long descent)
+
+A flight of steps down a 90 m cliff takes minutes; a winch LIFT (Thunder Bluff) runs beside it forever on the shared
+clock (the `lift` builtin: a kinematic deck that carries its riders and is never replicated). Tool: `tools/_place-lift.mts`.
+
+```
+$T lift plan <world> --zone <z> --location <place> --lift <id> --top x,z --bottom x,z [--facing deg] [--exit front|back] [--top-y y] [--bottom-y y]
+$T lift gate <world> --zone <z> --location <place> --lift <id>              # a real body rides down and back up on the server's stepping
+$T lift install|uninstall <world> --zone <z> --location <place> --lift <id>  # refused without a passing gate on the current ops
+```
+
+- top = bottom XZ is a plumb shaft (give `--facing`, out from the cliff); a bottom further out is an INCLINED winch (the
+  deck stays level). A 70 degree slope has no room for a plumb shaft: `SHAFT` says where the line meets the ground.
+- The headframe stands on the ground BEHIND the top deck, never over the drop; when the deck hangs clear of the edge a
+  gangway spans the gap (two 3 m pieces; `EDGE` past 5.6 m). The landing frame stands at the bottom exit (`--exit back` = a cave mouth
+  under the top). Both sit on their LOWEST ground (never float) and refuse more than 2 m of rise under them.
+- The plan reads the scene's colliders too: a wall, kerb, pier or flight in a rider's volume on either deck, in the shaft,
+  on the walk on/off or under a frame is `STRUCTURE` (kirk-stair 2026-10-21: a bell-cote wall stopped the ride gate's body
+  after the plan said ok). `--shaft` carves a straight box round the deck (`lift-<id>-shaft`, exempt from the 6 m rule
+  like bridge cuts: the ride gate proves it). The cradle and rope are written with mesh overrides (`moving`, not
+  `static`/`hlod`) so they follow the deck on a client. `tools/lift-play.mts` is the real-client ride + pictures.
+- Files: `<place job>/lifts/<id>.{spec,ops,plan,gate,install-inverse}.json`. Entities are tagged `lift:<id>`, not
+  `poi:<place>`, so a place re-install never takes the lift with it.
+
+## Bridges (a structure kind across a gorge)
+
+A hero crossing (the Lych Span, HERO-BRIDGE 2026-10-21) is a place whose landmark IS the structure: `place-build bridge`
+reads `<job>/bridge.json` and writes the job files the rest of the tool uses (then `lab`, `build`, `gates`, `shots`,
+`install` as for any place). Tool: `tools/_place-bridge.mts` (schema `bridgeSchema`, every field described; test
+`test/place-bridge.test.ts`).
+
+```
+$T bridge <world> --zone <z> --location <place> [--spec <file>]   # <job>/bridge.json { bridge, roads, views }
+```
+
+- `bridge`: the deck line (`from` = a gate tower's centre or the first end, `to` = the far end, one level `y`), piers
+  (centre, foot and top sizes, set-back heights, cutwater side, half-round refuge), `arches.springing` (all spans equal:
+  one crown height), start/end kinds (`gate-tower` with its round-arched passage on the deck line, `block`, `rim`) and a
+  material per role (face, arch, parapet, coping, deck, footing, roof). It compiles to ONE `landmark` operator
+  (`kind: built`, `pb-<place>-<id>`): bevelled boxes for tiers, deck, parapets and the tower; closed prisms with UVs laid
+  flat per face for the arch rings, spandrel bays, refuges, cutwaters and the roof, so every face (caps, soffits, the
+  deck's underside) is at 40 tx/m with no off-axis stretch. Bevels stay small (a chamfer strip takes box UVs off its axis).
+- Seating: every pier footing, impost block, abutment, the tower and the band beyond each end arch is a BASE buried
+  `bury` m under the lowest ground of its outline (min of the heightfield and the surface cast); an end arch whose outer
+  springer stands over lower ground gets an impost block run into the wall until the ground reaches the springing. Gate
+  `seated` reads `reports/bridge.json` bases (daylight along each outline <= 0.05 m).
+- Roads: each `roads[]` entry is a carved + painted recipe road (`worldgen road`, `road-pb-<place>-<id>`) from a deck end
+  (`from: start|end`) through its points, pinned to the deck height at the deck (`--pin-start`): flush, no ramp edge.
+  Gate `roads` checks every one (handoff `approachTracks`).
+- Routes: `deck` (the gate passage and the deck, `onBuilt`: the lab build keeps its heights) and one per road.
+- A gate tower's passage gets a masked LOWERING patch (`pb-<place>-gate`, `lowerPatch`): the mouth flush with the deck,
+  under the passage paving 5 cm below it (the ground poked through, then lay coplanar with the paving: zfight); samples
+  already lower keep weight 0, so the rim's edge is never filled (a level patch there was a 12 m lip).
+- Reach targets: the deck start only. poi-walk walks the `deck` route; its ground planner cannot chain landmark targets
+  along a deck 100 m over a gorge (STUCK at once).
+- `views[]` take `camera` + `target` (a contract shot list): `light-shots` holds the rig off and puts the camera there.
+
+## Lessons the tool enforces
+
+| Lesson | Default or check |
+| --- | --- |
+| Kit and custom builds mix (owner ruling 2026-10-24: "the wall operator is fine; some WFC, some custom") | a kind `wall` square/line >= 1.5 m that is a `row`, has a `shell`, or whose id names a building (house, croft, hut, byre, hall, chapel, kirk, church, shed, barn) gets a plan NOTE `<id> is a wall-operator shell`, naming the kit alternative (`wfc-ruins/*` as a layout structure piece) once the closure catalogues one (`shellStandIn`, `kitBuildings`). Never a refusal: the owner picks per piece |
+| Size tiers measured, never claimed | tier `spread` sizes the footprint; usable area flood-filled from the core and every pocket (each joined by a walked footpath); gate `size` (job.mjs measure) |
+| The ground decides the tier (ruling 2026-10-20) | when the measured usable area is under the asked tier's minimum, `plan` builds one tier down (medium -> small) and writes `tierDowngrade { from, to, measuredUsableAreaM2, neededM2, why }` into brief.json (`adventureSize` = the built tier), handoff.json and reports/size.json; size-tiers.mjs is never loosened |
+| A shore place stays on its own shore (weepmouth, kelpmane-cove 2026-10-20) | a core with `near: water` (beach-landing) is a site-search candidate only within `SHORE_RISE_M` 12 m above the surface of water within `SHORE_M` 60 m at the level of the water nearest the brief site (+-2 m; `shoreRise`, `waterLevelNear`, `PlaceGround.waterY`): the search had lifted a cove onto a 100 m cliff top over the sea and a river mouth onto a tarn's bank 270 m away |
+| A brief size the ground cannot hold goes to the zone master | when even the lowest tier the builder makes (small) does not fit, `plan` prints `SIZE FOR THE ZONE MASTER` and writes reports/zone-master.json + handoff `zoneMaster` { asked, built, measured, needed, suggest: pinpoint / another site }; the size gate stays red, the place is never forced (kelpmane-cove 1536 m2, weepmouth 2676 m2 of shore) |
+| Pad on the ground's own level, no lips | pad = masked height patch at the median ground, `calm`; `raiseOnly` beside a drop; gates `lips`, `scatter-float` |
+| 6 m rule | pads >= 6 m by schema; walls/paths are operators; gate `fine` |
+| Water levels, falls | archetypes never write water or a fall `course`; pads fitted dry; gate `water-edges` |
+| Grass cleared under structures | a cover clearing per pocket and per structure outside it; check `place` (uncleared, clearings installed) |
+| Catalogued pieces, no primitives | prefabs must resolve in the closure at plan time; check `place` (primitives, uncatalogued); gate `art` (form) |
+| No hull walls; boats on the shingle | schema refuses a hull prefab unless role `boat`; missing boats are prop requests |
+| Walls over 3 m get buttresses | planner adds `buttresses` to any wall over 3 m |
+| Fire only as catalogued vfx | schema refuses a `fire` slot outside `FIRE_PREFABS`; job.mjs `fire` rule in art |
+| Stairs land on level ground, risers <= 0.4 m | footpaths are `path` ribbons (graded, risers from the solver); gate `walk` |
+| Footpaths ride the moor, no stepped flights | `route.maxGrade` 0.35 (stairs in a grade patch read as sawtooth: gate `lips` alias) |
+| Pads only where something stands | a pocket gets a pad only when it has structures and relief > 2 m; walls and dressing follow the ground |
+| Gates you can walk through | a gate in a wall under 3.2 m is a real gap (the ring cut into runs ending in piers, `cutRing`): the wall operator caps any opening at wall top - 0.4 m |
+| Routes are planned, never drawn straight | every leg is A* over the measured ground (`routeGrid`, 1 m cells): water, structures (footprint + 0.8 m), wall runs (pier-wide + 0.5 m, so gates are the way through) and ground steeper than 35 deg are blocked, steps over `route.maxGrade` cost extra (the line follows contours), then pulled taut; a wall end left at `terrain` counts its `tie` run-on; the footpath ribbon follows the planned line outside the pockets; the approach joins at its gentlest dry sample; every route lane gets a polygon clearing (scatter only; half the footpath width + 4 m each side, so the ribbon's cut and fill shoulders never leave a scatter rock floating: shielings 0.09 m); an area or clearing whose straight reach from the nearest route sample (poi-walk's rule) meets a wall gets its own planned spur route; gate `walk` |
+| The path joins the approach on dry ground near the pad level | judged per 2 m sample of the approach, so a join never lands at a cliff foot |
+| Pockets go on level ground (owner ruling 2026-10-20) | `plan` runs the SITE SEARCH (`siteSearch`): a 2 m slope map of the reserved disc and a ring up to `--roam` (1.5) x its radius (water, the road corridor + approach lines, other POIs and placed scene things excluded); the core goes to the flattest level spot whose satellites also find level dry pads at 0.6-1.25 x spread (+-60 deg of their bearing) on the core's own connected ground, within 0.3 x distance in height; scored by usable area toward the tier's need, then pad relief, then distance from the brief site. Recorded in brief.json / reports/plan.json `site` and printed as `SITE:`. `--at x,z` pins the core (search refines 14 m round it); `--at auto` clears an old pin. Tier downgrade only when no layout holds the tier |
+| No graded straight line where the ground has no way | a leg `routeGrid` cannot solve is a FIT fault and gets NO path operator (the straight fallback graded 6-9 m sidehill lips); the approach join tries up to 8 further joins along the approach before it is a fault; footpaths are the `path` ribbon (its sidehill fix: ribbon.ts wall-run fades, fill-wall shoulders) |
+| The walk judges the surface the body stands on | poi-walk compares a leg's end to the walkable surface of the goal column nearest the body (`goalSurface`: declared ground or a collider top), not the terrain under ribbon steps or stairs |
+| Shots never hold the heavy slot | `shots` runs under a hard cap (`--shots-timeout`, default 15 min; `_run-capped.mts`): on expiry the run, its vite and browser are killed (process tree) and the stage FAILS with TIMEOUT |
+| A pocket with no floor is named, not a schema error | an area whose socket map has 0 m2 open floor is not dressed; the `dress` gate says `no open floor ... re-plan`; plan item ids are made unique on every write (`uniqueItemIds`) |
+| The place is charged for its own faults only | `float` and `scatter-float` (like `rock-skins` and `lips`) fail only on findings the live world (same `--near`, place not installed) does not already have: a site moved 200 m widens `--near` over old hoodoos and shore rocks; `all` exits by the final gate table. scatter-float attributes a finding to a masked height patch only where the patch has weight within 4 m + its feather (`patchReaches`), never by its rectangle: a diagonal footpath's 122 x 109 m grade patch charged an old 'ground none' hoodoo 48 m off the path (gibbet-rise, shell-midden, goat-tables) |
+| Creature clearings stand free | the encounter clearing takes the first of six spots round the pocket (then eight at 0.85 x its radius) that keeps 1.5 m past every structure footprint AND wall line (`pocketClearance`; shielings: a croft corner) |
+| Doors and gates are walked on their centre line, and are at least 2.2 m | every wall gate is built at least `MIN_GATE_M` 2.2 m (a voxel wall's 1.4 m door is ~1.0 m between piers, rounded further by the mesher: the 0.84 m capsule stuck in both shielings doors); a gap between wall run ends (`wallGates`: a pier-ended square's door, a ring's gate, the runs of a cut ring written as separate operators; 0.6-6 m) is open to the router on its centre line within half-width - 0.65 m (pier 0.2 + body 0.45), the grid cells it crosses snapped onto that line; before this a 1.4 m croft door was narrower than the 0.5 m wall clearance either side, every route to the stand was a FIT fault and the walk got the straight fallback (shielings 14 STUCK/14 MISS) |
+| A tight site gets a compact layout, not cliff-side satellites | when no layout holds at 0.6-1.25 x spread, `siteSearch` retries satellites at 0.3-0.5 x spread (+-90 deg) on the core's connected ground (`SITE: COMPACT ...`); only then the archetype's own offsets (hags-nose: satellites 40-50 m down the nose, 9 FALL) |
+| An approach that names only where it comes from is resolved | reservation `approach.from` with `points: []` -> `approachLines`: a road/path/trail -> its stretch within 600 m of the centre, a river -> nearest point to the centre, a town / POI / region (hub or centroid) / other reservation -> its centre to the centre (`APPROACH:` line at plan); used by the site search, the footpath join and the read check (peat-banks, gibbet-rise: "no approach line to judge from") |
+| One fault per cause | `all` runs the gates before the shots without charging the evidence (pending); after the shots the `place` row names the shot failure once (`shots FAILED: <reason>` from reports/shots.json) instead of "no evidence yet"; the plan's FIT faults are named in `place` as `plan: N FIT fault(s)` |
+| Browser shots let read-only POSTs through | the write stub in light-shots / see-through / town-shots passes `READ_ONLY_POSTS` (`tools/_readonly-posts.mjs`: `/__hitreg/log`, `/__hitreg/asset-json`); the batched asset reader's POST was answered `{"ok":true}`, no prefab loaded ("prefab characters/player not found") and every shot run timed out (Hagsheer batch 2026-10-20). `test/readonly-posts.test.ts` fails when vite.config declares a new POST read the list lacks |
+| A shot boot that never comes up says why | light-shots prints the page errors + console errors and a `<scene>-boot-failed.png` when `__hitreg` is not up in 240 s, and reloads once before failing |
+| No camera under water (weep-well 2026-10-20) | a view's body (pivot) and camera (`distance` m behind it) are never wet nor, within a lake's radius + 40 m, lower than its waterY + 0.3 (a shore can be dry by the field yet under the lake's surface: read-2 sat under the tarn); the spot slides back from the target in 4 m steps up to 40 m (plan NOTE `view ... moved`), else the view is dropped |
+| One mesh per plane | gate `zfight` |
+| Texel 40/m, ground matches, L* band | walls default to the zone's own stone; gate `art` (texel, ground, value) |
+| Reads from its approach, lit at dusk | check `place`: along the approach the place's own footpath joins (`read.approachLine`; other approach lines are reported, not charged), some dry spot in the tier window (small 113-150 m: a small silhouette is enough; medium 225-300 m; large 340-450 m; `READ_BY_TIER`, `read.band` overrides) sees the landmark top or a smoke column (`SMOKE_READ_M`: `giant-camp/landmark-pyre` reads 40 m up) over the ground, inside `fogReach`; a line shorter than the window is judged from its far end. A fire is required unless `read.duskLight` is false with a reason; shots at 12 and 20. A medium place hidden on a dome or behind a crest: `--set <pocket>.<fire>=giant-camp/landmark-pyre` |
+| The site is chosen where the landmark reads (Hagsheer batch 2026-10-20) | the site search scores every layout by the approach read: from the approach its footpath will join (`nearestOnApproach`), `readHeightNeeded` (approachRead's rule, every 2nd spot of the tier window) against `readTargets` (the landmark's height and every smoke column at its pocket); a layout whose targets stay hidden pays 30 + its shortfall (capped 30). `SITE:` ends `read from approach N: the landmark reads` or `X m short (no layout reads)`; brief.json/plan.json `site.read`. Seven medium places had put a 3.5-5 m landmark behind a crest 12-64 m in front of the read spot (needed 11-47 m) |
+| A camp reads by its fire (TOOLS-PB 2026-10-23) | archetype `camp`'s fire is `camp-props/bonfire` (`SMOKE_READ_M` 4 m: flames, no smoke column); `giant-camp/landmark-pyre` is a choice a giant camp sets (`--set core.fire=giant-camp/landmark-pyre`, ~8 m smoke). `SMOKE_READ_M` lists every vfx fire prop (bonfire 4, campfire 1.2, brazier 1.4, pyre 8); a place whose stone/cart cannot read anywhere in its disc takes a pyre by `--set core.<fire slot>=giant-camp/landmark-pyre` (coffin-road: 12 m short with a cairn) |
+| One approach named twice is judged once | `approachLines` drops a line identical to an earlier one (a reservation naming the same road as `approach` and in `approaches`: wreck-road, coffin-road showed two identical failing rows) |
+| Props by name only | first dressing plans (`auto` places); gate `dress` (dress check) |
+| A row is as many as the brief names (shielings 2026-10-20) | a wall `row` (`square` only) builds N shells along x: N = the number before one of `row.nouns` in the brief's read/landmark/features (`briefCount`: "five turf-roofed stone huts" -> 5), else `row.count` (3), capped at `row.max` (5); each shell `row.size[tier]` (medium 6 x 4 m) with its door on `gateSide`; the pocket radius grows to hold the row (`expandRows`, also seen by the site search); plan NOTE `a row of N shells`. croft-row: the row's doors face the yard, the byre and fold across it open back onto it (`gateSide: back`). ONE 4 m shell read as a lone gate where the brief promised five huts. A living row with no catalogued turf hut stays roofless shells + ONE prop request (`turf croft hut, 6x4 m, human/rural`), never a composite |
+| The brief's ring is built as data (weep-well 2026-10-20) | archetype `ring` (shrine: switched on by `when` words such as "ringed", "salt ring"): `anchor: water` = the nearest recipe lake within 150 m of the brief site, its ring on the MEASURED dry rim (median first dry ground on 24 rays; the field's shore/bank is wet past the recipe radius: weep-tarn r 45, dry from 57.5 m), a `groundPaints` disc to rim + width limited to waterY - 1 .. + 2.5 (the shore band), catalogued stones and `ring.scatter` (the VISIBLE ring: instances of the world's own scatter rules, zone skin first via `{zone}`, as a `rockSets` feature `pb-<id>-ring-plants`: shrine = 28 dry-brush + 6 bleached snags at 0.6) on the first dry spot of evenly spaced rays (<= 0.5 grade, then the angles either side, then 0.7: a steep bank no longer leaves a gap); paint alone did not read at 300 m; `anchor: core` = paint discs round a circle. No white reed or salt cover species exists: paint `snow` stands in and `ring.request` logs the true species as a prop request |
+| Legs take the gentle way first (shielings 2026-10-20) | every leg is routed first over ground nowhere steeper than `route.maxGrade`, then + 0.1, and only when neither exists up to 35 deg: ground steeper than the ribbon grade gets a riser (in-field leg on 29 deg: fell 3 m; approach over a 0.45 stretch: a 2 m riser, fell 2.2 m) |
+| No camp gear outside a camp (weep-well, hags-nose 2026-10-20) | the automatic fill (`ROOM_FILL`, `fill-N` top-ups) takes `CAMP_ONLY_RE` props (camp-props/*, banners, porters' frames, tents, lean-tos, bedrolls) only for the `camp` archetype; every other role fills with small boulders (rock-kit/boulder-s-*, any culture; never scree: its flat underside z-fights a cairn base on level ground, weep-well zfight). A brief place's `culture` overrides the archetype's dressing culture |
+| Plans pass dress check | dressing props must be of the archetype's `culture` (a wrong-culture prop is a plan FIT fault: fix the archetype); fill props are only those of its culture; top-up ids are unique (`fill-N`, counting on past ids already in the plan) |
+| Gate-rejected catalogue pieces are never placed | `DENIED_PROPS` (`_place-archetype.mts`: lean-tos that z-fight, `camp-props/tent` and `spoilgate/chain-post` out of the L* band, `town-craft/dockside-tally-stand` z-fighting the ground; `old-watch/ruined-tower` was lifted 2026-10-20 after its floor slab was sunk 7 cm under the origin plane) + an archetype's `deny`: a denied slot takes its first allowed `choices` (plan NOTE), denied dressing/fill is skipped. Fix the prop (prop-intake), then take it off the list |
+| Reinstall removes stale pieces | build/install remove everything tagged `poi:<id>`, features `pb-<id>-*`, clearings owned by `<id>` first; check `place` (stale) |
+| Gates on the lab, not live | every gate runs on `pb-<id>`; install refuses when the live ground under the place differs from the lab; the lab leaves out `populate` creatures (the walk judges ground and pieces, not a fight), and `art` leaves `mobs/*` out of "the props around it" |
+| A small drift of the world's ground re-seats, a large one re-plans (2026-10-20) | install measures live vs lab ground under the pockets (4 m grid): <= 0.05 m installs; <= `RESEAT_MAX_M` 0.5 m installs, then re-seats every entity of the place (tagged `poi:<id>`, `dress-<id>-*`) on the live solid by float's seat rule (`seatPlaced`, inverse `install-seat-inverse.json`) and fails on any still off or unsupported (reports/install-float.json); above it refuses (`installGuard`). A core road-band change moved five reviewed places 0.24-0.94 m and each would have needed an 8-min `all` |
+| The read shot is recorded | `shots` writes progress.json `evidence.readShot { file, viewpoint }` (the approach read view at noon) and `viewpoints`, so `job.mjs stage <job> installed` passes; `place-build evidence` records it from pictures already taken |
+| Evidence after the last ops change | check `place` (evidence fresh); shots overwrite by view name |
+| One independent review | install calls `requireFinalReview` (job.mjs gate 13: Q1-Q5, S1-S9 and the Place lines P1-P5) |
+| Designed before it is built (owner ruling 2026-10-22) | `build` refuses without `<job>/design.json` (premise, journey, areas, story elements of catalogued props / structures / creatures, a concept frame drawn from the premise with `image-request.mjs gen`; `designFaults` with `sample: false`); the `design` gate row (first) and the install need the finished sample area's frames and a fresh reviewer's PASS on the Place lines, recorded by `job.mjs design-review` (gate 16) |
+| A footpath lands on the ground (tinkers-camp 2026-10-20) | the paved stretch ends at the pocket edge unless the ribbon fitted there ends > `LAND_TOL_M` 0.5 m off the ground; then it runs on into the pocket (radius x 0.6, x 0.3) along the planned line (`landedStretch`, plan NOTE). A flight that ended 1.5 m above the core ground was a 0.51 m lips alias |
+| A stepped path grades without slots (net-green 2026-10-20) | core `ribbonPatch` gives every raster cell within the stepped foot's 10 m fan a height (`span`); cells past `reach` had kept height 0 beside weighted cells and the sampler drew a one-column 9 m slot |
+| Footpaths are walked as built (hags-garth 2026-10-20) | poi-walk `derivedRoutes` walks a path op along its ribbon samples (the world's features.ribbons), never its control polyline (the spline bowed 2.3 m into a retaining-wall end) |
+| zfight charges the place only (sheer-crofts 2026-10-20) | on a lab FAIL the gate runs zfight on the live world (same --near) and fails only on clusters it lacks (`newZfightClusters`: mesh pair, materials, centre within 1 m); ocean vs sea-level terrain 260 m off is not the place's |
+| A pyre burns at dusk (coffin-road 2026-10-20) | check `place`: `burnsAtDusk` = any FIRE_PREFABS piece or a flame name (pyre included) |
+| A pinpoint is one spot (weepmouth, coordinator ruling 2026-10-21) | a brief place sized `pinpoint` builds the archetype's core pocket only (`forTier`: satellites, their routes and prop requests dropped; `spread.pinpoint`, `row.size.pinpoint`); its read window is 45-60 m (`READ_BY_TIER.pinpoint` 60: one marker at the end of its path); size-tiers.mjs pinpoint 15-60 m, 100 m2. The zone master re-tiers a place the ground cannot hold as small (`SIZE FOR THE ZONE MASTER`) |
+| Quest objects are built with the place (weepmouth, kelpmane-cove 2026-10-21) | `plan` reads the zone's quests.json `entities[]` (kind object/readable, location = the place); each is an item of the core's first dressing plan with `quest.entity`, its prop from archetype `quest` (`--set quest.<entity>=<prop>`, saved in brief.json); a declared object with no prop is a plan FIT fault. Hand-added quest items were wiped by every `plan`. `dress check` runs with `--poi <id>` (in the lab project no job names the plan, the check refused every quest item as `quest-wrong-location` and the build dropped them: `place` stale entities) |
+| The cut shoulder leaves no grass floating (kelpmane-cove 2026-10-21) | every route lane gets a second, cover-only polygon clearing (half the footpath width + `COVER_LANE_M` 3.5 m each side); grass 2.9 m past a path edge stood 0.5 m over the ribbon's cut (scatter-float) |
+| A medium place is not a 20 m clutter patch (Hagsheer 2026-10-21) | `forTier` -> `spreadToFloor`: every pocket covers its built tier's floor (`POCKET_FLOOR_M`: pinpoint 7/5, small 16/9, medium 24/12, large 36/16 m radius, core/other); a smaller archetype pocket keeps its own radius as `fit` (ground fit, site search, pad and pad clearing judge only that) and its layout is spread by floor/radius (structure and wall positions, line walls, enclosing ring/square walls grow; small rings, pens and row shells keep their size); plan NOTE `pocket X: spread to the <tier> floor`; graded by `quality` (core across) |
+| Dressing density scales with area (Hagsheer 2026-10-21) | `firstPlanItems` asks `densityNeed` = the role's `DENSITY_FLOOR` (camp 1.2, yard/ruin 1, cave-mouth 0.8, shore 0.6, path 0.4 props / 100 m2; archetype `dressing.density` overrides; at most 40) and never under dress check's room minimum: the archetype's own non-container props repeated first (up to 3 x their count), then the role's fill; the socket map drops what has no room |
+| Outdoor areas get LAYOUT, not room rules (owner walk 2026-10-21: "they just look like clutter in a small area... looking for a small square place") | `arrangeFirstPlan`: a first plan is laid out in vignettes (plan `arrangements`, @hitreg/core resolver): camp round the pocket's fire structure (`structure:<pocket>-<fire>`), yard before its first structure's front, a work line for the rest (shore: the work line), boulders stay loose (`prefer: open` now spreads outdoors), quest objects keep their place, item ids kept; the area is the whole pocket (centre + `DRESS_RIM_M` 3 m), not a disc round the stand point; the dress loop tops up `site-sparse` (per 100 m2 by role) and drops a vignette that cannot be laid out to loose items; dress check `site-spread` / `site-clutter` / `facing-sense` / `opening-clear` |
+| Built walls never wear the terrain cliff tile (kirk-knowe 2026-10-21: a blue slate checker) | a wall whose archetype names no materials takes the zone's `builtStone`; none at all is a plan FIT fault; check `place`: `walls in the terrain cliff tile` (`wearsCliffTile`: no face / `zone` / `surface:`). Not this tool: rock-kit props >= 4 m still show the zone cliff tile's slate patchwork up close (`quality` counts them: the zone-texture pass) |
+| Every place reads at 300 m in PIXELS (Hagsheer 2026-10-21: 1.8-5 m landmarks showed 0-10 px) | `approachRead` with the landmark's foot judges the visible height over the occluding ground as pixels in the evidence frame: a spot reads only with >= `READ_PX_MIN` 16 px (check `place`; the fault names the best px per line); the site search adds `heightForPx(band far)` to the height a target must clear. An archetype whose tallest read target (landmark, smoke column) is under `heightForPx` of its tier's far read distance (medium 7.7 m, small 3.9 m) gets its `read.beacon` in the core, and that is the landmark (`withBeacon`; plan NOTE `beacon`): graveyard / croft-row / shrine a 9 m drystone beacon tower (a small `ring` wall: no buttresses), den a 12 m drystone cairn (PLACES-FIX: a rock alone gave a medium place one built picture), cuttings / halt-yard / work-yard / beach-landing `giant-camp/landmark-pyre` (40 m of smoke) |
+| Evidence cameras stand outside geometry (tinkers-camp aerial in the pyre flames 2026-10-20) | every view's body and camera keep `CAMERA_CLEAR_M` 1.5 m past every structure footprint and wall line (slid back in 4 m steps, NOTE `moved`); the aerial's body moves toward the approach off a built centre (`PlacePlan.aerial`) |
+| A structure never floats on its low side (signal-tower 2026-10-21, owner: "the ruins are floating"; float passed it on one contact) | the planner seats every structure (not fires or boats) on its BASE OUTLINE (`baseOutline`: 0.5 m cells of the mesh's lowest surface, from 0.3 m under the origin: a foundation stub buried by design is ignored) over the ground as planned (the pad only where one is written): it sits on the HIGHEST ground under its base and, where the outline then stands > `SEAT_GAP_M` 0.05 m clear, a piece nobody walks into (not a `dwelling`) on a fall up to `SINK_MAX_M` 0.6 m is SUNK to its outline's lowest ground (uphill side rooted, no terrain edit: a raised patch round the signal-tower ruin took the cliff paint and failed the art ground-texel rule); otherwise the ground under its whole base is RAISED to it (raised foundations: `pb-<id>-seat-<pocket>-<slot>`, a level raise-only height patch RAISE_OVER_M 0.1 m over the base (the base rooted in it; 2 cm under the floor z-fought) on a plateau RAISE_PAST_M 1.5 m past it (the filtered 2 m lattice sagged 7 cm at 0.5 m), feathered 3 x the fall: a hollow tower's inner outline stood 0.28 m clear inside a skirt); past `SKIRT_RELIEF_M` 1 m of fall a SKIRT also runs round it (`pb-<id>-skirt-<pocket>-<slot>`: a closed level wall op on the outline's hull, top 0.15 m under the base (never the base's plane: zfight), 0.8 m thick, footing `SKIRT_BURY_M` 0.6 m under the lowest ground) in its own base material when that is a material asset, else the zone's builtStone; rocks, pieces under 1.5 m and pieces on legs/posts/wheels (base fill < 0.3) are SUNK to their lowest ground instead (rocks 0.2 m more). Gate `seated` (reports/seated.json): the MOST daylight along each structure's outline on the lab's built ground (from the skirt's top along a skirt) <= 0.05 m |
+| A route point past the ribbon's end stays (burnt-steading 2026-10-21) | `routeOnRibbon` snaps a point onto the ribbon only within hw + 4 of an INNER sample (hw + 0.5 of an end sample): the planned way round a pen wall to its gate had collapsed onto the end sample and the walk cut through the wall (5 STUCK) |
+| A structure's cover clearing is not a walk target (peat-banks 2026-10-21) | clearings under structures outside the pad carry `walk: false`; poi-walk skips them (a marker spread past a bank line was 3 STUCK); fill props go to `open`, never against a wall (boulders sank into bank walls: zfight) |
+| A low dyke has no footing step (hags-garth 2026-10-21) | walls under 3.2 m get `footing: null` (the body still runs into the ground): the footing top followed the smoothed terrain and met the meshed ground coplanar (zfight 0.08 m2). Beacons sit off the gate axes (a tower in front of a kirkyard back gate left a 3.7 m squeeze: 5 STUCK) |
+| An area whose own props are all denied keeps its plan (peat-banks 2026-10-21) | denied props leave the first plan and the density floor fills the area; a plan the place no longer writes is removed from the project's plans at build (a stale core plan held the quest object, the new plan's apply was refused as quest-duplicate and the live place went undressed) |
+| Quality pictures fall back to the lab (Hagsheer 2026-10-21) | the whole-world scene did not boot in a headless browser inside 240 s (light-shots "timed out waiting for scene skelmorrow"), so `quality --shots` cannot shoot it; the table links each job's own lab evidence, marked (lab). All of a place's plans are written before any is checked (a quest object that moved between two plans was refused as quest-duplicate) |
+| A closed ring is a mitred polygon (shielings beacon 2026-10-21) | a ring wall with no gate is written `smooth: false`: a closed smooth ring's collider solids self-intersect at any radius and the wall bake (op-apply) fails |
+| The approach is a carved + painted track, never a ribbon (owner ruling 2026-10-20: "no ribbon roads: buried by terrain, never approved") | the approach leg is planned as before (`routeGrid`) but from the nearest existing road / path / trail within `TRACK_JOIN_M` 350 m that holds a walkable way to the core (else the approach join; plan NOTE) to the core's edge, and built as a recipe ROAD graded and painted by `worldgen road` (roadFrom: solved profile, shoulder, embankment band, the zone's road surface), `road-pb-<id>-approach` in world-ops.json, `TRACK_WIDTH_M` small 4 / medium 5 / large 6 m (a pinpoint none), cut/fill `TRACK_CUT_M` 1.5 / `TRACK_FILL_M` 0.8 m on profile and tread, the lanes and keep-clear as wide as the track; the track stops where its regraded band (`trackBand`: half width + shoulder 3.5 + smooth 7 + 1 m) would reach a structure or a wall (`trimTrack`; kirk-knowe 2026-10-21: the band lifted the ground 0.55 m off a bell post). The road is voxel data: the field grades the ground to the track surface (cut and fill), never a strip over it. Footpaths between pockets stay path ribbons. Gate `roads` (reports/roads.json) and zonegen status `poi <id>` fail a job still carrying a ribbon / path-operator approach (`ribbonApproachOps`); `place-build approach` re-plans only the approach of a built place |
+| Landmarks that break the skyline are BUILT, not catalogued (LANDMARKS 2026-10-21, Derek: "castles, wizard towers ... something big and apparent") | wall `kind`: `curtain` (follows the ground, crenellated walk, buttresses; CUT where a `gatehouse` stands on its line), `tower` (a mitred ring of `sides`, level top), `keep` and `gatehouse` (square, level top, arched door / passage front and back); built kinds are up to 40 m high and 4 m thick, crenellated (`top: crenel`, needs >= 1.8 m thickness) or `plain`, have no footing step (crossing pieces met coplanar) and keep their size when a pocket is spread to its tier floor; all from the one wall mesher (planar 40 tx/m UVs on every face incl. coping, parapet and merlon tops). A structure with `onWall` stands on that wall's walk (a brazier on a tower top) and is never seated; a built door with `portal` gets a trigger `portal` filling it (`scene: ""` = SEALED, refuses with its line; veil by tools/portal-veil.mts). Archetypes `castle` (curtain, 24 m keep, 4 towers, gatehouse) and `lone-tower` (28 m tower, fire on top) |
+| A landmark reads at NIGHT too (LANDMARKS 2026-10-22: a 28 m tower was a black block from 300 m at dusk) | tower `windows[]`: raised arched slits on its faces (wall operator `openings[].sill` > 0: the body runs on under them; walk checks treat only sill-0 openings as gaps), each holding `giant-camp/window-glow` (night-only light); a `giant-camp/beacon-fire` (`onWall` on a tower / keep / chimney walk; brazier + bonfire flames + one warm light, glow 4) is the warm point the road sees. Smoke never counts as the read. A taller-than-6 m piece (a headframe) is a `props request add --landmark <m>` Codex build, never a scaled wrap. |
+| Every outdoor pocket is laid out, and a site sheds what it cannot hold (PLACES-FIX 2026-10-21: 42 site-dense, 31 site-spread over 26 installed places) | `arrangeFirstPlan` gives every role a first vignette: camp a camp, yard / ruin / cave-mouth a yard (before the first built piece), shore / path a work line, a `lookout` pocket a lookout, an `offering` pocket a shrine; `place-build dress` re-lays an installed place's plans from the live copies; the build's dress loop sheds loose pieces over `site-dense` (top-up fill, then boulders; never a vignette member or quest object) |
+| An atlas is judged by the texels a piece samples (PLACES-FIX 2026-10-21) | gate `art` value takes a UV-laid material's mean over its triangles' UV footprint (`uvFootprintMean`), not the whole page: every poi-props piece read L* 46.1 and no tile repaint could move it. The cloth and crate tiles were re-valued (poi-props import.mts `TILE_VALUE`), giant-camp/timber lifted 21.8 -> 29.5; camp-props/tent and spoilgate/chain-post left DENIED_PROPS |
+| ONE silhouette per place, larger footprints (owner ruling 2026-10-21 23:25: "larger and more silhouetted POIs") | `withBeacon` / `silhouetteHeight`: the landmark must be >= `heightForPx` of the far read distance AND >= `SILHOUETTE_RATIO` 2 x the tallest other piece (walls by height, structures by their catalogue dressing size); else the archetype's beacon joins the core as THE landmark: a wall beacon raised to that height (a plain-topped `tower` past 12 m), a pyre/crag beacon kept as `beacon-fire` beside the default `SILHOUETTE_TOWER`; smoke counts for dusk, never as the silhouette; plan prints `SILHOUETTE:`. `POCKET_FLOOR_M` medium core 24 -> 30 m (small 20, large 44; satellites 11/15/20). A re-plan of an installed place carries its live plans' quest-prop swaps and added named pieces (`carryLive`); routes follow a ribbon on to its paved end (`routeOnRibbon`) and cross a gate within `GATE_LINE_M` 0.3 m of its centre line |
+| A requested prop never vanishes (TOOLS-PB 2026-10-23, silent drop) | plan records `requested` per dressing plan in reports/plan.json (exact counts; plan-time refusals named: denied / wrong culture / camp gear); the build's dress loop writes every item it drops or sheds to `reports/dress-<area>.dropped.json` with the dress-check reason; gate `dress` FAILS on any requested prop short (`requestedShortfall`) and appends the prop and why to `reports/dress-<area>.log` |
+| Top-up is filler, never hero props (TOOLS-PB 2026-10-23: 1 figurehead became 3) | `dressing.props` counts are exact; the density floor and the dress loop's room-minimum top-up draw only from the pocket's `dressing.filler` or the archetype's `filler` (stones, hay, rope coils, firewood), else the role's `ROOM_FILL`, never a listed prop (`fillerFor`); top-up ids are `fill-*` (shed first) |
+| Pockets stay near the core (TOOLS-PB 2026-10-23: a camp's forge 120 m from its fire) | archetype `spreadMax` caps `spread`: a satellite's centre stands within core fit + pocket fit + spreadMax of the core (`spreadReach`; plan and site search). camp 30, croft-row 40, work-yard 40, shrine 25, den 40; the size gate measures honestly and may downgrade the tier; plan NOTE `TIER: built <size>` |
+| A read with no standable spot is a named fault (TOOLS-PB 2026-10-23: "best 0 px @ 560 m") | `approachSpots`: a line that crosses the read band with nothing standable in it yields a spot with `reason` ("no standable spot in band A-B m (wet/steep); nearest standable at N m"); that row never reads and check `place` prints the reason; a line shorter than the band is still judged from its far end |
+| The reviewer sees the place up close (TOOLS-PB 2026-10-23) | every walked pocket gets `<pocket>-close` (8 m toward the approach, `CLOSE_VIEW_M`) and `<pocket>-close-side` (8 m at 90 deg), eye 1.7 m, in place of core-front / core-side; a design adds fixed cameras with `--set views=[{"name","camera":[x,y,z],"target":[x,y,z]}]` (place frame: x right, z toward the approach from the plan centre, y over padY), merged into views.json like contract.json views (contract wins on a name) |
+| Burnt house shells (TOOLS-PB 2026-10-23) | wall `shell: "burnt"` (`--set core.croft.shell=burnt`; `--set <pocket>.<wall>.<field>=v` sets any wall or structure field): 4-5 m walls (`BURNT_SHELL_M`), no buttresses, no roof. Not built yet: gable ends (the wall operator has a flat top) and a charred face material (none in the zone palette) |
+| Not encoded | set pieces unique per zone (the brief owns it); "one strong idea"; prop fantasy/readability (prop-intake) |

@@ -29,10 +29,17 @@
  *   butte-top     the flat top of a mesa or butte (`terrain.buttes`)                          (a summit hold)
  *   canyon-bend   a river or canyon turning between high walls                               (an ambush, a view)
  *
+ * Crossings (any world with solved rivers):
+ *   crossing      where a river's gap (natural top to natural top) of CROSS_MIN_SPAN m or more separates two banks:
+ *                 scored by bank height match and drama (depth under the deck, view down the course), plus roads or
+ *                 places on both banks that would use it; an existing road crossing nearby is noted   (a great bridge)
+ *
  * Approach (every candidate): the nearest road or path, how far, the height change from it, how many metres of road
  * see a landmark standing there (line of sight over the sampled ground, eye 1.7 m, landmark 8 m), the farthest
  * point it is first seen from, and the bearing it should FACE (toward the road that sees it).
  */
+
+import { POI_SIZE_TIERS } from "../../../../../tools/poi-review/size-tiers.mjs";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type J = Record<string, any>;
@@ -49,6 +56,9 @@ export interface FieldLike {
   seaCliffs?(): { stacksIn(x0: number, z0: number, x1: number, z1: number): readonly { x: number; z: number; radius: number; top: number; arch: boolean }[] } | null;
   /** `terrain.buttes`: the monuments of every butte field. */
   buttes?(): { monumentsIn(x0: number, z0: number, x1: number, z1: number): readonly { x: number; z: number; kind: string; radius: number; top: number }[] } | null;
+  /** The field's real top surface at (x, z) (3D cuts included: a sea cliff cuts a 2D summit away), null = none. A peak
+   *  whose summit is not there (cut away, or under the sea) is no site: a marker would hang in mid-air over the sea. */
+  surfaceCast?(x: number, z: number): number | null;
   /** Solved river centrelines: canyon bends are read along them. */
   readonly rivers?: readonly { id: string; points: readonly (readonly [number, number])[] }[];
 }
@@ -73,7 +83,7 @@ export interface RoadLine {
 }
 
 export type SiteKind = "cliff-water" | "canyon-end" | "plateau" | "peak" | "saddle" | "wall-gap" | "cove" | "waterfall" | "path-end" | "switchback" | "empty-land" | "island" | "access"
-  | "fall-lip" | "plunge-pool" | "sea-stack" | "stack-cluster" | "headland" | "butte-top" | "canyon-bend";
+  | "fall-lip" | "plunge-pool" | "sea-stack" | "stack-cluster" | "headland" | "butte-top" | "canyon-bend" | "crossing";
 
 /** The access device proposed for a strong site no walking body can reach from a road (sites.md "access devices"). */
 export type AccessDevice = "ladder" | "cliff-stair" | "lift" | "rope-way" | "bridge-or-ferry";
@@ -130,7 +140,8 @@ export interface SiteReport {
   box: [number, number, number, number];
   landKm2: number;
   places: number;
-  perKm2: number;
+  /** The zone's dry land claimed by place and town footprints, in total and by size tier (gate: AREA_CLAIM). */
+  claim: AreaClaim;
   /** The largest walkable-land disc inside the zone that holds no place/town/reservation. */
   largestEmpty: { at: Vec2; radius: number; landform: string } | null;
   empties: { at: Vec2; radius: number; landform: string }[];
@@ -174,12 +185,25 @@ export const HEADLAND_MIN_H = 8;
  *  on both sides (looked for 12-80 m out). */
 export const BEND_TURN = 25;
 export const BEND_DEPTH = 15;
+/** Crossing: a river gap between natural tops (rim to rim, measured square to the course and up to 30 degrees off it)
+ *  of CROSS_MIN_SPAN..CROSS_MAX_SPAN m. A natural top is dry ground under CROSS_TOP_SLOPE degrees from which the ground
+ *  rises no more than CROSS_TOP_RISE m over the next CROSS_TOP_RUN m outward (a gorge floor beside the water is not one).
+ *  A bank is used when a road/path sample or a place's edge lies within CROSS_JOIN m on that side. */
+export const CROSS_MIN_SPAN = 25;
+export const CROSS_MAX_SPAN = 260;
+export const CROSS_REACH = 220;
+export const CROSS_TOP_SLOPE = 22;
+export const CROSS_TOP_RISE = 6;
+export const CROSS_TOP_RUN = 60;
+export const CROSS_JOIN = 300;
+/** How far along the course (each way) the deck's view is traced. */
+export const CROSS_VIEW = 1500;
 /** Score at or above which a site no walking body reaches from a road gets an access-device proposal. */
 export const ACCESS_SCORE = 5;
 /** How far from the site the foot of an access device may stand (m). */
 export const ACCESS_REACH = 400;
 /** Kinds that never need an access device (a path point is reached by its path; empty land is not a site). */
-const NO_ACCESS: ReadonlySet<SiteKind> = new Set<SiteKind>(["path-end", "switchback", "empty-land", "access", "waterfall"]);
+const NO_ACCESS: ReadonlySet<SiteKind> = new Set<SiteKind>(["path-end", "switchback", "empty-land", "access", "waterfall", "crossing"]);
 
 /** Roads and paths a player walks: not paint-only strips (`role: "none"`), not town paving or a town's own lanes. */
 export function travelRoads(recipe: J): RoadLine[] {
@@ -287,11 +311,83 @@ export const WASTE_LEG = 30;
 export const PATH_JOIN = 40;
 /** Sight lines are tested from road points within this range. */
 export const SIGHT_RANGE = 700;
-/** Density gates (see docs/zone-creation-lessons.md "Site finder" for the measured zones). */
-// Owner 2026-10-06: "it should be dense, it should feel like Skyrim, stuff around every corner": several major places
-// plus many small ones; small finds (radius >= 10 m) count; nowhere further than EMPTY_MAX from something to see.
-export const MIN_PER_KM2 = 8;
+/**
+ * Density gates. Owner 2026-10-06: "it should be dense, it should feel like Skyrim, stuff around every corner";
+ * owner 2026-10-03 size tiers (tools/poi-review/size-tiers.mjs): FEWER, BIGGER places (a large place is a 300-600 m
+ * district). So density is the share of the zone's dry land that place footprints CLAIM (each footprint a disc of its
+ * reservation / town radius, overlaps counted once, a cell going to the biggest tier over it), not places per km2 (a
+ * zone of three large districts is fuller than one of thirty cairns). Gates on that share of land:
+ *   min       below it the zone is open space between a few spots (sparse)
+ *   max       above it every step is inside a place and the wild between them is gone (crowded)
+ *   bigMin    at least this share is held by medium and large places and towns: finds alone do not fill a zone
+ * Nowhere further than EMPTY_MAX from something to see (the "around every corner" half) stays its own gate.
+ * Measured 2026-10-19 (skelmorrow): drownmere, replanned to the tiers, 15% (medium+ 14%); hagsheer 21% (18%);
+ * rustmarch, still planned as 126 pinpoint finds, 5% (3%) -> sparse + no-big-places.
+ */
+export const AREA_CLAIM = { min: 0.12, max: 0.6, bigMin: 0.08 } as const;
 export const EMPTY_MAX = 250;
+
+/** Footprint classes of the claim: the size tiers (by diameter) and towns. */
+export type ClaimTier = "town" | "large" | "medium" | "small" | "pinpoint";
+const CLAIM_ORDER: ClaimTier[] = ["town", "large", "medium", "small", "pinpoint"];
+/** The size tier a footprint of this diameter reads as (size-tiers.mjs minimums; under the pinpoint minimum is a pinpoint find). */
+export function tierOfDiameter(d: number): Exclude<ClaimTier, "town"> {
+  let out: Exclude<ClaimTier, "town"> = "pinpoint";
+  for (const t of POI_SIZE_TIERS.tiers) if (d >= t.footprintDiameterM.min) out = t.id as Exclude<ClaimTier, "town">;
+  return out;
+}
+export interface AreaClaim {
+  landKm2: number;
+  claimedKm2: number;
+  /** claimed / land */
+  share: number;
+  /** Share of land held by medium + large places and towns. */
+  bigShare: number;
+  byTier: Record<ClaimTier, { places: number; share: number }>;
+}
+/** A land mask on a regular grid: cell (i, j) is at (x0 + i * step, z0 + j * step). */
+export interface LandGrid { nx: number; nz: number; x0: number; z0: number; step: number; land: Uint8Array }
+/** The share of the grid's land inside place footprints (discs), each cell counted once, for the biggest tier over it. */
+export function areaClaim(grid: LandGrid, discs: readonly { x: number; z: number; radius: number; tier: ClaimTier }[]): AreaClaim {
+  const { nx, nz, x0, z0, step, land } = grid;
+  const owned = new Uint8Array(nx * nz);
+  const byTier = Object.fromEntries(CLAIM_ORDER.map((t) => [t, { places: 0, share: 0 }])) as AreaClaim["byTier"];
+  const cells: Partial<Record<ClaimTier, number>> = {};
+  for (const d of [...discs].sort((a, b) => CLAIM_ORDER.indexOf(a.tier) - CLAIM_ORDER.indexOf(b.tier))) {
+    byTier[d.tier].places++;
+    const i0 = Math.max(0, Math.ceil((d.x - d.radius - x0) / step)), i1 = Math.min(nx - 1, Math.floor((d.x + d.radius - x0) / step));
+    const j0 = Math.max(0, Math.ceil((d.z - d.radius - z0) / step)), j1 = Math.min(nz - 1, Math.floor((d.z + d.radius - z0) / step));
+    for (let j = j0; j <= j1; j++)
+      for (let i = i0; i <= i1; i++) {
+        const k = j * nx + i;
+        if (!land[k] || owned[k] || Math.hypot(x0 + i * step - d.x, z0 + j * step - d.z) > d.radius) continue;
+        owned[k] = 1;
+        cells[d.tier] = (cells[d.tier] ?? 0) + 1;
+      }
+  }
+  let landCells = 0;
+  for (let k = 0; k < nx * nz; k++) if (land[k]) landCells++;
+  const r3 = (v: number) => +v.toFixed(3);
+  const claimed = Object.values(cells).reduce((a, b) => a + b, 0);
+  for (const t of CLAIM_ORDER) byTier[t].share = r3((cells[t] ?? 0) / Math.max(1, landCells));
+  return {
+    landKm2: +((landCells * step * step) / 1e6).toFixed(2),
+    claimedKm2: +((claimed * step * step) / 1e6).toFixed(2),
+    share: r3(claimed / Math.max(1, landCells)),
+    bigShare: r3(((cells.town ?? 0) + (cells.large ?? 0) + (cells.medium ?? 0)) / Math.max(1, landCells)),
+    byTier,
+  };
+}
+/** The density gate's verdicts on a claim (empty = ok). */
+export function claimFaults(c: AreaClaim): { code: "sparse" | "crowded" | "no-big-places"; message: string }[] {
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  const tiers = CLAIM_ORDER.filter((t) => c.byTier[t].places).map((t) => `${t} ${c.byTier[t].places} (${pct(c.byTier[t].share)})`).join(", ") || "none";
+  const out: ReturnType<typeof claimFaults> = [];
+  if (c.share < AREA_CLAIM.min) out.push({ code: "sparse", message: `place footprints claim ${pct(c.share)} of ${c.landKm2} km2 of land (at least ${pct(AREA_CLAIM.min)}): too much open space between places [${tiers}]` });
+  if (c.share > AREA_CLAIM.max) out.push({ code: "crowded", message: `place footprints claim ${pct(c.share)} of ${c.landKm2} km2 of land (at most ${pct(AREA_CLAIM.max)}): no wild left between places [${tiers}]` });
+  if (c.bigShare < AREA_CLAIM.bigMin) out.push({ code: "no-big-places", message: `medium and large places and towns hold ${pct(c.bigShare)} of the land (at least ${pct(AREA_CLAIM.bigMin)}): a zone needs district-sized places, not only finds [${tiers}]` });
+  return out;
+}
 
 const DIRS16: Vec2[] = Array.from({ length: 16 }, (_, k) => [Math.sin((k * Math.PI) / 8), -Math.cos((k * Math.PI) / 8)]);
 const WORDS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
@@ -767,6 +863,8 @@ export function findSites(input: FindInput): SiteReport {
       if (g.h[k]! - ring / 16 < 6) continue;
       const prom = g.h[k]! - hmin[k]!;
       if (prom < PEAK_PROMINENCE) continue;
+      // over land: the summit must be real ground (a sea cliff's cut leaves height() standing over the water)
+      if (input.field.surfaceCast) { const s = input.field.surfaceCast(g.xOf(i), g.zOf(j)); if (s === null || s < g.h[k]! - 6 || s <= input.seaLevel + 0.3) continue; }
       raw.push({ kind: "peak", x: g.xOf(i), z: g.zOf(j), score: 2 + Math.min(4, prom / 110), why: `summit ${Math.round(prom)} m over the ground within 300 m`, detail: { prominence: Math.round(prom) } });
     }
 
@@ -1104,6 +1202,153 @@ export function findSites(input: FindInput): SiteReport {
     }
   }
 
+  // ---- 8c. crossings: where a river separates two banks a bridge would join (rim to rim, natural tops)
+  {
+    type Bank = { t: number; edge: number; x: number; z: number; y: number };
+    /** Walk out from the course along u to the water's edge and then to the first natural top. */
+    const bankOf = (px: number, pz: number, u: Vec2, wy: number): Bank | null => {
+      const ds = g.step / 2;
+      let edge = 0;
+      let dry = false;
+      for (let t = ds; t <= CROSS_REACH; t += ds) {
+        const x = px + u[0] * t;
+        const z = pz + u[1] * t;
+        const k = g.cell(x, z);
+        if (k < 0) return null;
+        if (g.wet(k)) {
+          if (dry) return null; // a second water (an island, a side arm): not a clean bank
+          edge = t;
+          continue;
+        }
+        if (!dry) edge += ds / 2; // the water's edge lies between the last wet and the first dry sample
+        dry = true;
+        const y = g.ground(x, z);
+        if (y < wy + 1 || g.slope[k]! >= CROSS_TOP_SLOPE) continue;
+        let hi = y;
+        for (let d = ds; d <= CROSS_TOP_RUN; d += ds) hi = Math.max(hi, g.ground(x + u[0] * d, z + u[1] * d));
+        if (hi - y <= CROSS_TOP_RISE) return { t, edge, x, z, y };
+      }
+      return null;
+    };
+    /** The nearest road sample and place on the bank's side (+1 / -1 of the normal n through p). */
+    const usersOn = (p: Vec2, n: Vec2, bank: Bank, sgn: number): { road: string | null; roadD: number; roadAt: Vec2 | null; place: string | null; placeD: number } => {
+      let road: string | null = null;
+      let roadD = Infinity;
+      let roadAt: Vec2 | null = null;
+      for (const s of roadSamples) {
+        if (((s.x - p[0]) * n[0] + (s.z - p[1]) * n[1]) * sgn <= 0) continue;
+        const d = Math.hypot(s.x - bank.x, s.z - bank.z);
+        if (d < roadD && d <= CROSS_JOIN) (roadD = d), (road = s.road), (roadAt = [Math.round(s.x), Math.round(s.z)]);
+      }
+      let place: string | null = null;
+      let placeD = Infinity;
+      for (const c of input.content) {
+        if (((c.x - p[0]) * n[0] + (c.z - p[1]) * n[1]) * sgn <= 0) continue;
+        const d = Math.max(0, Math.hypot(c.x - bank.x, c.z - bank.z) - c.radius);
+        if (d < placeD && d <= CROSS_JOIN) (placeD = d), (place = c.id);
+      }
+      return { road, roadD: Math.round(roadD), roadAt, place, placeD: Math.round(placeD) };
+    };
+    const segX = (a: Vec2, b: Vec2, c: Vec2, d: Vec2): boolean => {
+      const o = (p: Vec2, q: Vec2, r: Vec2) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+      return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
+    };
+    for (const r of input.field.rivers ?? []) {
+      const pts = resample(r.points.map((q) => [q[0], q[1]] as Vec2), 16);
+      for (let i = 1; i + 1 < pts.length; i++) {
+        const p = pts[i]!;
+        const k = g.cell(p[0], p[1]);
+        if (k < 0 || !g.zone[k] || !g.wet(k)) continue;
+        const wy = g.wy[k]!;
+        const dx = pts[i + 1]![0] - pts[i - 1]![0];
+        const dz = pts[i + 1]![1] - pts[i - 1]![1];
+        let best: { n: Vec2; a: Bank; b: Bank; span: number; skew: number } | null = null;
+        for (const skew of [0, -15, 15, -30, 30]) {
+          const ang = Math.atan2(dz, dx) + Math.PI / 2 + (skew * Math.PI) / 180;
+          const n: Vec2 = [Math.cos(ang), Math.sin(ang)];
+          const a = bankOf(p[0], p[1], n, wy);
+          const b = bankOf(p[0], p[1], [-n[0], -n[1]], wy);
+          if (!a || !b) continue;
+          const span = a.t + b.t;
+          if (span < CROSS_MIN_SPAN || span > CROSS_MAX_SPAN) continue;
+          // the shortest gap wins, but a skewed line must save 10% to beat the square one
+          if (!best || span < best.span * (skew === 0 ? 1 : 0.9)) best = { n, a, b, span, skew };
+        }
+        if (!best) continue;
+        const { n, a, b, span } = best;
+        const deckY = Math.min(a.y, b.y);
+        const depth = deckY - wy;
+        const match = Math.abs(a.y - b.y);
+        // the view along the course from the deck's middle (eye 1.7 m) to the water: the farthest point seen either way
+        let view = 0;
+        let viewWay = "";
+        for (const dir of [-1, 1]) {
+          let along = 0;
+          let seen = 0;
+          for (let j = i + dir; j >= 0 && j < pts.length; j += dir) {
+            along += Math.hypot(pts[j]![0] - pts[j - dir]![0], pts[j]![1] - pts[j - dir]![1]);
+            if (along > CROSS_VIEW) break;
+            const kk = g.cell(pts[j]![0], pts[j]![1]);
+            const ty = (kk >= 0 && g.wet(kk) ? g.wy[kk]! : g.ground(pts[j]![0], pts[j]![1])) + 2;
+            if (g.sees(p[0], p[1], deckY + 1.7, pts[j]![0], pts[j]![1], ty)) seen = Math.hypot(pts[j]![0] - p[0], pts[j]![1] - p[1]);
+          }
+          if (seen > view) (view = seen), (viewWay = dir > 0 ? "downstream" : "upstream");
+        }
+        const ua = usersOn(p, n, a, 1);
+        const ub = usersOn(p, n, b, -1);
+        const usedA = !!(ua.road || ua.place);
+        const usedB = !!(ub.road || ub.place);
+        // a road already over this river within ~200 m
+        let existing: string | null = null;
+        const lo = Math.max(1, i - 12);
+        const hi = Math.min(pts.length - 1, i + 12);
+        for (const rd of input.roads) {
+          for (let s = 1; s < rd.points.length && !existing; s++)
+            for (let m = lo; m <= hi; m++)
+              if (segX(rd.points[s - 1]!, rd.points[s]!, pts[m - 1]!, pts[m]!)) {
+                existing = rd.id;
+                break;
+              }
+          if (existing) break;
+        }
+        const score = 3 + Math.min(3, depth / 30) + Math.min(1.5, view / 400) - Math.min(2.5, match / 8)
+          + (usedA && usedB ? 1.5 : usedA || usedB ? 0.5 : 0) - (span > 180 ? (span - 180) / 40 : 0) - (existing ? 2 : 0);
+        const side = (bk: Bank, u: typeof ua, nn: Vec2) => ({
+          side: compass(bearing(nn[0], nn[1])),
+          top: [Math.round(bk.x), +bk.y.toFixed(1), Math.round(bk.z)],
+          waterEdge: Math.round(bk.edge),
+          road: u.road,
+          roadD: u.road ? u.roadD : null,
+          roadAt: u.roadAt,
+          place: u.place,
+          placeD: u.place ? u.placeD : null,
+        });
+        raw.push({
+          kind: "crossing",
+          x: p[0],
+          z: p[1],
+          score,
+          why: `${r.id}: ${Math.round(span)} m gap rim to rim, banks ${Math.round(a.y)}/${Math.round(b.y)} m (${match.toFixed(1)} m apart), ${Math.round(depth)} m over the water, sees ${Math.round(view)} m ${viewWay}; ${usedA && usedB ? "used on both banks" : usedA || usedB ? "used on one bank" : "no road or place on either bank"}${existing ? `; ${existing} already crosses` : ""}`,
+          detail: {
+            river: r.id,
+            span: Math.round(span),
+            skew: best.skew,
+            waterY: +wy.toFixed(1),
+            waterWidth: Math.round(a.edge + b.edge),
+            deckY: +deckY.toFixed(1),
+            depth: Math.round(depth),
+            match: +match.toFixed(1),
+            view: Math.round(view),
+            viewWay,
+            heading: Math.round(bearing(n[0], n[1])),
+            banks: [side(a, ua, n), side(b, ub, [-n[0], -n[1]])],
+            existing,
+          },
+        });
+      }
+    }
+  }
+
   // ---- 9. paths: dead ends, climbing tops, hairpins, wasted climbs
   const paths: PathFinding[] = [];
   const connected = (x: number, z: number, self: string): string | null => {
@@ -1350,7 +1595,7 @@ export function findSites(input: FindInput): SiteReport {
   }
 
   // ---- rank, suppress, approach
-  const sep: Record<SiteKind, number> = { "cliff-water": 160, "canyon-end": 200, plateau: 250, peak: 250, saddle: 220, "wall-gap": 220, cove: 220, waterfall: 60, "path-end": 40, switchback: 120, "empty-land": 1, island: 30, access: 1, "fall-lip": 40, "plunge-pool": 40, "sea-stack": 40, "stack-cluster": 150, headland: 300, "butte-top": 100, "canyon-bend": 120 };
+  const sep: Record<SiteKind, number> = { "cliff-water": 160, "canyon-end": 200, plateau: 250, peak: 250, saddle: 220, "wall-gap": 220, cove: 220, waterfall: 60, "path-end": 40, switchback: 120, "empty-land": 1, island: 30, access: 1, "fall-lip": 40, "plunge-pool": 40, "sea-stack": 40, "stack-cluster": 150, headland: 300, "butte-top": 100, "canyon-bend": 120, crossing: 150 };
   const perKind = input.perKind ?? 15;
   const kinds = [...new Set(raw.map((r) => r.kind))];
   const kept = kinds.flatMap((kind) => suppress(raw.filter((r) => r.kind === kind), sep[kind]).slice(0, kind === "path-end" || kind === "empty-land" ? 99 : perKind));
@@ -1398,7 +1643,8 @@ export function findSites(input: FindInput): SiteReport {
 
   const near = (x: number, z: number): typeof roadSamples => roadSamples.filter((s) => Math.abs(s.x - x) <= SIGHT_RANGE && Math.abs(s.z - z) <= SIGHT_RANGE && Math.hypot(s.x - x, s.z - z) <= SIGHT_RANGE);
   const candidates: Candidate[] = kept.map((c) => {
-    const y = g.ground(c.x, c.z);
+    // a crossing stands at deck height (its lower bank top), not on the riverbed
+    const y = c.kind === "crossing" ? (c.detail.deckY as number) : g.ground(c.x, c.z);
     const nearRoad = roadNear(c.x, c.z, 5000);
     let seen = 0;
     let first: Approach["firstSeen"] = null;
@@ -1512,18 +1758,18 @@ export function findSites(input: FindInput): SiteReport {
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  // ---- density
-  let land = 0;
-  for (let k = 0; k < nx * nz; k++) if (g.zone[k] && !g.wet(k)) land++;
-  const landKm2 = (land * step * step) / 1e6;
-  // places of this zone: its towns and its reservations of 20 m or more (a door or a stone inside a place is not one)
-  const places = input.content.filter((c) => (c.kind === "town" ? pointInPolygon(c.x, c.z, input.polygon) : c.zone === input.zone && c.radius >= 10)).length;
+  // ---- density: the share of the zone's dry land its places and towns claim (AREA_CLAIM)
+  const landMask = new Uint8Array(nx * nz);
+  for (let k = 0; k < nx * nz; k++) if (g.zone[k] && !g.wet(k)) landMask[k] = 1;
+  // places of this zone: its towns and its reservations of 10 m or more (a stone inside a place is not one)
+  const own = input.content.filter((c) => (c.kind === "town" ? pointInPolygon(c.x, c.z, input.polygon) : c.zone === input.zone && c.radius >= 10));
+  const claim = areaClaim({ nx, nz, x0: g.x0, z0: g.z0, step, land: landMask }, own.map((c) => ({ x: c.x, z: c.z, radius: c.radius, tier: c.kind === "town" ? ("town" as const) : tierOfDiameter(2 * c.radius) })));
   return {
     step,
     box,
-    landKm2: +landKm2.toFixed(2),
-    places,
-    perKm2: +(places / Math.max(0.01, landKm2)).toFixed(2),
+    landKm2: claim.landKm2,
+    places: own.length,
+    claim,
     largestEmpty: empties[0] ?? null,
     empties,
     candidates,

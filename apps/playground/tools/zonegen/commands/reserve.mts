@@ -3,6 +3,10 @@ import fs from "node:fs";
 /**
  * zonegen reserve <world> --project <p> --zone <id> — lint where every planned location goes.
  *
+ * Every reservation is at least its size tier (tools/poi-review/size-tiers.mjs: diameter and approaches; owner ruling
+ * 2026-10-03, a large place is 300-600 m): `under-tier` refuses it. The tier is the brief place's size when the
+ * location IS a place, else the location's own.
+ *
  * Plan-level geometry from the recipe only (no world field): inside the zone, clear of towns, roads, rivers and each
  * other, on a site of a fitting kind, reached from something that exists. Whether a walking body can actually get
  * there is NOT proven here: that is the POI owner's traversal gate (tools/poi-review), run on the real ground.
@@ -11,9 +15,30 @@ import { exists, finish, load, loadRecipe, readJson, type Ctx, type Finding } fr
 import { questGraphSchema, reservationsSchema, zoneBriefSchema } from "../schemas.mts";
 import { distToPolyline, err, inZone, requireZone, warn } from "./_shared.mts";
 import { hostileOnMainRoads, travelRoads, type Content } from "./_site-finder.mts";
+import { reservationTierFault, tierFor } from "../../../../../tools/poi-review/size-tiers.mjs";
 
 /** Metres an approach (road or river line, town pad, POI, other reservation) may stay from the reservation's edge. */
 const APPROACH_REACH = 150;
+
+/**
+ * An approach may carry a PLANNED route (`points`: a trail the trails stage will build). It counts when the route
+ * has a point within APPROACH_REACH of its `from` (it is anchored there) and passes within APPROACH_REACH of this
+ * reservation's edge.
+ * Returns the gap to judge: the route's when it is anchored on `from` and comes closer, else the direct gap.
+ */
+export function plannedRouteGap(
+  direct: number,
+  points: readonly (readonly [number, number])[],
+  x: number,
+  z: number,
+  radius: number,
+  gapAt: (px: number, pz: number, pr: number) => number | null,
+): number {
+  if (points.length < 2) return direct;
+  const near = points.map(([px, pz]) => gapAt(px, pz, 0) ?? Infinity);
+  if (Math.min(...near) > APPROACH_REACH) return direct;
+  return Math.min(direct, distToPolyline(x, z, points as [number, number][]) - radius);
+}
 
 export async function run(ctx: Ctx): Promise<number> {
   const bad = requireZone(ctx.zone, "reserve");
@@ -31,6 +56,7 @@ export async function run(ctx: Ctx): Promise<number> {
     const locations = new Map(g.locations.map((l) => [l.id, l]));
     // the ground each place was picked from (brief places[].site, from `zonegen sites`)
     const parsedBrief = exists(p.brief(zone)) ? zoneBriefSchema.safeParse(readJson(p.brief(zone))) : null;
+    const placeSize = new Map((parsedBrief?.success ? parsedBrief.data.places : []).map((x) => [x.id, x.size] as const));
     const picks = new Map((parsedBrief?.success ? parsedBrief.data.places : []).flatMap((x) => (x.site ? [[x.id, x.site] as const] : [])));
     const towns = recipe.features.towns;
     const roads = recipe.features.roads;
@@ -71,6 +97,12 @@ export async function run(ctx: Ctx): Promise<number> {
         const d = distToPolyline(x, z, river.points);
         if (d < r.radius + river.width / 2 && ![r.approach, ...r.approaches].some((a) => a.from === river.id)) err(f, "on-river", `${ref}: sits on river ${river.id} (${Math.round(d)} m)`, ref);
       }
+      if (loc.kind !== "town") {
+        const size = placeSize.get(r.location) ?? loc.size;
+        const small = reservationTierFault(size, { radius: r.radius, approaches: 1 + r.approaches.length });
+        if (small) err(f, "under-tier", `${ref}: ${small} (tools/poi-review/size-tiers.mjs; grow the reservation or re-tier the place)`, ref);
+        else if (2 * r.radius > tierFor(size).footprintDiameterM.max) warn(f, "over-tier", `${ref}: ${2 * r.radius} m across is more than a ${size} place (${tierFor(size).footprintDiameterM.max} m): the next tier up?`, ref);
+      }
       if (r.terrainRadius > 0 && r.terrainRadius < r.radius) warn(f, "terrain-radius", `${ref}: may reshape terrain only inside ${r.terrainRadius} m of a ${r.radius} m site`, ref);
 
       if (r.site !== "new") {
@@ -93,19 +125,22 @@ export async function run(ctx: Ctx): Promise<number> {
         const town = towns.find((t) => t.id === from);
         const poi = pois.get(from);
         const other = res.reservations.find((x) => x.location === from);
-        let gap: number | null = null;
-        if (line) gap = distToPolyline(x, z, line.points) - r.radius;
-        else if (town) gap = Math.hypot(town.center[0] - x, town.center[1] - z) - r.radius - town.radius - town.falloff;
-        else if (poi) gap = Math.hypot(poi.position[0] - x, poi.position[2] - z) - r.radius;
-        else if (other) gap = Math.hypot(other.center[0] - x, other.center[1] - z) - r.radius - other.radius;
-        else if (locations.has(from)) {
-          warn(f, "approach-unplaced", `${ref}: approached from location ${from}, which has no reservation to measure`, ref);
-          continue;
-        } else {
-          err(f, "approach", `${ref}: approached from "${from}", which is no road, river, town, recipe POI or reserved location`, ref);
+        // metres from `from` to the disc (px, pz, pr): its line, town pad, POI or reservation edge
+        const gapAt = (px: number, pz: number, pr: number): number | null => {
+          if (line) return distToPolyline(px, pz, line.points) - pr;
+          if (town) return Math.hypot(town.center[0] - px, town.center[1] - pz) - pr - town.radius - town.falloff;
+          if (poi) return Math.hypot(poi.position[0] - px, poi.position[2] - pz) - pr;
+          if (other) return Math.hypot(other.center[0] - px, other.center[1] - pz) - pr - other.radius;
+          return null;
+        };
+        let gap = gapAt(x, z, r.radius);
+        if (gap !== null) gap = plannedRouteGap(gap, a.points, x, z, r.radius, gapAt);
+        if (gap === null) {
+          if (locations.has(from)) warn(f, "approach-unplaced", `${ref}: approached from location ${from}, which has no reservation to measure`, ref);
+          else err(f, "approach", `${ref}: approached from "${from}", which is no road, river, town, recipe POI or reserved location`, ref);
           continue;
         }
-        if (gap > APPROACH_REACH) err(f, "approach-far", `${ref}: approach "${from}" passes ${Math.round(gap)} m from the reservation's edge (at most ${APPROACH_REACH} m): it does not lead here`, ref);
+        if (gap > APPROACH_REACH) err(f, "approach-far", `${ref}: approach "${from}" passes ${Math.round(gap)} m from the reservation's edge (at most ${APPROACH_REACH} m${a.points.length >= 2 ? ", along its planned route too" : ""}): it does not lead here`, ref);
       }
       // a place that recorded its ground pick is reserved ON that ground
       const picked = picks.get(r.location);

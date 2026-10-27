@@ -476,7 +476,7 @@ describe("skirts at the LOD boundary", () => {
     for (const lodStep of [1, 4]) {
       const mesh = buildVoxelMesh(world, { kind: "voxel", world: "w", cell: [3, -4], lodStep });
       const step = world.voxelSize * lodStep;
-      // skirt vertices: on a side plane, sitting exactly 3 steps under a surface vertex on the same plane
+      // skirt vertices: on a side plane, sitting exactly 3 steps (9 on an HLOD cell: COARSE_SKIRT_K) under a surface vertex
       const onPlane = (i: number): boolean =>
         [0, size].some((p) => Math.abs(mesh.positions[i * 3]! - p) < 1e-4 || Math.abs(mesh.positions[i * 3 + 2]! - p) < 1e-4);
       const surfaceYs = new Map<string, number[]>();
@@ -488,7 +488,7 @@ describe("skirts at the LOD boundary", () => {
       let skirted = 0;
       for (const ys of surfaceYs.values()) {
         ys.sort((a, b) => a - b);
-        for (let k = 1; k < ys.length; k++) if (Math.abs(ys[k]! - ys[k - 1]! - 3 * step) < 1e-3) skirted++;
+        for (let k = 1; k < ys.length; k++) if (Math.abs(ys[k]! - ys[k - 1]! - (lodStep > 1 ? 9 : 3) * step) < 1e-3) skirted++;
       }
       expect(skirted).toBeGreaterThan(10);
       // splat weights on every vertex, skirt included, still sum to 1

@@ -30,7 +30,136 @@
         "medium",
         "large"
       ],
-      "description": "Size of the complete requested player experience, including described interiors; never silently replace it with an entrance-only scope. Physical targets use the chosen measured small reference."
+      "description": "Size tier of the complete requested player experience, including described interiors; never silently replace it with an entrance-only scope. Physical targets come from tools/poi-review/size-tiers.mjs (footprint, measured usable area, linked features, creature groups, approaches, terrain shaping) and the install gate measures against them (job.mjs measure)."
+    },
+    "parent": {
+      "description": "The job id of the larger place this job is one part of — a dungeon door whose dungeon belongs to another place job. A parented job is sized as a pinpoint child (adventureSize must be pinpoint) and the size gate judges the PARENT tier over the parent plus its children (tools/poi-review/size-tiers.mjs \"PARENTED JOBS\").",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "sizeTargets": {
+      "description": "Written by preparation from tools/poi-review/size-tiers.mjs for adventureSize; an input value is replaced. The install gate enforces it.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "pinpoint",
+            "small",
+            "medium",
+            "large"
+          ]
+        },
+        "read": {
+          "type": "string",
+          "minLength": 1,
+          "description": "What a place of this tier is, in the owner's words."
+        },
+        "footprintDiameterM": {
+          "type": "object",
+          "properties": {
+            "min": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Metres: the smallest footprint diameter this tier may have."
+            },
+            "max": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Metres: above this the place is the next tier up (a warning, not a refusal)."
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "additionalProperties": false,
+          "description": "Measured across the place's whole edit footprint (every delivered terrain edit, clearing, path, landmark and root entity), not the landmark alone. A reservation's diameter is 2 x radius."
+        },
+        "minUsableAreaM2": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Connected, reachable, walkable ground (18 deg default slope limit) after walls, steep banks, the incoming spur and solid dressing are excluded; summed over outdoor and interior levels. MEASURED, never an estimate."
+        },
+        "minLinkedFeatures": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Distinct sub-sites joined by walked routes (a lake, a cave system, a camp, a ruin, the landmark)."
+        },
+        "requiredFeatureKinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "landmark",
+              "water",
+              "cave",
+              "interior",
+              "camp",
+              "ruin",
+              "structure",
+              "grove",
+              "shore",
+              "lookout",
+              "lair",
+              "other"
+            ]
+          },
+          "description": "Kinds every place of this tier must include."
+        },
+        "oneOfFeatureKinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "landmark",
+              "water",
+              "cave",
+              "interior",
+              "camp",
+              "ruin",
+              "structure",
+              "grove",
+              "shore",
+              "lookout",
+              "lair",
+              "other"
+            ]
+          },
+          "description": "At least one feature of one of these kinds (water or a cave/interior for a large place). Empty = no constraint."
+        },
+        "minCreatureGroups": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Distinct creature groups (packs / camps handed to populate as clearings), not individual bodies."
+        },
+        "minApproaches": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Distinct ways in (roads, paths, trails, shore landings) that reach the place."
+        },
+        "terrainShaping": {
+          "type": "boolean",
+          "description": "The place must carry its own terrain shaping (operators, height patches, carves, clearings) in its delivered world ops."
+        }
+      },
+      "required": [
+        "id",
+        "read",
+        "footprintDiameterM",
+        "minUsableAreaM2",
+        "minLinkedFeatures",
+        "requiredFeatureKinds",
+        "oneOfFeatureKinds",
+        "minCreatureGroups",
+        "minApproaches",
+        "terrainShaping"
+      ],
+      "additionalProperties": false
     },
     "hostility": {
       "type": "string",
@@ -44,7 +173,7 @@
     "description": {
       "type": "string",
       "minLength": 1,
-      "description": "What the place is, why it exists, its atmosphere and what the player should experience. Resolve unclear core intent before building."
+      "description": "The specific fantasy discovery, what investigating it reveals, its playable payoff and the physical place that delivers them. Ordinary trades support the adventure; a grim name or generic danger does not turn a work yard into a destination. Follow docs/world-standards/adventure-design.md and resolve unclear core intent before building."
     },
     "location": {
       "type": "object",

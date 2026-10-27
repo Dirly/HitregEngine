@@ -1116,6 +1116,64 @@ describe("surface decoration", () => {
     expect(flat.id).not.toBe("crag");
   });
 
+  it("never lets a loose-cover patch climb a face, whatever its slope window says (scree-gravel on the gorge walls)", () => {
+    const sand = defaultWorldRecipe().surfaces.findIndex((s) => s.name === "sand");
+    const rockI = defaultWorldRecipe().surfaces.findIndex((s) => s.name === "rock");
+    // full-mask patches with a window open to vertical: one of loose sand, one of cliff-role rock
+    const field = createWorldField(
+      testRecipe({
+        surfaces: defaultWorldRecipe().surfaces.map((s) => (s.name === "rock" ? { ...s, role: "cliff" } : s)),
+        patches: [
+          { id: "scree", surface: "sand", biomes: [], frequency: 0.02, octaves: 1, threshold: -1, blend: 0.001, strength: 1, seed: 3, slope: [0.42, 1.2] },
+        ],
+      }),
+    );
+    const plain = createWorldField(testRecipe({ surfaces: defaultWorldRecipe().surfaces.map((s) => (s.name === "rock" ? { ...s, role: "cliff" } : s)), patches: [] }));
+    const at = (f: WorldField, deg: number): Float32Array => {
+      const out = new Float32Array(MAX_SURFACES);
+      f.splatAt(40, 30, -60, Math.cos((deg * Math.PI) / 180), out, 0);
+      return out;
+    };
+    expect(at(field, 32)[sand]!).toBeGreaterThan(0.9); // a scree slope: the patch holds
+    // a wall: the patch adds nothing over what the biome itself draws there
+    expect(at(field, 75)[sand]! - at(plain, 75)[sand]!).toBeLessThan(0.02);
+    expect(at(field, 90)[sand]! - at(plain, 90)[sand]!).toBeLessThan(0.02);
+    // a cliff-role patch is stone and may stay on the face
+    const stone = createWorldField(
+      testRecipe({
+        surfaces: defaultWorldRecipe().surfaces.map((s) => (s.name === "rock" ? { ...s, role: "cliff" } : s)),
+        patches: [{ id: "skirt", surface: "rock", biomes: [], frequency: 0.02, octaves: 1, threshold: -1, blend: 0.001, strength: 1, seed: 3, slope: [0.42, 1.2] }],
+      }),
+    );
+    const out = new Float32Array(MAX_SURFACES);
+    stone.splatAt(40, 30, -60, 0, out, 0);
+    expect(out[rockI]!).toBeGreaterThan(0.9);
+  });
+
+  it("a palette zone draws its stony ground, not its cliff tile, where cliff-role weight lies on the flat", () => {
+    const base = defaultWorldRecipe();
+    const surfaces = [
+      ...base.surfaces.map((s) => (s.name === "rock" ? { ...s, role: "cliff" } : s)),
+      { name: "z-cliff", color: "#333333", roughness: 0.9 },
+      { name: "z-shingle", color: "#555555", roughness: 0.9 },
+    ];
+    const zone = { id: "z", name: "Z", polygon: [[-5000, -5000], [5000, -5000], [5000, 5000], [-5000, 5000]], ground: { cliff: "z-cliff", accent: "z-shingle" } };
+    // every point fully rock: one biome with rock on the ground and on the cliff
+    const rockOnly = surfaces.map((s) => (s.name === "rock" ? 1 : 0));
+    const make = (palette: boolean) =>
+      createWorldField(testRecipe({ surfaces, biomes: [{ id: "stone", surface: rockOnly, cliff: rockOnly }], patches: [], regions: [{ ...zone, ...(palette ? { palette: { ground: ["z-shingle"], cliff: ["z-cliff"] } } : {}) }] } as never));
+    const idx = (n: string) => surfaces.findIndex((s) => s.name === n);
+    const at = (f: WorldField, deg: number) => {
+      const out = new Float32Array(MAX_SURFACES);
+      f.splatAt(0, 30, 0, Math.cos((deg * Math.PI) / 180), out, 0);
+      return out;
+    };
+    const plain = make(false), pal = make(true);
+    expect(at(plain, 5)[idx("z-cliff")]!).toBeGreaterThan(0.95); // without a palette: the cliff tile flat on the ground
+    expect(at(pal, 5)[idx("z-shingle")]!).toBeGreaterThan(0.95); // with one: the zone's stony ground
+    expect(at(pal, 60)[idx("z-cliff")]!).toBeGreaterThan(0.95); // and the face keeps the cliff tile
+  });
+
   it("drops a patch naming a surface that does not exist rather than throwing", () => {
     const field = createWorldField(
       testRecipe({ patches: [{ id: "p", surface: "obsidian", biomes: [], frequency: 0.02, octaves: 1, threshold: 0, blend: 0.2, strength: 1, seed: 1 }] }),

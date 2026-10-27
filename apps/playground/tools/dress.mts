@@ -3,10 +3,20 @@
  *
  *   npx tsx tools/dress.mts sockets ...                                    (measure a space: tools/dress-sockets.mts)
  *   npx tsx tools/dress.mts manifest --project <p> --map <id> [--level n]  the designer's view of a space
- *   npx tsx tools/dress.mts check    --project <p> --plan <file|id> [--quiet]   resolve; exit 1 on violations; writes <plan>.report.json;
+ *   npx tsx tools/dress.mts check    --project <p> --plan <file|id> [--quiet]   resolve; exit 1 on violations; writes
+ *                                    <project>/authoring/dressing/reports/<plan>.report.json (never beside the plan: tools/_dress-report.mts);
  *                                    the LAST line is `CHECK <plan>: N placements, V violations, W warnings -> ok|FAILED`;
  *                                    --quiet prints only the findings and that line (use it after the first full look)
- *   npx tsx tools/dress.mts apply    --project <p> --plan <file|id> --scene <name|file> --at x,y,z --yaw <deg> [--parent <entity>] [--no-batch] [--dry]
+ *   npx tsx tools/dress.mts apply    --project <p> --plan <file|id> --scene <name|file> --at x,y,z --yaw <deg> [--parent <entity>] [--poi <id>] [--no-batch] [--dry]
+ *                                    (every added entity is tagged poi:<id>: --poi, else the site socket map's job, else the
+ *                                    <poi>-<area> plan id prefix of a POI job; tools/_dress-poi.mts)
+ *   npx tsx tools/dress.mts retag    --project <p> --scene <name|file> [--plan <file|id>] [--poi <id>] [--dry]   tag dressing
+ *                                    installed before that rule with its poi:<id> (one set-tags batch, inverse saved)
+ *   npx tsx tools/dress.mts unclear  --project <p> --plan <file|id> --scene <name|file>   remove the plan's vegetation clearings from the world
+ *                                    (apply writes one per room on a voxel-world scene: owner dress-<plan>, room bounds + 2 m,
+ *                                    scatter cleared, cover kept outdoors EXCEPT under every dwelling / fire / bedding: those get their own
+ *                                    footprint disc with cover CLEARED (+1.5 m, 3 m at a fire; `check` fails one that stands on kept cover);
+ *                                    plan `clearing` tunes it, false / --no-clearing skips it)
  *   npx tsx tools/dress.mts fixtures --project <p> --map <id> [--plan <file|id>] [--dry]   lit fixtures on the map's fixture anchors
  *   npx tsx tools/dress.mts report   --project <p> --plan <file|id>   readable authoring/dressing/reports/<plan>.md (check writes it on a pass)
  *   npx tsx tools/dress.mts review   --project <p> --plan <file|id> | --all   per room: centre clutter, wall share, scale/culture
@@ -51,9 +61,18 @@
  * by prefab override (--no-batch turns that off; flames/lights and live prefabs never opt in), and saves the inverse batch
  * to <plan>.inverse.json. With --parent the --at/--yaw are in
  * the parent's frame. Entity ids replace "/" with "--".
+ *
+ * QUEST OBJECTS: an item with `quest: { entity, readable?, radius?, dialogue? }` is a quest object the zone's quest plan
+ * declares (quests.json `entities[]`, kind object|readable, `location` = the plan's town (`<town>--<building>` plan id)
+ * or its POI). check refuses an undeclared / other-location / duplicate entity and warns for a declared object of the
+ * location that no plan places; apply gives the placed instance (a set's anchor piece) the entity id EXACTLY, tags
+ * `quest-object interactable zone:<z>` + `town:<t> building:<b>` / `poi:<id>`, and the `npc` builtin (face false,
+ * radius 2.5, dialogue zones/<zone>/<entity>, places = the zone's places table). Re-apply replaces it. _dress-quest.mts.
  */
 import fs from "node:fs";
-import { kindSizes, realSizeIssue } from "./_prop-real-size.mts";
+import { materialFamilyFinding, STONE_NAME, type PrefabLike } from "./_material-family.mts";
+import { kindSizes, outrankedIds, outrankFindings, realSizeExemptIds, realSizeIssue, supersededIds } from "./_prop-real-size.mts";
+import { dressReportFile } from "./_dress-report.mts";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -92,10 +111,15 @@ import {
 } from "@hitreg/core";
 
 import { controllerLimits } from "./dress-steps.mts";
+import { applyBatchesToSceneFile, applyOpsToSceneFile } from "./_scene-write.mts";
 import { fieldOfScene, seatPlaced } from "./float.mts";
 import { skinPlacedOps } from "./rock-skins.mts";
 import { measure, prefabGeometry } from "./_prop-geometry.mts";
+import { dressPoiId, poiJobIds, retagOps } from "./_dress-poi.mts";
+import { questAddOp, questDecls, questFindings, placesFor, planTown } from "./_dress-quest.mts";
+import { questPlacements } from "@hitreg/core";
 import { closure, findAsset, PROJECTS } from "./_closure.mjs";
+import { worldRecipeSchema, clearingSchema, needsClearedCover, discCleared, type ClearingDoc } from "@hitreg/core";
 
 /** A prefab file through the project's dependsOn closure (a world's props live in world-kit); own path when none. */
 const prefabAt = (proj: string, id: string): string => findAsset(proj, `prefabs/${id}.json`) ?? path.join(proj, "assets", "prefabs", `${id}.json`);
@@ -114,7 +138,10 @@ const [cmd, ...argv] = process.argv.slice(2);
 
 function opt(name: string): string | undefined {
   const i = argv.indexOf(`--${name}`);
-  return i >= 0 ? argv[i + 1] : undefined;
+  if (i >= 0) return argv[i + 1];
+  // `--yaw=-179.9` (the form a negative value invites) once fell through to the default and installed a room turned 180 degrees
+  const eq = argv.find((a) => a.startsWith(`--${name}=`));
+  return eq === undefined ? undefined : eq.slice(name.length + 3);
 }
 const flag = (name: string): boolean => argv.includes(`--${name}`);
 function need(name: string): string {
@@ -179,6 +206,8 @@ function sources(proj: string) {
   const problems: string[] = [];
   const props = new Map<string, DressingData | undefined>();
   const sets = new Map<string, DressingSet | undefined>();
+  let successors: Map<string, string> | undefined; // a set authored with a superseded piece places its successor
+  const successor = (id: string): string => (successors ??= supersededIds((closure(proj) as string[]).map((p) => path.join(PROJECTS, p)))).get(id) ?? id;
   const prop = (id: string): DressingData | undefined => {
     if (props.has(id)) return props.get(id);
     let decl: DressingData | undefined;
@@ -206,7 +235,7 @@ function sources(proj: string) {
       const raw = fs.readFileSync(file, "utf8");
       used.set(`set:${id}`, raw);
       const parsed = dressingSetSchema.safeParse(JSON.parse(raw));
-      if (parsed.success) s = parsed.data;
+      if (parsed.success) s = { ...parsed.data, items: parsed.data.items.map((i) => ({ ...i, prop: successor(i.prop) })) };
       else problems.push(`set ${id}: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`);
     } else used.set(`set:${id}`, "missing");
     sets.set(id, s);
@@ -432,7 +461,7 @@ function sceneContext(proj: string, plan: DressingPlan, map: SocketMap): { decal
       continue;
     }
     const pf = e.components.prefab?.prefabId as string | undefined;
-    if (!pf || id.startsWith(own)) continue;
+    if (!pf || id.startsWith(own) || (e.tags ?? []).includes(`dress:${plan.id}`)) continue; // own instances, quest objects included, are removed by apply: never obstacles
     let size: [number, number, number] | null | undefined = src0(proj)(pf)?.size as [number, number, number] | undefined;
     if (!size && (e.tags ?? []).includes("statue")) {
       if (!measured.has(pf)) { try { measured.set(pf, measure(prefabGeometry(assets, pf)).size as [number, number, number]); } catch { measured.set(pf, null); } }
@@ -486,6 +515,14 @@ function resolvePlan(proj: string, file: string) {
   }
   const result = resolveDressing({ plan, map, prop: src.prop, set: src.set, options: { laneWidth: body.laneWidth }, vocabulary: vocabulary(proj), ...scene });
   for (const p of src.problems) result.violations.push({ item: "", code: "decl-invalid", message: p });
+  // QUEST OBJECTS: an item's quest.entity must be declared by the zone's quest plan at this plan's town or place
+  // (_dress-quest.mts); a declared object of that location in no plan is a warning
+  {
+    const poi = dressPoiId({ planId: plan.id, mapSource: (map as { source?: { model?: string } }).source?.model ?? null, flag: opt("poi") ?? null, jobIds: poiJobIds(proj) });
+    const q = questFindings(proj, file, plan, poi);
+    result.violations.push(...q.violations);
+    result.warnings.push(...q.warnings);
+  }
   // Instance prop values must name props the prefab declares (expandScene would throw on apply otherwise).
   for (const item of plan.items) {
     if (!item.props || !item.prop) continue;
@@ -498,13 +535,42 @@ function resolvePlan(proj: string, file: string) {
   const catalogs = inClosure(proj, "authoring/prop-catalogs.json");
   const sizes = kindSizes(fs.existsSync(catalogs) ? (readJson(catalogs) as { realSize?: Parameters<typeof kindSizes>[0] }).realSize : undefined);
   const scales = vocabulary(proj).scales;
+  const sizeExempt = realSizeExemptIds((closure(proj) as string[]).map((p) => path.join(PROJECTS, p))); // catalogue rows' realSizeExempt
   for (const p of result.placements) {
     if (/\/chain-\d+$/.test(p.id)) continue; // generated links are stretched on purpose
+    if (sizeExempt.has(p.prop)) continue;
     const d = src.prop(p.prop);
     if (!d) continue;
-    const scale = (p.room ? plan.rooms[p.room]?.scale : undefined) ?? plan.space?.scale ?? d.scale;
+    // A plain object or captured human cargo declared any-scale keeps its physical
+    // dimensions; its host culture must not turn it into giant-sized manufacture.
+    const scale = d.scale === "any" ? "any" : ((p.room ? plan.rooms[p.room]?.scale : undefined) ?? plan.space?.scale ?? d.scale);
     const issue = realSizeIssue(p.prop, d.size, scale, scales, sizes);
     if (issue) result.violations.push({ item: p.id, code: "wrong-size", message: `${p.prop}: ${issue}${scale ? "" : " (the place declares no scale: human assumed)"}` });
+  }
+  // owner-made props outrank stand-ins: a superseded prop placed directly, or a prop whose role the owner's prop owns
+  // (catalogue supersededFor) without it on or beside it, is a warning (tools/_prop-real-size.mts outrankFindings)
+  {
+    const roots = (closure(proj) as string[]).map((p) => path.join(PROJECTS, p));
+    result.warnings.push(...outrankFindings(result.placements, outrankedIds(roots), supersededIds(roots)));
+  }
+  // MATERIAL FAMILY: in a dungeon (plan space.kind "dungeon") that owns a palette (<project>/dc-palette), stone props wear
+  // the dungeon's stone: a foreign stone material is a violation unless the item swaps it via props.material (_material-family.mts)
+  {
+    const pname = path.basename(proj);
+    const palette = `${pname}/dc-palette`;
+    if (plan.space?.kind === "dungeon" && findAsset(proj, `materials/${palette}.json`)) {
+      const load = (id: string): PrefabLike | null => { const pf = prefabAt(proj, id); return fs.existsSync(pf) ? (readJson(pf) as PrefabLike) : null; };
+      const isStone = (m: string): boolean => {
+        if (STONE_NAME.test(m)) return true;
+        const mf = findAsset(proj, `materials/${m}.json`);
+        return !!mf && (readJson(mf) as { shader?: string }).shader === "terrain-splat";
+      };
+      for (const item of plan.items) {
+        if (!item.prop) continue;
+        const v = materialFamilyFinding({ id: item.id, prop: item.prop, props: item.props as Record<string, unknown> | undefined }, load, isStone, `${pname}/`, palette);
+        if (v) result.violations.push(v);
+      }
+    }
   }
   // OWNER, LAST: deleted items never come back, edited ones take the owner's values (and what stands ON them follows),
   // owner-added ones join; the owner's own placements are fixed, so their findings are warnings, never refusals
@@ -606,9 +672,14 @@ function check(): void {
   const resolved = resolvePlan(proj, file);
   const { plan, map, result, hash } = resolved;
   const quiet = flag("quiet");
+  { const cf = coverFindings(proj, file, plan, map, resolved.src, result.placements); result.violations.push(...cf.violations); result.warnings.push(...cf.warnings); }
   for (const w of lightBucketNotes(proj, plan as unknown as { lights?: string }, result.placements.map((p) => p.prop))) console.log(`LIGHTS: ${w}`);
   printCheck(plan, map, result, quiet);
-  const report = file.replace(/\.json$/, ".report.json");
+  const report = dressReportFile(file);
+  fs.mkdirSync(path.dirname(report), { recursive: true });
+  // a report an older dress left beside the plan is replaced by this one in the reports dir
+  const legacy = file.replace(/\.json$/, ".report.json");
+  if (legacy !== report && fs.existsSync(legacy)) fs.rmSync(legacy);
   fs.writeFileSync(
     report,
     JSON.stringify({ plan: plan.id, map: map.id, hash, ok: result.violations.length === 0, checkedAt: new Date().toISOString(), ...result }, null, 1),
@@ -623,6 +694,13 @@ function check(): void {
 // ---- apply ----------------------------------------------------------------
 
 const idPart = (s: string): string => s.replace(/\//g, "--");
+
+/** yaw (about +Y) * tilt (a placement's pose rotation, e.g. a book laid flat), as a quaternion [x, y, z, w]. */
+function yawTilt(yaw: number, tilt?: [number, number, number, number]): number[] {
+  const sy = Math.sin(yaw / 2), cy = Math.cos(yaw / 2);
+  const [x, y, z, w] = tilt ?? [0, 0, 0, 1];
+  return [cy * x + sy * z, cy * y + sy * w, cy * z - sy * x, cy * w - sy * y].map((v) => +v.toFixed(6));
+}
 
 /** Components that make a prefab live (behaviour, animation, deformation, nested prefabs, light/flame): never batched. */
 const LIVE = ["prefab", "script", "scripts", "animator", "clothSway", "rigidBody", "rigidbody", "light", "particles", "vfx"];
@@ -670,10 +748,14 @@ function apply(): void {
   const scene = readJson(sceneFile) as { entities: Record<string, { parent: string | null; tags?: string[] }> }; // re-read: the editor autosaves
   if (parent && !scene.entities[parent]) fail(`--parent ${parent} is not an entity of ${path.basename(sceneFile)}`);
   const prefix = `dress-${idPart(plan.id)}-`;
+  // every entity apply adds carries poi:<id> (tools/_dress-poi.mts): the POI's walk, site sockets and gates see its dressing
+  const poi = dressPoiId({ planId: plan.id, mapSource: (map as { source?: { model?: string } }).source?.model ?? null, flag: opt("poi") ?? null, jobIds: poiJobIds(proj) });
+  const poiTags = poi ? [`poi:${poi}`] : [];
+  if (!poi) console.log(`poi: no POI job matches plan ${plan.id} (no --poi, no site socket source, no <poi>-<area> id): its entities carry no poi:<id> tag`);
   const ownerIds = new Set((owner?.overrides ?? []).filter((o) => o.added && o.entity).map((o) => o.entity!));
   const ops: Op[] = [];
   // The tag check keeps plan "a/b" from removing plan "a/b-2"'s entities, which share the id prefix.
-  const mine = Object.keys(scene.entities).filter((id) => (id.startsWith(prefix) || ownerIds.has(id)) && (scene.entities[id]!.tags ?? []).includes(`dress:${plan.id}`));
+  const mine = Object.keys(scene.entities).filter((id) => (id.startsWith(prefix) || ownerIds.has(id) || (scene.entities[id]!.tags ?? []).includes("quest-object")) && (scene.entities[id]!.tags ?? []).includes(`dress:${plan.id}`));
   for (const id of mine) if (!mine.includes(scene.entities[id]!.parent ?? "")) ops.push({ op: "remove-entity", id });
   const removed = ops.length;
   // One group per room: a room is one culling unit and its furniture never batches with another room or the shell
@@ -692,7 +774,7 @@ function apply(): void {
       entity: {
         name: room ? `${plan.id} ${room}${role ? ` (${role})` : ""}` : `${plan.id} outside`,
         parent,
-        tags: ["dressing", `dress:${plan.id}`],
+        tags: ["dressing", `dress:${plan.id}`, ...poiTags],
         components: { transform: {}, culling: room && !siteMap ? { interior: true, reveal: 12 } : { minScreenPx: 6 } },
       },
     });
@@ -702,43 +784,64 @@ function apply(): void {
   const itemProps = new Map(plan.items.filter((i) => i.props && Object.keys(i.props).length).map((i) => [i.id, i.props!]));
   // owner-added props keep the entity id the editor gave them (the scene and the overrides file stay in step)
   const ownerEntity = new Map((owner?.overrides ?? []).filter((o) => o.added && o.entity).map((o) => [o.item, o.entity!]));
-  const entityOf = (id: string): string => ownerEntity.get(id) ?? prefix + idPart(id);
+  // QUEST OBJECTS keep their quest entity id exactly (the zone's quest plan binds to it); _dress-quest.mts
+  const quests = questPlacements(plan, result.placements);
+  const entityOf = (id: string): string => quests.get(id)?.entity ?? ownerEntity.get(id) ?? prefix + idPart(id);
+  const decls = quests.size ? questDecls(proj) : [];
+  for (const q of quests.values()) {
+    const e = scene.entities[q.entity];
+    if (e && !(e.tags ?? []).includes(`dress:${plan.id}`)) fail(`quest entity ${q.entity} is already in the scene, placed by something else (tags ${(e.tags ?? []).join(", ")}): remove it with its own installer's inverse first`);
+  }
   for (const p of result.placements) {
-    const overrides = batch ? staticOverrides(proj, p.prop, src.prop(p.prop)?.fire ?? false) : [];
+    const quest = quests.get(p.id);
+    const overrides = batch && !quest ? staticOverrides(proj, p.prop, src.prop(p.prop)?.fire ?? false) : [];
     if (overrides.length) batched++;
     const [lx, ly, lz] = p.position;
     const position = [at[0]! + lx * c + lz * s, at[1]! + ly, at[2]! - lx * s + lz * c].map((v) => +v.toFixed(4));
     const y = yaw0 + p.yaw;
-    ops.push({
-      op: "add-entity",
+    const add = {
+      op: "add-entity" as const,
       id: entityOf(p.id),
       entity: {
         name: `${p.id}: ${p.prop}`,
         parent: groupOf(p.room),
-        tags: ["dressing", `dress:${plan.id}`, ...(own.fixed.has(p.id) ? ["owner-fixed"] : [])],
+        tags: ["dressing", `dress:${plan.id}`, ...poiTags, ...(own.fixed.has(p.id) ? ["owner-fixed"] : [])],
         components: {
-          transform: { position, rotation: [0, +Math.sin(y / 2).toFixed(6), 0, +Math.cos(y / 2).toFixed(6)], scale: p.scale ?? [1, 1, 1] },
+          transform: { position, rotation: yawTilt(y, p.tilt), scale: p.scale ?? [1, 1, 1] },
           prefab: { prefabId: p.prop, ...(itemProps.has(p.id) && plan.items.find((i) => i.id === p.id)?.prop === p.prop ? { props: itemProps.get(p.id) } : {}), ...(overrides.length ? { overrides } : {}) },
-        },
+        } as Record<string, unknown>,
       },
-    });
+    };
+    if (quest) {
+      const decl = decls.find((d) => d.id === quest.entity);
+      const op = questAddOp(add, quest, { decl, planId: plan.id, poi, places: decl ? placesFor(proj, decl.world, decl.zone, planTown(plan.id)?.town ?? null) : undefined });
+      console.log(`quest object: ${op.id} <- item ${p.id} (${p.prop}), npc ${JSON.stringify((op.entity.components["script"] as { params: unknown }).params)}`);
+      ops.push(op as Op);
+    } else ops.push(add as Op);
   }
   const reg = new ComponentRegistry();
   registerCoreComponents(reg);
   let { doc, inverse } = applyOps(scene as never, ops, reg);
+  // every batch below is re-applied onto the FRESH scene under its lock at write time (tools/_scene-write.mts)
+  const batches: Op[][] = [ops];
   // SEAT (voxel/seat.ts): the plan's y is the socket map's floor, measured earlier; every placed prop is now
   // measured on the REAL solid under its footprint (DC floors, decks, colliders, the field) by its catalogue contact
   // and re-seated in a second batch — the inverse undoes both. No support at all is reported, not hidden.
   if (!flag("no-seat")) {
     // the owner's own placements are where the owner put them: never re-seated
     const placed = new Set(result.placements.filter((p) => !own.fixed.has(p.id)).map((p) => entityOf(p.id)));
-    const seat = seatPlaced(path.basename(proj), doc as never, placed);
-    if (seat.ops.length) {
+    // in passes (as float --fix): a candle placed on a crate's PLANNED top stays in the air when the crate itself is then
+    // re-seated onto the real floor (the plan's floor y 10 cm off the rock), so the next pass sets it on the crate's new top
+    let seat = seatPlaced(path.basename(proj), doc as never, placed), moved = 0;
+    for (let pass = 0; pass < 4 && seat.ops.length; pass++) {
       const second = applyOps(doc, seat.ops, reg);
+      batches.push(seat.ops as Op[]);
       doc = second.doc;
       inverse = [...second.inverse, ...inverse];
+      moved += seat.ops.length;
+      seat = seatPlaced(path.basename(proj), doc as never, placed);
     }
-    console.log(`seat: ${seat.ops.length} of ${placed.size} props re-seated on the real floor${seat.unsupported.length ? `; ${seat.unsupported.length} with NO support (move them in the plan): ${seat.unsupported.slice(0, 6).map((r) => r.id.slice(prefix.length)).join(", ")}` : ""}`);
+    console.log(`seat: ${moved} re-seats of ${placed.size} props on the real floor${seat.unsupported.length ? `; ${seat.unsupported.length} with NO support (move them in the plan): ${seat.unsupported.slice(0, 6).map((r) => r.id.slice(prefix.length)).join(", ")}` : ""}`);
   }
   // SKIN (voxel/rock-cap.ts): a placed rock is the stone of its place and wears the ground's cap, as the scatter rocks
   // beside it do: the world's rock material + the resolver's rockCap per instance (no material per instance)
@@ -748,18 +851,121 @@ function apply(): void {
     const skin = field ? skinPlacedOps(path.basename(proj), doc, field, placed) : { ops: [], changed: [] };
     if (skin.ops.length) {
       const third = applyOps(doc, skin.ops, reg);
+      batches.push(skin.ops as Op[]);
       doc = third.doc;
       inverse = [...third.inverse, ...inverse];
       console.log(`skin: ${skin.changed.length} placed rock(s) take their place's stone and cap (worldgen rock-skins)`);
     }
   }
   const inverseFile = file.replace(/\.json$/, ".inverse.json");
+  // CLEARING: trees must never grow through a dressed room — one vegetation clearing per room in the scene's world
+  // GRASS RULE (Derek: "grass and high grass should be cleared below a hut"): outdoors the room disc keeps cover, but every
+  // dwelling / fire / bedding footprint gets its own disc with cover CLEARED (+1.5 m, 3 m round a fire)
+  const footprints = siteMap ? coverFootprints(src, result.placements).map((d) => ({ ...d, center: [+(at[0]! + d.center[0] * c + d.center[1] * s).toFixed(2), +(at[2]! - d.center[0] * s + d.center[1] * c).toFixed(2)] as [number, number], cover: true })) : [];
+  const clearing = plan.clearing === false || flag("no-clearing") ? null : dressClearings(proj, doc, plan.id, [...roomDiscs(map, result.placements, at, c, s, plan.clearing?.pad ?? 2), ...footprints], plan.clearing?.cover ?? !siteMap, flag("dry"));
   console.log(`${flag("dry") ? "DRY RUN: would apply" : "applied"} one batch to ${path.relative(PLAYGROUND, sceneFile)}: removed ${removed} previous root(s) of ${prefix}*, added ${new Set(result.placements.map((p) => p.room)).size} room group(s) + ${result.placements.length} prefab instances, ${batched} opted into static batching${batch ? "" : " (--no-batch)"} (plan hash ${hash})${result.warnings.length ? `; ${result.warnings.length} warnings (dress check)` : ""}`);
   if (flag("dry")) return;
-  fs.writeFileSync(sceneFile, JSON.stringify(doc, null, 2));
+  inverse = applyBatchesToSceneFile(sceneFile, batches, (d, o) => applyOps(d, o, reg), { label: `dress apply ${plan.id}`, trailer: "" }).inverse;
   // the frame is recorded so the editor can write the owner's edits back in the plan's own (map-local) frame
-  fs.writeFileSync(inverseFile, JSON.stringify({ plan: plan.id, scene: path.relative(PLAYGROUND, sceneFile), hash, frame: { at, yaw: yawDeg }, parent, ops: inverse }, null, 1));
+  fs.writeFileSync(inverseFile, JSON.stringify({ plan: plan.id, scene: path.relative(PLAYGROUND, sceneFile), hash, frame: { at, yaw: yawDeg }, parent, ops: inverse, ...(clearing ? { clearings: clearing } : {}) }, null, 1));
   console.log(`inverse -> ${path.relative(PLAYGROUND, inverseFile)}`);
+}
+
+// ---- clearings (vegetation kept off dressed rooms) -------------------------
+
+/** Map-frame discs (cover to CLEAR) under every placed dwelling, fire and bedding: catalogue footprint + 1.5 m (3 m at a fire). */
+function coverFootprints(src: ReturnType<typeof sources>, placements: { id: string; prop: string; position: number[] }[]): { room: string; center: [number, number]; radius: number }[] {
+  const out: { room: string; center: [number, number]; radius: number }[] = [];
+  for (const p of placements) {
+    const d = src.prop(p.prop) as { fire?: boolean; mount?: string; category?: string; size?: number[] } | undefined;
+    const kind = needsClearedCover(p.prop, d);
+    if (!kind) continue;
+    const half = d?.size ? Math.hypot(d.size[0]!, d.size[2]!) / 2 : 2;
+    out.push({ room: `fp-${p.id}`, center: [p.position[0]!, p.position[2]!], radius: +(half + (kind === "fire" ? 3 : 1.5)).toFixed(2) });
+  }
+  return out;
+}
+
+/** The grass rule at check time: a dwelling / fire on an outdoor site must stand on cover the world clears (or that apply will). */
+function coverFindings(proj: string, file: string, plan: DressingPlan, map: SocketMap, src: ReturnType<typeof sources>, placements: { id: string; prop: string; position: number[] }[]): { violations: { item: string; code: string; message: string }[]; warnings: { item: string; code: string; message: string }[] } {
+  const out = { violations: [] as { item: string; code: string; message: string }[], warnings: [] as { item: string; code: string; message: string }[] };
+  const siteMap = /handoff \(site /.test(String((map as { source?: { model?: string } }).source?.model ?? ""));
+  if (!siteMap) return out;
+  const fps = coverFootprints(src, placements);
+  if (!fps.length) return out;
+  const sceneRef = opt("scene");
+  const sceneDoc = sceneRef ? readJson(fs.existsSync(sceneRef) ? sceneRef : path.join(proj, "assets", "scenes", `${sceneRef}.scene.json`)) : null;
+  const worldFile = sceneDoc ? sceneWorldFile(proj, sceneDoc) : findAsset(path.basename(proj), `worlds/${path.basename(proj)}.json`) ?? null;
+  const world = worldFile ? ((readJson(worldFile) as { features?: { clearings?: { center?: [number, number]; radius?: number; cover?: boolean }[] } }).features?.clearings ?? []) : [];
+  const applied = fs.existsSync(file.replace(/.json$/, ".inverse.json"));
+  for (const d of fps) {
+    if (discCleared(d.center, d.radius - 0.05, world)) continue;
+    const item = d.room.slice(3);
+    if (plan.clearing === false) out.violations.push({ item, code: "cover-not-cleared", message: `${item} is a dwelling/fire on an outdoor site but the plan sets clearing: false: ground cover grows through it (clear footprint + 1.5 m, 3 m at a fire)` });
+    else if (applied) out.violations.push({ item, code: "cover-not-cleared", message: `${item} stands on uncleared ground cover in ${worldFile ? path.relative(PLAYGROUND, worldFile) : "the world"} (applied before the grass rule): re-run dress apply to write its cover-cleared footprint clearing` });
+    else out.warnings.push({ item, code: "cover-cleared-on-apply", message: `${item}: apply writes a cover-cleared footprint clearing r ${d.radius} m` });
+  }
+  return out;
+}
+
+/** World discs, one per room the plan furnishes: its socket-map bbox (or, outdoors with no room, its placements) + pad. */
+function roomDiscs(map: { levels: { rooms: { id: string; bbox: [number, number, number, number] }[] }[] }, placements: { room: string; position: number[] }[], at: number[], c: number, s: number, pad: number): { room: string; center: [number, number]; radius: number }[] {
+  const out: { room: string; center: [number, number]; radius: number }[] = [];
+  const world = (lx: number, lz: number): [number, number] => [+(at[0]! + lx * c + lz * s).toFixed(2), +(at[2]! - lx * s + lz * c).toFixed(2)];
+  for (const room of [...new Set(placements.map((p) => p.room))]) {
+    let box: [number, number, number, number] | undefined;
+    for (const lv of map.levels) box ??= lv.rooms.find((r) => r.id === room)?.bbox;
+    if (!box) {
+      const ps = placements.filter((p) => p.room === room);
+      box = [Math.min(...ps.map((p) => p.position[0]!)), Math.max(...ps.map((p) => p.position[0]!)), Math.min(...ps.map((p) => p.position[2]!)), Math.max(...ps.map((p) => p.position[2]!))];
+    }
+    const [x0, x1, z0, z1] = box;
+    out.push({ room: room || "outdoor", center: world((x0 + x1) / 2, (z0 + z1) / 2), radius: +(Math.hypot(x1 - x0, z1 - z0) / 2 + pad).toFixed(2) });
+  }
+  return out;
+}
+
+const clearingOwner = (planId: string): string => `dress-${idPart(planId)}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+
+/** The world recipe file a scene streams (its voxelWorld), or null for a scene without one (a dungeon). */
+function sceneWorldFile(proj: string, doc: unknown): string | null {
+  let worldId: string | undefined;
+  for (const e of Object.values((doc as { entities: Record<string, { components?: { voxelWorld?: { world?: string } } }> }).entities)) worldId ??= e.components?.voxelWorld?.world;
+  return worldId ? findAsset(path.basename(proj), `worlds/${worldId}.json`) ?? null : null;
+}
+
+/**
+ * Replace the plan's clearings (owner `dress-<plan>`) in the scene's world with `discs`. Clearings of every other owner
+ * (poi-dressing, a town's plots ...) are left exactly as they are. Returns what was there before (the inverse), or null
+ * when the scene has no voxel world.
+ */
+function dressClearings(proj: string, doc: unknown, planId: string, discs: { room: string; center: [number, number]; radius: number; cover?: boolean }[], cover: boolean, dry: boolean, remove = false): { world: string; owner: string; before: ClearingDoc[]; after: string[] } | null {
+  const file = sceneWorldFile(proj, doc);
+  if (!file) return null;
+  const owner = clearingOwner(planId);
+  const raw = readJson(file) as { features: { clearings?: ClearingDoc[] } };
+  const all = raw.features.clearings ?? [];
+  const before = all.filter((cl) => cl.owner === owner);
+  const next: ClearingDoc[] = remove ? [] : discs.map((d) => clearingSchema.parse({ id: `${owner}-${d.room}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-"), center: d.center, radius: d.radius, feather: 3, keep: 0, scatter: true, cover: d.cover ?? cover, owner }));
+  const kept = all.filter((cl) => cl.owner !== owner && !next.some((n) => n.id === cl.id));
+  raw.features.clearings = [...kept, ...next];
+  if (raw.features.clearings.length === 0) delete raw.features.clearings;
+  const parsed = worldRecipeSchema.safeParse(raw);
+  if (!parsed.success) fail(`clearing: refusing to write an invalid world ${file}: ${parsed.error.issues[0]?.message}`);
+  console.log(`clearing: ${remove ? "removed" : "wrote"} ${remove ? before.length : next.length} vegetation clearing(s) owner ${owner} in ${path.relative(PLAYGROUND, file)}${remove ? "" : ` (scatter cleared, cover ${cover ? "cleared" : "kept"}; ${before.length} replaced)`}${dry ? " — DRY RUN, not written" : ""}`);
+  if (!dry) fs.writeFileSync(file, `${JSON.stringify(parsed.data, null, 2)}
+`);
+  return { world: path.relative(PLAYGROUND, file), owner, before, after: next.map((n) => n.id) };
+}
+
+function unclear(): void {
+  const proj = projectDir();
+  const file = planFile(proj, need("plan"));
+  const plan = dressingPlanSchema.parse(readJson(file));
+  const sceneRef = need("scene");
+  const sceneFile = fs.existsSync(sceneRef) && sceneRef.endsWith(".json") ? path.resolve(sceneRef) : path.join(proj, "assets", "scenes", `${sceneRef}.scene.json`);
+  if (!fs.existsSync(sceneFile)) fail(`no scene ${sceneFile}`);
+  if (!dressClearings(proj, readJson(sceneFile), plan.id, [], false, flag("dry"), true)) console.log("clearing: the scene has no voxel world; nothing to remove");
 }
 
 // ---- report / walk --------------------------------------------------------
@@ -853,6 +1059,7 @@ function report(): void {
  * centre clutter 0..100 (solid non-set-piece props reaching the room's keep-clear middle), scale/culture violations;
  * then the plan's violations by code. --all reviews every plan of the project (ids rime-hall-*.json, not reports).
  */
+const RULE_WARNINGS = new Set(["chapel-altar", "chapel-pews", "no-chandelier"]);
 function review(): void {
   const proj = projectDir();
   const files = flag("all")
@@ -871,11 +1078,14 @@ function review(): void {
     for (const x of rv) {
       if (!x.items && !plan.rooms[x.room]) continue;
       console.log(`  ${x.room} ${x.role || "-"} ${x.area.toFixed(0)} m²: ${x.items} items, wall share ${Math.round(x.wallShare * 100)}%, centre ${x.centreM2 ? `${x.centreM2} m², clutter ${x.centreClutter}/100${x.centreItems.length ? ` (${x.centreItems.join(", ")})` : ""}` : "none (too small)"}` +
-        `${x.keepCentre ? " [kept clear]" : ""}, scale ${x.scaleViolations}, culture ${x.cultureViolations}`);
+        `${x.keepCentre ? " [kept clear]" : ""}, scale ${x.scaleViolations}, culture ${x.cultureViolations}` +
+        `${x.chandelier === undefined ? "" : `, ridge ${x.ridge?.toFixed(1)} m ${x.chandelier ? "with its chandelier" : "NO CHANDELIER"}`}`);
       tot.centre += x.centreItems.length;
       tot.scale += x.scaleViolations;
       tot.culture += x.cultureViolations;
     }
+    // the owner's rulings (2026-10-20) that are warnings: chapels, tall rooms
+    for (const w of result.warnings.filter((w) => RULE_WARNINGS.has(w.code))) console.log(`  WARN ${w.code} ${w.item}: ${w.message}`);
     tot.plans++;
     tot.violations += result.violations.length;
   }
@@ -1079,11 +1289,51 @@ function ownerApply(): void {
   }
   const reg = new ComponentRegistry();
   registerCoreComponents(reg);
-  const { doc, inverse } = applyOps(scene, ops, reg);
+  applyOps(scene, ops, reg); // validates the batch before anything is written
   console.log(`${flag("dry") ? "DRY RUN: would apply" : "applied"} ${ops.length} owner op(s) to ${path.relative(PLAYGROUND, sceneFile)}`);
   if (flag("dry")) return;
-  fs.writeFileSync(sceneFile, JSON.stringify(doc, null, 2));
+  const { inverse } = applyOpsToSceneFile(sceneFile, ops, (d, o) => applyOps(d, o, reg), { label: "dress owner-apply", trailer: "" });
   fs.writeFileSync(file.replace(/\.json$/, ".inverse.json"), JSON.stringify({ scene: path.relative(PLAYGROUND, sceneFile), ops: inverse }, null, 1));
+}
+
+/**
+ * dress retag --project <p> --scene <name|file> [--plan <file|id>] [--poi <id>] [--dry]: tag dressing installed before
+ * apply tagged it — every entity of each plan (tag dress:<plan>) gets poi:<id> (tools/_dress-poi.mts derives it), as ONE
+ * set-tags batch; inverse -> authoring/dressing/retag-<scene>.inverse.json (overwritten). Idempotent.
+ */
+function retag(): void {
+  const proj = projectDir();
+  const sceneRef = need("scene");
+  const sceneFile = fs.existsSync(sceneRef) && sceneRef.endsWith(".json") ? path.resolve(sceneRef) : path.join(proj, "assets", "scenes", `${sceneRef}.scene.json`);
+  if (!fs.existsSync(sceneFile)) fail(`no scene ${sceneFile}`);
+  const plansDir = path.join(proj, "authoring", "dressing", "plans");
+  const files = opt("plan") ? [planFile(proj, opt("plan")!)] : fs.readdirSync(plansDir).filter((f) => /.json$/.test(f) && !/.(inverse|report|owner|walk).json$/.test(f)).map((f) => path.join(plansDir, f));
+  const jobs = poiJobIds(proj);
+  const scene = readJson(sceneFile) as { entities: Record<string, { tags?: string[]; parent?: string | null }> };
+  const ops: Op[] = [];
+  let unmatched = 0;
+  for (const f of files) {
+    let plan: { id?: string; map?: string };
+    try { plan = readJson(f) as { id?: string; map?: string }; } catch { continue; }
+    if (typeof plan.id !== "string") continue;
+    const sm = plan.map ? path.join(proj, "authoring", "dressing", "sockets", `${plan.map}.json`) : null;
+    let src: string | null = null;
+    try { src = sm && fs.existsSync(sm) ? (readJson(sm) as { source?: { model?: string } }).source?.model ?? null : null; } catch { /* no map */ }
+    const poi = dressPoiId({ planId: plan.id, mapSource: src, flag: opt("poi") ?? null, jobIds: jobs });
+    if (!poi) { unmatched++; continue; }
+    const r = retagOps(scene.entities, plan.id, poi);
+    if (r.ops.length) console.log(`  ${plan.id} -> poi:${poi}: ${r.ops.length} entit${r.ops.length === 1 ? "y" : "ies"}`);
+    if (r.conflicts.length) console.log(`  ${plan.id}: ${r.conflicts.length} entit${r.conflicts.length === 1 ? "y" : "ies"} already tagged for another poi, left alone (${r.conflicts.slice(0, 3).join(", ")})`);
+    ops.push(...(r.ops as Op[]));
+  }
+  console.log(`retag: ${files.length} plan(s), ${unmatched} with no matching POI job; ${ops.length} entit${ops.length === 1 ? "y" : "ies"} to tag in ${path.relative(PLAYGROUND, sceneFile)}`);
+  if (!ops.length || flag("dry")) { if (ops.length) console.log("DRY RUN: nothing written"); return; }
+  const reg = new ComponentRegistry();
+  registerCoreComponents(reg);
+  const { inverse } = applyOpsToSceneFile(sceneFile, ops, (d, o) => applyOps(d, o, reg), { label: "dress retag", trailer: "" }); // fresh read under the lock
+  const inv = path.join(proj, "authoring", "dressing", `retag-${path.basename(sceneFile).replace(/.scene.json$/, "")}.inverse.json`);
+  fs.writeFileSync(inv, JSON.stringify({ scene: path.relative(PLAYGROUND, sceneFile), ops: inverse }, null, 1));
+  console.log(`inverse -> ${path.relative(PLAYGROUND, inv)}`);
 }
 
 // ---- dispatch -------------------------------------------------------------
@@ -1106,6 +1356,9 @@ switch (cmd) {
   case "fixtures":
     fixtures();
     break;
+  case "unclear":
+    unclear();
+    break;
   case "report":
     report();
     break;
@@ -1120,6 +1373,9 @@ switch (cmd) {
     break;
   case "owner-apply":
     ownerApply();
+    break;
+  case "retag":
+    retag();
     break;
   default:
     console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 20).map((l) => l.replace(/^ \*\/?\s?/, "")).join("\n"));

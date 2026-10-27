@@ -1,11 +1,14 @@
-import { assetFileUrl } from "./asset-url.js";
+import { assetFileUrl, assetIndexUrl } from "./asset-url.js";
 import * as THREE from "three/webgpu";
 import {
   assembleHlodBuildDoc,
   chunkDocSchema,
   chunkToSceneDoc,
-  computeChunkStates,
+  cellLoadPriority,
+  computeLeadChunkStates,
   expandScene,
+  FocusVelocity,
+  streamLeadPoint,
   parseChunkCoords,
   parseChunkKey,
   supercellForCell,
@@ -35,6 +38,7 @@ import {
   type BuildOptions,
   type InstancedPropBatch,
   type StaticBatchHandle,
+  STATIC_BATCH_FLAG,
 } from "@hitreg/render";
 import type { PhysicsSim } from "@hitreg/physics";
 
@@ -58,7 +62,16 @@ interface LoadedChunk {
   cullRoots: CullRoot[];
   /** Registered culling units: the cell's own (render-only cells) first, then its roots'. */
   cullUnits: CullUnit[];
+  /** The built scene root the batch merged (re-merged when models land after the build). */
+  root: THREE.Object3D;
+  /** Static models of this cell still loading when it was batched (async glTF); 0 = the batch saw every one. */
+  lateModels: number;
 }
+
+/** A re-merge waits this long after a cell's last late model, so a cell whose models land together merges once. */
+export const CHUNK_REBATCH_DELAY_MS = 250;
+/** Cells re-merged per update at most: each is a synchronous merge of one cell. */
+export const CHUNK_REBATCH_PER_UPDATE = 2;
 
 /**
  * A merged HLOD proxy baked from MULTIPLE cells at once (hlodSupercellFactor),
@@ -258,6 +271,21 @@ function maxCellLoadsInFlightValue(): number {
 export const CELL_INTEGRATION_BUDGET_MS = 2.5;
 
 /**
+ * The integration budget while the focus moves fast (a sprint, a mount, a
+ * fly-cam): a 9.5 m/s sprint crosses a 48 m cell every five seconds and every
+ * crossing brings a new row of full-detail cells, so 2.5 ms a frame fell
+ * behind and the player ran into cells still waiting to be published
+ * (owner report 2026-10-22). Raised only while the frames themselves are
+ * cheap (see FAST_BUDGET_MAX_FRAME_MS) — the budget may not create the stall
+ * it is avoiding.
+ */
+export const CELL_INTEGRATION_BUDGET_FAST_MS = 6;
+/** Speed (units/s) above which the fast budget applies. */
+const FAST_BUDGET_SPEED = 4;
+/** Smoothed frame interval above which the fast budget is withheld. */
+const FAST_BUDGET_MAX_FRAME_MS = 25;
+
+/**
  * How many arrived-but-not-yet-integrated cells may pile up before the
  * streamer stops starting new loads.
  *
@@ -443,6 +471,30 @@ export class ChunkManager {
   private scene: THREE.Scene | null = null;
   private sim: PhysicsSim | null = null;
   private lastFocus: [number, number] | null = null;
+  /** The focus position update() was last fed (world units). */
+  private focusX = 0;
+  private focusZ = 0;
+  /**
+   * Velocity-led streaming (packages/core stream-lead.ts): the focus velocity,
+   * estimated from the positions update() is fed, and the LEAD point it
+   * projects. Residency takes every cell either the focus or the lead point
+   * wants, and loads go nearest-the-lead first, so a sprinting player's ring
+   * runs ahead of them instead of trailing behind. Standing still, lead =
+   * focus and nothing changes.
+   */
+  private readonly focusVelocity = new FocusVelocity();
+  /**
+   * Runtime A/B switch for everything velocity-led (lead residency, lead-first
+   * queue order, the fast integration budget, worker generation for lead-ahead
+   * simulation cells). Off = the previous focus-centred behaviour exactly.
+   * tools/sprint-probe.mts --ab flips it inside one page session.
+   */
+  leadStreaming = true;
+  private lead = { x: 0, z: 0 };
+  private lastLeadCell: [number, number] | null = null;
+  /** Smoothed interval between update() calls (≈ the frame time), for the fast budget's cap. */
+  private frameMs = 16.7;
+  private lastUpdateAt = -1;
   /**
    * Desired-but-unbaked supercells at the last queue refill, so a refill only
    * happens while it is making progress (a supercell whose cells all fail
@@ -622,6 +674,7 @@ export class ChunkManager {
     this.scene = scene;
     const worldChanged = streamer?.source !== this.streamer?.source;
     this.streamer = streamer;
+    this.groundEpoch++; // cell size or world may differ: re-judge ground once
     if (!streamer || worldChanged) this.unloadAll();
     if (!streamer) return;
     // re-parent surviving groups into the rebuilt scene — NOT a fresh load
@@ -655,6 +708,7 @@ export class ChunkManager {
       Object.is(provider.key, this.provider.key);
     this.provider = provider;
     this.hasCellMemo.clear();
+    this.groundEpoch++; // which cells exist may differ
     if (sameCells) return;
     this.unloadAll();
     this.lastFocus = null;
@@ -686,6 +740,13 @@ export class ChunkManager {
     return coords;
   }
 
+  /** Is cell (cx, cz) within reach of the body itself — the focus's own cell or one touching it? */
+  private nearFocus(cx: number, cz: number, size: number): boolean {
+    const ex = Math.max(cx * size - this.focusX, 0, this.focusX - (cx + 1) * size);
+    const ez = Math.max(cz * size - this.focusZ, 0, this.focusZ - (cz + 1) * size);
+    return Math.hypot(ex, ez) <= size;
+  }
+
   private hasCell(key: string): boolean {
     if (this.provider) {
       let has = this.hasCellMemo.get(key);
@@ -698,6 +759,47 @@ export class ChunkManager {
       return has;
     }
     return this.available.has(key);
+  }
+
+  /** Bumped whenever the set of cells with DRAWN ground changes (a cell or HLOD part published or dropped). */
+  private groundEpoch = 0;
+  private groundMemo: Set<string> | null = null;
+  private groundMemoEpoch = -1;
+
+  /**
+   * Version of {@link coversGround}'s answer: it changes only when a cell or an HLOD part is published or dropped,
+   * so a consumer (the culling system's ground gate) re-judges on chunk events, never by scanning every frame.
+   */
+  get groundVersion(): number {
+    return this.groundEpoch;
+  }
+
+  /**
+   * Is terrain drawn under (x, z)? True when the cell there is resident at any tier (a full cell, or a cell an HLOD /
+   * far proxy holds), when there is no cell to stream there (outside the world, no streamer), or when the cell is
+   * suppressed for isolation editing (its editable copy stands in). False = its ground has not streamed in: anything
+   * placed there would hang over the void (docs/culling.md, "Over unloaded ground").
+   */
+  coversGround(x: number, z: number): boolean {
+    const s = this.streamer;
+    if (!s) return true;
+    const key = `${Math.floor(x / s.cellSize)}_${Math.floor(z / s.cellSize)}`;
+    if (!this.hasCell(key) || this.suppressed.has(key)) return true;
+    if (this.groundMemoEpoch !== this.groundEpoch || !this.groundMemo) {
+      const memo = new Set<string>(this.loaded.keys());
+      for (const sc of this.loadedSupercells.values()) for (const k of sc.cellKeys) memo.add(k);
+      this.groundMemo = memo;
+      this.groundMemoEpoch = this.groundEpoch;
+    }
+    return this.groundMemo.has(key);
+  }
+
+  /** Whether the cell under (x, z) — the one a body standing there is in — is loaded (true where there is no cell to load). */
+  isCellLoaded(x: number, z: number): boolean {
+    const s = this.streamer;
+    if (!s) return true;
+    const key = `${Math.floor(x / s.cellSize)}_${Math.floor(z / s.cellSize)}`;
+    return !this.hasCell(key) || this.loaded.has(key);
   }
 
   /** Local landing coverage, not queue emptiness (queued work is not ground). */
@@ -718,7 +820,21 @@ export class ChunkManager {
     return true;
   }
 
-  /** Arrival screens wait for visible coverage too, not just the landing pad. */
+  /** The playable neighbourhood is ready; distant HLOD/far scenery may keep streaming. */
+  isArrivalReady(x: number, z: number): boolean {
+    if (!this.streamer) return true;
+    if (!this.lastFocus || this.lastFocus[0] !== Math.round(x / this.streamer.cellSize) ||
+      this.lastFocus[1] !== Math.round(z / this.streamer.cellSize) || !this.isLandingReady(x, z)) return false;
+    // The simulation ring includes the ground a player can reach next. Waiting
+    // for every desired far cell held a ready landing for minutes.
+    for (const [key, rep] of this.desiredCells) {
+      if (rep !== "simulation" || this.suppressed.has(key)) continue;
+      if (this.hasCell(key) && !this.loaded.has(key)) return false;
+    }
+    return true;
+  }
+
+  /** Complete visible coverage, including distant scenery; stronger than playable arrival. */
   isViewReady(): boolean {
     if (!this.streamer) return true;
     if (!this.lastFocus) return false;
@@ -748,7 +864,7 @@ export class ChunkManager {
     if (!this.streamer) return;
     if (this.provider) return; // generated worlds have no file index to read
     try {
-      const index = (await fetch("/__hitreg/assets-index?kinds=chunks").then((r) => r.json())) as {
+      const index = (await fetch(assetIndexUrl()).then((r) => r.json())) as {
         chunks?: string[];
       };
       this.available.clear();
@@ -758,6 +874,7 @@ export class ChunkManager {
         const coords = parseChunkCoords(file);
         if (coords) this.available.set(`${coords[0]}_${coords[1]}`, file);
       }
+      this.groundEpoch++;
     } catch {
       /* prod build: no bridge, no streaming */
     }
@@ -791,6 +908,7 @@ export class ChunkManager {
   suppressCell(cx: number, cz: number): void {
     const key = `${cx}_${cz}`;
     this.suppressed.add(key);
+    this.groundEpoch++;
     // drop it before it can publish; the drain skips suppressed keys anyway,
     // but an inline (simulation) integration would already have gone through
     this.pending.delete(key);
@@ -806,6 +924,7 @@ export class ChunkManager {
   /** Resume normal streamed residency for a cell suppressed via suppressCell. */
   unsuppressCell(cx: number, cz: number): void {
     this.suppressed.delete(`${cx}_${cz}`);
+    this.groundEpoch++;
     this.lastFocus = null; // force a re-evaluation so it can reload if still in range
   }
 
@@ -821,13 +940,26 @@ export class ChunkManager {
   update(fx: number, fz: number): void {
     const s = this.streamer;
     if (!s || !this.scene) return;
+    const t = now();
+    if (this.lastUpdateAt >= 0) this.frameMs += (Math.min(t - this.lastUpdateAt, 250) - this.frameMs) * 0.1;
+    this.lastUpdateAt = t;
+    this.focusVelocity.sample(fx, fz, t);
+    this.focusX = fx;
+    this.focusZ = fz;
+    const lead = this.leadStreaming ? streamLeadPoint(fx, fz, this.focusVelocity.vx, this.focusVelocity.vz) : { x: fx, z: fz };
+    this.lead = lead;
     this.drainPendingSupercells();
-    this.drainPendingCells(fx, fz);
+    this.drainPendingCells(lead.x, lead.z);
+    this.pumpRebatches();
     const cx = Math.round(fx / s.cellSize);
     const cz = Math.round(fz / s.cellSize);
-    if (this.lastFocus && this.lastFocus[0] === cx && this.lastFocus[1] === cz) return;
+    const lcx = Math.round(lead.x / s.cellSize);
+    const lcz = Math.round(lead.z / s.cellSize);
+    const leadMoved = !this.lastLeadCell || this.lastLeadCell[0] !== lcx || this.lastLeadCell[1] !== lcz;
+    if (this.lastFocus && this.lastFocus[0] === cx && this.lastFocus[1] === cz && !leadMoved) return;
     if (!this.lastFocus || this.lastFocus[0] !== cx || this.lastFocus[1] !== cz) this.lastRefillMissing = Infinity;
     this.lastFocus = [cx, cz];
+    this.lastLeadCell = [lcx, lcz];
 
     // feed current reps back in so the ring hysteresis holds cells on a boundary.
     // Supercell-covered cells don't carry an exact rep (hlod vs far collapses to
@@ -837,7 +969,10 @@ export class ChunkManager {
     for (const sc of this.loadedSupercells.values()) {
       for (const key of sc.cellKeys) if (!prev.has(key)) prev.set(key, "hlod");
     }
-    const target = computeChunkStates({ x: fx, z: fz }, s, prev);
+    // the lead point's rings OR the focus's own, whichever wants more detail:
+    // the cells ahead are promoted before the body reaches them and nothing
+    // behind is dropped early (stream-lead.ts)
+    const target = computeLeadChunkStates({ x: fx, z: fz }, lead, s, prev);
 
     // Everything below runs only on a cell crossing, so it never shows up in
     // an average — but a crossing is exactly when the world hitches, and the
@@ -1149,7 +1284,12 @@ export class ChunkManager {
     const endLoad = this.profiler?.span("chunk.load", `${key} (${rep})`);
     let arrived: ChunkDoc | null = null;
     try {
-      arrived = await this.readCell(key, coords[0], coords[1], rawContent, isSimulated(rep) ? "inline" : "near");
+      // Inline (main-thread) generation is for ground the body can reach NOW. A
+      // simulation cell the LEAD ring asked for ahead of a moving player is
+      // generated on a worker at near priority like any visible cell; it still
+      // integrates (collider included) the moment it arrives.
+      const urgent = isSimulated(rep) && (!this.leadStreaming || this.nearFocus(coords[0], coords[1], s.cellSize));
+      arrived = await this.readCell(key, coords[0], coords[1], rawContent, urgent ? "inline" : "near");
     } catch (error) {
       console.warn(`[chunks] failed to load cell ${key}:`, error);
     } finally {
@@ -1204,10 +1344,18 @@ export class ChunkManager {
     if (!s) return;
     const started = now();
     let integrated = 0;
+    // a fast-moving focus gets the larger budget, unless frames are already long
+    const budget =
+      this.leadStreaming && this.focusVelocity.speed > FAST_BUDGET_SPEED && this.frameMs < FAST_BUDGET_MAX_FRAME_MS
+        ? CELL_INTEGRATION_BUDGET_FAST_MS
+        : CELL_INTEGRATION_BUDGET_MS;
     while (this.pending.size > 0) {
       // Always let the first cell through: one cell costing more than the
       // whole budget must still make progress or the queue never drains.
-      if (integrated > 0 && now() - started >= CELL_INTEGRATION_BUDGET_MS) break;
+      // A cell the rings now want SIMULATED (the lead ring reached it while it
+      // waited) is ground the body is about to stand on: it never waits for
+      // budget, exactly like a simulation cell that arrives directly.
+      const overBudget = integrated > 0 && now() - started >= budget;
       let best: PendingCell | null = null;
       let bestDist = Infinity;
       for (const entry of this.pending.values()) {
@@ -1227,9 +1375,11 @@ export class ChunkManager {
           this.pending.delete(entry.key);
           continue;
         }
-        const dx = entry.cx * s.cellSize - fx;
-        const dz = entry.cz * s.cellSize - fz;
-        const dist = dx * dx + dz * dz;
+        if (overBudget && (rep !== "simulation" || !this.leadStreaming)) continue;
+        const dx = (entry.cx + 0.5) * s.cellSize - fx;
+        const dz = (entry.cz + 0.5) * s.cellSize - fz;
+        // simulation-wanted cells first, then nearest the (lead) point
+        const dist = dx * dx + dz * dz + (rep === "simulation" || !this.leadStreaming ? 0 : 1e12);
         if (dist < bestDist) {
           bestDist = dist;
           best = entry;
@@ -1286,10 +1436,33 @@ export class ChunkManager {
       // model load is async — which is why the pool wants a token and not
       // the cell key)
       const poolOwner = {};
-      const built = buildScene(
-        expanded,
-        this.buildOptions.instancePool ? { ...this.buildOptions, instancePoolOwner: poolOwner } : this.buildOptions,
-      );
+      // A cell is merged right after it is built, but a model the cache has not seen yet (every bridge segment, a
+      // prop's first use) lands asynchronously AFTER that merge and stayed one draw per pass — main pass and every
+      // shadow cascade — for as long as the cell was loaded. Count the static ones that land late and re-merge the
+      // cell once they stop arriving (pumpRebatches).
+      const late = { chunk: null as LoadedChunk | null };
+      const onModelLoaded = this.buildOptions.onModelLoaded;
+      const built = buildScene(expanded, {
+        ...this.buildOptions,
+        ...(this.buildOptions.instancePool ? { instancePoolOwner: poolOwner } : {}),
+        onModelLoaded: (entityId, root, clips) => {
+          onModelLoaded?.(entityId, root, clips);
+          // a cached model lands synchronously, inside buildScene, and the merge below sees it
+          if (!late.chunk) return;
+          const chunk = late.chunk;
+          // the builder flags a model static (prepareStaticModel) right AFTER this callback, in the same task
+          queueMicrotask(() => {
+            if (this.loaded.get(key) !== chunk) return; // unloaded (or reloaded) since
+            let staticMesh = false;
+            root.traverse((o) => {
+              if ((o as THREE.Mesh).isMesh && o.userData[STATIC_BATCH_FLAG]) staticMesh = true;
+            });
+            if (!staticMesh) return;
+            chunk.lateModels += 1;
+            this.rebatchAt.set(key, now() + CHUNK_REBATCH_DELAY_MS);
+          });
+        },
+      });
       group.add(built.scene);
       // Merge this cell's static props into one draw call per material.
       //
@@ -1335,8 +1508,12 @@ export class ChunkManager {
         poolOwner,
         cullRoots,
         cullUnits: [],
+        root: built.scene,
+        lateModels: 0,
       };
+      late.chunk = chunk;
       this.loaded.set(key, chunk);
+      this.groundEpoch++;
       this.stampCell(key, group);
       this.registerCulling(chunk);
       if (simulated) this.sim?.addEntities(expanded); // render-only rings never collide
@@ -1375,11 +1552,26 @@ export class ChunkManager {
    * backlog. drainPendingCells re-pumps as it clears them.
    */
   private pumpCellQueue(): void {
-    while (
-      this.inFlight.size < maxCellLoadsInFlightValue() &&
-      this.pending.size < MAX_PENDING_INTEGRATIONS &&
-      this.cellQueue.length > 0
-    ) {
+    // Order by what the player is running into: simulation cells first, then
+    // nearest the lead point. queueCell's newest-first unshift inherited the
+    // ring walk's RASTER order, so within one crossing the loads went from the
+    // +z/+x corner backwards — fine sprinting one way, last-in-line the other.
+    const s = this.streamer;
+    if (s && this.leadStreaming && this.cellQueue.length > 1) {
+      const lead = this.lead;
+      const prio = new Map<string, number>();
+      for (const key of this.cellQueue) {
+        const c = this.cellCoords(key);
+        prio.set(key, c ? cellLoadPriority(c[0], c[1], this.desiredCells.get(key), lead, s.cellSize) : Infinity);
+      }
+      this.cellQueue.sort((a, b) => prio.get(a)! - prio.get(b)!);
+    }
+    while (this.cellQueue.length > 0) {
+      // A simulation cell is generated inline (no worker) and integrates on
+      // arrival, so neither the worker cap nor the integration backlog
+      // applies to it: ground under the body never waits behind scenery.
+      const headSim = this.leadStreaming && this.desiredCells.get(this.cellQueue[0]!) === "simulation";
+      if (!headSim && (this.inFlight.size >= maxCellLoadsInFlightValue() || this.pending.size >= MAX_PENDING_INTEGRATIONS)) break;
       const key = this.cellQueue.shift()!;
       if (
         this.loaded.has(key) ||
@@ -1580,6 +1772,7 @@ export class ChunkManager {
       return;
     }
     this.lastFocus = null; // retire full-detail fallbacks after publication
+    this.groundEpoch++; // every branch below publishes this part's cells
     // an hlod block landing on cells a far block still draws: residency runs
     // only on a cell crossing, so ask for one — it re-bakes that far block
     // without the overlap (see the far/hlod boundary note in refresh)
@@ -1656,6 +1849,7 @@ export class ChunkManager {
     for (const part of sc.parts) this.unregisterPart(part);
     this.disposeGroup(sc.group);
     this.loadedSupercells.delete(scKey);
+    this.groundEpoch++;
   }
 
   /**
@@ -1682,7 +1876,37 @@ export class ChunkManager {
     this.registerCulling(chunk);
   }
 
+  /** When each cell with late-landing static models is due its re-merge (CHUNK_REBATCH_DELAY_MS after the last). */
+  private readonly rebatchAt = new Map<string, number>();
+
+  /**
+   * Re-merge cells whose static models landed after their first merge: restore the sources, merge again with the
+   * same grouping, re-freeze, re-register culling, and precompile the new merged meshes. Bounded per update.
+   */
+  pumpRebatches(at: number = now()): number {
+    let done = 0;
+    for (const [key, due] of this.rebatchAt) {
+      if (done >= CHUNK_REBATCH_PER_UPDATE) break;
+      if (due > at) continue;
+      this.rebatchAt.delete(key);
+      const chunk = this.loaded.get(key);
+      if (!chunk || chunk.lateModels === 0) continue;
+      chunk.lateModels = 0;
+      this.unregisterCulling(chunk);
+      chunk.batch?.dispose();
+      const rootOf = cullRootIndex(chunk.cullRoots);
+      chunk.batch = batchStaticMeshes(chunk.root, rootOf.size > 0 ? { groupOf: (mesh) => rootOf.get(mesh.userData["entityId"] as string) } : {});
+      // the merged meshes are new children of a frozen cell: lay them out (and any late model) before it draws
+      if (!chunk.simulated) refreshStaticSubtree(chunk.group);
+      this.registerCulling(chunk);
+      if (chunk.batch) this.lifecycle.precompile?.(chunk.batch.group);
+      done += 1;
+    }
+    return done;
+  }
+
   private unload(key: string, chunk: LoadedChunk): void {
+    this.rebatchAt.delete(key);
     // restore the source meshes first: dispose() puts them back so disposeGroup
     // frees the real geometries rather than only the merged copies
     this.unregisterCulling(chunk);
@@ -1692,6 +1916,7 @@ export class ChunkManager {
     if (chunk.simulated) this.sim?.removeEntities(Object.keys(chunk.expanded.entities));
     this.lifecycle.onUnloaded?.(Object.keys(chunk.expanded.entities));
     this.loaded.delete(key);
+    this.groundEpoch++;
   }
 
   /** Detach + free GPU resources for a chunk or supercell proxy group. */

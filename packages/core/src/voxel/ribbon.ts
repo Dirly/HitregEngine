@@ -64,6 +64,7 @@ export const pathParamsSchema = z.object({
   wallCut: z.number().min(0.8).max(6).default(1.5).describe("Uphill cut (m) beyond which the cut side gets a retaining wall holding the bank back instead of a raw earth slope."),
   wallStyle: z.enum(["common", "stone"]).default("common").describe("Retaining-wall kit style: common (coursed rubble), stone (dressed ashlar)."),
   wallSkin: z.string().optional().describe("Stone the walls wear: omitted = the zone's own stone (its `ground.cliff` surface, the rock-skins key: `worldgen-ribbon materials` writes `ribbon-wall/<cliff>-rubble|ashlar`); a palette cliff surface NAME to force one; `kit` = the kit's own grey stone."),
+  calm: z.boolean().optional().describe("true: the graded ground is built ground: the terrain's overhang noise is off over the grade patch (heightPatch `calm`), so no rock shelf floats over or heaves through a path benched across a steep sidehill (the 2 m columns read the bench's banks as steep and the noise adds up to `terrain.overhang.strength` m there). Omitted = natural noise."),
 });
 export type PathParams = z.infer<typeof pathParamsSchema>;
 
@@ -341,7 +342,13 @@ export function fitRibbon(params: PathParams, ground: RibbonGround, seed = 0): R
       const maxLegs = Math.floor(L0 / (2 * (hw + RIBBON_CORE_MARGIN + params.shoulder)));
       const legs = Math.min(maxLegs, Math.ceil(Math.sqrt(Math.max(0, need * need - L0 * L0)) / (2 * amp)));
       next.push([ax, az]);
-      if (legs >= 2 && L0 > 1) {
+      // a stretch that winds (its chord well short of its own length) is zig-zagged along its chord only when it is
+      // nearly straight: otherwise its control line is kept (steps take the rise) — the chord would cut every bend
+      const winds = L0 < 0.85 * (c.s[b]! - c.s[a]!);
+      if (winds) {
+        for (let i = a + 6; i < b; i += 6) next.push([c.x[i]!, c.z[i]!]);
+        warnings.push(`steep stretch ${c.s[a]!.toFixed(0)}-${c.s[b]!.toFixed(0)} m winds (chord ${L0.toFixed(0)} m): kept its line, no switchback`);
+      } else if (legs >= 2 && L0 > 1) {
         const ux = (bx - ax) / L0, uz = (bz - az) / L0;
         for (let j = 1; j <= legs; j++) {
           const f = ((j - 0.5) / legs) * L0, side = j % 2 ? 1 : -1;
@@ -423,20 +430,25 @@ export function fitRibbon(params: PathParams, ground: RibbonGround, seed = 0): R
   const faceL: number[] = [], faceR: number[] = [];
   const wallKinds = (drops: number[], side: -1 | 1, faces: number[]): WallKind[] => {
     const m: WallKind[] = drops.map((d) => (params.walls !== "auto" ? 0 : d > params.wallDrop ? 1 : -d > params.wallCut ? 2 : 0));
+    // samples where no wall may stand (a turn too tight, another leg of a hairpin, beside a stair): the gap closing
+    // below never bridges them. Bridging one put a wall face at an INFINITE offset: an endless run of 2 m modules (the
+    // hairpin OOM).
+    const banned: boolean[] = new Array<boolean>(n).fill(false);
     for (let i = 0; i < n; i++) {
       const f = wallFaceOffset(hw, face, side * kappa[i]!);
       faces.push(f);
+      if (!Number.isFinite(f)) banned[i] = true;
       if (!m[i]) continue;
       // a wall inside a turn too tight for it, or reaching another leg of the path (a hairpin), is a bank instead
-      if (!Number.isFinite(f) || wallCrowds(c, i, side, f, hw)) m[i] = 0;
+      if (banned[i] || wallCrowds(c, i, side, f, hw)) { m[i] = 0; banned[i] = true; }
       // a cut wall never runs beside a stair: its face cut would carve the bank flat and bare the treads' sides
-      if (m[i] === 2 && flights.some((fl) => i >= fl.from - 2 && i <= fl.to + 2)) m[i] = 0;
+      if (m[i] === 2 && flights.some((fl) => i >= fl.from - 2 && i <= fl.to + 2)) { m[i] = 0; banned[i] = true; }
     }
-    // close gaps under 3 m, drop runs under 4 m (per kind)
+    // close gaps under 3 m (never across a banned sample), drop runs under 4 m (per kind)
     for (let i = 0; i < n; i++) if (!m[i]) {
       let j = i;
       while (j < n && !m[j]) j++;
-      if (i > 0 && j < n && j - i < 3 && m[i - 1] === m[j]) for (let k = i; k < j; k++) m[k] = m[j]!;
+      if (i > 0 && j < n && j - i < 3 && m[i - 1] === m[j] && !banned.slice(i, j).some(Boolean)) for (let k = i; k < j; k++) m[k] = m[j]!;
       i = j;
     }
     for (let i = 0; i < n; i++) if (m[i]) {
@@ -461,6 +473,23 @@ export function fitRibbon(params: PathParams, ground: RibbonGround, seed = 0): R
     if (d > fill) fill = d;
     if (-d > cut) cut = -d;
     if (i > 0 && !flights.some((f) => i > f.from && i <= f.to)) maxG = Math.max(maxG, Math.abs(y[i]! - y[i - 1]!) / (c.s[i]! - c.s[i - 1]! || 1));
+  }
+  // legs of the path laid side by side closer than two cores and a shoulder (a line doubling back on itself, a
+  // zero-radius hairpin) grade over each other: where the nearer core flips, their levels meet as a step. Not fixable
+  // in the grade: the LINE must spread its legs (or take a switchback corridor), so say where
+  {
+    const need = 2 * core + params.shoulder;
+    let run = 0, runAt = -1;
+    for (let i = 0; i < n; i += 2) {
+      let close = false;
+      for (let j = 0; j < n && !close; j += 2) if (Math.abs(c.s[j]! - c.s[i]!) > 40 && Math.hypot(c.x[j]! - c.x[i]!, c.z[j]! - c.z[i]!) < need) close = true;
+      if (close) { if (run === 0) runAt = i; run += 2; }
+      if ((!close || i + 2 >= n) && run >= 20) {
+        warnings.push(`legs too close: ${run} m from ${r2(c.x[runAt]!)},${r2(c.z[runAt]!)} run within ${r2(need)} m of another leg of the path (two cores + a shoulder): the grades step where they meet; spread the legs or give the hairpin a corridor`);
+        run = 0;
+      }
+      if (!close) run = 0;
+    }
   }
   const samples = c.x.map((x, i) => [r3(x), r3(y[i]!), r3(c.z[i]!), r2(sl[i]!), r2(sr[i]!)] as [number, number, number, number, number]);
   const ribbon: Omit<RibbonDoc, "id"> = {
@@ -534,6 +563,9 @@ export function stairRamp(r: Pick<RibbonDoc, "samples">, f: RibbonDoc["flights"]
 
 /** 0 = no wall, 1 = fill wall (the ground falls away; the path stands on top), 2 = cut wall (holds the uphill bank). */
 type WallKind = 0 | 1 | 2;
+
+/** Along-path distance (m) over which a wall run's end fades the next feathered shoulder in (4 lattice steps). */
+export const RIBBON_WALL_END_TAPER = 8;
 
 /** Clearance (m) beyond the walk edge a wall face keeps on the inside of a turn, before the corner cut. */
 export const RIBBON_WALL_TURN_CLEAR = 0.8;
@@ -613,6 +645,8 @@ function wallPieces(c: Centreline, y: number[], wallL: WallKind[], wallR: WallKi
       const cum = [0];
       for (let q = 1; q < line.length; q++) cum.push(cum[q - 1]! + Math.hypot(line[q]!.x - line[q - 1]!.x, line[q]!.z - line[q - 1]!.z));
       const total = cum[cum.length - 1]!;
+      // belt and braces: a face line that is not finite, or far longer than its run (samples ~1 m apart), is no wall
+      if (!Number.isFinite(total) || total > 4 * line.length + 4) { i = j - 1; continue; }
       const pointAt = (d: number) => {
         let q = 0;
         while (q < line.length - 2 && cum[q + 1]! < d) q++;
@@ -756,23 +790,71 @@ export function ribbonPatch(r: RibbonDoc, cell = 1): RibbonPatch {
     x0 = Math.min(x0, p[0]); z0 = Math.min(z0, p[2]); x1 = Math.max(x1, p[0]); z1 = Math.max(z1, p[2]);
   }
   const reach = core + maxSh + 2;
-  x0 = Math.floor(x0 - reach); z0 = Math.floor(z0 - reach); x1 = Math.ceil(x1 + reach); z1 = Math.ceil(z1 + reach);
+  // how far any sample can carry weight: the shoulders (reach) or the foot fanning out past either end (10 m on a
+  // stepped path). Every raster cell within it gets a candidate and so a height; with `reach` alone the fan's outer
+  // cells were weighted beside cells never given a height (0) and the bilinear sampler read that 0 into a one-column
+  // 9 m slot (net-green to-far-cut, 2026-10-20). `reach` still separates a hairpin's branches.
+  const endSh = Math.max(...[r.samples[0]!, r.samples[r.samples.length - 1]!].flatMap((p) => [Math.abs(p[3]), Math.abs(p[4])]));
+  const span = Math.max(reach, hw * 0.6 + Math.max(endSh, r.flights.length ? 10 : 5) + 2);
+  x0 = Math.floor(x0 - span); z0 = Math.floor(z0 - span); x1 = Math.ceil(x1 + span); z1 = Math.ceil(z1 + span);
   while ((x1 - x0) / cell > 1024 || (z1 - z0) / cell > 1024) cell *= 2;
   const columns = Math.ceil((x1 - x0) / cell) + 1, rows = Math.ceil((z1 - z0) / cell) + 1;
   const grade = r.samples.map((_, i) => gradeAt(r, s, i));
+  // per side, the nearest UNWALLED sample: a wall run's ends fade that sample's feather in over RIBBON_WALL_END_TAPER m
+  // instead of cutting it off at the face. A feathered sample beside a walled one was a metres-high step ALONG the path,
+  // drawn by the 2 m lattice as a sawtooth past every wall end (the sidehill lips)
+  const openNear = ([3, 4] as const).map((col) => {
+    const N = r.samples.length, at: number[] = new Array<number>(N).fill(-1);
+    let last = -1;
+    for (let i = 0; i < N; i++) { if (r.samples[i]![col] >= 0) last = i; at[i] = last; }
+    last = -1;
+    for (let i = N - 1; i >= 0; i--) {
+      if (r.samples[i]![col] >= 0) last = i;
+      if (last >= 0 && (at[i]! < 0 || s[last]! - s[i]! < s[i]! - s[at[i]!]!)) at[i] = last;
+    }
+    return at;
+  });
+  // a FILL wall's face cut stands outside its face (the low side): the field reads the wall FOOT inside it, so any
+  // shoulder lifted there (a wall end's taper, a hairpin's other leg) is clamped back to the foot at the cut's edge — a
+  // trench the lattice draws as a sawtooth. Shoulders (never a levelled core) fade to the natural ground over
+  // FILL_CUT_CLEAR m round every fill cut. A cut wall's cut lies on the path side, under the core: left alone.
+  const FILL_CUT_CLEAR = 6;
+  const fillCuts = r.cuts.filter((c) => {
+    if (c.kind !== "face") return false;
+    const mx = c.origin[0] + c.dir[0] * (c.s[0] + c.s[1]) / 2 - c.dir[1] * c.n[1], mz = c.origin[1] + c.dir[1] * (c.s[0] + c.s[1]) / 2 + c.dir[0] * c.n[1];
+    let d = Infinity;
+    for (const q of r.samples) if (Math.abs(q[0] - mx) < hw + 1 && Math.abs(q[2] - mz) < hw + 1) d = Math.min(d, Math.hypot(q[0] - mx, q[2] - mz));
+    return d > hw + 1;
+  });
+  const cutOutside = (c: (typeof fillCuts)[number], x: number, z: number) => {
+    const rx = x - c.origin[0], rz = z - c.origin[1];
+    const cs = rx * c.dir[0] + rz * c.dir[1], cn = -rx * c.dir[1] + rz * c.dir[0];
+    return Math.hypot(Math.max(c.s[0] - cs, 0, cs - c.s[1]), Math.max(c.n[0] - cn, 0, cn - c.n[1]));
+  };
   // segment buckets
   const B = 8;
   const buckets = new Map<string, number[]>();
   for (let i = 0; i < r.samples.length - 1; i++) {
     const a = r.samples[i]!, b = r.samples[i + 1]!;
-    const bx0 = Math.floor((Math.min(a[0], b[0]) - reach) / B), bx1 = Math.floor((Math.max(a[0], b[0]) + reach) / B);
-    const bz0 = Math.floor((Math.min(a[2], b[2]) - reach) / B), bz1 = Math.floor((Math.max(a[2], b[2]) + reach) / B);
+    const bx0 = Math.floor((Math.min(a[0], b[0]) - span) / B), bx1 = Math.floor((Math.max(a[0], b[0]) + span) / B);
+    const bz0 = Math.floor((Math.min(a[2], b[2]) - span) / B), bz1 = Math.floor((Math.max(a[2], b[2]) + span) / B);
     for (let bx = bx0; bx <= bx1; bx++) for (let bz = bz0; bz <= bz1; bz++) {
       const k = `${bx},${bz}`;
       let list = buckets.get(k);
       if (!list) buckets.set(k, (list = []));
       list.push(i);
     }
+  }
+  const cutBuckets = new Map<string, (typeof fillCuts)[number][]>();
+  for (const c of fillCuts) {
+    const ex = c.origin[0] + c.dir[0] * c.s[1], ez = c.origin[1] + c.dir[1] * c.s[1], R = Math.abs(c.n[1]) + Math.abs(c.s[0]) + FILL_CUT_CLEAR;
+    for (let bx = Math.floor((Math.min(c.origin[0], ex) - R) / B); bx <= Math.floor((Math.max(c.origin[0], ex) + R) / B); bx++)
+      for (let bz = Math.floor((Math.min(c.origin[1], ez) - R) / B); bz <= Math.floor((Math.max(c.origin[1], ez) + R) / B); bz++) {
+        const k = `${bx},${bz}`;
+        let list = cutBuckets.get(k);
+        if (!list) cutBuckets.set(k, (list = []));
+        list.push(c);
+      }
   }
   const heights = new Array<number>(columns * rows).fill(0);
   const weights = new Array<number>(columns * rows).fill(0);
@@ -791,7 +873,7 @@ export function ribbonPatch(r: RibbonDoc, cell = 1): RibbonPatch {
           const u = Math.min(1, Math.max(0, ((x - a[0]) * dx + (zz - a[2]) * dz) / L2));
           const px = a[0] + dx * u, pz = a[2] + dz * u;
           const d = Math.hypot(x - px, zz - pz);
-          if (d > reach) continue;
+          if (d > span) continue;
           const side = (x - a[0]) * -dz + (zz - a[2]) * dx >= 0 ? 1 : -1;
           cand.push({ d, s: s[i]! + (s[i + 1]! - s[i]!) * u, i, u, side });
         }
@@ -802,15 +884,36 @@ export function ribbonPatch(r: RibbonDoc, cell = 1): RibbonPatch {
           if (taken.some((ts) => Math.abs(ts - k.s) < reach * 2)) continue;
           taken.push(k.s);
           const a = r.samples[k.i]!, b = r.samples[k.i + 1]!;
-          const sh = k.side > 0 ? a[4] + (b[4] - a[4]) * k.u : a[3] + (b[3] - a[3]) * k.u;
-          const g = grade[k.i]! + (grade[k.i + 1]! - grade[k.i]!) * k.u;
+          // never interpolate a shoulder across a wall end (through 0 it is a hard edge at the core): the nearer sample
+          // decides walled or not; two feathered samples interpolate
+          const col = k.side > 0 ? 4 : 3, near = k.u < 0.5 ? k.i : k.i + 1;
+          const shA = a[col]!, shB = b[col]!, shN = r.samples[near]![col]!;
+          const sh = shN < 0 ? shN : shA < 0 ? shB : shB < 0 ? shA : shA + (shB - shA) * k.u;
+          // the level this branch asks for: inside a turn the nearest segment flips from one arm to the other (their
+          // arc lengths metres apart, so their grade levels too): blend every segment of the branch within 2 m of the
+          // nearest, so the level is continuous across the flip and never a step the lattice draws as a tooth
+          let g = 0, gw = 0;
+          for (const q of cand) {
+            if (Math.abs(q.s - k.s) >= reach * 2 || q.d > k.d + 2) continue;
+            const wq = 1 - smoothstep(0, 2, q.d - k.d);
+            g += wq * (grade[q.i]! + (grade[q.i + 1]! - grade[q.i]!) * q.u);
+            gw += wq;
+          }
+          g /= gw;
           // past either end the levelled core rounds off to the tapered tip and the shoulder fans out wide: the foot
           // of a path is worn ground, never a square pad cut into the slope
           // (a stepped path may top out below the hill it climbs, so its foot fans out wider)
           const pastEnd = (k.i === 0 && k.u === 0) || (k.i === r.samples.length - 2 && k.u === 1);
           let w: number;
           if (pastEnd) w = 1 - smoothstep(hw * 0.6, hw * 0.6 + Math.max(Math.abs(sh), r.flights.length ? 10 : 5), k.d);
-          else if (sh < 0) w = k.d <= -sh ? 1 : 0;
+          else if (sh < 0) {
+            w = k.d <= -sh ? 1 : 0;
+            const o = openNear[col - 3]![near]!;
+            if (o >= 0) {
+              const taper = 1 - smoothstep(0, RIBBON_WALL_END_TAPER, Math.abs(k.s - s[o]!));
+              if (taper > 0) w = Math.max(w, taper * (1 - smoothstep(core, core + r.samples[o]![col]!, k.d)));
+            }
+          }
           else w = 1 - smoothstep(core, core + sh, k.d);
           if (Number.isNaN(nearestG)) nearestG = g;
           if (w > 0) hits.push({ d: k.d, s: k.s, g, w });
@@ -827,8 +930,13 @@ export function ribbonPatch(r: RibbonDoc, cell = 1): RibbonPatch {
       const use = solid.length ? [solid.reduce((p, q) => (q.d < p.d ? q : p))] : hits;
       let sw = 0, sg = 0, wmax = 0;
       for (const h of use) { sw += h.w * h.w; sg += h.g * h.w * h.w; wmax = Math.max(wmax, h.w); }
+      let fade = 1;
+      if (!solid.length) for (const c of cutBuckets.get(`${Math.floor(x / B)},${Math.floor(zz / B)}`) ?? []) {
+        const d = cutOutside(c, x, zz);
+        if (d < FILL_CUT_CLEAR) fade = Math.min(fade, smoothstep(0, FILL_CUT_CLEAR, d));
+      }
       heights[at] = r3(sg / sw);
-      weights[at] = r3(wmax);
+      weights[at] = r3(wmax * fade);
     }
   }
   // footprint width: the core plus both shoulders (a walled side counts its levelled strip to the face)
@@ -893,8 +1001,11 @@ const endLength = (L: number) => Math.min(3, L / 4);
  * round off in a fan and fade, so a path melts into the paving or road it meets. A turn is resampled every <= 8
  * degrees and the inside of a tight turn folds into a fan about its centre (offsets capped at 0.92 R), so a hairpin
  * is round, its triangles never flip and its normals stay smooth.
+ * `joins`: an end shared with another ribbon's end (`ribbonJoins`) is cut flush on the joint's bisector (heading given,
+ * radians) with no taper, fade or round cap: both ribbons end on the same cross-section, so the joint is one surface,
+ * never two overlapping ends that z-fight.
  */
-export function ribbonMesh(r: RibbonDoc, x0: number, z0: number, x1: number, z1: number, uvScale: number, tintAt?: (x: number, y: number, z: number) => [number, number, number]): RibbonMesh {
+export function ribbonMesh(r: RibbonDoc, x0: number, z0: number, x1: number, z1: number, uvScale: number, tintAt?: (x: number, y: number, z: number) => [number, number, number], joins: RibbonJoin = {}): RibbonMesh {
   const s = ribbonArc(r);
   const n = r.samples.length;
   const L = s[n - 1]!;
@@ -902,6 +1013,8 @@ export function ribbonMesh(r: RibbonDoc, x0: number, z0: number, x1: number, z1:
   const inStair = new Array<boolean>(n).fill(false);
   for (const f of r.flights) for (let i = f.from; i < f.to; i++) inStair[i] = true;
   const theta = (i: number): number => {
+    if (i === 0 && joins.start !== undefined) return joins.start;
+    if (i === n - 1 && joins.end !== undefined) return joins.end;
     const a = r.samples[Math.max(0, i - 1)]!, b = r.samples[Math.min(n - 1, i + 1)]!;
     return Math.atan2(b[2] - a[2], b[0] - a[0]);
   };
@@ -933,7 +1046,7 @@ export function ribbonMesh(r: RibbonDoc, x0: number, z0: number, x1: number, z1:
   const ring = (px: number, py: number, pz: number, th: number, sv: number, kap: number): number[] => {
     const tx = Math.cos(th), tz = Math.sin(th);
     const nx = -tz, nz = tx; // right of travel
-    const te = smoothstep(0, T, Math.min(sv, L - sv));
+    const te = smoothstep(0, T, Math.min(joins.start !== undefined ? Infinity : sv, joins.end !== undefined ? Infinity : L - sv));
     const wf = 0.6 + 0.4 * te, af = 0.25 + 0.75 * te;
     const ids: number[] = [];
     const sides: [number, number, number][] = []; // [offset, dy, alpha] left to right
@@ -989,13 +1102,13 @@ export function ribbonMesh(r: RibbonDoc, x0: number, z0: number, x1: number, z1:
     while (dth < -Math.PI) dth += 2 * Math.PI;
     const steps = Math.min(8, Math.max(1, Math.ceil(Math.abs(dth) / ((8 * Math.PI) / 180))));
     let A: number[] = prev ?? stationRings(i, 0);
-    if (i === 0 && !hard) endCap(A, 0, -1);
+    if (i === 0 && !hard && joins.start === undefined) endCap(A, 0, -1);
     for (let k = 1; k <= steps; k++) {
       const B = stationRings(i, k / steps);
       strip(A, B);
       A = B;
     }
-    if (i === n - 2 && !hard) endCap(A, n - 1, 1);
+    if (i === n - 2 && !hard && joins.end === undefined) endCap(A, n - 1, 1);
     prev = A;
   }
   // stair treads: a solid per tread (top, a sloped flank down to the graded ramp each side, both ends), buried below the
@@ -1100,6 +1213,46 @@ export function wallSkinOverrides(p: { prefab: string; role: string }, skin: str
   return out;
 }
 
+/** Ends of a ribbon cut flush at a joint: the heading (radians, direction of travel) of the shared cross-section. */
+export interface RibbonJoin { start?: number; end?: number }
+
+/** Two ribbon ends this close (m, XZ) are one joint (paths laid end to end share their anchor point). */
+export const RIBBON_JOIN_TOL = 0.5;
+
+/**
+ * Ribbons laid end to end (an end of one on an end of exactly one other): both cut flush on the bisector of the joint,
+ * so their tapered, rounded ends no longer lie over each other (two coplanar surfaces = a z-fight). A point shared by
+ * three or more ends (a junction) keeps its round ends. Keyed by ribbon id.
+ */
+export function ribbonJoins(ribbons: readonly RibbonDoc[]): Map<string, RibbonJoin> {
+  type End = { r: RibbonDoc; end: boolean; x: number; z: number; out: number };
+  const ends: End[] = [];
+  for (const r of ribbons) {
+    const S = r.samples, m = S.length;
+    if (m < 2) continue;
+    const a = S[0]!, a1 = S[1]!, b = S[m - 1]!, b1 = S[m - 2]!;
+    ends.push({ r, end: false, x: a[0], z: a[2], out: Math.atan2(a[2] - a1[2], a[0] - a1[0]) });
+    ends.push({ r, end: true, x: b[0], z: b[2], out: Math.atan2(b[2] - b1[2], b[0] - b1[0]) });
+  }
+  const out = new Map<string, RibbonJoin>();
+  for (let i = 0; i < ends.length; i++) {
+    const A = ends[i]!;
+    const near = ends.filter((E, j) => j !== i && Math.hypot(E.x - A.x, E.z - A.z) <= RIBBON_JOIN_TOL);
+    if (near.length !== 1 || near[0]!.r === A.r) continue;
+    const B = near[0]!;
+    // the cut line's normal: A's outward direction bisected with the reverse of B's outward direction
+    const dx = Math.cos(A.out) - Math.cos(B.out), dz = Math.sin(A.out) - Math.sin(B.out);
+    if (Math.hypot(dx, dz) < 1e-6) continue; // the two ends point the same way (they overlap along their length)
+    const d = Math.atan2(dz, dx);
+    // the travel heading at A's end: outward at its end, inward at its start
+    const j = out.get(A.r.id) ?? {};
+    if (A.end) j.end = d;
+    else j.start = d + Math.PI;
+    out.set(A.r.id, j);
+  }
+  return out;
+}
+
 /**
  * Every ribbon segment, stair and wall piece standing in cell (cx, cz): one static `surface` mesh per ribbon (the
  * static batcher merges them per material: one draw per surface style) with a trimesh collider from the same
@@ -1116,6 +1269,7 @@ export function ribbonEntities(
 ): void {
   if (!ribbons?.length) return;
   const x0 = cx * cellSize, z0 = cz * cellSize, x1 = x0 + cellSize, z1 = z0 + cellSize;
+  const joins = ribbonJoins(ribbons);
   for (const r of ribbons) {
     let bx0 = Infinity, bz0 = Infinity, bx1 = -Infinity, bz1 = -Infinity;
     for (const p of r.samples) { bx0 = Math.min(bx0, p[0]); bz0 = Math.min(bz0, p[2]); bx1 = Math.max(bx1, p[0]); bz1 = Math.max(bz1, p[2]); }
@@ -1124,7 +1278,7 @@ export function ribbonEntities(
     const toward = surfaces.troddenToward?.(r) ?? null;
     const skin = surfaces.wallSkinOf?.(r) ?? null;
     const scale = surfaces.uvScaleOf(name) * (r.style === "slab" ? 1.6 : 1);
-    const mesh = ribbonMesh(r, x0, z0, x1, z1, scale, surfaces.tintAt?.bind(surfaces));
+    const mesh = ribbonMesh(r, x0, z0, x1, z1, scale, surfaces.tintAt?.bind(surfaces), joins.get(r.id));
     const key = r.id.replace(/[^a-zA-Z0-9_-]/g, "_");
     if (mesh.indices.length) {
       entities[`ribbon_${key}`] = {

@@ -10,6 +10,9 @@ import {
   standStretches,
   describeSetShape,
   DEFAULT_LANE_WIDTH,
+  MOUNT_CLEAR,
+  MOUNT_WALL,
+  expandRoomRoles,
   resolveDressing,
   socketMapSchema,
   type DressingData,
@@ -100,6 +103,9 @@ const P: Record<string, DressingInput> = {
   chandelier: { mount: "ceiling", size: [1.0, 0.8, 1.0], chain: "chain-link", fire: true },
   "chain-link": { mount: "part", size: [0.05, 1, 0.05] },
   painting: { mount: "wall", size: [0.8, 0.6, 0.05] },
+  notice: { mount: "wall", size: [0.5, 0.7, 0.002] },
+  pew: { mount: "floor", size: [1.2, 0.9, 0.5] },
+  candlestand: { mount: "floor", size: [0.4, 1.5, 0.4] },
 };
 const PROPS = new Map<string, DressingData>(Object.entries(P).map(([k, v]) => [k, dressingSchema.parse(v)]));
 const SETS = new Map<string, DressingSet>([
@@ -134,7 +140,7 @@ describe("resolveDressing", () => {
     expect(codes(r, "p")).toEqual([]);
     expect(codes(r, "t")).toEqual([]);
     const p = at(r, "p");
-    expect(p.position[1]).toBeCloseTo(0.75);
+    expect(p.position[1]).toBeCloseTo(0.75 + MOUNT_CLEAR); // thin paper held off the board
     expect(p.position[0]).toBeCloseTo(2);
     expect(p.position[2]).toBeCloseTo(3);
     expect(p.room).toBe("A");
@@ -210,7 +216,7 @@ describe("resolveDressing", () => {
     const desk = at(r, "study/desk"), letter = at(r, "study/letter"), chair = at(r, "study/chair");
     expect(letter.position[0]).toBeCloseTo(desk.position[0]);
     expect(letter.position[2]).toBeCloseTo(desk.position[2]);
-    expect(letter.position[1]).toBeCloseTo(0.8);
+    expect(letter.position[1]).toBeCloseTo(0.8 + MOUNT_CLEAR);
     expect(chair.position[2]).toBeCloseTo(3.0);
     expect(Math.abs(chair.yaw)).toBeCloseTo(Math.PI);
   });
@@ -632,5 +638,414 @@ describe("placement by intent (auto places)", () => {
     const text = describeSetShape(SETS.get("table-side")!, (id) => PROPS.get(id));
     expect(text).toMatch(/chair on the left/);
     expect(describeSetShape(SETS.get("desk-set")!, (id) => PROPS.get(id))).toMatch(/chair in front/);
+  });
+});
+
+describe("dresser follow-ups (2026-10-20)", () => {
+  it("honours prefer wall for a free-standing piece (a lectern, a vat)", () => {
+    const r = run([{ id: "t", prop: "table", place: { kind: "auto", room: "A", prefer: "wall" } }]);
+    expect(codes(r, "t")).toEqual([]);
+    expect(r.auto?.find((a) => a.item === "t")?.place.kind).toBe("wall");
+  });
+
+  it("lines pews up in rows facing the item they are near", () => {
+    const pews = Array.from({ length: 4 }, (_, i) => ({ id: `pew${i}`, prop: "pew", place: { kind: "auto" as const, room: "A", prefer: "row" as const, near: "altar" } }));
+    const r = run([{ id: "altar", prop: "desk", place: { kind: "wall", wall: "A.N", t: 1.9 } }, ...pews]);
+    for (const p of pews) expect(codes(r, p.id)).toEqual([]);
+    const altarZ = at(r, "altar").position[2];
+    const placed = pews.map((p) => at(r, p.id));
+    // all face the altar (+z: yaw 0) and stand wholly in front of it
+    for (const p of placed) {
+      expect(Math.abs(Math.sin(p.yaw))).toBeLessThan(1e-6);
+      expect(Math.cos(p.yaw)).toBeGreaterThan(0);
+      expect(p.position[2]).toBeLessThan(altarZ - 0.5);
+    }
+    // more than one row, the rows one behind another with room to sit between them
+    const rows = [...new Set(placed.map((p) => p.position[2].toFixed(2)))].map(Number).sort((a, b) => b - a);
+    expect(rows.length).toBeGreaterThan(1);
+    expect(rows[0]! - rows[1]!).toBeGreaterThanOrEqual(0.5 + 0.45 - 1e-6);
+  });
+
+  it("asks for `near` with prefer row", () => {
+    const r = run([{ id: "p", prop: "pew", place: { kind: "auto", room: "A", prefer: "row" } }]);
+    expect(codes(r, "p")).toContain("auto-near");
+  });
+
+  it("never hangs two ceiling props in one spot", () => {
+    const r = run([
+      { id: "c1", prop: "chandelier", place: { kind: "auto", room: "B", prefer: "open" } },
+      { id: "c2", prop: "chandelier", place: { kind: "auto", room: "B", prefer: "open" } },
+    ]);
+    expect(codes(r, "c1")).toEqual([]);
+    expect(codes(r, "c2")).toEqual([]);
+    const [a, b] = [at(r, "c1"), at(r, "c2")];
+    expect(Math.hypot(a.position[0] - b.position[0], a.position[2] - b.position[2])).toBeGreaterThanOrEqual(1.4);
+    const same = run([
+      { id: "c1", prop: "chandelier", place: { kind: "ceiling", level: 0, at: [6, 2], drop: 0 } },
+      { id: "c2", prop: "chandelier", place: { kind: "ceiling", level: 0, at: [6.2, 2], drop: 0 } },
+    ]);
+    expect(codes(same, "c2")).toContain("overlap");
+  });
+
+  it("holds wall props off the wall and thin coverings off the floor (no coplanar faces)", () => {
+    const r = run([
+      { id: "pic", prop: "painting", place: { kind: "wall", wall: "A.W", t: 2, height: 1.5 } },
+      { id: "note", prop: "notice", place: { kind: "wall", wall: "A.W", t: 4, height: 1.5 } },
+      { id: "t", prop: "table", place: { kind: "floor", at: [2, 3] } },
+      { id: "p", prop: "paper", place: { kind: "on", item: "t" } },
+    ]);
+    expect(at(r, "pic").position[0]).toBeCloseTo(0.25 + MOUNT_WALL, 4);
+    expect(at(r, "note").position[0]).toBeCloseTo(0.25 + MOUNT_CLEAR, 4);
+    expect(at(r, "p").position[1]).toBeCloseTo(0.75 + MOUNT_CLEAR, 4);
+    expect(at(r, "t").position[1]).toBeCloseTo(0, 6);
+  });
+
+  it("tells a standing prop put `on` a table to use a surface prop", () => {
+    const r = run([
+      { id: "t", prop: "table", place: { kind: "floor", at: [2, 3] } },
+      { id: "c", prop: "candlestand", place: { kind: "on", item: "t" } },
+    ]);
+    expect(r.violations.find((v) => v.item === "c")?.message).toMatch(/only `surface` props go on/);
+  });
+
+  it("expands mixed room roles (cottage, guardroom, living)", () => {
+    expect(expandRoomRoles(["cottage"])).toEqual(["cottage", "hall", "bedroom", "kitchen"]);
+    expect(expandRoomRoles(["guardroom", "storage"])).toEqual(["guardroom", "hall", "bedroom", "storage"]);
+    expect(expandRoomRoles(["living", "hall"])).toEqual(["living", "hall"]);
+  });
+});
+
+describe("hearth comfort (2026-10-20)", () => {
+  const map = structuredClone(MAP);
+  const lv = map.levels[0]!;
+  // a hearth clearance on the west wall of room A: x 0.25..1.0, z 3.0..4.5
+  lv.cells = lv.cells.map((row, r) => (r >= 12 && r <= 17 ? row.split("").map((ch, c) => (c >= 1 && c <= 3 ? "H" : ch)).join("") : row));
+  const go = (items: DressingPlanInput["items"]) =>
+    resolveDressing({ plan: dressingPlanSchema.parse({ id: "zt", map: "zt-house", rooms: { A: { role: "hall" }, B: { role: "hall" } }, items }), map, prop: (id) => PROPS.get(id), set: (id) => SETS.get(id), options: { minItems: () => 0 } });
+
+  it("seats fireside furniture at the clearance's edge without a hearth warning", () => {
+    const r = go([{ id: "seat", set: "table-side", place: { kind: "auto", room: "A", prefer: "near", near: "hearth" } }]);
+    expect(r.violations.filter((v) => v.item.startsWith("seat"))).toEqual([]);
+    expect(r.warnings.filter((w) => w.code === "hearth-clearance")).toEqual([]);
+    const t = at(r, "seat/table").position;
+    expect(Math.hypot(t[0] - 0.6, t[2] - 3.8)).toBeLessThan(2.0);
+  });
+
+  it("keeps other pieces out of the hearth's comfort buffer while the room has room", () => {
+    const r = go([{ id: "w", prop: "wardrobe", place: { kind: "auto", room: "A", prefer: "wall" } }]);
+    expect(codes(r, "w")).toEqual([]);
+    expect(wcodes(r, "w")).not.toContain("hearth-clearance");
+    expect(wcodes(r, "w")).not.toContain("auto-tight");
+    // only the hearth's own wall allowed: it stands at the best spot left and says so, with what to do
+    const tight = go([{ id: "w", prop: "wardrobe", place: { kind: "auto", room: "A", prefer: "wall", wall: "A.W" } }]);
+    expect(codes(tight, "w")).toEqual([]);
+    expect(tight.warnings.find((x) => x.code === "auto-tight")?.message).toMatch(/Accept it, or/);
+  });
+});
+
+describe("owner rulings (2026-10-20)", () => {
+  const R: Record<string, DressingInput> = {
+    altar: { mount: "floor", size: [1.4, 1.0, 0.7], against: "free", category: "sacred", tags: ["altar"], centrepiece: true },
+    "pew-t": { mount: "floor", size: [1.2, 0.9, 0.5], against: "free", use: ["seat"], tags: ["pew"] },
+    lectern: { mount: "floor", size: [0.6, 1.2, 0.5], against: "free", use: ["table"], tags: ["lectern"], neverInDoorLine: true },
+    "book-up": { mount: "surface", size: [0.06, 0.29, 0.26], fits: ["book"], tags: ["book"], pose: { surface: "flat", shelf: "upright" } },
+    "book-bare": { mount: "surface", size: [0.06, 0.29, 0.26], fits: ["book"], tags: ["book"] },
+    shelf: { mount: "floor", against: "wall", size: [1.0, 1.8, 0.4], use: ["shelf"], provides: [{ id: "b1", kind: "surface", position: [0, 1.0, 0], size: [0.9, 0.35], clearHeight: 0.4, capacity: 4 }] },
+    dining: { mount: "floor", size: [1.2, 0.75, 0.8], against: "free", use: ["table"], provides: [{ id: "top", kind: "surface", position: [0, 0.75, 0], size: [1.1, 0.7], capacity: 6 }] },
+    "cand-stand": { mount: "floor", size: [0.5, 1.5, 0.3], against: "either", use: ["light"], tags: ["candelabra"] },
+    sign: { mount: "wall", size: [0.6, 1.0, 0.8], tags: ["sign"] },
+    "sign-out": { mount: "wall", size: [0.18, 1.2, 1.28], tags: ["sign", "projecting"] },
+    "sign-post": { mount: "floor", size: [0.14, 2.4, 1.27], against: "free", tags: ["sign", "post"] },
+    "chandelier-t": { mount: "ceiling", size: [1.0, 0.8, 1.0], use: ["light"], tags: ["chandelier"] },
+  };
+  const ALL = new Map<string, DressingData>([...PROPS, ...Object.entries(R).map(([k, v]) => [k, dressingSchema.parse(v)] as const)]);
+  const go = (items: DressingPlanInput["items"], rooms: Record<string, { role: string }> = { A: { role: "office" }, B: { role: "hall" } }, map = MAP) =>
+    resolveDressing({ plan: dressingPlanSchema.parse({ id: "zt", map: "zt-house", rooms, items }), map, prop: (id) => ALL.get(id), set: (id) => SETS.get(id), options: { minItems: () => 0 } });
+  const chapel = { A: { role: "chapel" }, B: { role: "storage" } };
+
+  it("warns a chapel with no altar and no pews in rows", () => {
+    const r = go([{ id: "c", prop: "chair", place: { kind: "floor", at: [2, 3] } }], chapel);
+    expect(wcodes(r, "A")).toEqual(expect.arrayContaining(["chapel-altar", "chapel-pews"]));
+    expect(r.warnings.find((w) => w.code === "chapel-altar")?.message).toMatch(/"near": "back-wall"/);
+  });
+
+  it("stands the altar at the back wall facing the nave, pews in rows facing it: no chapel warning", () => {
+    const pews = Array.from({ length: 4 }, (_, i) => ({ id: `pew${i}`, prop: "pew-t", place: { kind: "auto" as const, room: "A", prefer: "row" as const, near: "altar" } }));
+    const r = go([{ id: "altar", prop: "altar", place: { kind: "auto", room: "A", near: "back-wall" } }, ...pews], chapel);
+    expect(r.violations.filter((v) => v.item === "altar" || v.item.startsWith("pew"))).toEqual([]);
+    const a = at(r, "altar");
+    // the door is in the south wall (z 0), facing +z: the back wall is z 5.75; the altar's far edge within 1 m of it, facing -z
+    expect(a.position[2] + 0.35).toBeGreaterThan(5.75 - 1.0);
+    expect(Math.cos(a.yaw)).toBeLessThan(-0.7);
+    expect(wcodes(r, "A")).not.toContain("chapel-altar");
+    expect(wcodes(r, "A")).not.toContain("chapel-pews");
+    expect(wcodes(r, "altar")).not.toContain("chapel-altar");
+    // an altar with no `near` in a chapel goes to the back wall by itself
+    const d = go([{ id: "altar", prop: "altar", place: { kind: "auto", room: "A" } }], chapel);
+    expect(at(d, "altar").position[2] + 0.35).toBeGreaterThan(5.75 - 1.0);
+  });
+
+  it("warns an altar in the middle of the nave", () => {
+    const r = go([{ id: "altar", prop: "altar", place: { kind: "floor", at: [2.5, 2.5], yaw: 180 } }], chapel);
+    expect(wcodes(r, "altar")).toContain("chapel-altar");
+  });
+
+  it("refuses a lectern in a door line and keeps auto lecterns out of them", () => {
+    const entry = go([{ id: "l", prop: "lectern", place: { kind: "floor", at: [1.5, 2.5] } }]);
+    expect(codes(entry, "l")).toContain("door-line");
+    const doorway = go([{ id: "l", prop: "lectern", place: { kind: "floor", at: [3.0, 3.0] } }]);
+    expect(codes(doorway, "l")).toContain("door-line");
+    const side = go([{ id: "l", prop: "lectern", place: { kind: "floor", at: [3.2, 4.8] } }]);
+    expect(codes(side, "l")).toEqual([]);
+    const auto = go([{ id: "l", prop: "lectern", place: { kind: "auto", room: "A", prefer: "open" } }]);
+    expect(codes(auto, "l")).toEqual([]);
+  });
+
+  it("lays a book flat on a table, upright on a shelf; a book standing on a table is refused", () => {
+    const r = go([
+      { id: "t", prop: "dining", place: { kind: "floor", at: [2.5, 4.5] } },
+      { id: "s", prop: "shelf", place: { kind: "wall", wall: "A.W", t: 2 } },
+      { id: "flat", prop: "book-up", place: { kind: "on", item: "t" } },
+      { id: "up", prop: "book-up", place: { kind: "on", item: "s" } },
+      { id: "bare", prop: "book-bare", place: { kind: "on", item: "t" } },
+    ]);
+    expect(codes(r, "flat")).toEqual([]);
+    expect(codes(r, "up")).toEqual([]);
+    expect(codes(r, "bare")).toContain("book-upright");
+    const flat = at(r, "flat");
+    expect(flat.tilt?.map((v) => +v.toFixed(4))).toEqual([0, 0, 0.7071, 0.7071]);
+    expect(flat.position[1]).toBeCloseTo(0.75 + 0.03, 4); // lifted by half its thickness
+    expect(at(r, "up").tilt).toBeUndefined();
+  });
+
+  it("refuses a standing candelabra beside a table unless it was put on a wall or in a corner", () => {
+    const beside = go([
+      { id: "t", prop: "dining", place: { kind: "floor", at: [2, 3] } },
+      { id: "c", prop: "cand-stand", place: { kind: "floor", at: [2, 4.1] } },
+    ]);
+    expect(codes(beside, "c")).toContain("candelabra-table");
+    expect(beside.violations.find((v) => v.code === "candelabra-table")?.message).toMatch(/LOW candelabra/);
+    const near = go([
+      { id: "t", prop: "dining", place: { kind: "floor", at: [2, 3] } },
+      { id: "c", prop: "cand-stand", place: { kind: "auto", room: "A", prefer: "near", near: "t" } },
+    ]);
+    expect(codes(near, "c")).toContain("candelabra-table");
+    const wall = go([
+      { id: "t", prop: "dining", place: { kind: "floor", at: [2, 3] } },
+      { id: "c", prop: "cand-stand", place: { kind: "auto", room: "A", prefer: "corner" } },
+    ]);
+    expect(codes(wall, "c")).toEqual([]);
+  });
+
+  it("refuses a sign inside a room and hangs an auto sign on a door-sign anchor", () => {
+    const inside = go([{ id: "s", prop: "sign", place: { kind: "wall", wall: "A.W", t: 2 } }]);
+    expect(codes(inside, "s")).toContain("sign-indoors");
+    const map = structuredClone(MAP);
+    map.anchors.push({ id: "door-sign-zt", kind: "door-sign", level: 0, position: [1.5, 2.6, -0.1], yaw: 180, mount: "wall", outdoor: true });
+    const out = go([{ id: "s", prop: "sign", place: { kind: "auto", room: "A" } }], undefined, map);
+    expect(codes(out, "s")).toEqual([]);
+    // the anchor is the sign's BOTTOM edge (lintel + 0.3 m): a 1.0 m sign with a back origin hangs its centre 0.5 m above it
+    expect(at(out, "s").position[1]).toBeCloseTo(3.1);
+  });
+
+  it("sign-over-door: centred over the door, under the eave, clear of windows and other wall props", () => {
+    const map = structuredClone(MAP);
+    map.anchors.push({ id: "door-sign-zt", kind: "door-sign", level: 0, position: [1.5, 2.6, -0.1], yaw: 180, mount: "wall", outdoor: true, size: [1.2, 1.5, 1] });
+    const ok = go([{ id: "s", prop: "sign", place: { kind: "anchor", anchor: "door-sign-zt" } }], undefined, map);
+    expect(codes(ok, "s")).toEqual([]);
+    // a sign hung from a point 0.8 m along the wall from the door's centre
+    const side = structuredClone(map);
+    side.anchors.push({ id: "door-l", kind: "door-side", level: 0, position: [2.3, 3.1, -0.1], yaw: 180, mount: "wall", outdoor: true });
+    const off = go([{ id: "s", prop: "sign", place: { kind: "anchor", anchor: "door-l" } }], undefined, side);
+    expect(off.violations.find((v) => v.item === "s" && v.code === "sign-over-door")?.message).toMatch(/0.80 m along the wall/);
+    // the eave leaves 0.6 m over the anchor: a 1.0 m sign runs into it
+    const low = structuredClone(map);
+    low.anchors.find((x) => x.id === "door-sign-zt")!.size = [1.2, 0.6, 1];
+    expect(go([{ id: "s", prop: "sign", place: { kind: "anchor", anchor: "door-sign-zt" } }], undefined, low).violations.find((v) => v.code === "sign-over-door")?.message).toMatch(/eave/);
+    // a window beside the door, 0.4 m from it at sign height: the 0.6 m sign covers its edge
+    const win = structuredClone(map);
+    win.anchors.push({ id: "window-1", kind: "window", level: 0, position: [2.2, 3.0, -0.1], yaw: 180, mount: "wall", outdoor: true, size: [1.0, 1.2, 0.1] });
+    expect(go([{ id: "s", prop: "sign", place: { kind: "anchor", anchor: "door-sign-zt" } }], undefined, win).violations.find((v) => v.code === "sign-over-door")?.message).toMatch(/window window-1/);
+    const far = structuredClone(map);
+    far.anchors.push({ id: "window-1", kind: "window", level: 0, position: [3.4, 3.0, -0.1], yaw: 180, mount: "wall", outdoor: true, size: [1.0, 1.2, 0.1] });
+    expect(codes(go([{ id: "s", prop: "sign", place: { kind: "anchor", anchor: "door-sign-zt" } }], undefined, far), "s")).toEqual([]);
+  });
+
+  it("sign-over-door: no room over the door, a PROJECTING sign hangs beside it, as high as the lintel allows", () => {
+    const map = structuredClone(MAP);
+    map.anchors.push(
+      { id: "door-sign-zt", kind: "door-sign", level: 0, position: [1.5, 2.6, -0.1], yaw: 180, mount: "wall", outdoor: true, size: [1.2, 0.4, 1] },
+      { id: "door-sign-zt-l", kind: "door-sign-beside", level: 0, position: [2.5, 2.1, -0.1], yaw: 180, mount: "wall", outdoor: true, prefer: 0.3, size: [0.2, 1.5, 1.3] },
+      { id: "door-sign-zt-r", kind: "door-sign-beside", level: 0, position: [4.0, 2.1, -0.1], yaw: 180, mount: "wall", outdoor: true, prefer: 0.3, size: [0.2, 1.5, 1.3] },
+    );
+    const at0 = (anchor: string, prop = "sign-out") => go([{ id: "s", prop, place: { kind: "anchor", anchor } }], undefined, map);
+    expect(at0("door-sign-zt", "sign").violations.find((v) => v.code === "sign-over-door")?.message).toMatch(/beside the door/);
+    const ok = at0("door-sign-zt-l");
+    expect(codes(ok, "s")).toEqual([]);
+    // bottom 2.1 + min(prefer 0.3, clear 1.5 - 1.2) = 2.4; a back-origin sign's origin is its middle
+    expect(at(ok, "s").position[1]).toBeCloseTo(3.0);
+    expect(at0("door-sign-zt-l", "sign").violations.find((v) => v.code === "sign-over-door")?.message).toMatch(/PROJECTING/);
+    expect(at0("door-sign-zt-r").violations.find((v) => v.code === "sign-over-door")?.message).toMatch(/1.90 m from the edge/);
+    // an auto projecting sign takes the beside anchor, a flat one the door-sign
+    expect(go([{ id: "s", prop: "sign-out", place: { kind: "auto", room: "A" } }], undefined, map).auto?.[0]?.place).toEqual({ kind: "anchor", anchor: "door-sign-zt-l" });
+  });
+
+  it("sign-over-door: a low eave and no wall for a board: a freestanding sign POST 1.0-1.5 m beside the door, clear of windows", () => {
+    const map = structuredClone(MAP);
+    map.anchors.push(
+      { id: "door-sign-zt", kind: "door-sign", level: 0, position: [1.5, 2.6, -0.1], yaw: 180, mount: "wall", outdoor: true, size: [1.2, 0.2, 1] },
+      { id: "door-sign-zt-post-l", kind: "door-sign-post", level: 0, position: [3.35, 0, -0.7], yaw: 180, mount: "floor", outdoor: true },
+      { id: "far-post", kind: "door-sign-post", level: 0, position: [4.6, 0, -0.7], yaw: 180, mount: "floor", outdoor: true },
+    );
+    const post = (anchor: string, m = map) => go([{ id: "s", prop: "sign-post", place: { kind: "anchor", anchor } }], undefined, m);
+    expect(codes(post("door-sign-zt-post-l"), "s")).toEqual([]);
+    expect(post("far-post").violations.find((v) => v.code === "sign-over-door")?.message).toMatch(/2.50 m from the edge of door door-sign-zt/);
+    // a ground-floor window on that side: the post goes to the window-free side
+    const win = structuredClone(map);
+    win.anchors.push({ id: "window-1", kind: "window", level: 0, position: [3.4, 1.4, -0.1], yaw: 180, mount: "wall", outdoor: true, size: [1.0, 1.2, 0.1] });
+    expect(post("door-sign-zt-post-l", win).violations.find((v) => v.code === "sign-over-door")?.message).toMatch(/window window-1/);
+    // an auto sign post takes the post anchor, not the wall door-sign
+    expect(go([{ id: "s", prop: "sign-post", place: { kind: "auto", room: "A" } }], undefined, map).auto?.[0]?.place).toEqual({ kind: "anchor", anchor: "door-sign-zt-post-l" });
+  });
+
+  it("asks a tall-roofed room for a chandelier and hangs it at the ridge centre", () => {
+    const map = structuredClone(MAP);
+    map.levels[0]!.rooms[1]!.area = 25;
+    const none = go([{ id: "c", prop: "chair", place: { kind: "floor", at: [5, 1.5] } }], undefined, map);
+    expect(wcodes(none, "B")).toContain("no-chandelier");
+    expect(none.review?.find((x) => x.room === "B")?.chandelier).toBe(false);
+    const hung = go([{ id: "ch", prop: "chandelier-t", place: { kind: "auto", room: "B" } }], undefined, map);
+    expect(wcodes(hung, "B")).not.toContain("no-chandelier");
+    expect(hung.review?.find((x) => x.room === "B")?.chandelier).toBe(true);
+    const p = at(hung, "ch").position;
+    expect(Math.hypot(p[0] - 6, p[2] - 3)).toBeLessThan(0.3);
+    // a low room is never asked, nor a tall workshop (chapels, halls and taverns are)
+    expect(wcodes(none, "A")).not.toContain("no-chandelier");
+    const shop = go([{ id: "c", prop: "chair", place: { kind: "floor", at: [5, 1.5] } }], { A: { role: "office" }, B: { role: "workshop" } }, map);
+    expect(wcodes(shop, "B")).not.toContain("no-chandelier");
+  });
+});
+
+describe("long halls (2026-10-21): pew rows along the nave, a chandelier line, flames by area, high sconces", () => {
+  /*
+   * One long chapel, 8 x 24 m at 0.25 m cells: x 0.25..8.25, z 0.25..24.25, walls 6 m, a 7 m ridge down x 3.75..4.75.
+   * The entry is in the south wall at x 3.5..5 (z 0), leading +z; the back wall (the altar's) is z 24.25.
+   */
+  const C = 34, R = 98;
+  function hall() {
+    const cells: string[] = [], head: string[] = [], room: string[] = [];
+    for (let r = 0; r < R; r++) {
+      let c0 = "", h0 = "", r0 = "";
+      for (let c = 0; c < C; c++) {
+        const border = r === 0 || r === R - 1 || c === 0 || c === C - 1;
+        const ch = border ? (r === 0 && c >= 14 && c <= 19 ? "E" : "#") : r <= 2 && c >= 14 && c <= 19 ? "E" : ".";
+        c0 += ch;
+        r0 += ch === "." ? "0" : ".";
+        h0 += ch === "#" ? "." : c >= 15 && c <= 18 ? "s" : "o";
+      }
+      cells.push(c0);
+      head.push(h0);
+      room.push(r0);
+    }
+    return socketMapSchema.parse({
+      id: "zt-hall",
+      entry: { position: [4.25, 0], facing: [0, 1] },
+      levels: [
+        {
+          level: 0, floorY: 0, origin: [0, 0], step: 0.25, columns: C, rows: R, cells, head, room,
+          rooms: [{ id: "N", index: 0, area: 192, centre: [4.25, 12.25], bbox: [0.25, 8.25, 0.25, 24.25], minHead: 6, maxHead: 7 }],
+          walls: [
+            { id: "N.W", room: "N", a: [0.25, 0.25], b: [0.25, 24.25], normal: [1, 0], spans: [[0, 24]], height: 6 },
+            { id: "N.E", room: "N", a: [8.25, 24.25], b: [8.25, 0.25], normal: [-1, 0], spans: [[0, 24]], height: 6 },
+            { id: "N.N", room: "N", a: [8.25, 24.25], b: [0.25, 24.25], normal: [0, -1], spans: [[0, 8]], height: 6 },
+          ],
+        },
+      ],
+      anchors: [],
+    });
+  }
+  const HALL = hall();
+  const R2: Record<string, DressingInput> = {
+    altar: { mount: "floor", size: [1.4, 1.0, 0.7], against: "free", category: "sacred", tags: ["altar"], centrepiece: true },
+    "pew-t": { mount: "floor", size: [1.2, 0.9, 0.5], against: "free", use: ["seat"], tags: ["pew"] },
+    "chandelier-t": { mount: "ceiling", size: [1.0, 0.8, 1.0], use: ["light"], tags: ["chandelier"], fire: true, chain: "chain-link" },
+    sconce: { mount: "wall", size: [0.3, 0.4, 0.2], use: ["light"], fire: true, wallHeight: [1.4, 1.8] },
+    picture: { mount: "wall", size: [0.6, 0.5, 0.05] },
+  };
+  const ALL = new Map<string, DressingData>([...PROPS, ...Object.entries(R2).map(([k, v]) => [k, dressingSchema.parse(v)] as const)]);
+  const go = (items: DressingPlanInput["items"], map = HALL) =>
+    resolveDressing({ plan: dressingPlanSchema.parse({ id: "zt", map: map.id, rooms: { N: { role: "chapel" } }, items }), map, prop: (id) => ALL.get(id), set: () => undefined, options: { minItems: () => 0 } });
+  const altar = { id: "altar", prop: "altar", place: { kind: "auto" as const, room: "N", near: "back-wall" } };
+  const pews = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `pew${i}`, prop: "pew-t", place: { kind: "auto" as const, room: "N", prefer: "row" as const, near: "altar" } }));
+
+  it("spreads the plan's pews in rows 1.1-1.3 m apart from the altar step back down the nave, a centre aisle, never into the door line", () => {
+    const t0 = performance.now();
+    const r = go([altar, ...pews(50)]);
+    const ms = performance.now() - t0;
+    expect(r.violations).toEqual([]);
+    expect(wcodes(r, "N")).not.toContain("chapel-pews");
+    const ps = r.placements.filter((p) => p.id.startsWith("pew"));
+    expect(ps.length).toBe(50);
+    const rows = [...new Set(ps.map((p) => +p.position[2].toFixed(2)))].sort((a, b) => b - a);
+    for (let i = 1; i < rows.length; i++) expect(rows[i - 1]! - rows[i]!).toBeGreaterThanOrEqual(1.1 - 1e-6), expect(rows[i - 1]! - rows[i]!).toBeLessThanOrEqual(1.3 + 1e-6);
+    // the rows fill from the altar back: the front row just before the altar, the last short of the door line (z 0.75 + 3)
+    const alt = at(r, "altar").position[2];
+    expect(alt - rows[0]!).toBeLessThan(1.6);
+    expect(Math.min(...rows) - 0.25).toBeGreaterThan(0.75 + 3 - 0.01);
+    // pews face the altar (+z) and leave a 1.2 m aisle down the middle
+    for (const p of ps) expect(Math.cos(p.yaw)).toBeGreaterThan(0.99);
+    const front = ps.filter((p) => Math.abs(p.position[2] - rows[2]!) < 0.01).map((p) => p.position[0]).sort((a, b) => a - b);
+    const inner = front.filter((x) => x < 4.25).pop()!, innerR = front.find((x) => x > 4.25)!;
+    expect(innerR - inner - 1.2).toBeGreaterThanOrEqual(1.2 - 1e-6);
+    expect(ms).toBeLessThan(1000);
+  });
+
+  it("refuses a block of pews at one end of a long nave, with the measured share", () => {
+    const r = go([altar, ...pews(8)]);
+    const v = r.violations.find((x) => x.code === "chapel-pews");
+    expect(v?.message).toMatch(/cover [\d.]+ m of its [\d.]+ m nave \(\d+%/);
+  });
+
+  it("hangs a long hall's chandeliers in a line under the ridge, 6-8 m apart, the first centred", () => {
+    const one = go([altar, ...pews(50), { id: "ch1", prop: "chandelier-t", place: { kind: "auto", room: "N", near: "ceiling-centre" } }]);
+    expect(one.warnings.find((w) => w.item === "N" && w.code === "no-chandelier")?.message).toMatch(/line of 3/);
+    const three = go([altar, ...pews(50), ...[1, 2, 3].map((i) => ({ id: `ch${i}`, prop: "chandelier-t", place: { kind: "auto" as const, room: "N", near: "ceiling-centre" } }))]);
+    expect(wcodes(three, "N")).not.toContain("no-chandelier");
+    const zs = [1, 2, 3].map((i) => at(three, `ch${i}`).position);
+    for (const p of zs) expect(p[0]).toBeGreaterThan(3.9), expect(p[0]).toBeLessThan(4.6); // under the ridge
+    // let down on its chain toward 4 m over the floor, not left 1 m under a 7 m ridge
+    for (const c of three.auto!.filter((x) => x.item.startsWith("ch"))) expect(c.place.kind === "ceiling" && c.place.drop).toBe(2);
+    for (const p of zs) expect(p[1]).toBeCloseTo(5, 1); // its top: the bottom hangs 4.2 m over the floor
+    expect(Math.abs(zs[0]![2] - 12.25)).toBeLessThan(0.5);
+    const s = zs.map((p) => p[2]).sort((a, b) => a - b);
+    expect(s[1]! - s[0]!).toBeGreaterThanOrEqual(6 - 0.3);
+    expect(s[2]! - s[1]!).toBeLessThanOrEqual(8 + 0.3);
+  });
+
+  it("allows a flame per 12 m² of floor (at least 6), and a sconce up to 2.4 m on a wall over 4 m", () => {
+    const lights = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `s${i}`, prop: "sconce", place: { kind: "wall" as const, wall: i % 2 ? "N.W" : "N.E", t: 1 + Math.floor(i / 2) * 1.4, height: 2.3 } }));
+    const ok = go(lights(16)); // 192 m2 -> 16
+    expect(ok.violations).toEqual([]);
+    expect(go(lights(17)).violations.some((v) => v.code === "flame-budget")).toBe(true);
+    // the small house keeps its floor of 6
+    const house = (n: number) => resolveDressing({ plan: dressingPlanSchema.parse({ id: "zt", map: "zt-house", items: Array.from({ length: n }, (_, i) => ({ id: `c${i}`, prop: "chandelier-t", place: { kind: "ceiling", at: [4.75 + (i % 4) * 0.8, 1 + Math.floor(i / 4) * 1.2] } })) }), map: MAP, prop: (id) => ALL.get(id), set: () => undefined });
+    expect(house(6).violations.filter((v) => v.code === "flame-budget")).toEqual([]);
+    expect(house(7).violations.filter((v) => v.code === "flame-budget")).not.toEqual([]);
+    // a picture is not a light: its own band holds; a sconce on a 3 m wall keeps its own band too
+    expect(codes(go([{ id: "p", prop: "picture", place: { kind: "wall", wall: "N.W", t: 2, height: 2.3 } }]), "p")).toContain("wall-height");
+    const low = resolveDressing({ plan: dressingPlanSchema.parse({ id: "zt", map: "zt-house", items: [{ id: "s", prop: "sconce", place: { kind: "wall", wall: "A.W", t: 2, height: 2.3 } }] }), map: MAP, prop: (id) => ALL.get(id), set: () => undefined });
+    expect(codes(low, "s")).toContain("wall-height");
+  });
+});
+
+describe("opening-clear (owner walk 2026-10-21): nothing in front of a doorway or hallway mouth", () => {
+  it("refuses a solid prop within 1.2 m in front of a doorway, and auto places keep out of it", () => {
+    // the doorway A|B: x 4.0..4.25, z 2.5..3.5; a crate's near edge 0.75 m into room B in front of it
+    expect(codes(run([{ id: "c", prop: "crate", place: { kind: "floor", at: [5.3, 3.0] } }]), "c")).toContain("opening-clear");
+    // beside it (not in front): no opening fault
+    expect(codes(run([{ id: "c", prop: "crate", place: { kind: "floor", at: [5.3, 1.2] } }]), "c")).not.toContain("opening-clear");
+    // auto crates in room B: none lands in front of the doorway
+    const r = run(Array.from({ length: 3 }, (_, i) => ({ id: `a${i}`, prop: "crate", place: { kind: "auto" as const, room: "B", prefer: "open" as const } })));
+    expect(r.violations.filter((v) => v.code === "opening-clear")).toEqual([]);
   });
 });

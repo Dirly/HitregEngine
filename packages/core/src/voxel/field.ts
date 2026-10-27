@@ -35,6 +35,8 @@ import { createButtes, type Buttes } from "./buttes.js";
 import { clamp, fbm2, fbm3, hashUnit, perlin2, ridgedMultifractal2, smoothstep, type FbmSpec } from "./noise.js";
 import { PolygonIndex, type OutlineSpec } from "./polygon-index.js";
 import { createZoneMembership, surfaceRoleIndex, zoneGroundRoles } from "./zone-ground.js";
+import { createGroundPainter } from "./ground-paint.js";
+import { floaterClearKey, floaterClearSet } from "./floaters.js";
 import {
   type BiomeDoc,
   type BlobDoc,
@@ -44,6 +46,7 @@ import {
   type LakeDoc,
   type PatchDoc,
   type RiverDoc,
+  type RiverWeirDoc,
   type FillDoc,
   type RoadDoc,
   type TownDoc,
@@ -52,6 +55,10 @@ import {
   type LandformProfileDoc,
 } from "./recipe.js";
 import { applyFallSites, fallSiteGorge, fallSiteLedge, type SolvedFallSite } from "./fall-sites.js";
+import { isLedge, ledgeChurnSpeed, riverFlowSpeed } from "./white-water.js";
+
+/** How far over the sea plane an `overSea` river's drowned channel is drawn (m): clear of the plane's depth. */
+const RIVER_OVER_SEA = 0.08;
 
 // ------------------------------------------------------------------ geometry
 
@@ -162,6 +169,12 @@ const BLADE_AXES: readonly (readonly [number, number])[] = [[1, 0], [0, 1], [Mat
  */
 export const PAINT_STEEP_START = 0.64;
 export const PAINT_STEEP_END = 0.8;
+/**
+ * A palette zone's cliff-role weight turns into its stony ground below these steepnesses (sin: 20 deg -> 30 deg): the
+ * cliff tile from 30 deg up, its accent/ground on the flat (zone-ground.ts `flatCliff`).
+ */
+export const FLAT_CLIFF_START = 0.34;
+export const FLAT_CLIFF_END = 0.5;
 
 /**
  * Spacing (m) every river is resampled to when the field is created, along a
@@ -224,6 +237,8 @@ const FALL_GORGE_RISE = 1.6;
 /** Steepest a river bank may be cut (rise over run) when the land is too high to reach at the normal slope. */
 const BANK_MAX_RISE = 1.6;
 
+/** Most a road's embankment band may stand above (or sink below) both the road and the ground under it (m). */
+export const ROAD_BANK_OVERSHOOT = 0.4;
 /** Most the rock beside a fall may stand over the ground it is built on (m): a shoulder, never a tower. */
 const FALL_WALL_RAISE = 4;
 
@@ -896,7 +911,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
           const poly = r?.polygon ?? [];
           let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
           for (const [px, pz] of poly) { x0 = Math.min(x0, px); z0 = Math.min(z0, pz); x1 = Math.max(x1, px); z1 = Math.max(z1, pz); }
-          return { id, polygon: poly, bbox: [x0, z0, x1, z1] as [number, number, number, number], parent: -1, targets: new Int16Array(0) };
+          return { id, polygon: poly, bbox: [x0, z0, x1, z1] as [number, number, number, number], parent: -1, targets: new Int16Array(0), flatCliff: -1 };
         }).filter((zn) => zn.polygon.length >= 3);
         for (const zn of zones) { const r = recipe.regions.find((g) => g.id === zn.id); if (r?.within) zn.parent = zones.findIndex((o) => o.id === r.within); }
         const membership = createZoneMembership({ ...recipe, zoneGround: { band, jitter: 0.2 } }, { baseRole: new Int8Array(0), overrideRole: new Int8Array(0), zones, unresolved: [] });
@@ -923,7 +938,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         // big fills only: a raised landform (a mesa, a plateau) is a place; a small one is a drained hollow the plain may cover
         ...recipe.features.fills.filter((fl) => Math.abs(fl.polygon.reduce((s, p, i, a) => s + p[0] * a[(i + 1) % a.length]![1] - a[(i + 1) % a.length]![0] * p[1], 0)) / 2 > 50000).map((fl) => ({ points: fl.polygon, radius: fl.bank, closed: true })),
         ...recipe.features.towns.map((tw) => ({ points: [tw.center] as [number, number][], radius: tw.radius + tw.falloff })),
-        ...recipe.features.roads.map((r) => ({ points: r.points, radius: r.width / 2 + r.shoulder + r.smooth })),
+        // an approach onto a monument (keepLandforms) does not clear it away
+        ...recipe.features.roads.filter((r) => !r.keepLandforms).map((r) => ({ points: r.points, radius: r.width / 2 + r.shoulder + r.smooth })),
         ...recipe.features.rivers.map((r) => ({ points: r.points, radius: r.width / 2 + r.bank * 3 })),
         ...recipe.features.lakes.map((l) => (l.polygon ? { points: l.polygon, radius: l.bank, closed: true } : { points: [l.center] as [number, number][], radius: l.radius + l.bank })),
       ];
@@ -946,16 +962,34 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const src: PlanarFeatureSource = { dryClearance };
     if (hasSeaCliffs) src.sea = seaOf();
     if (hasButtes) src.buttes = buttesOf();
-    if ((hasSeaCliffs || hasButtes) && heightPatchDocs.length > 0) {
+    // a road that keeps the landforms (an approach onto a monument) is held like a patch: the planar walls hand its
+    // roadway, shoulder and band back to the graded heightfield, fading out over the outer half of the band
+    const keepRoads = recipe.features.roads.filter((r) => r.keepLandforms && r.surfaceY && r.points.length > 1);
+    const roadHold = (x: number, z: number): number => {
+      let w = 0;
+      for (const r of keepRoads) {
+        const half = r.width / 2, inner = half + r.shoulder + r.smooth * 0.5, outer = half + r.shoulder + r.smooth;
+        for (let i = 1; i < r.points.length; i++) {
+          const [ax, az] = r.points[i - 1]!, [bx, bz] = r.points[i]!;
+          const dx = bx - ax, dz = bz - az, len2 = dx * dx + dz * dz || 1;
+          const t = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / len2));
+          const d = Math.hypot(x - ax - dx * t, z - az - dz * t);
+          if (d < outer) w = Math.max(w, 1 - smoothstep(inner, outer, d));
+        }
+      }
+      return w;
+    };
+    if ((hasSeaCliffs || hasButtes) && (heightPatchDocs.length > 0 || keepRoads.length > 0)) {
       // the strongest patch over the column, by the same rule heightThroughPatches applies them
       src.hold = (x, z) => {
-        let w = 0;
+        let w = keepRoads.length ? roadHold(x, z) : 0;
+        if (w >= 1) return w;
         for (let k = 0; k < heightPatchDocs.length; k++) {
           if (!memoReady && builtWorkPatch[k]) continue;
           const doc = heightPatchDocs[k]!;
           const dx = x - doc.origin[0], dz = z - doc.origin[1];
           if (dx <= 0 || dz <= 0 || dx >= doc.size[0] || dz >= doc.size[1]) continue;
-          w = Math.max(w, preparedPatch(k).weight(x, z));
+          w = Math.max(w, preparedPatch(k).hold(x, z));
           if (w >= 1) break;
         }
         return w;
@@ -966,6 +1000,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         let n = 0;
         if (lipList.length === 0) return 0;
         for (const lip of bucketAt(lipBuckets, x, z) as readonly Lip[]) {
+          if (lip.weir) continue;
           const px = x - lip.lx, pz = z - lip.lz;
           const rel = px * lip.dx + pz * lip.dz, across = Math.abs(-px * lip.dz + pz * lip.dx);
           // lipAt's band: FALL_WALL_UP + 3 upstream of the line, the drop + 30 past it, `reach` across
@@ -1561,6 +1596,10 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const hasFeatures =
     riverDocs.length + canyonDocs.length + ridgeDocs.length + roadDocs.length + recipe.features.towns.length + lakeDocs.length + fillDocs.length > 0;
   const hasBlobs = recipe.features.blobs.length > 0;
+  // floating voxels removed by the floaters pass: lattice cells forced to air (floaters.ts)
+  const floaterClears = floaterClearSet(recipe.features.floaterClears);
+  const clearedAt = (x: number, y: number, z: number): boolean =>
+    floaterClears.size > 0 && floaterClears.has(floaterClearKey(Math.round(x / voxelSize), Math.round(y / voxelSize), Math.round(z / voxelSize)));
   const passageDocs = recipe.features.passages ?? [];
   // Negative exterior samples are essential to interpolate an exact floor;
   // retain an explicit bounded exterior margin.
@@ -1589,13 +1628,20 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     calmRects.push([Math.min(c.origin[0], ex) - reach, Math.min(c.origin[1], ez) - reach, Math.max(c.origin[0], ex) + reach, Math.max(c.origin[1], ez) + reach]);
   }
   const calmBuckets = makeBuckets(calmRects, (r) => [r[0] - CALM_FADE, r[1] - CALM_FADE, r[2] + CALM_FADE, r[3] + CALM_FADE]);
-  /** 0 on built ground (a terrace wall's footprint), 1 where natural overhang noise applies in full. */
+  //  height patches (a wall-ramp stair's cut): built ground wherever the patch pulls the ground (1 - its blend weight),
+  // so the noise cannot heave rock through the deck laid on the cut
+  const calmPatches = heightPatchDocs.flatMap((p, k) => (p.calm ? [k] : []));
+  /** 0 on built ground (a terrace wall's footprint, a calm patch), 1 where natural overhang noise applies in full. */
   function calmFactor(x: number, z: number): number {
-    if (calmRects.length === 0) return 1;
+    if (calmRects.length === 0 && calmPatches.length === 0) return 1;
     let f = 1;
     for (const r of bucketAt(calmBuckets, x, z)) {
       const d = Math.hypot(Math.max(r[0] - x, 0, x - r[2]), Math.max(r[1] - z, 0, z - r[3]));
       if (d < CALM_FADE) f = Math.min(f, smoothstep(0, CALM_FADE, d));
+    }
+    for (const k of calmPatches) {
+      const p = heightPatchDocs[k]!, dx = x - p.origin[0], dz = z - p.origin[1];
+      if (dx > 0 && dz > 0 && dx < p.size[0] && dz < p.size[1]) f = Math.min(f, 1 - preparedPatch(k).weight(x, z));
     }
     return f;
   }
@@ -1839,7 +1885,10 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return hasSeaTurf ? seaOf().turf(x, z, turfHit) : 0;
   }
   /** Move each role-tagged surface's weight onto the zones' surfaces for that role. */
-  function remapNaturalRoles(x: number, z: number, out: Float32Array, offset: number): void {
+  function remapNaturalRoles(x: number, z: number, out: Float32Array, offset: number, steep = 1): void {
+    // a palette zone's cliff weight on gentle ground goes to its stony ground (ZoneGroundZone.flatCliff): the cliff tile
+    // is a wall texture and reads as one laid flat (rock-audit 2026-10-21: 12 % of the Hagsheer moor's flat ground)
+    const flatShare = 1 - smoothstep(FLAT_CLIFF_START, FLAT_CLIFF_END, steep);
     let zm: Float32Array = zoneM;
     if (hasSeaTurf && seaTurfAt(x, z) > 0 && seaTurfZone[turfHit.k]! >= 0) {
       // the turf's zone holds at least the turf's share; the others give up what that leaves short
@@ -1865,7 +1914,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         const t = groundZones[k]!.targets[role]!;
         if (t < 0 || t === s) continue;
         const moved = w * m;
-        out[offset + t] = out[offset + t]! + moved;
+        const fc = role === CLIFF_ROLE ? groundZones[k]!.flatCliff : -1;
+        if (fc >= 0 && flatShare > 0) {
+          out[offset + fc] = out[offset + fc]! + moved * flatShare;
+          out[offset + t] = out[offset + t]! + moved * (1 - flatShare);
+        } else out[offset + t] = out[offset + t]! + moved;
         out[offset + s] = out[offset + s]! - moved;
       }
     }
@@ -1917,6 +1970,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     blend: number;
     strength: number;
     slope: readonly [number, number] | undefined;
+    /** Loose cover (any surface not of the cliff role): fades out on faces like feature paint (see applyPatches). */
+    loose: boolean;
   }
   // A patch naming a surface or a biome that does not exist is DROPPED rather
   // than throwing: a recipe legitimately names things before they are added,
@@ -1937,6 +1992,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       blend: Math.max(patch.blend, 1e-4),
       strength: patch.strength,
       slope: patch.slope,
+      loose: zoneRoles.baseRole[surface] !== ROLE_CLIFF && zoneRoles.overrideRole[surface] !== ROLE_CLIFF,
     });
   }
   const hasPatches = patches.length > 0;
@@ -2167,6 +2223,12 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     marshScratch.em = wet * r;
     return marshScratch;
+  }
+  /** Does a river standing at `level` here run AT the marsh's table (a weir-held fen river)? */
+  function heldInMarsh(level: number, x: number, z: number): boolean {
+    if (!hasMarsh || Number.isNaN(level)) return false;
+    const m = marshAt(x, z);
+    return m.em >= MARSH_WET && Math.abs(level - m.table) < 0.3;
   }
   /** The marsh water table over (x, z), or null where no marsh holds water (em under MARSH_WET). */
   function marshTableAt(x: number, z: number): number | null {
@@ -2875,7 +2937,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         // as long as the drop, easing back to ordinary banks. With the ordinary
         // bank slope the gorge under a 25 m fall was a V seventy metres wide,
         // cut back into the cliff top on both sides of the lip.
-        if (lipNow && lipNow.rel >= 0 && lipNow.lip!.owner === hit.owner) {
+        if (lipNow && lipNow.rel >= 0 && lipNow.lip!.owner === hit.owner && !lipNow.lip!.weir) {
           const drop = lipNow.lip!.top - lipNow.lip!.bottom;
           rise += (FALL_GORGE_RISE - rise) * (1 - smoothstep(drop * 0.5, drop + 20, lipNow.rel));
         }
@@ -2961,6 +3023,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
 
     count = nearestPerOwner(roadSegs, x, z, hits);
+    // the ground under the roads, before any of them: an embankment band is held against THIS, not the running
+    // height, or roads that overlap (a shared stretch of a path and a trail) ratchet the band down a hand per road
+    const underRoads = out;
     for (let k = 0; k < count; k++) {
       const hit = hits[k]!;
       const road = roadDocs[hit.owner]!;
@@ -3002,7 +3067,20 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       // what a bench cut looks like and the cliff above stays a cliff.
       const band = outer - half;
       const side = Math.min(value + band * 1.0, Math.max(value - band * 0.8, hit.side));
-      const embankment = value + (side - value) * smoothstep(half, outer, hit.distance);
+      // The side height is the generator's sample at the segment's ends, read
+      // linearly between them; over ground that is not linear along the road
+      // (a concave apron climbing to a pinned end) it stands metres off the
+      // real ground, and the band's outer fade back to that ground drew a rim
+      // (or a slot) one lattice sample wide. A cut bank never stands above the
+      // ground it cuts, nor a fill bank below the ground it fills: the band is
+      // held between the road and the ground at this column (+/- a hand, so
+      // the S-curve still irons out crinkle).
+      const curve = value + (side - value) * smoothstep(half, outer, hit.distance);
+      // the hold is a SMOOTH min/max (of width the overshoot, so the roadway,
+      // a full overshoot inside both bounds, is untouched): a hard clamp creases the band where it
+      // takes over, and a crease across a lattice cell draws as a sawtooth
+      const held = smoothMax(Math.min(value, underRoads) - ROAD_BANK_OVERSHOOT, curve, ROAD_BANK_OVERSHOOT);
+      const embankment = -smoothMax(-(Math.max(value, underRoads) + ROAD_BANK_OVERSHOOT), -held, ROAD_BANK_OVERSHOOT);
       const w = (1 - smoothstep(half + road.shoulder + road.smooth * 0.5, outer, hit.distance)) * road.flatten * dry;
       if (w <= 0) continue;
       out = out + (embankment - out) * w;
@@ -3053,7 +3131,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       if (inside < 0 || inside > bank * 2.2 + voxelSize * 3) continue;
       const lipNow = lipAt(x, z);
       for (const f of g.falls) {
-        if (!lipNow || lipNow.lip!.owner !== hit.owner || Math.abs(lipNow.lip!.along - f.along) > 0.5) continue;
+        if (!lipNow || lipNow.lip!.weir || lipNow.lip!.owner !== hit.owner || Math.abs(lipNow.lip!.along - f.along) > 0.5) continue;
         // UPSTREAM of the lip line only: the banks that keep the upper water
         // in its channel up to the edge. Past the line the water is the
         // curtain and the pool below, and walls there stood out over the cliff
@@ -3191,6 +3269,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       if (lipNow && lipNow.lip!.owner === hit.owner && hit.along >= lipNow.lip!.along - 0.5 && hit.along <= lipNow.lip!.along + RIVER_FALL_LIP + 30) {
         level = lipNow.rel < 0 ? lipNow.lip!.top : Math.min(level, lipNow.lip!.bottom);
       }
+      // a river held at a marsh's table by its weir is the fen itself: no
+      // rim, no levee — its banks go under the same sheet
+      if (river.weirs && heldInMarsh(level, x, z)) continue;
       const w = smoothstep(bank * 0.58, bank * 0.68, inside) * (1 - smoothstep(bank * MARSH_RIVER_RIM, bank, inside));
       weight = Math.max(weight, w);
       target = Math.max(target, level + 0.3);
@@ -3493,6 +3574,14 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         gate *= window(steep, patch.slope, 0.08);
         if (gate <= 0.02) continue;
       }
+      // Loose cover (gravel, scree, dirt, sand, snow) does not stay on a face: it fades out between PAINT_STEEP_START
+      // and PAINT_STEEP_END like every feature paint, whatever the patch's slope window says. A `scree-gravel`
+      // window of [0.42, 1.2] painted Gravel.png up the Weepwater gorge walls (rock-audit 2026-10-21: 4.5 % of the
+      // gorge's drawn surface, 25 %+ gravel on vertical faces); a scree FAN is a slope, never a wall.
+      if (patch.loose) {
+        gate *= 1 - smoothstep(PAINT_STEEP_START, PAINT_STEEP_END, steep);
+        if (gate <= 0.02) continue;
+      }
       const n = fbm2(patch.spec, x, z, seed);
       const mask = smoothstep(patch.threshold, patch.threshold + patch.blend, n) * patch.strength * gate;
       if (mask <= 0.002) continue;
@@ -3586,10 +3675,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       const d = sd + fbm2(vergeSpec, x, z, seed) * Math.min(2, lake.shore * 0.4 + 0.4);
       const w = (1 - smoothstep(lake.shore * 0.35, lake.shore, d)) * flat;
       if (w <= 0.002) continue;
-      for (let s = 0; s < surfaceCount; s++) {
-        const cur = out[offset + s]!;
-        out[offset + s] = cur + ((s === target ? 1 : 0) - cur) * w;
-      }
+      // re-aimed through the surface's role like a road's paint: a lake shore in base `sand` (accent) draws each zone's
+      // own accent, not the world's beach sand (rock-audit 2026-10-21: Hagsend Water's shore, 0.27 % of Hagsheer)
+      paintToward(x, z, out, offset, target, w, zoneRoles.baseRole[target]!);
     }
   }
 
@@ -3627,9 +3715,13 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     paintToward(x, z, out, offset, siteRockTarget, w, ROLE_CLIFF);
   }
 
+  // operator ground paint (features.groundPaints, ground-paint.ts): a palette surface over an area
+  const groundPainter = createGroundPainter(recipe.features.groundPaints, surfaceIndex, seed);
+
   /** Everything that decorates the biome result, in order. Shared by every splat path. */
   function decorate(
     x: number,
+    y: number,
     z: number,
     steep: number,
     membership: Float32Array,
@@ -3640,7 +3732,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // zone ground AFTER the biome and its patches (they decide what kind of
     // ground this is) and BEFORE feature paint (a road's dirt is a road, not
     // the zone's open ground — paint re-aims through its own role)
-    if (hasZoneGround) remapNaturalRoles(x, z, out, offset);
+    if (hasZoneGround) remapNaturalRoles(x, z, out, offset, steep);
     // a sea-cliff stretch's turf surface on its flat tops (the cliff top and the stacks)
     if (hasSeaTurf && seaTurfAt(x, z) > 0 && seaTurfSurface[turfHit.k]! >= 0) {
       const w = turfHit.w * (1 - smoothstep(PAINT_STEEP_START, PAINT_STEEP_END, steep));
@@ -3656,11 +3748,18 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // a river's paint band came out gravel or sand (measured on mmo: 69 % of
     // the >55 degree faces near water).
     const flat = 1 - smoothstep(PAINT_STEEP_START, PAINT_STEEP_END, steep);
+    // a place's own paint (quarry floor, scree fan, camp ash) beats the zone ground but not the water or the trail
+    if (groundPainter) groundPainter.paint(x, y, z, steep, flat, out, offset, surfaceCount);
     if (hasLakePaint) paintLakes(x, z, out, offset, flat);
     // roads last: a track worn through the ground wins over the mottling it
     // was worn through
     if (hasRoadPaint) paintRoads(x, z, membership, out, offset, flat);
-    if (siteRockBlobs.length > 0 || craftedSites.length > 0) paintSiteRocks(x, z, steep, out, offset);
+    if (siteRockBlobs.length > 0 || craftedSites.length > 0) {
+      paintSiteRocks(x, z, steep, out, offset);
+      // a place's own `faces` paint re-skins its walls over the site's blanket gorge stone (steep part only: on the
+      // ground the water and the trail still win)
+      if (groundPainter) groundPainter.paint(x, y, z, steep, flat, out, offset, surfaceCount, true);
+    }
   }
 
   function zoneName(): string {
@@ -3695,7 +3794,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     const surface = new Float32Array(surfaceCount);
     blendSurface(weights, steep, surface, 0);
-    decorate(x, z, steep, weights, surface, 0);
+    decorate(x, g, z, steep, weights, surface, 0);
     return { id: recipe.biomes[bestIndex]!.id, zone, weights, surface, temperature, moisture, slope: steep };
   }
 
@@ -3715,7 +3814,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const { temperature, moisture, heightOffset } = climateAt(x, z, y);
     memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
     blendSurface(scratchMembership, steep, out, offset);
-    decorate(x, z, steep, scratchMembership, out, offset);
+    decorate(x, y, z, steep, scratchMembership, out, offset);
   }
 
   /** Blend the biome tints already resolved into `scratchMembership`. */
@@ -3768,7 +3867,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const { temperature, moisture, heightOffset } = climateAt(x, z, y);
     memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
     blendSurface(scratchMembership, steep, out, offset);
-    decorate(x, z, steep, scratchMembership, out, offset);
+    decorate(x, y, z, steep, scratchMembership, out, offset);
     blendTint(out, offset + surfaceCount);
   }
 
@@ -3999,6 +4098,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     if (terraceCuts.length) d = terraceCutsAt(x, y, z, d);
     // hard floor last so nothing — not caves, not blobs — can open the world's underside
     if (y < recipe.minY + 2) d = Math.min(d, y - (recipe.minY + 2));
+    if (d < 0 && clearedAt(x, y, z)) d = voxelSize / 2;
     return d;
   }
 
@@ -4153,6 +4253,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
             if (passageDocs.length) d = passagesAt(wx, wy, wz, d);
             if (terraceCuts.length) d = terraceCutsAt(wx, wy, wz, d);
             if (wy < recipe.minY + 2) d = Math.min(d, wy - (recipe.minY + 2));
+            if (d < 0 && clearedAt(wx, wy, wz)) d = voxelSize / 2;
             if (active && flat && d === planarD) active[i + j * nx + k * strideZ] = 1;
           }
           values[i + j * nx + k * strideZ] = d;
@@ -4528,6 +4629,102 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
    * Beds only descend, by construction. A doc that already carries a
    * `bedY` of the right length is left exactly as written.
    */
+  /** Index of the polyline point nearest (x, z). */
+  function nearestPointIndex(points: readonly (readonly [number, number])[], at: readonly [number, number]): number {
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < points.length; i++) {
+      const d = (points[i]![0] - at[0]) ** 2 + (points[i]![1] - at[1]) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  /** A weir's held level: its own, else the table of the nearest marsh upstream of it on the river (undefined: none). */
+  function weirLevel(points: readonly (readonly [number, number])[], iw: number, weir: RiverWeirDoc): number | undefined {
+    if (weir.level !== undefined) return weir.level;
+    for (let i = iw; i >= 0; i--) {
+      const t = marshTableAt(points[i]![0], points[i]![1]);
+      if (t !== null) return t;
+    }
+    return undefined;
+  }
+
+  /** Is the lip at (a) on this river one of its declared weirs (at the weir, at its level)? */
+  function isWeirLip(river: RiverDoc, a: readonly [number, number], top: number): boolean {
+    if (!river.weirs) return false;
+    const half = river.width / 2;
+    return river.weirs.some((w) => {
+      if (w.natural) return false;
+      const level = w.level ?? weirLevel(river.points, nearestPointIndex(river.points, w.at), w);
+      return level !== undefined && Math.abs(level - top) < 0.05 && Math.hypot(w.at[0] - a[0], w.at[1] - a[1]) <= half + 6;
+    });
+  }
+
+  /**
+   * The doc with a point exactly ON each weir (its `at` projected onto the
+   * channel) and one RIVER_FALL_LIP + 0.25 m below it, so the held level
+   * ends at the weir's crest and the drop is the short segment after it —
+   * the fall pours off the weir, not off whichever sample came next.
+   */
+  function withWeirPoints(river: RiverDoc): RiverDoc {
+    if (!river.weirs || river.weirs.length === 0 || river.points.length < 2) return river;
+    let out = river;
+    for (const weir of river.weirs) {
+      // a weir that holds nothing (no level, no marsh upstream) leaves the river exactly as it was
+      if (weirLevel(out.points, nearestPointIndex(out.points, weir.at), weir) === undefined) continue;
+      const pts = out.points;
+      const n = pts.length;
+      const along = [0];
+      for (let k = 1; k < n; k++) along.push(along[k - 1]! + Math.hypot(pts[k]![0] - pts[k - 1]![0], pts[k]![1] - pts[k - 1]![1]));
+      let best = Infinity;
+      let at = 0;
+      for (let k = 0; k + 1 < n; k++) {
+        const [ax, az] = pts[k]!;
+        const dx = pts[k + 1]![0] - ax;
+        const dz = pts[k + 1]![1] - az;
+        const l2 = dx * dx + dz * dz || 1;
+        const t = clamp(((weir.at[0] - ax) * dx + (weir.at[1] - az) * dz) / l2, 0, 1);
+        const d = Math.hypot(ax + dx * t - weir.at[0], az + dz * t - weir.at[1]);
+        if (d < best) {
+          best = d;
+          at = along[k]! + (along[k + 1]! - along[k]!) * t;
+        }
+      }
+      const total = along[n - 1]!;
+      const stations = [at, at + RIVER_FALL_LIP + 0.25].filter((s) => s > 0.5 && s < total - 0.5);
+      const sAt = (s: number): { k: number; t: number } => {
+        let k = 0;
+        while (k + 2 < n && along[k + 1]! < s) k++;
+        return { k, t: (s - along[k]!) / (along[k + 1]! - along[k]! || 1) };
+      };
+      const insert = stations.filter((s) => along.every((a) => Math.abs(a - s) > 0.5));
+      if (insert.length === 0) continue;
+      const lerp = (arr: readonly number[] | undefined, k: number, t: number): number => arr![k]! + (arr![k + 1]! - arr![k]!) * t;
+      const keyed = insert.map((s) => ({ s, ...sAt(s) }));
+      const merge = <T,>(src: readonly T[] | undefined, make: (k: number, t: number) => T): T[] | undefined => {
+        if (!src || src.length !== n) return undefined;
+        const res: T[] = [];
+        let j = 0;
+        for (let k = 0; k < n; k++) {
+          res.push(src[k]!);
+          while (j < keyed.length && keyed[j]!.k === k) res.push(make(keyed[j]!.k, keyed[j++]!.t));
+        }
+        return res;
+      };
+      const round = (v: number): number => Math.round(v * 100) / 100;
+      const points = merge(pts, (k, t) => [round(pts[k]![0] + (pts[k + 1]![0] - pts[k]![0]) * t), round(pts[k]![1] + (pts[k + 1]![1] - pts[k]![1]) * t)] as [number, number])!;
+      const widths = merge(out.widths, (k, t) => lerp(out.widths, k, t));
+      const depths = merge(out.depths, (k, t) => lerp(out.depths, k, t));
+      const bedY = merge(out.bedY, (k, t) => lerp(out.bedY, k, t));
+      out = { ...out, points, ...(widths ? { widths } : {}), ...(depths ? { depths } : {}), ...(bedY ? { bedY } : {}) };
+    }
+    return out;
+  }
+
   function solveRiverBeds(): void {
     const hasBed = (r: RiverDoc): boolean => !!r.bedY && r.bedY.length === r.points.length;
     if (riverDocs.every(hasBed)) return;
@@ -4535,7 +4732,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // between them, so it is resampled along a centripetal Catmull-Rom
     // spline first (the curve the water ribbon draws through the same
     // points), a few metres apart, per-point widths and depths riding along
-    const solved: RiverDoc[] = riverDocs.map((r) => (hasBed(r) ? r : splineRiver(r)));
+    const solved: RiverDoc[] = riverDocs.map((r) => (hasBed(r) ? r : withWeirPoints(splineRiver(r))));
     riverDocs = solved.filter(hasBed);
     riverSegs = buildRiverSegs(riverDocs);
     waterStageOnly = true;
@@ -4602,7 +4799,35 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
           if (bed[i]! > limit) bed[i] = Number.isNaN(flushAt[i]!) ? limit : Math.max(limit, flushAt[i]!);
         }
       }
-      solved[index] = { ...river, bedY: bed.map((v) => Math.round(v * 100) / 100) };
+      // declared weirs hold the river UP behind them: from the weir upstream,
+      // wherever the river would stand under the weir's level, the bed sits a
+      // channel under that level (backwater) — the river through a fen IS the
+      // fen — and the only drop is at the weir itself
+      let weirs = river.weirs;
+      if (weirs && weirs.length > 0) {
+        weirs = weirs.map((weir) => {
+          const iw = nearestPointIndex(river.points, weir.at);
+          const level = weirLevel(river.points, iw, weir);
+          if (level === undefined) return weir;
+          // a weir with a `reach` holds its pool that far upstream whatever the ground (the bed cut under the
+          // level), up to the next weir's crest; past it, or without one, the backwater rule
+          const crests = new Set(river.weirs!.filter((w) => w !== weir).map((w) => nearestPointIndex(river.points, w.at)));
+          let run = 0;
+          for (let i = iw; i >= 0; i--) {
+            if (i < iw) run += Math.hypot(river.points[i + 1]![0] - river.points[i]![0], river.points[i + 1]![1] - river.points[i]![1]);
+            const d = depthAt(i);
+            const pool = weir.reach !== undefined && run <= weir.reach + 1e-6;
+            if (pool && i < iw && crests.has(i)) break;
+            if (!pool && bed[i]! + SURFACE * d > level) break;
+            bed[i] = level - SURFACE * d - 0.15;
+          }
+          return { ...weir, level };
+        });
+        // a pool cut under the ground leaves the bed below it standing higher: it descends from the pool instead
+        if (weirs.some((w) => w.reach !== undefined)) for (let i = 1; i <= last; i++) bed[i] = Math.min(bed[i]!, bed[i - 1]!);
+        for (let i = last - 1; i >= 0; i--) bed[i] = Math.max(bed[i]!, bed[i + 1]!);
+      }
+      solved[index] = { ...river, ...(weirs ? { weirs } : {}), bedY: bed.map((v) => Math.round(v * 100) / 100) };
       riverDocs = solved.filter(hasBed);
       riverSegs = buildRiverSegs(riverDocs);
     }
@@ -5012,6 +5237,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     bedBottom: number;
     half: number;
     reach: number;
+    /** A declared weir (river.weirs) — a built structure: no slot gorge, no rock walls, no planar fall banks. */
+    weir: boolean;
   }
   let lipList: Lip[] = [];
   let lipBuckets = makeBuckets<Lip>([], () => [0, 0, 0, 0]);
@@ -5055,6 +5282,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     capEnd: boolean;
     /** This river's falls: arc length at the lip's top, and the water above and below. */
     falls: { along: number; top: number; bottom: number }[];
+    /** Along-river positions of the ledge lips (short steps under a fall: a stepped rapid). */
+    ledges: { along: number; drop: number }[];
   }[] = [];
 
   /**
@@ -5129,7 +5358,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const hasBed = (r: RiverDoc): boolean => !!r.bedY && r.bedY.length === r.points.length;
     // a doc that already carries its levels is taken as written
     const open = (r: RiverDoc): boolean => hasBed(r) && !(r.surfaceY && r.surfaceY.length === r.points.length);
-    const docs: RiverDoc[] = riverDocs.map((r) => (open(r) ? splineRiver(withMidpoint(spliceCourses(r)), RIVER_SAMPLE) : r));
+    const docs: RiverDoc[] = riverDocs.map((r) => (open(r) ? withWeirPoints(splineRiver(withMidpoint(spliceCourses(r)), RIVER_SAMPLE)) : r));
     const minWater = MIN_WATER_VOXELS * voxelSize;
     const lakeLevel = (x: number, z: number): number => {
       let best = NaN;
@@ -5365,6 +5594,37 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       const b = docs[i]!.points[k]!;
       return Math.hypot(b[0] - a[0], b[1] - a[1]);
     };
+    // Declared weirs (`river.weirs`): from each weir upstream, every point
+    // whose own level would be under the weir's is held AT it like a lake
+    // (inLake 2: fixed, but no outlet ramp below it — the weir is the drop).
+    const heldOf = docs.map((d) => {
+      if (!d.weirs || d.weirs.length === 0 || !d.water || !d.bedY || d.bedY.length !== d.points.length) return null;
+      const held = new Float64Array(d.points.length).fill(NaN);
+      for (const weir of d.weirs) {
+        const iw = nearestPointIndex(d.points, weir.at);
+        const level = weirLevel(d.points, iw, weir);
+        if (level === undefined) continue;
+        for (let k = iw; k >= 0; k--) {
+          if (d.bedY[k]! + Math.max(0.4, depthOf(d, k) * 0.7) > level + 0.05) break;
+          if (!(held[k]! >= level)) held[k] = level;
+        }
+      }
+      return held;
+    });
+    // (after pass 1, below) water upstream of a held reach never stands under it: a
+    // reach the bank cap held lower than the backwater would be water running uphill
+    const raiseAboveHeld = (): void =>
+      heldOf.forEach((held, i) => {
+        if (!held) return;
+        const h = held.findIndex((v) => !Number.isNaN(v));
+        if (h <= 0) return;
+        for (let k = 0; k < h; k++) {
+          if (levels[i]![k]! < held[h]!) {
+            levels[i]![k] = held[h]!;
+            inLake[i]![k] = 2;
+          }
+        }
+      });
     refs.forEach((run) => {
       let level = Infinity;
       for (const [i, k] of run) {
@@ -5372,7 +5632,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         const natural = d.bedY![k]! + Math.max(0.4, depthOf(d, k) * 0.7);
         const [x, z] = d.points[k]!;
         const lake = lakeLevel(x, z);
-        if (!Number.isNaN(lake)) {
+        const held = heldOf[i] ? heldOf[i]![k]! : NaN;
+        if (!Number.isNaN(held) && !(lake > held)) {
+          level = held;
+          inLake[i]![k] = 2;
+        } else if (!Number.isNaN(lake)) {
           level = lake;
           inLake[i]![k] = 1;
         } else if (natural <= recipe.seaLevel + POOL_STEP) {
@@ -5384,6 +5648,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         levels[i]![k] = level;
       }
     });
+    raiseAboveHeld();
 
     // Where each tributary enters its trunk: the first of its points inside
     // the trunk's channel, and the trunk point there.
@@ -5524,15 +5789,20 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         let byLake = false;
         for (let j = Math.max(0, a - 3); j <= Math.min(n - 1, a + 3); j++) {
           const [ji, jk] = run[j]!;
-          if (inLake[ji]![jk]) byLake = true;
+          if (inLake[ji]![jk] === 1) byLake = true; // a weir-held reach (2) may take a fall into it: its pool, not a lake seam
         }
         if (byLake) continue;
         let reach = 0;
         for (let b = a + 1; b < n; b++) {
           reach += gaps[b]!;
           if (reach > RIVER_FALL_WINDOW) break;
-          if (env[a]! - env[b]! > best) {
-            best = env[a]! - env[b]!;
+          const drop = env[a]! - env[b]!;
+          // into a weir-held reach every sample above the fall ties (the held
+          // water is flat): the LAST of them is the lip, where the fall stood
+          // before the backwater rose — not the first, metres up the gorge
+          const [bi, bk] = run[b]!;
+          if (drop > best || (fallAt >= 0 && inLake[bi]![bk] === 2 && drop >= best - 1e-9)) {
+            best = drop;
             fallAt = a;
           }
         }
@@ -5643,13 +5913,16 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       const [sdx, sdz] = m > 1 ? unit(pts[1]!, pts[0]!) : [0, 0];
       const [edx, edz] = m > 1 ? unit(pts[m - 2]!, pts[m - 1]!) : [0, 0];
       const falls: { along: number; top: number; bottom: number }[] = [];
+      // a rapid's LEDGES (short steps under a fall's height): the water churns white below each (white-water.ts)
+      const ledges: { along: number; drop: number }[] = [];
       if (d.water && d.surfaceY && d.surfaceY.length === m) {
         for (let k = 1; k < m; k++) {
           const drop = d.surfaceY[k - 1]! - d.surfaceY[k]!;
           if (drop >= 2 && along[k]! - along[k - 1]! <= RIVER_FALL_LIP + 0.5) falls.push({ along: along[k - 1]!, top: d.surfaceY[k - 1]!, bottom: d.surfaceY[k]! });
+          else if (isLedge(drop, along[k]! - along[k - 1]!, RIVER_FALL_LIP)) ledges.push({ along: along[k - 1]!, drop });
         }
       }
-      return { along, sx: pts[0]![0], sz: pts[0]![1], sdx, sdz, ex: pts[m - 1]![0], ez: pts[m - 1]![1], edx, edz, capStart: capStart[index]!, capEnd: capEnd[index]!, falls };
+      return { along, sx: pts[0]![0], sz: pts[0]![1], sdx, sdz, ex: pts[m - 1]![0], ez: pts[m - 1]![1], edx, edz, capStart: capStart[index]!, capEnd: capEnd[index]!, falls, ledges };
     });
     lipList = [];
     riverDocs.forEach((d, owner) => {
@@ -5674,6 +5947,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
           bedBottom: d.bedY[k]!,
           half: width / 2,
           reach: width / 2 + riverBank(d, d.widths && d.widths.length === m ? width : NaN) * 2.5,
+          weir: isWeirLip(d, a, d.surfaceY[k - 1]!),
         });
       }
     });
@@ -5943,7 +6217,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       const width = Number.isNaN(hit.width) ? river.width : hit.width;
       const half = (width / 2) * (0.2 + 0.8 * grow);
       const bankNow = riverBank(river, hit.width) * (0.35 + 0.65 * grow);
-      if (hasMarsh && hit.distance - half < bankNow * MARSH_RIVER_RIM) riverRim = true;
+      if (hasMarsh && hit.distance - half < bankNow * MARSH_RIVER_RIM && !(river.weirs && heldInMarsh(hit.side, x, z))) riverRim = true;
       let reach = half + bankNow * RIVER_WATER_REACH;
       // a crafted plunge pool fills its bowl (the carve and this read one shape)
       if (siteGorges.length > 0 && hit.distance > reach) {
@@ -6010,7 +6284,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const surf = river.surfaceY!;
     const drop = Math.max(0, surf[seg]! - surf[Math.min(seg + 1, last)]!);
     // a still pool drifts, a rapid runs: speed from the local fall of the surface
-    let speed = Math.min(3.5, 0.45 + 18 * (drop / len));
+    let speed = riverFlowSpeed(drop, len);
+    // and churns white below each ledge of a stepped rapid
+    for (const l of riverGeom[hit.owner]!.ledges) speed = Math.max(speed, ledgeChurnSpeed(hit.along - l.along, l.drop));
     // still off a lake, gathering pace over the first 40 m of the river: the
     // shader fades the still texture into the flowing one by this speed
     for (const lake of bucketAt(lakes, x, z) as readonly LakeDoc[]) {
@@ -6065,6 +6341,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     out.flowX = hx * speed;
     out.flowZ = hz * speed;
+    // a drowned rapid (`overSea`): the channel keeps its own surface just over the sea, with its current
+    if (river.overSea && out.y < recipe.seaLevel + RIVER_OVER_SEA) out.y = recipe.seaLevel + RIVER_OVER_SEA;
     out.kind = "river";
     out.material = undefined;
     out.floor = floor === Infinity ? -Infinity : floor;

@@ -38,6 +38,15 @@ export interface PreparedHeightPatch {
   raster(x: number, z: number): number;
   /** Blend weight in [0, 1] (edge feather times the `weights` opacity); 0 outside and on the boundary. */
   weight(x: number, z: number): number;
+  /**
+   * Share (0..1) of the column this patch takes over from the planar sea-cliff / butte walls (the field's `hold`): its
+   * `weight`. A `raiseOnly` patch holds only where it actually lifts the ground (eased in over the first 0.5 m) AND the
+   * heightfield under it is gentle within 6 m (rises < 1 m, none past 2 m): round a sea stack that heightfield is the
+   * stack's top plane, not the surface, and handing those columns to it (in full or in part) stood 90 m fins and 9 m
+   * plateaus at the stack's foot (crone-beads wrack shelf, 2026-10-19: 880 such columns; 0 with this rule). Elsewhere
+   * the walls keep their own faces and read the raised heightfield where they hand over to it.
+   */
+  hold(x: number, z: number): number;
 }
 
 function smoothstep(a: number, b: number, x: number): number {
@@ -184,9 +193,22 @@ export function prepareHeightPatch(doc: HeightPatchDoc, voxelSize: number, under
     filter: Math.max(0, filter),
     raster,
     weight,
+    hold(x, z) {
+      if (!doc.raiseOnly) return weight(x, z);
+      const w = weight(x, z);
+      if (w <= 0) return 0;
+      const u0 = under(x, z), lift = smoothstep(0, 0.5, (raster(x, z) - u0) * w);
+      if (lift <= 0) return 0;
+      // the heightfield under it within 6 m must be gentle (rise <= 1 m, gone by 2 m): next to a stack's top plane it is not
+      let jump = 0;
+      for (let a = 0; a < 8 && jump < 2; a++) for (const r of [3, 6]) jump = Math.max(jump, Math.abs(under(x + r * Math.cos((a * Math.PI) / 4), z + r * Math.sin((a * Math.PI) / 4)) - u0));
+      return w * lift * (1 - smoothstep(1, 2, jump));
+    },
     apply(x, z, out) {
       const w = weight(x, z);
-      return w <= 0 ? out : out + (raster(x, z) - out) * w;
+      if (w <= 0) return out;
+      const v = out + (raster(x, z) - out) * w;
+      return doc.raiseOnly && v < out ? out : v;
     },
   };
 }

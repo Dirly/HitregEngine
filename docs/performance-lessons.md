@@ -1932,3 +1932,189 @@ shader now decides its frames once per vertex and hands the fragment stage five 
 (`impostor.ts`); `test/impostor-varyings.test.ts` counts fragment-reachable varyings and stray
 attributes on the node graph, so a new per-instance term has to be packed to land. Check any
 console run for "infringes limits" / "Invalid RenderPipeline" before measuring GPU time.
+## Large scene startup and retained model data (2026-10-20)
+
+Skelmorrow's loaded models contained 188 embedded PNG occurrences but only 41
+distinct images. At decoded RGBA size those copies totalled 1,517 MiB versus
+170 MiB of unique pixels. Deduplicating textures after GLTFLoader finishes is
+too late: every copy has already allocated a bitmap. The loader now shares
+immutable ImageBitmaps before decoding, including orientation/resize settings
+in the key, while leaving sampler and material state separate. The browser
+probe recorded 196 image requests, 41 decodes and 155 reuses. The model cache
+also drops GLTFParser after constructing the scene; its source JSON, base64
+strings and superseded textures otherwise survive for the whole session.
+
+Loading a library must not mean one HTTP round trip per small JSON file.
+The scoped batch endpoint reduced roughly 2,900 individual reads to 47 batches
+in this scene. File errors remain independent, and every batch reads current
+disk contents. The client subscribes to its closure as soon as the index loads,
+and again after WebSocket reconnection. Live-sync filters unrelated libraries
+before transmission, sends only discovery metadata for unrelated scenes, skips
+unchanged normalized assets and coalesces rebuild notifications. Client-side
+filtering alone is insufficient: unrelated 17 MB world saves still cost network
+traffic and JSON parsing before a receiver can discard them.
+Windows watch events are content-deduplicated; watcher handles close with the
+server. The transport rejects obsolete global asset broadcasts, including
+publishers left over from older in-process Vite restarts. A full process restart
+releases those old watcher handles, but is not needed to stop their broadcasts.
+
+Terrain workers import a generation-only entry instead of the complete core
+export graph. Derived cell/mesh results use a shared 128 MiB IndexedDB budget,
+invalidated by generation source, recipe, world, options and available assets.
+Cached mesh transfers were checked byte-for-byte against fresh generation.
+This avoids repeated generation but did not by itself improve total scene-open
+time materially: model uploads and shader work still dominate the cold load.
+
+Precompile visibility/culling overrides belong only around compileAsync's
+synchronous projection, never around its pending GPU promise. Holding them
+until completion renders distant objects and hides water for many frames.
+Do not force synchronous node builds in the projection hook; asynchronous
+builds borrow the correct scene-pass context and share one frame budget across
+concurrent jobs. One individual shader build can still exceed that budget.
+The editor also no longer warms the entire spell-effects catalog on open:
+Play requires a different render context and had to warm it again anyway.
+Standing scene effects still render normally; entering Play warms the catalog
+for that session. Queued warmups skip a scene or mode that has already changed.
+The editor probe used 129 textures instead of 244 after this change; its GPU
+process allocation was about 1.65 GiB instead of 2.1 GiB.
+
+Measure renderer-process memory separately from GPU-process memory and JS heap.
+In instrumented decoder/parser comparisons the renderer's private allocation
+fell from about 5.0 GiB to 2.9 GiB; GPU-process allocation stayed around 2.1 GiB.
+Those are process allocations, not live JS sizes. DevTools network capture can
+itself retain large data URLs, so disable it when measuring ordinary footprint.
+The fixes do not make the far ring free: the cold probe still took about a
+minute to finish distant streaming and had substantial startup stalls. Do not
+report a warm terrain-cache hit or an early editor-ready signal as a fully
+settled world.
+
+## Playable arrival versus distant coverage (2026-10-21)
+
+A cold Skelmorrow browser probe had its landing ground at about 14 seconds,
+but held the player until 95 seconds while roughly a thousand distant cells
+finished. Entry now requires published local landing and simulation coverage
+at the current focus. Full view coverage remains a separate, stronger check
+for tools. Background jobs must not reset the entry screen's progress forever;
+after local readiness its settling wait is bounded, without a timeout that
+releases a player into absent ground. Non-voxel scenes still wait for model
+loading, since those models supply their ground colliders.
+
+The same CPU capture found about 3.4 seconds inside portrait PNG encoding.
+Readback pixels already live on the CPU: use a CPU canvas and asynchronous
+blob encoding rather than uploading them to a GPU canvas and synchronously
+reading them back with `toDataURL`. The comparison reached world entry at
+27 seconds after Play, with about 10 seconds of app startup beforehand.
+These are isolated cold-browser timings, not a promise of settled frame rate:
+initial shader builds and texture uploads still cause substantial hitches,
+and the distant landscape continues arriving after entry.
+
+## Sprinting forward: lead the player, and sweep LOD over live instances (2026-10-21)
+
+Owner report: sprinting straight on, trees keep their LOD and cells ahead load late. Measured with
+`apps/playground/tools/sprint-probe.mts` (Shift+W in play, or `--mode edit` driving the orbit target at 9.5 m/s;
+`--ab` runs OFF/ON/OFF in one page session via `chunkManager.leadStreaming` / `foliageLod.movingSweep`). Two causes:
+
+- **The ring trailed the player.** Residency was centred on the focus cell and recomputed only on a crossing, and
+  queued loads ran in the ring walk's RASTER order (`queueCell` unshifts, so the +x/+z corner went first: running one
+  way got the cells ahead first, the other way last). Fix (`packages/core/src/stream-lead.ts`, wired in
+  `ChunkManager.update`): a smoothed focus velocity projects a lead point 3 s ahead (cap 96 m, none under 1.5 m/s,
+  reset on teleport); residency is the max of the focus's and the lead's rings (nothing behind dropped early); the
+  queue and the publish drain are ordered simulation-first, then by distance from the lead to the cell CENTRE (keys
+  name the min corner); simulation cells bypass the worker cap and the backlog gate and never wait for budget; the
+  integration budget is 6 ms instead of 2.5 while moving > 4 m/s and frames are < 25 ms; lead-ahead simulation cells
+  generate on a worker (only the body's own neighbourhood still generates inline on the main thread).
+- **The LOD sweep counted empty pool slots.** `FoliageLodSystem` re-judged 200 slots per batch per frame, but a
+  pool page has 2,048 slots, mostly empty, so one sweep took ~10 frames; at a streaming sprint's frame rate a tree
+  ran metres past its impostor/mesh switch. Now only live instances count, and a moving camera re-judges every
+  batch in full at least every 3 frames (`SWEEP_FRAMES_MOVING`). `update/foliage-lod` went 0.15 -> 0.34 ms.
+
+Edit-mode A/B at 9.5 m/s on skelmorrow (line A east of Hagsend, line B the gorge trail; OFF / ON / OFF):
+full detail ahead p5 120/152/124 m and 136/164/136 m; LOD-late samples 40/0/28 and 37/0/33; cells entered unloaded 0
+in every arm; frame work p50 within noise (34.6/33.6/32.5, 34.9/37.4/40.5 ms). Not changed and worth knowing: the
+fullRender ring (3 cells) does not reach the 170 m tree mesh distance on its diagonals, so every sample has 14-15
+cells within 145 m whose trees can only be HLOD impostors; and the frame itself is ~35 ms of work headless, mostly
+`render/draw` (15-18 ms) and `render/matrices` (~10 ms) — that, not streaming, is most of what is left. A play-mode
+before/after on a changed scene (wandering mobs arrived between runs: speed p50 7 -> 3.7 m/s, combat VFX) was not
+comparable; that is why the harness has the in-session A/B.
+
+## React dev-build performance tracks ate the tab on a big scene (2026-10-21)
+
+**Symptom:** the headless shot harness died at play-mode entry on the live Skelmorrow scene with
+`DataCloneError … out of memory`; the editor itself got sluggish on big worlds. The tab grew from 2.2 to 9.3 GB in
+85 s after one ops batch that rebuilt the scene.
+
+**Cause:** React's development build logs every render's changed props to the browser performance timeline. The
+editor panels take the scene document (6000 entities, 23 MB) as a prop, so each rebuild serialised the whole doc into
+performance entries, repeatedly, until the renderer process ran out of memory. Not a JS exception, not a hang.
+
+**Fix:** `apps/playground/src/boot.ts` switches React's performance logging off before the app loads
+(`localStorage "hitreg-react-tracks" = "1"` turns it back on for profiling). The same rebuild now takes 1.3 s.
+`tools/light-shots.mts` also hands the page a scene copy with the harness's mob removal and reference figures already
+applied, so the scene builds once; it refuses a port that is already taken (a silent reuse of someone else's dev
+server was a second cause of "no frames"); `--diag` prints each step, dev-server errors and browser memory.
+Test: `apps/playground/test/react-perf-track-off.test.ts`.
+
+**Rule:** anything that hands a scene-sized document to a React prop must assume the dev build may serialise it;
+keep documents behind stores/refs, and keep this switch off in headless runs.
+
+## Frame breakdown on the moor: idle skeletons, a lopsided ring, and the mob controllers (2026-10-22)
+
+`tools/sprint-probe.mts --breakdown` now takes a frame breakdown standing at each line's start and mid-sprint: 90
+clean frames (profiler only — the honest timings), then 90 instrumented frames that wrap three's `renderObject`
+(draws per pass and scene branch, materials, the slowest render objects with their material/attribute version
+churn) and `Object3D.updateMatrix`/`updateMatrixWorld` (calls per branch, plus sampled CALLER stacks of every
+matrix walk entered from outside the renderer). `--arms "a=<js>~b=<js>"` runs in-session A/B arms; `--stand-only`
+skips the drive. Read the instrumented arm for counts, never for ms — in play its wrappers slowed frames enough to
+spiral the fixed-step loop. The first draw of each pass absorbs the pass setup (~3 ms on the "slowest" list); that
+is not that object's cost.
+
+- **"render/matrices ~10 ms" was idle skeletons.** The renderer walk did ~30k `updateMatrix` a frame while only
+  ~14k objects were reachable: every edit-mode character (each wanderer/population preview ~300 bones) re-walked
+  its skeleton every frame although `poseStill` posed it once. The bone hold existed but only `update()` (play)
+  ever set `entry.held`. `poseStill` now marks an unchanged pose held (`holdBones` respected), so the walk skips
+  the skeleton until the pose, scrub time or the character's transform changes. Edit-mode A/B in one session
+  (`animations.holdBones`): updateMatrix 30.7k -> 15.7k a frame, render/matrices 10.7 -> 5.7 ms, frame work
+  standing 31.7 -> 24.0 ms, sprinting matrices 11.0 -> 6.8 ms. Test: test/animation-pose-still.test.ts.
+- The editor's socket preview re-placed every held item every frame (three ancestor walks of the bone each);
+  it now skips a socket whose pose version, params and carrier matrix are unchanged. The dev bridge's once-a-second
+  context post called `getWorldPosition` on every entity (~30k matrix updates in one frame, a spike per second);
+  it reads `matrixWorld` instead.
+- What is left in edit mode: ~14k objects walked because the editor never freezes still entities (play does);
+  the in-session `freezeStatic(true)` arm cut the walk to ~3.8k. Freezing in the editor needs the gizmo/reconcile
+  paths to thaw or refresh what they move — not done.
+- **The ring was lopsided.** `computeChunkStates` measured from the focus's nearest cell CORNER to each cell's MIN
+  corner, so the -x/-z side reached one cell less: on skelmorrow's 48 m grid fullRender 3 guaranteed full detail
+  only 73 m out (simulation 2: 25 m). It now measures to the cell CENTRE less half a cell (the four cells around the
+  corner are 0): symmetric, fullRender 3 = 104 m guaranteed with 32 cells (was 29), simulation 2 = 73 m with 16
+  (was 13; the server's simulation residency uses the same function). Test: "is symmetric about the focus".
+- **The 170 m tree switch vs the ring, measured** (edit mode, same session): fullRender 4 reaches 170 m
+  (60 cells; full detail ahead p5 148 -> 204 m, impostor-only cells within 145 m: none) for about +3-4 ms standing
+  (draw +1.6, matrices +0.8, render walk +0.8; ~600 more near trees); moving the switch to 105 m saved nothing
+  measurable (26.6 vs ~26.7 ms) and turns trees to impostors 65 m sooner. Neither applied: a content call.
+- **Local play on the moor is 78 ms of work, and most of it is not rendering**: `fixed/scripts/third-person-
+  controller` 23.7 ms (~190 controllers by call counts — every mob in the world steps at 60 Hz whatever its distance, and slow
+  frames run ~4-5 fixed steps), render/draw 12.5, matrices 6.4, animations 3.8, combat-actor 3.7, bone-socket 3.2.
+  With a dedicated server the tab does not step mobs.
+- **Mob distance sleep (coordinator ruling 2026-10-22; EQ/WoW rule)** — `ScriptRuntime` (`MOB_SLEEP`, `setPlayerFoci`,
+  `mobBand`), applied by whichever host simulates mobs (main.ts local play, `GameServer.tick` — the same code path):
+  a mob body (the body over a `mob-brain`) farther than 160 m from EVERY player is asleep: no fixed or late step
+  anywhere in its subtree (controller, brain, combat actor, sockets, looks), horizontal velocity zeroed on entry,
+  nothing disposed, so roam/leash state resumes where it stopped; it wakes on the first step a player is within
+  160 m. 80-160 m: its subtree steps every 3rd fixed step with 3x dt (20 Hz). Under 80 m: every step. Client
+  animation (AnimationSystem.skip) never poses an asleep mob and poses a mid-band one only inside the camera
+  frustum; the server never animates. No players known = no sleep (an empty server keeps its dormancy pauses).
+  Timers (ctx.after/every) and event subscriptions still run while asleep. On the wire an asleep, unchanged mob is not
+  refreshed either (GameServer.buildStateFor): 200 asleep mobs = 0 updates in 60 ticks (was 200, the 1 s refresh); its
+  wake changes it, so it is sent the step it moves. Spawn-area respawn timers are NpcManager ticks, not script
+  steps: a slot killed before the player left is back when they return (server test/mob-sleep-respawn.test.ts). Tests: scripting test/mob-sleep.test.ts,
+  server test/mob-sleep.test.ts. Numbers (skelmorrow moor, play, ~190 mobs, off/on/off arms in one
+  session): controller+brain+combat-actor+bone-socket+animations 38-43 ms -> 1.0 ms; frame work standing 77-80 -> 34 ms,
+  sprinting 84 -> 33 ms; frame interval p50 91-101 -> 35 ms. Streaming unchanged (ready-ahead p5 140 -> 148 m).
+  Pitfall met building it: AnimationSystem.update's loop body declares its own `skip` (pose LOD) — an outer hook
+  of the same name is a TDZ ReferenceError on every play frame, which held every fast-travel forever (light-shots
+  hung at `travelling:true`). test/animation-pose-still.test.ts now drives a full update() with the hook set.
+- **Tree switch at the ring**: the instanced trees' mesh->impostor switch is now set from the streamer —
+  min(170, fullRender x cellSize - cellSize/sqrt2) = 110 m on skelmorrow (inside the 104 m guaranteed ring; beyond
+  it cells are HLOD proxies whose trees can only be impostors). Full-detail ring 4 not applied (+3-4 ms).
+- **Next: freeze still entities in the editor** (walk 14k -> ~3.8k objects, ~-3 ms edit-mode matrices): freeze as
+  play does, thaw the frozen root holding the selection / an active gizmo, re-freeze after each reconcile.

@@ -17,9 +17,12 @@
  * this file's page:
  *   manifest.json                      (GameManifest — entry scene, etc.)
  *   assets-index.json                  ({ models:[], materials:[], prefabs:[], scenes:[], ... })
- *   assets/<kind>/<file>               (the copied content)
+ *   content/<kind>/<file>              (the copied content)
  */
 import { AudioSystem, type AudioComponentData } from "./audio-system.js";
+import { bundleAssetReader } from "./bundle-reads.js";
+import { setAssetBundleBase } from "./asset-url.js";
+import { GroundLoadHold } from "./ground-load-hold.js";
 import * as THREE from "three/webgpu";
 import CameraControls from "camera-controls";
 import {
@@ -38,6 +41,7 @@ import {
   NetStateStore,
   registerCharacterNetState,
   registerTransferLockNetState,
+  registerCooldownNetState,
   Profiler,
   getVoxelWorld,
   findCreation,
@@ -91,7 +95,7 @@ import {
   registerSessionNetState,
   type GatewayFlow,
 } from "./net-client.js";
-import type { GatewayCharacter, PlayGrant } from "./gateway.js";
+import { GatewayClient, mountGatewayPanel, type GatewayCharacter, type PlayGrant } from "./gateway.js";
 import { createCreationPreview } from "./creation-preview.js";
 import { loadingArtOf, mountPortalCurtain, type PortalCurtain } from "./portal-curtain.js";
 
@@ -100,47 +104,44 @@ CameraControls.install({ THREE: THREE as unknown as Parameters<typeof CameraCont
 // bundle lives beside the page by default; ?base=/path/ points elsewhere (dev testing)
 const BASE = new URL(new URLSearchParams(location.search).get("base") ?? ".", location.href).href;
 const url = (p: string) => new URL(p, BASE).href;
+setAssetBundleBase(BASE);
 
 /**
  * `preferredScene`: a scene NAME to boot instead of the entry, when the bundle
  * carries it (`?scene=`, or the scene a server grant names); ignored otherwise.
  */
-async function loadBundleAssets(assets: AssetLibrary, entryScene: string, preferredScene: string | null = null): Promise<SceneDoc> {
-  const index = (await fetch(url("assets-index.json")).then((r) => r.json())) as Record<string, string[]>;
+async function loadBundleAssets(assets: AssetLibrary, index: Record<string, string[]>, entryScene: string, preferredScene: string | null = null): Promise<SceneDoc> {
   if (preferredScene && (index["scenes"] ?? []).includes(`${preferredScene}.scene.json`)) entryScene = `${preferredScene}.scene.json`;
   const fileUrl = (kind: string, file: string) => url(`content/${kind}/${file}`);
-  // At most 24 requests in flight: a project ships thousands of data files, and Chrome refuses
-  // a few thousand simultaneous fetches outright (net::ERR_INSUFFICIENT_RESOURCES — the game
-  // never started). Same files, same order of registration; only the concurrency is bounded.
-  let inFlight = 0;
-  const queued: Array<() => void> = [];
-  const slot = (): Promise<void> => (inFlight < 24 ? (inFlight++, Promise.resolve()) : new Promise((r) => queued.push(r)));
-  const release = (): void => {
-    const next = queued.shift();
-    if (next) next();
-    else inFlight--;
-  };
-  const readJson = async (kind: string, file: string): Promise<unknown> => {
-    await slot();
-    try {
-      return await fetch(fileUrl(kind, file)).then((r) => r.json());
-    } finally {
-      release();
-    }
-  };
+  const readJson = await bundleAssetReader(index, url);
 
   const jsonKinds: { kind: string; type?: string }[] = [
     { kind: "prefabs" },
     { kind: "materials", type: "material" },
     { kind: "terrain", type: "terrain-heightfield" },
     { kind: "spritesheets", type: "spritesheet" },
+    { kind: "vfx", type: "vfx" },
+    { kind: "spells", type: "spell" },
+    { kind: "items", type: "item" },
+    { kind: "progression", type: "progression" },
+    { kind: "creation", type: "creation" },
+    { kind: "quests", type: "quest" },
+    { kind: "dialogues", type: "dialogue" },
+    { kind: "shops", type: "shop" },
+    { kind: "places", type: "places" },
+    { kind: "perform-actions", type: "performActions" },
   ];
   await Promise.all(
     jsonKinds.map(async ({ kind, type }) => {
       const files = (index[kind] ?? []).filter((f) => f.endsWith(".json"));
-      const loaded = await Promise.all(files.map(async (file) => ({ id: file.replace(/\.json$/, ""), data: await readJson(kind, file) })));
+      const loaded = await Promise.all(files.map(async (file) => {
+        try { return { id: file.replace(/\.json$/, ""), data: await readJson(kind, file) }; }
+        catch (error) { console.warn(`[assets] skipped ${kind}/${file}:`, error); return null; }
+      }));
       // a bad data asset is skipped with a warning, never a blank game (see asset-loader.ts)
-      for (const { id, data } of loaded) {
+      for (const entry of loaded) {
+        if (!entry) continue;
+        const { id, data } = entry;
         try {
           if (type) assets.addDataAsset({ id, type, name: id, data });
           else assets.addPrefab(id, data);
@@ -207,8 +208,29 @@ async function main(): Promise<void> {
     }
   })();
   // a page reloaded onto the scene a grant named carries that grant across
-  const resumed = netEndpoint.kind === "gateway" ? takePendingGrant<PlayGrant, GatewayCharacter>(sessionStore) : null;
+  let resumed: { grant: PlayGrant; character: GatewayCharacter } | null = netEndpoint.kind === "gateway" ? takePendingGrant<PlayGrant, GatewayCharacter>(sessionStore) : null;
   if (networked) registerCommsEvents(events); // "chat.message" — local-only, what THIS tab was allowed to see
+
+  const index = await fetch(url("assets-index.json")).then((r) => r.json()) as Record<string, string[]>;
+  if (netEndpoint.kind === "gateway" && !resumed) {
+    // Sign-in and character selection must not build a world, stream terrain,
+    // upload the scene's models or warm spell shaders behind the card.
+    // The directory supplies creation rules; previews resolve only the models/textures they use.
+    const files = new Set([...(index["models"] ?? []).map((f) => `models/${f}`), ...(index["textures"] ?? []).map((f) => `textures/${f}`)]);
+    const modelUrl = (id: string): string | undefined => files.has(`models/${id}`) ? url(`content/models/${id}`) : undefined;
+    const textureUrl = (id: string): string | undefined => files.has(`textures/${id}`) ? url(`content/textures/${id}`) : undefined;
+    resumed = await new Promise<{ grant: PlayGrant; character: GatewayCharacter }>((resolve) => {
+      const panel = mountGatewayPanel({
+        client: new GatewayClient(netEndpoint.url),
+        textureUrl,
+        preview: (canvas, creation) => createCreationPreview(canvas, creation, modelUrl, textureUrl),
+        onPlay: (grant, character) => {
+          panel.dispose();
+          resolve({ grant, character });
+        },
+      });
+    });
+  }
 
   // Loading art (docs/hosting.md → "Loading art"): a scene this page boots on —
   // the reload a server transfer makes, or a direct ?scene= — shows its
@@ -230,12 +252,13 @@ async function main(): Promise<void> {
   }
 
   // 2. assets + scene doc
-  const doc = await loadBundleAssets(assets, manifest.entry.scene, resumed?.grant.scene ?? query.get("scene"));
+  const doc = await loadBundleAssets(assets, index, manifest.entry.scene, resumed?.grant.scene ?? query.get("scene"));
 
   bootCurtain?.setProgress(0.4);
   // 3. canvas + renderer + physics
   const canvas = document.getElementById("game") as HTMLCanvasElement;
-  const renderer = new EngineRenderer(canvas);
+  // ?reversedDepth=0: standard depth buffer, for diagnosing depth-related looks
+  const renderer = new EngineRenderer(canvas, { reversedDepth: new URLSearchParams(location.search).get("reversedDepth") !== "0" });
   await Promise.all([renderer.init(), initPhysics()]);
 
   // 4. camera + controls
@@ -396,7 +419,7 @@ async function main(): Promise<void> {
   const screenPoint = new THREE.Vector3();
   const worldToScreen = (x: number, y: number, z: number): { x: number; y: number; distance: number } | null => {
     screenPoint.set(x, y, z).project(camera);
-    if (screenPoint.z < -1 || screenPoint.z > 1 || Math.abs(screenPoint.x) > 1.1 || Math.abs(screenPoint.y) > 1.1) return null;
+    if (screenPoint.z < (camera.reversedDepth ? 0 : -1) || screenPoint.z > 1 || Math.abs(screenPoint.x) > 1.1 || Math.abs(screenPoint.y) > 1.1) return null;
     const rect = canvas.getBoundingClientRect();
     return { x: rect.left + ((screenPoint.x + 1) / 2) * rect.width, y: rect.top + ((1 - screenPoint.y) / 2) * rect.height, distance: camera.position.distanceTo(screenPoint.set(x, y, z)) };
   };
@@ -609,6 +632,7 @@ async function main(): Promise<void> {
   if (!presence) {
     registerCharacterNetState(netState);
     registerTransferLockNetState(netState);
+    registerCooldownNetState(netState);
   }
 
   const scripts = new ScriptRuntime({
@@ -764,6 +788,13 @@ async function main(): Promise<void> {
       connected: () => !networked || presence?.serverLink().phase === "connected",
       hasBody: () => !networked || localPlayerId() !== null,
       loading: () => chunkManager.stats.loading,
+      ready: () => {
+        const id = localPlayerId() ?? (!networked ? followId : null);
+        const position = id ? sim.getPosition(id) : null;
+        const ready = position ? chunkManager.isArrivalReady(position[0], position[2])
+          : !networked && chunkManager.isArrivalReady(camera.position.x, camera.position.z);
+        return ready && (!!voxelWorldId || gltfLoadingCount() === 0);
+      },
       switching: () => false,
       place: () => {
         const id = localPlayerId();
@@ -1007,10 +1038,12 @@ async function main(): Promise<void> {
       `geometries ${info.memory.geometries}   F3 hide · F4 gpu timing`;
   }, 250);
 
+  const groundHold = new GroundLoadHold();
   const loop = new FixedTimestepLoop({
     fixedUpdate: (dt) => {
       if (++staticsStreamStep % 6 === 0) sim.updateStaticsAroundBodies();
       sim.step(dt);
+      groundHold.update(sim, localPlayerId(), (x, z) => chunkManager.isCellLoaded(x, z));
       for (const [id, state] of sim.states()) {
         const obj = built.objects.get(id);
         if (obj) applyBodyState(obj, state);
@@ -1119,7 +1152,11 @@ async function main(): Promise<void> {
     let progress = 0.6;
     let quiet = 0;
     const poll = setInterval(() => {
-      const ready = chunkManager.stats.loading === 0 && gltfLoadingCount() === 0 && chunkManager.isViewReady() && (!networked || localPlayerId() !== null);
+      const id = localPlayerId() ?? (!networked ? followId : null);
+      const position = id ? sim.getPosition(id) : null;
+      const groundReady = position ? chunkManager.isArrivalReady(position[0], position[2])
+        : !networked && chunkManager.isArrivalReady(camera.position.x, camera.position.z);
+      const ready = groundReady && (!!voxelWorldId || gltfLoadingCount() === 0);
       quiet = ready ? quiet + 1 : 0;
       curtain.setProgress((progress += (0.95 - progress) * 0.05));
       if (quiet < 3 && performance.now() - started < 30000) return;

@@ -18,8 +18,10 @@
 // The entry scene should be the scene main hosts (`--scene`); a grant for
 // another scene reloads the page on it. Details: docs/hosting.md → "The
 // published client".
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { cpSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 const args = process.argv.slice(2);
 const VALUED = new Set(["--gateway", "--server", "--out"]);
 const flags = new Set();
@@ -63,7 +65,7 @@ if ((values.gateway || values.server) && mode !== "server") {
 }
 const out = values.out ?? `dist/${project}`;
 console.log("1/3 content + manifest…");
-execSync(`node tools/export-game.mjs ${project} ${entry} ${out}`, { stdio: "inherit" });
+execFileSync(process.execPath, ["tools/export-game.mjs", project, entry, out], { stdio: "inherit" });
 {
   // the multiplayer half of the manifest: what export-game cannot know
   const file = `${out}/manifest.json`;
@@ -79,7 +81,9 @@ execSync(`node tools/export-game.mjs ${project} ${entry} ${out}`, { stdio: "inhe
   writeFileSync(file, JSON.stringify(manifest, null, 2));
 }
 console.log("2/3 building editor-free runtime…");
-execSync("npx vite build", { stdio: "inherit", env: { ...process.env, GAME: "1", HITREG_CONSOLE: withConsole ? "1" : "0" } });
+const require = createRequire(import.meta.url);
+const vite = join(dirname(require.resolve("vite/package.json")), "bin/vite.js");
+execFileSync(process.execPath, [vite, "build"], { stdio: "inherit", env: { ...process.env, GAME: "1", HITREG_PROJECT: project, HITREG_CONSOLE: withConsole ? "1" : "0" } });
 console.log("3/3 assembling bundle…");
 cpSync("dist-game/play.html", `${out}/index.html`);
 cpSync("dist-game/assets", `${out}/assets`, { recursive: true });

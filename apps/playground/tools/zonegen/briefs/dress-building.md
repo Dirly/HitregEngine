@@ -10,6 +10,8 @@ You furnish ONE building, every room, for the people who use it. You choose WHAT
    `{ "id": "fireside", "set": "hearth-seating", "place": { "kind": "auto", "room": "G-1", "near": "hearth" }, "note": "..." }`
    `prefer`: `wall` (back to a wall, the default for wall pieces), `corner`, `open` (the default for free-standing pieces), `near` (with `near`: an earlier item id, `hearth`, `door`, `stair`). Optional `wall` limits it to one wall. A set item may add `"mirror": true` to swap the set's left and right; leave it out and the resolver mirrors it when that fits better. Small things go `on` an item: `{ "kind": "on", "item": "<item id>" }`.
    Order matters: items resolve top to bottom and earlier ones win. Put sets first, the biggest and most important first, then single pieces.
+   Quest objects of this place (a quest binds only to an entity with that exact id; choose each prop by name from the menu, e.g. a strongbox, a ledger on a desk, a bell on a post):
+{questObjects}
 5. Check: `npx tsx tools/dress.mts check --project {project} --plan {plan} --quiet`. It prints the spot chosen for every auto item, then the findings, then the verdict line `CHECK <plan>: N placements, V violations, W warnings -> ok|FAILED`.
 6. Adjust only what it names. An item that does not fit says how much room was left and what refused it: choose a smaller piece, another room, another `prefer`, or move it earlier. Fix every warning about your plan.
 

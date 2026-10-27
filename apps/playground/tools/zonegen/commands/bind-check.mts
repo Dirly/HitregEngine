@@ -11,7 +11,9 @@
  * EXPLAINED here, not hidden: a talk target / giver that is a resident of another zone town or a placed quest entity,
  * and a place id that the quest's zone places table holds. Everything else it prints is an error.
  * Own checks: the writer's text is in (no `[write]` label, a journal description), every place token resolves in the
- * table its step uses, the giver's dialogue carries `acceptQuest` and the turn-in's `turnInQuest`.
+ * table its step uses, the giver's dialogue carries `acceptQuest` and the turn-in's `turnInQuest`,
+ * a placed npc object has its dialogue, and no quest id is also an item / data-asset id in the closure
+ * (`quest-id-collision`).
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -19,9 +21,59 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { placeTokens, questSchema, type Quest } from "@hitreg/core";
 import { exists, finish, readJson, type Ctx, type Finding } from "../lib.mts";
-import { loadZonePlan, readBindReport, residents, sceneIndex } from "./_zone.mts";
+import { instanceScenes, loadZonePlan, readBindReport, residents, sceneIndex, type SceneEntity } from "./_zone.mts";
 import { isUnwritten } from "./bind.mts";
 import { err, requireZone } from "./_shared.mts";
+import { closure, PROJECTS } from "../../_closure.mjs";
+
+/**
+ * The data-asset folders that share ONE id namespace with quests at runtime (src/asset-loader.ts registers them all by
+ * file name into AssetLibrary's single data-asset map): a quest whose id is also an item's is shadowed by it — the
+ * second `addDataAsset` is skipped (2026-10-21: quest `lamp-oil` lost to foundation's item `lamp-oil`).
+ */
+export const DATA_ASSET_KINDS = ["items", "materials", "terrain", "spritesheets", "vfx", "spells", "progression", "creation", "dialogues", "shops", "places", "perform-actions"] as const;
+
+/** Each quest id that is also a non-quest data asset somewhere in `roots` (closure asset folders): id -> "kind/file (project)". */
+export function questIdCollisions(roots: readonly string[], questIds: Iterable<string>): Map<string, string[]> {
+  const want = new Set(questIds), out = new Map<string, string[]>();
+  for (const root of roots)
+    for (const kind of DATA_ASSET_KINDS) {
+      const dir = path.join(root, kind);
+      if (!fs.existsSync(dir)) continue;
+      for (const f of fs.readdirSync(dir)) {
+        const id = f.endsWith(".json") ? f.slice(0, -5) : "";
+        if (id && want.has(id)) out.set(id, [...(out.get(id) ?? []), `${kind}/${f} (${path.basename(path.dirname(root))})`]);
+      }
+    }
+  return out;
+}
+
+/** World XZ of an entity, through its parents (spawn bodies sit under their area). */
+function worldXZ(entities: ReadonlyMap<string, SceneEntity>, id: string): [number, number] | null {
+  let x = 0, z = 0, seen = false;
+  for (let e = entities.get(id), k = 0; e && k < 16; e = e.parent ? entities.get(e.parent) : undefined, k++) {
+    const p = (e.components.transform as { position?: number[] } | undefined)?.position;
+    if (p && p.length >= 3) (x += p[0]!), (z += p[2]!), (seen = true);
+  }
+  return seen ? [x, z] : null;
+}
+
+/**
+ * The bodies a kill target (or a collect step's `from`) can be: `tag:<tag>` = every entity carrying the tag; otherwise the
+ * entity itself, its `<target>-` copies, or the spawn template id. Positions in world XZ (null when unplaced).
+ */
+export function killBodies(entities: ReadonlyMap<string, SceneEntity>, target: string): { id: string; at: [number, number] | null }[] {
+  const out: { id: string; at: [number, number] | null }[] = [];
+  const tag = target.startsWith("tag:") ? target.slice(4) : "";
+  for (const [id, e] of entities) {
+    const hit = tag ? (e.tags ?? []).includes(tag) : id === target || id.startsWith(`${target}-`);
+    if (hit) out.push({ id, at: worldXZ(entities, id) });
+  }
+  return out;
+}
+
+/** Metres beyond a step's area within which its creatures may stand (a pack leashed at the edge, a wanderer passing). */
+export const KILL_REACH = 250;
 
 export async function run(ctx: Ctx): Promise<number> {
   const bad = requireZone(ctx.zone, "bind-check");
@@ -38,6 +90,8 @@ export async function run(ctx: Ctx): Promise<number> {
   const people = residents(ctx);
   const scene = sceneIndex(ctx);
   const entityIds = new Set(plan.graph.entities.map((e) => e.id));
+  const instances = instanceScenes(ctx, scene);
+  const instanceScene = (name: string) => instances.find((s) => s.scene === name) ?? { scene: name, file: "", found: false, entities: new Map() };
   const dialogueId = (id: string): string => {
     const r = people.get(id);
     if (r) return r.dialogue || `${r.townName}/${id}`;
@@ -51,6 +105,10 @@ export async function run(ctx: Ctx): Promise<number> {
   };
 
   const bound = report.quests.filter((r) => r.state === "bound");
+  // one id namespace for every data asset: a quest named like an item is shadowed by it at load
+  const roots = closure(path.basename(p.projectDir)).map((n: string) => path.join(PROJECTS, n, "assets"));
+  for (const [id, hits] of questIdCollisions(roots, bound.map((r) => r.id)))
+    err(f, "quest-id-collision", `quest ${id} has the same id as ${hits.join(", ")} — data assets share one id namespace, so the quest is shadowed at load; rename the quest (e.g. a verb phrase: lamp-oil -> foul-the-lamp)`, id);
   const byTown = new Map<string, { quests: Quest[]; dialogues: Set<string> }>();
   for (const row of bound) {
     const file = path.join(assets, "quests", `${row.id}.json`);
@@ -83,6 +141,39 @@ export async function run(ctx: Ctx): Promise<number> {
       if (!file || !exists(file)) return false;
       return JSON.stringify(readJson(file)).includes(`"do":"${action}","quest":"${q.id}"`) || new RegExp(`"do":"${action}"[^}]*"quest":"${q.id}"`).test(JSON.stringify(readJson(file)));
     };
+    // field steps: every kill and drop-from-the-slain names bodies that exist where the step happens; a collected item is an
+    // item asset; a visit (discover) has a place to arrive at
+    for (const o of q.objectives) {
+      const where = o.scene && o.scene !== scene.scene ? instanceScene(o.scene) : scene;
+      const target = o.kind === "kill" ? o.target : o.kind === "collect" ? (o.from ?? "") : "";
+      if (target) {
+        const bodies = killBodies(where.entities, target);
+        if (!bodies.length) err(f, "kill-target-absent", `${q.id} objective ${o.id}: no body for ${target} in scene ${where.scene} (zonegen populate, a site pack, or the dungeon's own spawns)`, q.id);
+        else {
+          const area = o.area ?? q.area;
+          const placed = bodies.filter((b) => b.at);
+          // distance is judged in the world scene only (an instance is small and its bodies are its own)
+          if (area && where === scene && placed.length && !placed.some((b) => Math.hypot(b.at![0] - area.center[0], b.at![1] - area.center[1]) <= area.radius + KILL_REACH))
+            f.push({ level: "warn", code: "kill-target-far", message: `${q.id} objective ${o.id}: no ${target} within ${area.radius + KILL_REACH} m of ${area.label} (${placed.length} elsewhere) — the player is sent where none stand`, ref: q.id });
+        }
+      }
+      if (o.kind === "collect" && !exists(path.join(assets, "items", `${o.target}.json`)) && !roots.some((r) => exists(path.join(r, "items", `${o.target}.json`))))
+        err(f, "drop-missing", `${q.id} objective ${o.id}: item ${o.target} has no item asset in the closure (zonegen items)`, q.id);
+      if (o.kind === "visit" && !(o.area ?? q.area)) err(f, "visit-no-area", `${q.id} objective ${o.id}: a visit (discover) with no area to arrive in`, q.id);
+    }
+    // a placed object a step uses runs the `npc` builtin: it only answers a click when its `dialogue` asset exists (npc.talk()
+    // returns before anything without one, and a readable's `read` event is raised inside talk) — a missing asset is a
+    // dead object for a real player (2026-10-21: 19 quest objects named dialogues nobody had written)
+    for (const o of q.objectives) {
+      if (!["interact", "deliver", "read", "talk"].includes(o.kind) || !o.target || people.get(o.target)) continue;
+      // a step inside an instance names its scene: the object lives in that dungeon's scene, not the world's
+      const where = o.scene && o.scene !== scene.scene ? instanceScene(o.scene) : scene;
+      const script = where.entities.get(o.target)?.components.script as { name?: string; params?: { dialogue?: string } } | undefined;
+      if (script?.name !== "npc") continue;
+      const id = script.params?.dialogue ?? "";
+      if (!id) err(f, "object-dialogue-missing", `${q.id} objective ${o.id}: ${o.target} runs the npc builtin with no dialogue param — it cannot be used or read (declare its dialogue in the zone plan and wire it)`, q.id);
+      else if (!exists(dialogueFile(id))) err(f, "object-dialogue-missing", `${q.id} objective ${o.id}: ${o.target} names dialogue ${id}, which does not exist — write it`, q.id);
+    }
     if (q.giver && !carries(q.giver, "acceptQuest")) err(f, "offer-missing", `${q.id}: ${q.giver}'s dialogue (${dialogueId(q.giver) || "none"}) has no acceptQuest for it`, q.id);
     if (q.turnIn && !carries(q.turnIn, "turnInQuest")) err(f, "hand-in-missing", `${q.id}: ${q.turnIn}'s dialogue (${dialogueId(q.turnIn) || "none"}) has no turnInQuest for it`, q.id);
 
@@ -121,7 +212,9 @@ export async function run(ctx: Ctx): Promise<number> {
         const place = /unknown place "([^"]+)"/.exec(pr)?.[1];
         const quest = /^quest\.([^.]+)\.json/.exec(pr)?.[1];
         const q = slot.quests.find((x) => x.id === quest);
-        const tables = q ? new Set([q.places, ...q.objectives.map((o) => o.places)].filter(Boolean)) : new Set<string>();
+        // a problem in a DIALOGUE file names no quest: judge its places against every bound quest of this town stage
+        const forTables = q ? [q] : slot.quests;
+        const tables = new Set(forTables.flatMap((x) => [x.places, ...x.objectives.map((o) => o.places)]).filter(Boolean));
         const inZoneTables = place ? [...tables].some((t) => placesTable(t).has(place)) : false;
         if (who && (people.has(who) || (entityIds.has(who) && scene.entities.has(who)))) {
           explained++;

@@ -31,6 +31,7 @@ import {
   sceneDocSchema,
   snapPlacementOps,
 } from "@hitreg/core";
+import { applyOpsToSceneFile } from "./_scene-write.mts";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -117,8 +118,7 @@ if (command === "snap") {
       [...counts.entries()].map(([action, n]) => `${action}: ${n}`).join(", "),
   );
   if (ops.length > 0 && !has("dry-run")) {
-    const next = applyOps(doc, ops, registry).doc;
-    writeFileSync(scenePath, JSON.stringify(next, null, 2) + "\n", "utf8");
+    applyOpsToSceneFile(scenePath, ops, (d, o) => applyOps(d, o, registry), { label: "place" }); // fresh read under the scene lock (tools/_scene-write.mts)
     console.log(`wrote ${relative(process.cwd(), scenePath)}`);
   } else if (has("dry-run")) {
     console.log("(dry run — nothing written)");

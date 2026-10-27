@@ -44,9 +44,10 @@ import {
   type Op,
   type SanctuaryCircle,
 } from "@hitreg/core";
-import { digest, exists, readJson, writeJson, type Ctx, type Finding } from "../lib.mts";
+import { digest, digestMatches, exists, readJson, writeJson, type Ctx, type Finding } from "../lib.mts";
 import { HABITATS, castSchema, type Bestiary, type Creature } from "../schemas.mts";
 import { loadZonePlan, type ZonePlan } from "./_zone.mts";
+import { DISPOSITIONS, fodderLevel, starterDisposition, starterMixFindings, type Shares, WANDER_RULES, loadWanderers, longestRun, nameSlug, offsetLine, resample, routeLength, wandererFindings, wanderersFile, type WandererArea } from "./_wanderers.mts";
 import { checkHumanSubtree, dressFor, humanConfigFile, humanTemplateOps, loadHumanKit, type HumanDress, type HumanKit } from "./_human-template.mts";
 
 type Habitat = (typeof HABITATS)[number];
@@ -84,7 +85,10 @@ const BORDER_BAND = 20;
 interface Spawn { template: string; count: number; spread: number }
 export interface Area {
   id: string;
-  kind: "camp" | "group" | "rare" | "wildlife" | "fill";
+  kind: "camp" | "group" | "rare" | "wildlife" | "fill" | "wanderer";
+  /** A wanderer (zones/<z>/wanderers.json): the roaming spawnArea fields (placement, mix, patrol...) and creatures alive. */
+  life?: Record<string, unknown>;
+  alive?: number;
   x: number;
   y: number;
   z: number;
@@ -102,6 +106,9 @@ export interface Area {
   leash: number;
   roam: number;
   spawns: Spawn[];
+  /** A starter zone's wildlife: its disposition as a mob-brain temperament (and wary metres). */
+  temperament?: "hostile" | "territorial" | "passive";
+  territory?: number;
 }
 export interface Template {
   /** combat-actor loot spec ('item:qty:chance,...'): the plan's items whose source is this creature. */
@@ -115,13 +122,20 @@ export interface Template {
   levels: [number, number];
   role: Role;
   faction: string;
+  /** True only for a capsule: a creature with no body at all (resolveBody). */
   placeholder: boolean;
   /**
-   * Prefab id (ready body, or the nearest ready body for a placeholder), "human" (a dressed, armed modular human cloned
-   * from the project's declared pattern, authoring/zonegen/human-template.json) or "capsule".
+   * Prefab id (ready body, or the family's base body when its theme is unpainted), "human" (a dressed, armed modular
+   * human cloned from the project's declared pattern, authoring/zonegen/human-template.json) or "capsule".
    */
   body: string;
   why: string;
+  /** An art row: the paint (or modelled item) this template still stands in for; its body renders regardless. */
+  art?: string;
+  /** body "human": the stand-in weapon / outfit it wears (an art row, not a placeholder). */
+  standIns?: string[];
+  /** A painted theme with no prefab of its own: the base body wears this material (materials/<id>.json). */
+  material?: string;
   /** Abilities the brain uses and the caster bar holds. */
   abilities: string[];
   /** body "human": outfit, worn items, held weapon, and any stand-ins (which keep the template a placeholder). */
@@ -164,13 +178,13 @@ interface SitePack {
   faction: string;
   level: number;
   members: { creature: string; theme?: string; role: Role; count: number; scale?: number }[];
-  named?: { id: string; name: string; base: string; theme?: string; level: number; scale?: number };
+  named?: { id: string; name: string; base: string; theme?: string; level: number; scale?: number; title?: string };
 }
 
 /** The files whose content decides the population: the status row re-digests them. */
 export function populateInputs(ctx: Ctx, zone: string): string[] {
   const p = ctx.paths;
-  return [p.zoneBestiary(zone), p.reservations(zone), p.quests(zone), p.brief(zone), p.bestiary, p.recipe, humanConfigFile(p.projectDir), sitePacksFile(ctx, zone)].filter((x) => x.endsWith("site-packs.json") ? exists(x) : true);
+  return [p.zoneBestiary(zone), p.reservations(zone), p.quests(zone), p.brief(zone), p.bestiary, p.recipe, humanConfigFile(p.projectDir), sitePacksFile(ctx, zone), wanderersFile(ctx, zone)].filter((x) => x.endsWith("site-packs.json") || x.endsWith("wanderers.json") ? exists(x) : true);
 }
 
 export async function run(ctx: Ctx): Promise<number> {
@@ -203,7 +217,9 @@ export async function run(ctx: Ctx): Promise<number> {
     console.log(`  group ${g.padEnd(24)} ${row.areas} areas, ${row.creatures} creatures at ${row.locations.join(", ")}`);
   const camps = report.camps as { id: string; use: string }[];
   for (const c of camps) console.log(`  ${c.id}: ${c.use}`);
-  console.log(`  templates: ${templates.length} (${templates.filter((t) => t.placeholder).length} placeholder)`);
+  for (const [id, w] of Object.entries((report.wanderers ?? {}) as Record<string, { placement: string; alive: number; routeM?: number; radius?: number; templates: string[]; rares: string[] }>))
+    console.log(`  wanderer ${id.padEnd(26)} ${w.placement.padEnd(8)} ${String(w.alive).padStart(2)} alive  ${w.routeM ? `route ${w.routeM} m` : `disc ${w.radius} m`}  ${w.templates.join(", ")}${w.rares.length ? `  rares: ${w.rares.join("; ")}` : ""}`);
+  console.log(`  templates: ${templates.length} (${templates.filter((t) => t.placeholder).length} capsule placeholder, ${templates.filter((t) => t.art).length} art rows)`);
   const w = n.worstInView as { count: number; at: number[]; p95: number; view: number; budget: number };
   console.log(`  worst case in view: ${w.count} animated creatures at [${w.at.join(", ")}] (p95 ${w.p95}; ${w.view} m all round, budget ${w.budget})`);
   console.log(`  excluded km²: ${JSON.stringify(n.excludedKm2)}`);
@@ -253,6 +269,90 @@ export async function run(ctx: Ctx): Promise<number> {
   return final.ok ? 0 : 1;
 }
 
+// ===================================================================================================== bodies + names
+
+/**
+ * How a template's body is chosen (owner ruling 2026-10-20: "a lot of capsules roaming around instead of actual
+ * enemies"). A creature whose body EXISTS is never a capsule:
+ *  1. its own prefab (`mobs/<id>-<theme>`, `mobs/<family>-<theme>`, a rare's `mobs/<rare id>`): ready;
+ *  2. else the creature's catalogue `template` prefab, or any prefab of its themes: it stands in that BASE body (with
+ *     its bestiary scale) and the missing paint is an ART row, not a placeholder;
+ *  3. only a creature with no body prefab at all is a capsule (the one true placeholder).
+ * Pure: the caller passes the prefab lookups.
+ */
+export function resolveBody(o: { own: string | null; template: string | null; anyTheme: string | null; artWhy: string }): { body: string; placeholder: boolean; art?: string; why: string } {
+  if (o.own) return { body: o.own, placeholder: false, why: "ready body + theme" };
+  const base = o.template ?? o.anyTheme;
+  if (base) return { body: base, placeholder: false, art: o.artWhy, why: `base body ${base}; ${o.artWhy}` };
+  return { body: "capsule", placeholder: true, why: `no body prefab at all (${o.artWhy})` };
+}
+
+/**
+ * A human's dress for a theme. A theme whose outfit is not painted yet (needs-art) or names no declared outfit wears the
+ * creature's first ready theme instead, as a stand-in outfit (an art row): the body exists, so it is never a capsule.
+ */
+export function humanDress(dress: (theme: string) => HumanDress | { error: string }, themes: readonly { id: string; status: string }[], theme: string): HumanDress | { error: string } {
+  const row = themes.find((t) => t.id === theme);
+  const first = row?.status === "ready" ? dress(theme) : { error: `theme '${theme}' ${row?.status ?? "missing"}` };
+  if (!("error" in first)) return first;
+  for (const t of themes) {
+    if (t.id === theme || t.status !== "ready") continue;
+    const d = dress(t.id);
+    if (!("error" in d)) return { ...d, standIns: [`outfit ${theme} -> ${t.id} (${first.error})`, ...d.standIns] };
+  }
+  return first;
+}
+
+/** Weapon word in a human theme id -> the role noun its display name ends in ("oilskin-bearded-axe" -> Axeman). */
+export const WEAPON_ROLE: Record<string, string> = {
+  axe: "Axeman", greataxe: "Axeman", mace: "Maceman", club: "Clubman", sword: "Swordsman", greatsword: "Swordsman",
+  bow: "Archer", crossbow: "Crossbowman", spear: "Spearman", staff: "Adept", dagger: "Cutthroat", hammer: "Hammerer", flail: "Flailman",
+};
+/** A one-word faction kin's role noun, from the template role ("Frogkin" + melee -> "Frogkin Warrior"). */
+export const ROLE_NOUN: Record<Role, string> = {
+  melee: "Warrior", ranged: "Hunter", caster: "Shaman", swarm: "Runt", brute: "Brute", skirmisher: "Raider", support: "Mystic", elite: "Champion", boss: "Chieftain",
+};
+const titleWord = (w: string): string => w.split("-").map((p) => (p ? p[0]!.toUpperCase() + p.slice(1).toLowerCase() : p)).join("-");
+/** "giant sewer rat" -> "Giant Sewer Rat" (hyphenated parts too: "Salvage-Reeve"; "FrogKin" -> "Frogkin"). */
+export const titleCase = (s: string): string => s.trim().split(/\s+/).filter(Boolean).map(titleWord).join(" ");
+
+/**
+ * A creature's display name in a theme, WoW-style "<Kin> <Role>" and the same in every zone (owner ruling 2026-10-20:
+ * "Frogkin Warrior", not a unique name per spawn). The catalogue theme's own `name` wins; otherwise:
+ *  - a human: "<Name> <weapon role>" when the name is one word ("Wrecker Axeman"), else the name ("Bandit Bowman");
+ *  - a faction creature: a name of two words already says kin + role ("Ratkin Warrior"); a one-word kin gets the
+ *    template role's noun ("Frogkin Warrior", "Ogre Brute");
+ *  - wildlife: the theme words before the name, after a leading "Giant" ("Giant Sewer Rat", "Brinecoat Wolf");
+ *    "base" and words already in the name add nothing. No levels in it: they live in the template id and `level`.
+ */
+export function displayName(c: { name: string; kind?: string; themes: readonly { id: string; name?: string }[] }, theme: string, human: boolean, role?: Role): string {
+  const row = c.themes.find((t) => t.id === theme);
+  if (row?.name) return row.name;
+  const base = titleCase(c.name);
+  const parts = base.split(" ");
+  const words = theme.split("-").filter((w) => w && w !== "base");
+  if (human) {
+    const weapon = [...words].reverse().find((w) => WEAPON_ROLE[w]);
+    return weapon && parts.length === 1 ? `${base} ${WEAPON_ROLE[weapon]}` : base;
+  }
+  if (c.kind === "faction" || c.kind === "unique") return parts.length === 1 && role && c.kind === "faction" ? `${base} ${ROLE_NOUN[role]}` : base;
+  // a theme word the name already says, in any form ("pestilence" on a Pestilent Wolf, "ashen" on an Ash Wolf), adds nothing
+  const said = (w: string): boolean => parts.some((p) => {
+    const q = p.toLowerCase();
+    return q.length >= 3 && (w.startsWith(q) || q.startsWith(w) || (q.length >= 6 && w.startsWith(q.slice(0, 6))));
+  });
+  const adj = titleCase(words.filter((w) => !said(w)).join(" "));
+  if (!adj) return base;
+  return parts[0] === "Giant" && parts.length > 1 ? ["Giant", adj, ...parts.slice(1)].join(" ") : `${adj} ${base}`;
+}
+
+/** A rare or named creature keeps its unique name plus a title: its own, the one in the name, or "the <kin>". */
+export function namedTitle(name: string, kin: string, title?: string): string {
+  if (title) return `${name}, ${title.replace(/^,\s*/, "")}`;
+  if (/,|\bthe\b/i.test(name)) return name;
+  return `${name}, the ${kin}`;
+}
+
 // ===================================================================================================== the planner
 
 export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): { areas: Area[]; templates: Template[]; report: Record<string, unknown>; ops: Op[]; png: Buffer } | null {
@@ -286,6 +386,18 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   }
   const townZones = recipe.regions.filter((r) => r.within === zone);
   const [lo, hi] = plan.brief.level;
+  let starter = ctx.flag("starter");
+  if (!starter && exists(p.cast)) {
+    const cast = castSchema.safeParse(readJson(p.cast));
+    starter = cast.success && cast.data.rows.some((r) => r.zone === zone && r.starter);
+  }
+  const familyOf = (id: string): string => creatures.get(id)?.family ?? id;
+  // a starter zone's wildlife is never a bird or livestock (owner ruling 2026-10-22: ravens and horses read strange as
+  // starter creatures): those stay at the places that declare them (site packs, a rare at its place)
+  const wildlife = starter ? zb.wildlife.filter((w) => !WANDER_RULES.neverInStarter.includes(familyOf(w.creature))) : zb.wildlife;
+  if (wildlife.length < zb.wildlife.length)
+    f.push({ level: "warn", code: "starter-no-livestock", message: `starter zone: ${zb.wildlife.filter((w) => !wildlife.includes(w)).map((w) => w.creature).join(", ")} not placed as wildlife (birds and livestock never wander a starter zone)` });
+  const wanderers = loadWanderers(ctx, zone, f);
   const hubTown = recipe.features.towns.find((t) => t.id === plan.brief.hub);
   const hub: [number, number] = hubTown ? [hubTown.center[0], hubTown.center[1]] : [region.hub[0], region.hub[1]];
 
@@ -523,7 +635,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   };
   // human families: dressed and armed from the declared pattern (none declared -> capsules, as before)
   const kit = loadHumanKit(p.projectDir, f);
-  const templateFor = (creatureId: string, themeIn: string, role: Role, level: number, faction: string, rare?: { id: string; name: string; level: number }, scaleIn = 1): Template | null => {
+  const templateFor = (creatureId: string, themeIn: string, role: Role, level: number, faction: string, rare?: { id: string; name: string; level: number; title?: string }, scaleIn = 1, nameAs?: string): Template | null => {
     const scale = Math.round(scaleIn * 100) / 100;
     const c = creatures.get(creatureId);
     if (!c) {
@@ -536,59 +648,77 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     const lv = Math.max(band[0], Math.min(band[1], level));
     const tier = rare ? band : (tiers.find((t) => lv >= t[0] && lv <= t[1]) ?? [lv, lv]);
     const levels: [number, number] = rare ? band : [Math.max(tier[0], band[0]), Math.min(tier[1], band[1])];
-    const slug = rare ? rare.id : `${c.id}${theme && theme !== "base" ? `-${theme}` : ""}`;
+    // a wanderer row's own '<Kin> <Role>' name (Bandit Cutpurse) is its own template: the id says the name
+    const slug = rare ? rare.id : nameAs ? nameSlug(nameAs) : `${c.id}${theme && theme !== "base" ? `-${theme}` : ""}`;
     // an oversized body is its own template (its own size, reach and gait)
     const id = `pop-${slug}${scale !== 1 ? `-x${scale}` : ""}-l${levels[0]}${levels[1] !== levels[0] ? `-${levels[1]}` : ""}`;
     const have = templates.get(id);
     if (have) return have;
     const themeRow = c.themes.find((t) => t.id === theme);
+    // display name: "<Kin> <Role>" from the catalogue, the same in every zone; a rare keeps its own name + a title
+    const human = c.family === "human" || !!kit?.families.has(c.family);
+    const kin = displayName(c, themeRow ? theme : (c.themes[0]?.id ?? "base"), human, role);
+    const name = rare ? namedTitle(rare.name, kin, rare.title) : (nameAs ?? displayName(c, theme, human, role));
     // a human's theme is an outfit set + a weapon item, not art on a mob page: a rare in one is dressed like its base
-    if (kit && kit.families.has(c.family) && c.body.status === "ready" && themeRow?.status === "ready") {
-      const dress = dressFor(kit, theme);
+    if (kit && kit.families.has(c.family) && c.body.status === "ready") {
+      const dress = humanDress((t) => dressFor(kit, t), c.themes, theme);
       if (!("error" in dress)) {
+        // a stand-in weapon or outfit is an ART row: the dressed human body renders with it, never a capsule
         const t: Template = {
-          id, creature: rare ? rare.id : c.id, family: c.family, theme, name: rare ? rare.name : c.name,
+          id, creature: rare ? rare.id : c.id, family: c.family, theme, name,
           level: Math.round((levels[0] + levels[1]) / 2), levels, role, faction,
-          placeholder: dress.standIns.length > 0,
+          placeholder: false,
           body: "human",
           why: dress.standIns.length ? `dressed human with stand-ins: ${dress.standIns.join("; ")}` : "dressed + armed human (declared pattern)",
           abilities: c.abilities.length ? c.abilities : ["strike"],
           dress,
         };
+        if (dress.standIns.length) {
+          t.standIns = [...dress.standIns];
+          t.art = `stand-ins: ${dress.standIns.join("; ")}`;
+        }
         t.loot = lootOf.get(t.creature) ?? lootOf.get(c.id) ?? "";
-    if (scale !== 1) t.scale = scale;
-    templates.set(id, t);
+        if (scale !== 1) t.scale = scale;
+        templates.set(id, t);
         return t;
       }
       f.push({ level: "warn", code: "human-undressed", message: `${id}: ${dress.error} (capsule placeholder)` });
     }
     // a rare or boss gets its OWN body when one exists: a prefab named for it, or its base family in its own theme
-    // (mobs/hob-yarrow, mobs/ghost-reeve); otherwise it stands as a placeholder on the base creature's body
-    const rareBody = rare && c.body.status === "ready" ? ([`mobs/${rare.id}`, `mobs/${c.id}-${theme}`, `mobs/${c.family}-${theme}`].find(prefabExists) ?? null) : null;
-    const real = rare ? rareBody : c.body.status === "ready" && themeRow?.status === "ready" ? readyPrefab(c, theme) : null;
-    const near = real ?? anyReadyPrefab(c);
-    const why = real
-      ? "ready body + theme"
-      : c.body.status !== "ready"
-        ? `body ${c.body.status}`
-        : rare
-          ? `rare theme '${theme}' has no art on the body yet`
-          : themeRow?.status !== "ready"
-            ? `theme '${theme}' ${themeRow?.status ?? "missing"}`
-            : `no mob template for the ${c.family} body yet (no prefab under prefabs/mobs/)`;
+    // (mobs/hob-yarrow, mobs/ghost-reeve); otherwise it stands in the base creature's body (an art row)
+    const ready = c.body.status === "ready";
+    const own = !ready ? null : rare ? ([`mobs/${rare.id}`, `mobs/${c.id}-${theme}`, `mobs/${c.family}-${theme}`].find(prefabExists) ?? null) : themeRow?.status === "ready" ? readyPrefab(c, theme) : null;
+    const artWhy = !ready
+      ? `body ${c.body.status}`
+      : rare
+        ? `rare theme '${theme}' has no painted atlas on the ${c.family} body yet`
+        : themeRow?.status !== "ready"
+          ? `theme '${theme}' ${themeRow?.status ?? "missing"}`
+          : `no prefab mobs/${c.id}-${theme} for the painted '${theme}' theme yet`;
+    const catTemplate = ready && c.template && prefabExists(c.template) ? c.template : null;
+    const body = resolveBody({ own, template: catTemplate, anyTheme: ready ? anyReadyPrefab(c) : null, artWhy });
+    // a painted theme (atlas + its material) with no prefab of its own is worn by the base body: painted, not owed
+    const atlasBase = themeRow?.status === "ready" && /.png$/i.test(themeRow.atlas) ? path.basename(themeRow.atlas, path.extname(themeRow.atlas)) : "";
+    const paint = !own && body.body !== "capsule" && !rare && atlasBase && findAsset(p.projectDir, `materials/mobs/${atlasBase}.json`) ? `mobs/${atlasBase}` : "";
+    if (paint) {
+      delete body.art;
+      body.why = `base body ${body.body} wearing the painted theme ${paint}`;
+    }
     const t: Template = {
       id,
       creature: rare ? rare.id : c.id,
       family: c.family,
       theme,
-      name: rare ? rare.name : c.name,
+      name,
       level: Math.round((levels[0] + levels[1]) / 2),
       levels,
       role,
       faction,
-      placeholder: !real,
-      body: real ?? near ?? "capsule",
-      why,
+      placeholder: body.placeholder,
+      body: body.body,
+      why: body.why,
+      ...(body.art ? { art: body.art } : {}),
+      ...(paint ? { material: paint } : {}),
       abilities: c.abilities.length ? c.abilities : ["strike"],
     };
     t.loot = lootOf.get(t.creature) ?? lootOf.get(c.id) ?? "";
@@ -632,6 +762,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     area.spawns = merged;
     areas.push(area);
     bump(area, area.spawns.reduce((n, s) => n + s.count, 0));
+    if (!area.life) noteAlive(area);
     return area;
   };
   // animated creatures a player standing in each cell could see (all round, within `view`), kept as areas are added
@@ -650,6 +781,30 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       }
     return true;
   };
+  /** Alive creatures per grid cell (the view cap's measure, WANDER_RULES.viewCap): every area by its alive share. */
+  const aliveCell = new Float32Array(N);
+  function noteAlive(a: Area): void {
+    const life = a.life as { placement?: string; patrol?: number[][] } | undefined;
+    const n = a.life ? (a.alive ?? 0) : a.spawns.reduce((m, s) => m + s.count, 0);
+    if (!n) return;
+    if (life?.placement === "anywhere") {
+      const cells: number[] = [];
+      windowCells(a.x, a.z, a.radius, (c) => void cells.push(c));
+      if (cells.length) { for (const c of cells) aliveCell[c] = aliveCell[c]! + n / cells.length; return; }
+    }
+    if (life?.placement === "route" && life.patrol?.length) {
+      const pts = life.patrol.map((p) => cellOf(a.x + p[0]!, a.z + p[2]!)).filter((c) => c >= 0);
+      if (pts.length) { for (const c of pts) aliveCell[c] = aliveCell[c]! + n / pts.length; return; }
+    }
+    const c = cellOf(a.x, a.z);
+    if (c >= 0) aliveCell[c] = aliveCell[c]! + n;
+  }
+  /** Creatures alive inside the view circle round (x, z). */
+  const aliveInView = (x: number, z: number): number => {
+    let n = 0;
+    windowCells(x, z, WANDER_RULES.viewRadius, (c) => void (n += aliveCell[c]!));
+    return n;
+  };
   function bump(a: Area, n: number): void {
     const sp = a.spawns.reduce((m, s) => Math.max(m, s.spread), 0);
     windowCells(a.x, a.z, view + sp + a.roam, (c) => void (seen[c] = seen[c]! + n));
@@ -660,7 +815,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   const WEIGHT = { sparse: 1, common: 3, dense: 6 } as const;
   const wildlifeFor = (i: number): { creature: string; density: "sparse" | "common" | "dense" } | null => {
     const hs = habitatsOf(i);
-    const fits = zb.wildlife.filter((w) => w.habitats.some((h) => hs.includes(h)));
+    const fits = wildlife.filter((w) => w.habitats.some((h) => hs.includes(h)));
     if (!fits.length) return null;
     // weighted by density: where rats (common) and wolves (sparse) both fit, rats are three times as likely
     let roll = hash01(`${cx(i)}:${cz(i)}`) * fits.reduce((s, w) => s + WEIGHT[w.density], 0);
@@ -676,7 +831,10 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     const pk = PACK[role];
     return addArea({
       kind, x: r2(cx(i)), z: r2(cz(i)), level: Math.max(t.levels[0], Math.min(t.levels[1], level)), creature, habitats: habitatsOf(i),
-      leash: pk.leash, roam: pk.roam, spawns: [{ template: t.id, count: packCount(role, `${creature}:${i}`, density), spread: pk.spread }], ...extra,
+      leash: pk.leash, roam: pk.roam, spawns: [{ template: t.id, count: packCount(role, `${creature}:${i}`, density), spread: pk.spread }],
+      // a starter zone's wildlife is mostly not hostile on sight (starterDisposition): wary wolves, neutral rats
+      ...(starter ? (() => { const d = starterDisposition(c.family, `${creature}:${i}`); return { temperament: DISPOSITIONS[d], ...(d === "wary" ? { territory: WANDER_RULES.waryMetres } : {}) }; })() : {}),
+      ...extra,
     });
   };
 
@@ -801,7 +959,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     const w = wildlifeFor(i);
     if (w) return w.creature;
     // nothing lives in this habitat by the bestiary: the zone's most widespread wildlife fills it
-    const ranked = [...zb.wildlife].sort((a, b) => b.habitats.length - a.habitats.length || (a.density === "common" ? -1 : 1));
+    const ranked = [...wildlife].sort((a, b) => b.habitats.length - a.habitats.length || (a.density === "common" ? -1 : 1));
     return ranked[0]?.creature ?? zb.faction[0]!.creature;
   }
 
@@ -904,7 +1062,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     // a rare belongs to whoever holds its place (Ned Cotter is a Cotter wrecker, not wildlife): same faction, so the
     // pack does not turn on its own leader
     const holder = zb.groups.find((g) => (groupLocations.get(g.id) ?? []).some((l) => l.location === rare.where));
-    const t = templateFor(rare.base, rare.theme, role, rare.level, holder ? holder.faction || holder.id : "wild", { id: rare.id, name: rare.name, level: rare.level }, rare.scale);
+    const t = templateFor(rare.base, rare.theme, role, rare.level, holder ? holder.faction || holder.id : "wild", { id: rare.id, name: rare.name, level: rare.level, title: rare.title }, rare.scale);
     if (!t) continue;
     named.push({ template: t.id, name: rare.name, kind: "rare" });
     addArea({ kind: "rare", x: r2(cx(i)), z: r2(cz(i)), level: rare.level, creature: rare.id, location: res ? rare.where : undefined, habitats: habitatsOf(i), leash: PACK.elite.leash, roam: PACK.elite.roam, spawns: [{ template: t.id, count: 1, spread: 2 }] });
@@ -935,7 +1093,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       const row = (siteRows[sp.site] ??= { areas: 0, creatures: 0, named: [] });
       if (sp.named) {
         const base = creatures.get(sp.named.base);
-        const t = base ? templateFor(sp.named.base, sp.named.theme ?? "", "elite", sp.named.level, sp.faction, { id: sp.named.id, name: sp.named.name, level: sp.named.level }, sp.named.scale) : null;
+        const t = base ? templateFor(sp.named.base, sp.named.theme ?? "", "elite", sp.named.level, sp.faction, { id: sp.named.id, name: sp.named.name, level: sp.named.level, title: sp.named.title }, sp.named.scale) : null;
         if (t) {
           named.push({ template: t.id, name: sp.named.name, kind: "named" });
           spawns.push({ template: t.id, count: 1, spread: 2 });
@@ -950,9 +1108,227 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     for (const [site, row] of Object.entries(siteRows)) console.log(`  site ${site.padEnd(24)} ${row.areas} areas, ${row.creatures} creatures${row.named.length ? `; named: ${row.named.join(", ")}` : ""}`);
   }
 
+  // 3c. wanderers: packs walking roads and loops, roamers round places (zones/<z>/wanderers.json), placed before the
+  // wildlife so they claim their ground first
+  const wanderTemplates = new Map<string, string>(); // template id -> the wanderer area it stands at (the server holds it back)
+  const wanderRows: Record<string, { placement: string; alive: number; routeM?: number; radius?: number; templates: string[]; rares: string[] }> = {};
+  f.push(...wandererFindings(wanderers, familyOf, starter));
+  function anchorOf(a: { near?: string; at?: [number, number] } | undefined, id: string): [number, number] | null {
+    if (a?.at) return a.at;
+    const res = a?.near ? plan.reservations.reservations.find((r) => r.location === a.near) : undefined;
+    if (res) return [res.center[0], res.center[1]];
+    f.push({ level: "error", code: "wanderer-anchor", message: `${id}: no place ${a?.near ?? "(none given)"} in the reservations` });
+    return null;
+  }
+  /** Open ground a creature may walk: not a town or sanctuary, not deep water or a cliff, inside the zone with `reach` to spare. */
+  function walkOk(x: number, z: number, reach: number): boolean {
+    const i = cellOf(x, z);
+    if (i < 0 || inZone[i] !== 1 || sanctDist[i]! < sanctMargin) return false;
+    return depth[i]! <= wade && slope[i]! <= maxSlope && edge[i]! >= reach;
+  }
+  function placeWanderer(w: WandererArea & { solo?: boolean }): (typeof wanderRows)[string] | null {
+    const leash = 30;
+    const reach = leash + BORDER_BAND;
+    let pts: Array<[number, number]> = [];
+    let loop = false;
+    if (w.placement === "route") {
+      const r = w.route;
+      if (r?.road?.length) {
+        const line: Array<[number, number]> = [];
+        for (const id of r.road) {
+          const road = recipe.features.roads.find((x) => x.id === id);
+          if (!road) {
+            f.push({ level: "error", code: "wanderer-road", message: `${w.id}: no road ${id} in the recipe` });
+            return null;
+          }
+          for (const q of road.points) line.push([q[0]!, q[1]!]);
+        }
+        pts = longestRun(offsetLine(resample(line, 25), r.offset), ([x, z]) => walkOk(x, z, reach) || (() => {
+          // the road bed itself is walkable even where the grid calls it steep (a cut through a bank)
+          const i = cellOf(x, z);
+          return i >= 0 && inZone[i] === 1 && roadDist[i]! < 4 && sanctDist[i]! >= sanctMargin && edge[i]! >= reach && depth[i]! <= wade;
+        })());
+      } else if (r?.loop) {
+        const c = anchorOf({ near: r.loop.near, at: r.loop.at }, w.id);
+        if (!c) return null;
+        const n = Math.max(8, Math.round((2 * Math.PI * r.loop.radius) / 45));
+        for (let k = 0; k < n; k++) {
+          const a = (k / n) * Math.PI * 2;
+          // bend each point onto walkable ground along its spoke, nearest the circle first
+          for (const s of [1, 0.9, 1.1, 0.8, 1.2, 0.7, 1.3, 0.6, 0.5]) {
+            const x = c[0] + Math.cos(a) * r.loop.radius * s;
+            const z = c[1] + Math.sin(a) * r.loop.radius * s;
+            if (walkOk(x, z, reach)) {
+              pts.push([x, z]);
+              break;
+            }
+          }
+        }
+        loop = true;
+      } else if (r?.points?.length) {
+        pts = r.points.map((q) => [q[0], q[1]]);
+        loop = r.closed;
+      }
+      if (pts.length < (loop ? 4 : 2) || routeLength(pts) < 120) {
+        f.push({ level: "error", code: "wanderer-route", message: `${w.id}: route has ${pts.length} walkable point(s), ${Math.round(routeLength(pts))} m (needs 120 m+)` });
+        return null;
+      }
+      if (!loop) pts = resample(pts, 40);
+    } else {
+      const c = anchorOf(w.at, w.id);
+      if (!c) return null;
+      // the disc stays off the towns (sanctuary + margin) and inside the zone with its roamers' reach to spare
+      let r = w.radius;
+      for (const [sx, sz, sr] of sanct) r = Math.min(r, Math.hypot(c[0] - sx, c[1] - sz) - sr - sanctMargin);
+      // a solo walks 8-20 m from where it rose: its disc needs less border band than a ranging roamer
+      r = Math.min(r, polygonEdgeDistance(c[0], c[1], region!.polygon) - (w.solo ? 40 : 80) - BORDER_BAND);
+      if (r < 40) {
+        f.push({ level: "error", code: "wanderer-disc", message: `${w.id}: only ${Math.round(r)} m of room round ${w.at?.near ?? w.at?.at} (a town or the zone border is too close)` });
+        return null;
+      }
+      pts = [c];
+      w = { ...w, radius: Math.round(r) };
+    }
+    // origin: the route's middle point (or the disc's centre); level by walking distance there unless given
+    const mid = pts[Math.floor(pts.length / 2)]!;
+    const oi = cellOf(mid[0], mid[1]);
+    if (oi < 0) return null;
+    const level = w.level ?? levelAt(oi);
+    const faction = (cid: string): string => {
+      const c = creatures.get(cid);
+      return !c || c.kind === "wildlife" ? "wild" : c.family === "human" ? "bandits" : c.family;
+    };
+    const tplOf = (m: { creature: string; theme: string; name?: string; role?: string }, lv = level): string | null => {
+      const c = creatures.get(m.creature);
+      if (!c) {
+        f.push({ level: "error", code: "unknown-creature", message: `${w.id}: ${m.creature} is not in the catalogue bestiary` });
+        return null;
+      }
+      const t = templateFor(m.creature, m.theme, (m.role ?? c.roles[0] ?? "melee") as Role, lv, faction(m.creature), undefined, 1, m.name);
+      if (!t) return null;
+      if (!wanderTemplates.has(t.id)) wanderTemplates.set(t.id, `pop-${zone}-wander-${w.id}`);
+      return t.id;
+    };
+    const mix: Array<Record<string, unknown>> = [];
+    for (const m of w.mix) {
+      const dispFirst = m.disposition ?? w.disposition ?? (m.temperament || w.temperament ? undefined : starter ? starterDisposition(familyOf(m.creature), `${w.id}:${m.creature}`) : undefined);
+      // fodder (passive) stands 1-3 levels under where it lives; aggressive kinds at level; rares above (their own level)
+      const t = tplOf(m, dispFirst && DISPOSITIONS[dispFirst] === "passive" ? fodderLevel(level, `${w.id}:${m.creature}:${m.theme}`) : level);
+      if (!t) continue;
+      const withT = m.with.map(tplOf).filter((x): x is string => !!x);
+      // disposition: the row's, else the area's, else (starter zone) the family default; wary = territorial within waryMetres
+      const disp = m.disposition ?? w.disposition ?? (m.temperament || w.temperament ? undefined : starter ? starterDisposition(familyOf(m.creature), `${w.id}:${m.creature}`) : undefined);
+      const temper = disp ? DISPOSITIONS[disp] : m.temperament;
+      mix.push({ template: t, weight: m.weight, count: m.count, ...(temper ? { temperament: temper } : {}), near: w.placement === "route" ? 3 : 4, ...(withT.length ? { with: withT } : {}) });
+    }
+    const rares: Array<Record<string, unknown>> = [];
+    for (const r of w.rares) {
+      if (!creatures.get(r.creature)) continue;
+      const t = templateFor(r.creature, r.theme, (r.role ?? "elite") as Role, r.level, faction(r.creature), { id: r.id, name: r.name, level: r.level, title: r.title }, r.scale);
+      if (!t) continue;
+      if (!wanderTemplates.has(t.id)) wanderTemplates.set(t.id, `pop-${zone}-wander-${w.id}`);
+      named.push({ template: t.id, name: r.name, kind: "rare" });
+      rares.push({ template: t.id, chance: r.chance, lockout: r.lockout, id: r.id, temperament: "hostile" });
+    }
+    if (!mix.length) return null;
+    const y = r2(field.surfaceCast(mid[0], mid[1]) ?? ground[oi] ?? 0);
+    const far = Math.max(...pts.map(([x, z]) => Math.hypot(x - mid[0], z - mid[1])));
+    const patrol = w.placement === "route" ? pts.map(([x, z]) => [r2(x - mid[0]), r2((field.surfaceCast(x, z) ?? field.height(x, z)) - y), r2(z - mid[1])]) : [];
+    const life: Record<string, unknown> = {
+      placement: w.placement,
+      mix,
+      population: w.population,
+      respawn: w.solo ? [60, 120] : [90, 180],
+      hiddenFrom: w.solo ? 45 : 60,
+      // a solo walks its own short wander loop round where it rose; a roamer ranges wider
+      ...(w.placement === "route" ? { patrol, ...(loop ? { loop: true } : {}) } : { roamRange: w.solo ? [8, 20] : [25, 60] }),
+      territory: WANDER_RULES.waryMetres,
+      ...(w.hours ? { hours: w.hours } : {}),
+      ...(w.disposition ? { temperament: DISPOSITIONS[w.disposition] } : w.temperament ? { temperament: w.temperament } : {}),
+      ...(rares.length ? { rares } : {}),
+    };
+    const a = addArea({
+      id: `pop-${zone}-wander-${w.id}`, kind: "wanderer", x: r2(mid[0]), z: r2(mid[1]), yAt: y, level, creature: w.mix[0]!.creature,
+      habitats: habitatsOf(oi), leash, roam: w.placement === "route" ? 6 : 10, spawns: [], life, alive: w.population ?? 1,
+    });
+    // a route wakes while a player is anywhere near it (its furthest point + 80 m); an `anywhere` disc's radius IS where it
+    // spawns, so it stays the disc (the server places the creatures out of sight before a player reaches it)
+    a.radius = Math.round(w.placement === "route" ? far + 80 : w.radius);
+    a.sleepRadius = a.radius + 60;
+    bump(a, w.population ?? 1);
+    noteAlive(a);
+    return { placement: w.placement, alive: w.population ?? 1, ...(w.placement === "route" ? { routeM: Math.round(routeLength(loop ? [...pts, pts[0]!] : pts)) } : { radius: w.radius }), templates: [...new Set(mix.flatMap((m) => [m.template as string, ...((m.with as string[] | undefined) ?? [])]))], rares: w.rares.map((r) => (r.title ? `${r.name}, ${r.title}` : r.name)) };
+  }
+  /** Open land (km²) a disc of radius r round c holds: zone land, dry, walkable, off the sanctuaries. */
+  const discLandKm2 = (c: [number, number], r: number): number => {
+    let n = 0;
+    windowCells(c[0], c[1], r, (k) => void (inZone[k] === 1 && depth[k]! <= wade && slope[k]! <= maxSlope && sanctDist[k]! >= sanctMargin && n++));
+    return (n * step * step) / 1e6;
+  };
+  const soloDiscs: Array<[number, number, number]> = []; // always-out solo discs: x, z, r (they never overlap)
+  const order = [...(wanderers?.areas ?? [])].sort((a, b) => (a.placement === "solo" ? (a.tile ? 2 : 1) : 0) - (b.placement === "solo" ? (b.tile ? 2 : 1) : 0));
+  for (const w of order) {
+    if (w.placement !== "solo") {
+      const row = placeWanderer(w);
+      if (row) wanderRows[w.id] = row;
+      continue;
+    }
+    const centres: Array<[number, number]> = [];
+    for (const pl of w.places ?? []) {
+      const c = anchorOf({ near: pl }, w.id);
+      if (c) centres.push(c);
+    }
+    if (w.tile) {
+      // a hex-ish grid over the zone, every centre on open land with the disc's reach to spare
+      const s = w.radius * 2; // touching, never overlapping
+      for (let z = z0 + s / 2, row = 0; z < z0 + nz * step; z += s * 0.87, row++)
+        for (let x = x0 + (row % 2 ? s / 2 : 0); x < x0 + nx * step; x += s) if (walkOk(x, z, 60) && !centres.some((c) => Math.hypot(c[0] - x, c[1] - z) < w.radius)) centres.push([x, z]);
+    }
+    let alive = 0;
+    let discs = 0;
+    const templatesSeen = new Set<string>();
+    for (const [k, c] of centres.entries()) {
+      let r = w.radius;
+      for (const [sx, sz, sr] of sanct) r = Math.min(r, Math.hypot(c[0] - sx, c[1] - sz) - sr - sanctMargin);
+      r = Math.min(r, polygonEdgeDistance(c[0], c[1], region!.polygon) - 40 - BORDER_BAND);
+      if (r < 50) continue;
+      // an always-out disc never overlaps another (a time-gated extra may sit on its place's day disc)
+      if (!w.hours) {
+        if (soloDiscs.some(([dx, dz, dr]) => Math.hypot(dx - c[0], dz - c[1]) < dr + r - 1)) {
+          const room = Math.min(...soloDiscs.map(([dx, dz, dr]) => Math.hypot(dx - c[0], dz - c[1]) - dr));
+          if (room < 50) continue;
+          r = Math.min(r, room);
+        }
+      }
+      let pop = w.population ?? Math.round((w.perKm2 ?? 0) * discLandKm2(c, r));
+      // the view cap: what already stands within view of any point this disc's creatures can be seen from, plus this
+      // disc's whole population, stays under WANDER_RULES.viewCap (so discs thin out where places' own packs stand)
+      // per viewing point q: what stands in view of q now, plus this disc's population times the share of its land q sees
+      const own: number[] = [];
+      windowCells(c[0], c[1], r, (k) => void own.push(k));
+      let fit = Infinity;
+      windowCells(c[0], c[1], r + WANDER_RULES.viewRadius, (q) => {
+        const seen = own.length ? own.filter((k) => Math.hypot(cx(k) - cx(q), cz(k) - cz(q)) <= WANDER_RULES.viewRadius).length / own.length : 1;
+        if (seen > 0) fit = Math.min(fit, (WANDER_RULES.viewCap - aliveInView(cx(q), cz(q))) / seen);
+      });
+      pop = Math.min(pop, Math.floor(fit));
+      if (pop < 1) continue;
+      // night extras are staggered: each disc comes out an hour after the one before (19:00, 20:00, 21:00)
+      const hours = w.hours ? ([(w.hours[0] + (k % 3)) % 24, w.hours[1]] as [number, number]) : undefined;
+      const sub = placeWanderer({ ...w, id: `${w.id}-${String(k + 1).padStart(2, "0")}`, placement: "anywhere", at: { at: c }, radius: Math.round(r), population: pop, ...(hours ? { hours } : {}), mix: w.mix.map((m) => ({ ...m, count: [1, 1] as [number, number], with: [] })), solo: true } as never);
+      if (sub && !w.hours) soloDiscs.push([c[0], c[1], r]);
+      if (!sub) continue;
+      alive += sub.alive;
+      discs++;
+      for (const t of sub.templates) templatesSeen.add(t);
+    }
+    if (!discs) f.push({ level: "error", code: "wanderer-solo", message: `${w.id}: no disc found room (places ${(w.places ?? []).join(", ") || "-"}${w.tile ? ", tiled" : ""})` });
+    wanderRows[w.id] = { placement: `solo x${discs}`, alive, radius: w.radius, templates: [...templatesSeen], rares: w.rares.map((r) => (r.title ? `${r.name}, ${r.title}` : r.name)) };
+  }
+
   // 4. wildlife at its density, in its habitats
   const habitatKm2: Record<string, number> = {};
-  for (const w of zb.wildlife) {
+  for (const w of wildlife) {
     const c = creatures.get(w.creature);
     if (!c) continue;
     const role = (c.roles[0] ?? "melee") as Role;
@@ -1032,10 +1408,26 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     s.count -= 1;
     if (s.count <= 0) a.spawns = a.spawns.filter((x) => x !== s);
   }
+  for (const [tid, aid] of wanderTemplates) {
+    const t = templates.get(tid);
+    if (t && !t.standsAt) t.standsAt = aid;
+  }
   const used = [...templates.values()].filter((t) => t.standsAt);
 
+  // ---- alive in view (the cap's measure): the worst circle of WANDER_RULES.viewRadius over every standing point
+  let aliveWorst = { count: 0, at: [0, 0] as number[] };
+  for (let i = 0; i < N; i++) {
+    if (!stand[i]) continue;
+    const n = aliveInView(cx(i), cz(i));
+    if (n > aliveWorst.count) aliveWorst = { count: Math.round(n * 10) / 10, at: [Math.round(cx(i)), Math.round(cz(i))] };
+  }
+  if (aliveWorst.count > WANDER_RULES.viewCap)
+    f.push({ level: "warn", code: "alive-in-view", message: `${aliveWorst.count} creatures alive within ${WANDER_RULES.viewRadius} m of [${aliveWorst.at.join(", ")}] (cap ${WANDER_RULES.viewCap}; the wanderers row fails)` });
+  console.log(`  alive in view: worst ${aliveWorst.count} within ${WANDER_RULES.viewRadius} m at [${aliveWorst.at.join(", ")}] (cap ${WANDER_RULES.viewCap})`);
+
   // ---- numbers
-  const countOf = (a: Area): number => a.spawns.reduce((n, s) => n + s.count, 0) + used.filter((t) => t.standsAt === a.id).length;
+  // a wanderer's creatures are its population (its templates are held back by the server, never standing extra)
+  const countOf = (a: Area): number => (a.life ? (a.alive ?? 0) : a.spawns.reduce((n, s) => n + s.count, 0) + used.filter((t) => t.standsAt === a.id).length);
   const wildKm2 = (wild.length * step * step) / 1e6;
   const total = areas.reduce((n, a) => n + countOf(a), 0);
   const byCreature: Record<string, { areas: number; creatures: number; perKm2: number; placeholder: boolean; templates: string[] }> = {};
@@ -1090,6 +1482,10 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   if (worst > budget)
     f.push({ level: "warn", code: "view-budget", message: `up to ${worst} animated creatures within ${view} m of [${worstAt.join(", ")}] (budget ${budget}); ${Math.round((over / Math.max(1, views.length)) * 100)}% of standing points exceed it` });
   const placeholders = used.filter((t) => t.placeholder);
+  for (const t of placeholders) f.push({ level: "warn", code: "capsule", message: `${t.id} (${t.name}) is a CAPSULE: ${t.why}` });
+  // an art row: the body renders (base theme, or a dressed human with a stand-in), the paint / item is still owed
+  const artRows = used.filter((t) => t.art);
+  for (const t of artRows) f.push({ level: "warn", code: "art", message: `${t.id} (${t.name}) renders ${t.body}; art owed: ${t.art}` });
   // a mob body needs all three: mob-brain asks to attack, combat-caster resolves the request, combat-actor takes the hit.
   // A prefab missing one spawns, walks up and can never hurt anyone (found on the first proving zone).
   for (const body of new Set(used.filter((t) => t.body !== "capsule" && t.body !== "human").map((t) => t.body))) {
@@ -1100,11 +1496,8 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   }
 
   // ---- a starter zone's ambient life: thick enough, mostly not hostile, singles and pairs rather than packs
-  let starter = ctx.flag("starter");
-  if (!starter && exists(p.cast)) {
-    const cast = castSchema.safeParse(readJson(p.cast));
-    starter = cast.success && cast.data.rows.some((r) => r.zone === zone && r.starter);
-  }
+  let hostileShare: number | undefined;
+  let dispositionShares: Shares | undefined;
   if (starter) {
     let landCells = 0;
     for (let i = 0; i < N; i++) if (inZone[i] === 1 && reason[i] !== 2 && reason[i] !== 4) landCells++;
@@ -1114,7 +1507,9 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     const liveEnts = (exists(liveFile) ? (readJson(liveFile) as { entities?: Record<string, { components?: Record<string, unknown> }> }).entities : undefined) ?? {};
     const lived: LifeArea[] = areas.map((a) => {
       const live = liveEnts[a.id]?.components?.["spawnArea"] as LifeArea["data"] | undefined;
-      return { id: a.id, ambient: a.kind === "wildlife" || a.kind === "fill", data: live?.placement === "anywhere" ? live : { spawns: a.spawns } };
+      // a wanderer is a designed pack or swarm (the table is the design), not ambient singles and pairs
+      if (a.life) return { id: a.id, ambient: false, data: a.life as LifeArea["data"] };
+      return { id: a.id, ambient: a.kind === "wildlife" || a.kind === "fill", data: live?.placement === "anywhere" ? live : { spawns: a.spawns, ...(a.temperament ? { temperament: a.temperament } : {}) } };
     });
     // hand-authored spawn areas inside the zone count too (populate's own are already in `areas`)
     const scene = baseScene(ctx, zone).doc;
@@ -1126,6 +1521,18 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       lived.push({ id, ambient: data.placement === "anywhere", data });
     }
     f.push(...starterLifeFindings(lived, landKm2));
+    let alive = 0, hostile = 0;
+    for (const a of lived) { const l = lifeOf(a.data); alive += l.alive; hostile += l.hostile; }
+    hostileShare = alive ? Math.round((hostile / alive) * 1000) / 1000 : 0;
+    dispositionShares = sharesOf(lived.map((a) => a.data));
+    const mixBad = starterMixFindings(dispositionShares);
+    if (mixBad.length || dispositionShares.aggressive > 0.25) {
+      // name who carries the aggressive share, so the fix is a table edit, not a hunt
+      const agg = lived.map((a) => ({ id: a.id, n: Math.round(sharesOf([a.data]).aggressive * lifeOf(a.data).alive) })).filter((x) => x.n > 0).sort((x, y) => y.n - x.n).slice(0, 8);
+      mixBad.push({ level: "info", code: "starter-mix-aggressive", message: `most aggressive alive: ${agg.map((x) => `${x.id} ${x.n}`).join(", ")}` });
+    }
+    f.push(...mixBad);
+    console.log(`  dispositions (alive): passive ${Math.round(dispositionShares.passive * 100)}%, wary ${Math.round(dispositionShares.wary * 100)}%, aggressive ${Math.round(dispositionShares.aggressive * 100)}%`);
   }
 
   // ---- rares and named creatures sit behind placeholders (spawnArea.rares) in the live scene, never always up
@@ -1176,12 +1583,18 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       templates: used.length,
       placeholderTemplates: placeholders.length,
       placeholderCreatures: areas.reduce((n, a) => n + a.spawns.filter((s) => templates.get(s.template)?.placeholder).reduce((m, s) => m + s.count, 0), 0) + placeholders.length,
+      artTemplates: artRows.length,
+      artCreatures: areas.reduce((n, a) => n + a.spawns.filter((s) => templates.get(s.template)?.art).reduce((m, s) => m + s.count, 0), 0) + artRows.length,
+      aliveInView: { ...aliveWorst, radius: WANDER_RULES.viewRadius, cap: WANDER_RULES.viewCap, how: "every area by its alive share inside the circle: a pack at its origin, an anywhere/solo disc spread over its land cells, a route over its points; time-gated areas (night extras) counted as out" },
       worstInView: { count: worst, at: worstAt, p95, view, budget, overShare: r2(over / Math.max(1, views.length)), how: "every standing point of the zone grid (incl. roads and towns); every area whose origin lies within view + its spread + roam counts with its whole pack, as if woken and alive; all directions, no occlusion or frustum" },
       coverage: { gap, coveredShare: r2(covered / Math.max(1, wild.length)), coverableShare: r2(coverable / Math.max(1, wild.length)), largestEmptyAcross: Math.round(largest * 2), budgetSkips },
       habitatKm2,
+      ...(hostileShare !== undefined ? { hostileShare } : {}),
+      ...(dispositionShares ? { dispositionShares } : {}),
     },
     byCreature,
     byGroup: groupRows,
+    wanderers: wanderRows,
     camps: campRows,
     templates: used,
     areas: areas.map((a) => ({ ...a, count: countOf(a) })),
@@ -1259,6 +1672,22 @@ export function lifeOf(d: LifeArea["data"]): { alive: number; hostile: number } 
   const total = rows.reduce((n, r) => n + r.w, 0);
   const share = total > 0 ? rows.reduce((n, r) => n + (r.hostile ? r.w : 0), 0) / total : 1;
   return { alive, hostile: alive * share };
+}
+
+/** Shares of the creatures alive by disposition (mob-brain temperament: passive / territorial = wary / hostile = aggressive). */
+export function sharesOf(areas: ReadonlyArray<LifeArea["data"]>): Shares {
+  const sum = { passive: 0, wary: 0, aggressive: 0 };
+  for (const d of areas) {
+    const { alive } = lifeOf(d);
+    const mix = d.mix ?? [];
+    // the table a roll draws from, as lifeOf: the mix by weight, else the spawns by count
+    const rows = mix.length ? mix.map((m) => ({ w: m.weight ?? 1, t: m.temperament ?? d.temperament ?? "hostile" })) : (d.spawns ?? []).map((sp) => ({ w: sp.count ?? 1, t: d.temperament ?? "hostile" }));
+    const total = rows.reduce((n, r) => n + r.w, 0) || 1;
+    for (const r of rows) sum[r.t === "passive" ? "passive" : r.t === "territorial" ? "wary" : "aggressive"] += (alive * r.w) / total;
+  }
+  const all = sum.passive + sum.wary + sum.aggressive || 1;
+  const k = (v: number): number => Math.round((v / all) * 1000) / 1000;
+  return { passive: k(sum.passive), wary: k(sum.wary), aggressive: k(sum.aggressive) };
 }
 
 /** The starter-zone life lint: thin (alive per km²), mostly hostile, packs as ambient life. Warnings, never errors. */
@@ -1339,6 +1768,15 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
     }
     return out;
   };
+  /** The entities of a body prefab that carry an asset mesh (the ones a painted theme's material goes on). */
+  const meshKeys = (prefabId: string): string[] => {
+    try {
+      const doc = JSON.parse(fs.readFileSync(assetPath(ctx.paths.projectDir, `prefabs/${prefabId}.json`), "utf8")) as { entities?: Record<string, { components?: { mesh?: { source?: { kind?: string } } } }> };
+      return Object.entries(doc.entities ?? {}).filter(([, e]) => e.components?.mesh?.source?.kind === "asset").map(([k]) => k);
+    } catch {
+      return [];
+    }
+  };
   /** The same for a template written as add-entity ops (capsule, dressed human): root scaled, scripts sized. */
   const sizeOps = (rootId: string, list: Array<{ op: string; id?: string; entity?: { components?: Record<string, unknown> } }>, k: number): void => {
     for (const o of list) {
@@ -1360,7 +1798,8 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
     const pk = PACK[t.role];
     const hp = Math.round(pk.hp * (1 + 0.22 * (t.level - 1)));
     const xp = Math.round(4 + 3 * t.level * pk.xp);
-    const label = `${t.placeholder ? "PLACEHOLDER " : ""}${t.name} (lv ${t.levels[0]}${t.levels[1] !== t.levels[0] ? `-${t.levels[1]}` : ""})`;
+    // the display name only (levels live in the id and the `level` tag); only a body-less capsule says PLACEHOLDER
+    const label = `${t.placeholder ? "PLACEHOLDER " : ""}${t.name}`;
     const tags = ["npc", "populate", `zone:${zone}`, `creature:${t.creature}`, `level:${t.level}`, ...(t.theme ? [`theme:${t.theme}`] : []), ...(t.placeholder ? ["placeholder"] : [])];
     // a template is itself a body standing at its area: templates that share an area stand in a ring, not on one spot
     const mates = templates.filter((x) => x.standsAt === t.standsAt);
@@ -1382,7 +1821,9 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
       continue;
     }
     if (t.body !== "capsule") {
-      ops.push({ op: "add-entity", id: t.id, entity: { name: label, parent: null, tags, components: { transform: { position: at, ...(t.scale ? { scale: [t.scale, t.scale, t.scale] } : {}) }, prefab: { prefabId: t.body, props: { actor: t.id, faction: t.faction, maxHp: hp, xpValue: xp, ...(hasLevelProp(t.body) ? { level: t.level } : {}), aggroRange: brain.aggroRange, deaggroRange: brain.deaggroRange }, ...(t.loot || t.scale ? { overrides: [...(t.loot ? [{ path: "combat/components/script/params/loot", value: t.loot }] : []), ...(t.scale ? sizeOverrides(t.body, t.scale) : [])] } : {}) } } } as never });
+      const paintOv = t.material ? meshKeys(t.body).map((key) => ({ path: `${key}/components/mesh/material`, value: t.material })) : [];
+      const ov = [...(t.loot ? [{ path: "combat/components/script/params/loot", value: t.loot }] : []), ...(t.scale ? sizeOverrides(t.body, t.scale) : []), ...paintOv];
+      ops.push({ op: "add-entity", id: t.id, entity: { name: label, parent: null, tags, components: { transform: { position: at, ...(t.scale ? { scale: [t.scale, t.scale, t.scale] } : {}) }, prefab: { prefabId: t.body, props: { actor: t.id, faction: t.faction, maxHp: hp, xpValue: xp, ...(hasLevelProp(t.body) ? { level: t.level } : {}), aggroRange: brain.aggroRange, deaggroRange: brain.deaggroRange }, ...(ov.length ? { overrides: ov } : {}) } } } as never });
       continue;
     }
     const size = CAPSULE[t.family] ?? CAPSULE.human!;
@@ -1413,7 +1854,7 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
     if (t.scale) sizeOps(t.id, ops.slice(capsuleStart) as never, t.scale);
   }
   for (const a of areas) {
-    const spawnArea = { radius: a.radius, sleepRadius: a.sleepRadius, idleSeconds: a.idleSeconds, spawns: a.spawns, leash: a.leash, roam: a.roam };
+    const spawnArea = { radius: a.radius, sleepRadius: a.sleepRadius, idleSeconds: a.idleSeconds, spawns: a.spawns, leash: a.leash, roam: a.roam, ...(a.temperament ? { temperament: a.temperament } : {}), ...(a.territory ? { territory: a.territory } : {}), ...(a.life ?? {}) };
     const tags = ["populate", `zone:${zone}`, `pop:${a.kind}`, `creature:${a.creature}`, ...(a.group ? [`group:${a.group}`] : []), ...(a.location ? [`location:${a.location}`] : []), `level:${a.level}`];
     if (a.camp) {
       const prev = doc.entities[a.camp]?.tags ?? ["camp", `zone:${zone}`];
@@ -1460,7 +1901,7 @@ function drawMap(m: { nx: number; nz: number; reason: Uint8Array; inZone: Uint8A
     const iz = Math.floor(i / m.nx);
     for (let a = 0; a < S; a++) for (let b = 0; b < S; b++) put(ix * S + a, iz * S + b, c);
   }
-  const kindColour: Record<Area["kind"], [number, number, number]> = { camp: [255, 255, 255], group: [230, 40, 40], rare: [255, 215, 0], wildlife: [255, 140, 30], fill: [255, 190, 120] };
+  const kindColour: Record<Area["kind"], [number, number, number]> = { camp: [255, 255, 255], group: [230, 40, 40], rare: [255, 215, 0], wildlife: [255, 140, 30], fill: [255, 190, 120], wanderer: [80, 220, 255] };
   const disc = (x: number, z: number, r: number, c: [number, number, number], ring: boolean): void => {
     const gx = ((x - m.x0) / m.step) * S;
     const gz = ((z - m.z0) / m.step) * S;
@@ -1537,6 +1978,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { applyOps, ComponentRegistry, registerCoreComponents, registerChunkComponents } from "@hitreg/core";
 import { findAsset } from "${path.relative(populateDir(ctx, zone), path.resolve("tools", "_closure.mjs")).replaceAll("\\", "/")}";
+import { applyOpsToSceneFile } from "${path.relative(populateDir(ctx, zone), path.resolve("tools", "_scene-write.mts")).replaceAll("\\", "/")}";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT = path.resolve(HERE, "${path.relative(populateDir(ctx, zone), ctx.paths.projectDir).replaceAll("\\", "/")}");
@@ -1556,9 +1998,9 @@ if (!fs.existsSync(SCENE)) fail("no scene " + SCENE);
 
 if (argv.includes("--uninstall")) {
   if (!fs.existsSync(INV)) fail("nothing installed into " + sceneId + " by this script (no " + path.basename(INV) + ")");
-  const res = applyOps(read(SCENE), read(INV), reg);
+  applyOps(read(SCENE), read(INV), reg);
   if (dry) { console.log("[dry-run] would undo the populate batch in " + sceneId); process.exit(0); }
-  fs.writeFileSync(SCENE, JSON.stringify(res.doc, null, 2) + "\\n");
+  applyOpsToSceneFile(SCENE, read(INV), (d, o) => applyOps(d, o as never, reg), { label: "populate uninstall ${zone}" }); // fresh read under the scene lock
   fs.rmSync(INV);
   if (fs.existsSync(REC)) fs.rmSync(REC);
   console.log("removed the populate batch from " + sceneId);
@@ -1581,8 +2023,8 @@ const before = sha(SCENE);
 const res = applyOps(live, ops as never, reg);
 const adds = ops.filter((o) => o.op === "add-entity").length;
 if (dry) { console.log("[dry-run] would apply " + ops.length + " ops (" + adds + " new entities, " + (ops.length - adds) + " camp edits) to " + sceneId); process.exit(0); }
-fs.writeFileSync(SCENE, JSON.stringify(res.doc, null, 2) + "\\n");
-fs.writeFileSync(INV, JSON.stringify(res.inverse, null, 2) + "\\n");
+const done = applyOpsToSceneFile(SCENE, ops, (d, o) => applyOps(d, o as never, reg), { label: "populate install ${zone}" }); // fresh read under the scene lock (tools/_scene-write.mts)
+fs.writeFileSync(INV, JSON.stringify(done.inverse ?? res.inverse, null, 2) + "\\n");
 fs.writeFileSync(REC, JSON.stringify({ installedAt: new Date().toISOString(), scene: sceneId, sceneBefore: before, sceneAfter: sha(SCENE), opsSha: report.opsSha, ids: ops.map((o) => o.id) }, null, 2) + "\\n");
 console.log("installed " + ops.length + " ops into " + sceneId + "; inverse at " + path.basename(INV));
 `;
@@ -1598,7 +2040,7 @@ export function populateRow(ctx: Ctx, zone: string): { state: "ok" | "STALE" | "
   const rep = readJson(file) as { ok?: boolean; opsSha?: string; inputs?: Record<string, string>; numbers?: { areas?: number; creatures?: number; placeholderTemplates?: number; worstInView?: { count: number; budget: number } } };
   const changed = Object.entries(rep.inputs ?? {}).filter(([rel, h]) => {
     const full = path.join(ctx.paths.projectDir, rel);
-    return !exists(full) || digest(ctx.paths, full, zone) !== h;
+    return !exists(full) || !digestMatches(ctx.paths, full, zone, h);
   }).map(([rel]) => path.basename(rel));
   if (changed.length) return { state: "STALE", why: `changed since populate ran: ${changed.join(", ")}`, how };
   if (!rep.ok) return { state: "FAILED", why: "populate reported errors (reports/populate.json)", how };

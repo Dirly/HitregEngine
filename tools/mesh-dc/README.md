@@ -21,10 +21,12 @@ tagged `dc_export = True`. Assign `dc_group` to combine nearby structural parts
 into a room or passage. Group size controls extraction cost, so avoid one giant
 bounding box around a branching dungeon.
 
-Partition at buried interfaces. Overlapping groups with exposed coplanar walls
-or floors can still z-fight; checking each mesh for closed topology does not
-check the assembled surfaces. Union pieces that share those surfaces before
-extraction, and verify the final assembly as well as its individual meshes.
+One mesh owns each plane: `convertMeshStamp` cuts every group by the crisp solids
+of the groups ranked before it (stamp order; `ownerOrder` / a stamp's `ownerOrder`
+puts named groups first, e.g. one that may ship as a BUILT mesh), so two groups
+overlapping on a shared wall or door-threshold floor no longer both bake that face
+(`plane-owner.mjs`; `ownPlanes: false` for the old behaviour). Noised solids
+never cut other groups. Verify the assembly with the zfight gate (`tools/zfight.mts`).
 
 Run `export_blender.py` inside Blender through MCP or its Text Editor, then call
 the exported function. For example, with the entry point already loaded:

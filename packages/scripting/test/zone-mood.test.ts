@@ -77,3 +77,48 @@ describe("zone-mood: ground-relative mist", () => {
     w.runtime.dispose();
   });
 });
+
+describe("zone-mood: dusk cloud burn", () => {
+  const cold: RegionAt = {
+    id: "hag",
+    name: "Hagsheer",
+    tags: [],
+    mood: { amount: 0.5, lightScale: 1, fogDensity: 1, mist: 1, saturation: 1, contrast: 1, temperature: 0, sunset: "#8fa6c8", cloudGlow: 0.6 },
+  };
+
+  it("sends the zone's sunset colour and glow scale once eased in", () => {
+    const w = world(() => cold, () => 0);
+    w.step(6);
+    const mood = w.skies.at(-1)!.mood!;
+    expect(mood.sunset).toBe("#8fa6c8");
+    expect(mood.sunsetAmount).toBeGreaterThan(0.95);
+    expect(mood.cloudGlow).toBeCloseTo(0.6, 2);
+    w.runtime.dispose();
+  });
+
+  it("a zone without them leaves the global sunset alone", () => {
+    const w = world(() => ({ ...cold, mood: { ...cold.mood!, sunset: undefined, cloudGlow: undefined } }), () => 0);
+    w.step(6);
+    const mood = w.skies.at(-1)!.mood!;
+    expect(mood.sunset).toBeUndefined();
+    expect(mood.cloudGlow).toBeCloseTo(1, 5);
+    w.runtime.dispose();
+  });
+
+  it("eases the sunset out over blendSeconds after leaving the zone", () => {
+    let inside = true;
+    const w = world(() => (inside ? cold : { id: "plain", name: "Plain", tags: [] }), () => 0);
+    w.step(6);
+    inside = false;
+    w.step(0.6); // part-way: still fading, still the cold hue
+    const mid = w.skies.at(-1)!.mood!;
+    expect(mid.sunset).toBe("#8fa6c8");
+    expect(mid.sunsetAmount!).toBeGreaterThan(0.02);
+    expect(mid.sunsetAmount!).toBeLessThan(0.95);
+    w.step(6);
+    const out = w.skies.at(-1)!.mood!;
+    expect(out.sunsetAmount ?? 0).toBeLessThan(0.02);
+    expect(out.cloudGlow).toBeCloseTo(1, 2);
+    w.runtime.dispose();
+  });
+});

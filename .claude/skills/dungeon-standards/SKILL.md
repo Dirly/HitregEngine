@@ -15,6 +15,7 @@ gate), `dungeon-lighting` (readability, matte, culling, buckets), `portals` (doo
 - 3-5 dungeons per zone; a zone with a capital carries 5 (zone brief lint warns outside 3-5). Every landmark owns
   one; capitals and starter towns get one nearby or tied in (sewers, haunted house, abandoned mine, sunken ship).
 - Each differs in shape language and palette from the others in its zone.
+- Its world entrance is a grand landmark that reads from 300 m+: skill `grand-entrance`.
 - A FIRST dungeon is about 23 rooms and 600 m of route; a LARGE one about twice that. Never buy size with filler.
 
 ## Plan and shape
@@ -45,6 +46,7 @@ gate), `dungeon-lighting` (readability, matte, culling, buckets), `portals` (doo
 - Nothing floats: `dress apply` seats every prop on the real floor (DC mesh, colliders) by its catalogue contact, and the
   pipeline's `float` stage (`tools/float.mts scene <project>`) must pass before portal play; a prop with no support moves in the plan.
 - No see-through: every wall, vault and hull closes on screen — the pipeline's `see-through` stage must pass (docs/see-through.md); vault shells and arch springings at least 3 voxels thick in the source.
+- One mesh owns each plane; zfight gate: no two DC groups, kit pieces, built pads or props draw the same surface (the pipeline's `zfight` stage, `tools/zfight.mts <project> --decals`, also checks every decal lands on its surface: `decal place`). Where groups meet, one group's wall stops short of the other's face.
 - More bones in a tomb (an exception entry, `dungeon-build`); candles carry a barrow; nothing inside a hearth.
 - A dungeon is a place to farm (`encounter-standards`). Boss mechanics are engine builtins, the dungeon is data
   (`encounter-waves`, `spawnArea.patrol`); a patrol is a route between named points.
@@ -53,6 +55,13 @@ gate), `dungeon-lighting` (readability, matte, culling, buckets), `portals` (doo
   low contrast, no ripples, no parallel bands).
 
 ## Known limits
+- Water: one still level at the lowest point of the dungeon, nothing moving (2026-10-25: a plunge pot under an inner fall, the Weep Hole, did not work). Plan a flooded bottom, never a stepped or weeping water feature.
 - No stacked fight floors (ground found by a ray straight down); storeys side by side, joined by real stairs.
 - One recorded way back per traveller: no dungeon-to-dungeon doors.
 - Noised caves have no straight wall spans: no wall-backed props; posted lights at exact floor spots.
+
+## Variety (owner ruling 2026-10-20)
+Not every dungeon is humanoid. Each zone's dungeon set needs at least one creature LAIR where the bestiary allows it —
+a wasp nest, an ant hive, a spider nest, a sewer of rats and crocs — with its own plan-shape language (galleries,
+brood chambers, flooded culverts), not a barrow re-skinned. Any unit can be re-skinned through the atlas tooling for a
+lair's own look; capsules are never shipped (populate renders the base body when a theme lacks art).

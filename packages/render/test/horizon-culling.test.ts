@@ -263,6 +263,52 @@ describe("CullingSystem", () => {
     expect(roof.layers.mask).toBe(1 << OCCLUDED_LAYER);
   });
 
+
+  it("hides a grounded unit while no terrain is drawn under it, re-judged only when the ground version changes", () => {
+    const culling = new CullingSystem();
+    const loaded = new Set<string>();
+    let calls = 0;
+    const ground = {
+      groundVersion: 0,
+      coversGround(x: number, z: number): boolean {
+        calls++;
+        return loaded.has(`${Math.floor(x / 48)}_${Math.floor(z / 48)}`);
+      },
+    };
+    culling.ground = ground;
+    const town = box("town", 1500, 0, 20, 10);
+    const ungated = box("ungated", 1500, 0, 40, 10);
+    culling.register({ name: "town", objects: [town], grounded: true, occlusion: false });
+    culling.register({ name: "ungated", objects: [ungated], occlusion: false });
+    const camera = perspective(0, 50, 0, 1500, 20);
+    culling.update(camera, 480);
+    // over a cell that has not streamed in: gone from every pass (shadows too); ungrounded content untouched
+    expect(town.layers.mask).toBe(0);
+    expect(ungated.layers.mask).toBe(1);
+    expect(culling.stats().ungrounded).toBe(1);
+    // no chunk event, no re-judging: the gate costs nothing per frame
+    for (let n = 0; n < 5; n++) culling.update(camera, 480);
+    expect(calls).toBe(1);
+    // its cell streams in
+    loaded.add(`${Math.floor(1500 / 48)}_0`);
+    ground.groundVersion++;
+    culling.update(camera, 480);
+    expect(town.layers.mask).toBe(1);
+    expect(calls).toBe(2);
+    // and out again
+    loaded.clear();
+    ground.groundVersion++;
+    culling.update(camera, 480);
+    expect(town.layers.mask).toBe(0);
+    // the A/B switch shows it regardless
+    culling.groundGate = false;
+    culling.update(camera, 480);
+    expect(town.layers.mask).toBe(1);
+    // and judges afresh when it is switched back on (no chunk event in between)
+    culling.groundGate = true;
+    culling.update(camera, 480);
+    expect(town.layers.mask).toBe(0);
+  });
   it("restores every layer when a unit is unregistered or culling is switched off", () => {
     const culling = new CullingSystem();
     ridgeWorld(culling);

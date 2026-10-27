@@ -245,12 +245,13 @@ export class FaceShots {
 }
 
 /** Linear 8-bit readback → an sRGB PNG data URL (WebGL reads bottom-up: flipped). */
-function toDataUrl(pixels: Uint8Array, size: number, flip: boolean): string | null {
+export async function toDataUrl(pixels: Uint8Array, size: number, flip: boolean): Promise<string | null> {
   if (typeof document === "undefined") return null;
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
-  const ctx = canvas.getContext("2d");
+  // Pixels are already on the CPU. Avoid another GPU upload/readback just to encode them.
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) return null;
   const image = ctx.createImageData(size, size);
   const lut = SRGB_LUT;
@@ -268,7 +269,14 @@ function toDataUrl(pixels: Uint8Array, size: number, flip: boolean): string | nu
     }
   }
   ctx.putImageData(image, 0, 0);
-  return canvas.toDataURL("image/png");
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!blob) return null;
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(blob);
+  });
 }
 
 /** Linear 0..255 → sRGB 0..255. */

@@ -58,7 +58,7 @@ type P2 = [number, number];
 type P3 = [number, number, number];
 
 const t0 = Date.now();
-const content = loadContent(playgroundRoots(playground));
+const content = loadContent(playgroundRoots(playground, sceneName)); // the scene's closure only, as serve.ts loads it
 const doc = content.scenes.get(sceneName);
 if (!doc) throw new Error(`no scene ${sceneName}`);
 const events = defaultEvents();
@@ -212,6 +212,20 @@ function envelope(b: { centre: P2; facing: P2; size?: [number, number]; corners:
   return [at(-W, front), at(W, front), at(W, -back), at(-W, -back)];
 }
 const obstacles = (layoutDoc?.buildings ?? []).map((b) => ((b as { ground?: P2[] }).ground ? grow((b as { ground: P2[] }).ground, 0.4) : envelope(b)));
+/**
+ * A thin built landmark (a palisade, a fence-thin wall operator) can pass BETWEEN the 1 m grid samples, so the planner
+ * routed straight through it (Reedholt's 0.6 m palisade, T-D2). A cell whose centre has a landmark collider within the
+ * body's reach (0.45 m, 8 directions, at hip height) is blocked: the body (radius 0.4) cannot stand there anyway.
+ * Landmarks only: door jambs and stair rails of buildings keep their exact 1 m sampling.
+ */
+const REACH_DIRS: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1], [0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, 0.7071], [-0.7071, -0.7071]];
+function thinLandmarkNear(x: number, foot: number, z: number): unknown {
+  for (const [dx, dz] of REACH_DIRS) {
+    const hit = world.sim.raycast([x, foot + 1, z], [dx, 0, dz], 0.45, { solid: true });
+    if (hit && /landmark|lmc_/.test(hit.entityId)) return hit;
+  }
+  return null;
+}
 function plan(from: P2, to: P2): P2[] | null {
   const pad = 60;
   const x0 = Math.floor(Math.min(from[0], to[0]) - pad);
@@ -240,7 +254,7 @@ function plan(from: P2, to: P2): P2[] | null {
       const down = world.sim.raycast([x, top + 3, z], [0, -1, 0], 8, { solid: true });
       const foot = down ? down.point[1] : top;
       if (down && !down.entityId.includes("/terrain")) built[i + j * w] = 1;
-      const head = world.sim.raycast([x, foot + 0.3, z], [0, 1, 0], 1.5, { solid: true });
+      const head = world.sim.raycast([x, foot + 0.3, z], [0, 1, 0], 1.5, { solid: true }) ?? thinLandmarkNear(x, foot, z);
       H[i + j * w] = foot;
       const water = field.waterY(x, z);
       // a building's footprint is closed: its door is open and its floor is walkable, so without this a route to the

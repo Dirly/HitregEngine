@@ -8,7 +8,7 @@
  *
  *   npx tsx tools/props.mts measure <prefab id> --project <p>
  *   npx tsx tools/props.mts suggest <prefab id> | --all [--catalog <path>]  (draft declaration from geometry)
- *   npx tsx tools/props.mts status [--catalog <path>] [--next] [--quiet]   (ok / STALE / MISSING per prop; exit 1 if any)
+ *   npx tsx tools/props.mts status [--catalog <path>] [--next] [--quiet] [--all]   (ok / STALE / MISSING per prop; exit 1 if any; --all lists every uncatalogued prefab)
  *   npx tsx tools/props.mts sync                                           (sidecars -> prefab roots, idempotent)
  *   npx tsx tools/props.mts index                                          (authoring/dressing/prop-index.json)
  *   npx tsx tools/props.mts menu --room <role> [--wealth w] [--theme t] [--mount m] [--category c] [--fits tag] [--setting s] [--limit 60]
@@ -25,10 +25,23 @@
  *                                    same model(s), new material or art (--triplanar projects tiling art over atlas UVs in metres)
  *   npx tsx tools/props.mts compose <recipe.json>                          (props + models + primitives + alpha cards -> one prefab;
  *                                    REFUSED when its prefab parts mix cultures or scales, or a part is resized to stand in)
- *   npx tsx tools/props.mts request add --name <thing> --culture <c> --scale <s> --for <place> [--why text] | request [--all]
+ *   npx tsx tools/props.mts request add --name <thing> --culture <c> --scale <s> --for <place> [--why text] [--landmark <m>] [--size <metres tall>] | request [--all]
+ *                                    --size: a hero prop's finished height; the Codex brief says it is made at that size, never scaled later
+ *                                    (--landmark: a built landmark structure that tall, 6-30 m: the Codex gate builds it at full size, 40 tx/m)
+ *                                    | request made <id> --with <catalogue prop id> | request drop <id> --why text | request reopen <id> --why text
  *                                    the project's prop-request list by culture (authoring/dressing/prop-requests.json)
+ *   npx tsx tools/props.mts codex <request id...> | --all --project <p> [--batch 5] [--names <id>=<name>,...] [--scales <id>=<scale>,...] [--redo --notes-file <{id: review note}>] [--dry] [--designs-only] [--review-sheet <png>]
+ *                                    open prop requests -> one bounded Codex design job each (tools/prop-codex: brief, codex-task.mjs,
+ *                                    Blender gate, one retry with the gate text) -> world-kit codex-craft/ on the town-craft atlas page,
+ *                                    catalogued, review cards, sync/index/status, request made; ledger in <p>/authoring/dressing/prop-requests.md
+ *   npx tsx tools/props.mts codex install [--cards <name,...>] [--review-sheet <png>]   (rebuild + pack + catalogue the designs; cards; close requests)
  *   npx tsx tools/props.mts dupes [<new prefab id>...]                     (DUPLICATE of <existing id>; exit 1 when ids are given and one is)
- *   npx tsx tools/props.mts menu --map <map id> --room <room id> [--role r] [--wealth w] [--all]
+ *   npx tsx tools/props.mts menu --map <map id> --room <room id> [--role r] [--plan p] [--wealth w] [--all]
+ *       roles: the catalogue's, or a mix (cottage = hall+bedroom+kitchen, guardroom = hall+bedroom, living = hall); with
+ *       --plan the room's own role + `also` count too. Named sets that fit are listed first (name, members, footprint).
+ *       A town building (plan <town>--<b> / map <town>-<b>) with no `space` is human civic/rural (+ sacred in a chapel)
+ *       unless the town doc says `dressing`; --culture <c> or --all lifts that. A map with no rooms (a town exterior)
+ *       lists its pitches by kind and the props that stand on them.
  *                                    ROOM-AWARE: only what physically fits that room (under its ceiling, within its cover ceiling,
  *                                    a free wall stretch long enough when it needs a wall), with use, wall need, and each set's shape
  *   npx tsx tools/props.mts report                                         (authoring/dressing/prop-report.md: every prop's in-game size,
@@ -43,19 +56,26 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import os from "node:os";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { applyOps, ComponentRegistry, registerCoreComponents, dressingSchema, dressingSetSchema, dressingOrigin, isLooseClutter, type DressingData } from "@hitreg/core";
 import { mergeVocabulary, scaleFits, cultureFits, dressingPlanSchema, type DressingVocabulary } from "@hitreg/core";
-import { socketMapSchema, placeableFloor, roomBudget, standStretches, describeSetShape, HEAD_STEP } from "@hitreg/core";
-import { locate, prefabGeometry, measure, findSurfaces, supportBelow, readJson, prefabFile, type PropGeometry, type Measure, type V3 } from "./_prop-geometry.mts";
-import { closure, PROJECTS } from "./_closure.mjs";
-import { kindSizes, realSizeIssue, type KindSize } from "./_prop-real-size.mts";
-import { addRequest, compositeFaults, readRequests, requestsFile } from "./_prop-composite-guard.mts";
-import { texelDensity, clearGeometryCaches, type Density, type TexInfo, type PixelPage } from "./_prop-geometry.mts";
+import { socketMapSchema, placeableFloor, roomBudget, standStretches, describeSetShape, HEAD_STEP, expandRoomRoles, ROOM_ROLE_ALIASES, type DressingSet } from "@hitreg/core";
+import { locate, prefabGeometry, measure, findSurfaces, supportBelow, surfaceTopUnder, readJson, prefabFile, type PropGeometry, type Measure, type V3 } from "./_prop-geometry.mts";
+import { closure, firstExisting, PROJECTS } from "./_closure.mjs";
+import { kindSizes, realSizeIssue, standsAgainstWall, type KindSize } from "./_prop-real-size.mts";
+import { addRequest, closeRequest, reopenRequest, compositeFaults, readRequests, requestsFile } from "./_prop-composite-guard.mts";
+import { texelDensity, clearGeometryCaches, projectedTexels, type Density, type TexInfo, type PixelPage } from "./_prop-geometry.mts";
+import { blockbenchReport } from "./_bb-sources.mts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ROOMS = ["bedroom", "kitchen", "hall", "tavern", "shop", "workshop", "storage", "office", "chapel", "cellar", "street", "plaza", "quay", "yard", "camp", "ruin", "dungeon", "cave-mouth", "path", "shore"];
 export const OUTDOOR_ROOMS = new Set(["street", "plaza", "quay", "yard", "camp", "ruin", "cave-mouth", "path", "shore"]);
+/** A room role a menu accepts: a catalogue role or an alias for a mix of them (cottage, guardroom, living). */
+const knownRole = (r: string): boolean => ROOMS.includes(r) || r in ROOM_ROLE_ALIASES;
+const ROLE_WORDS = (): string => `${ROOMS.join(" ")} | mixes: ${Object.entries(ROOM_ROLE_ALIASES).map(([k, v]) => `${k} (${v.join("+")})`).join(", ")}`;
+/** A town building's people when its plan declares none: the town builder's towns are human (a town doc may say otherwise with `dressing`). */
+const TOWN_SPACE = { scale: "human", cultures: ["civic", "rural"] };
 export const CATEGORIES = ["furniture", "storage", "bedding", "light", "tableware", "document", "tool", "decor", "trade", "sacred", "street"];
 
 // ------------------------------------------------------------------ args ----
@@ -63,7 +83,7 @@ const argv = process.argv.slice(2);
 const cmd = argv[0];
 const positional: string[] = [];
 const flags: Record<string, string | true> = {};
-const BOOLEAN = new Set(["vocabulary", "json", "all", "sheet", "compact", "next", "quiet", "rooms", "categories", "tags", "surfaces", "force"]);
+const BOOLEAN = new Set(["redo", "dry", "designs-only", "vocabulary", "json", "all", "sheet", "compact", "next", "quiet", "rooms", "categories", "tags", "surfaces", "force", "uncut"]);
 for (let i = 1; i < argv.length; i++) {
   const a = argv[i];
   if (a.startsWith("--")) {
@@ -87,7 +107,7 @@ const INDEX = "authoring/prop-catalogs.json";
  * WRITES (index, report, new props) go to --project.
  */
 const ROOTS: string[] = closure(projectName).map((p: string) => path.join(PROJECTS, p));
-const proj = (rel: string): string => { for (const r of ROOTS) { const f = path.join(r, rel); if (fs.existsSync(f)) return f; } return path.join(PROJECT, rel); };
+const proj = (rel: string): string => firstExisting(ROOTS, rel) ?? path.join(PROJECT, rel);
 
 // -------------------------------------------------------------- catalogs ----
 /** `shared`: a reusable collection (kits, supplied props, wrappers/variants/composites); otherwise a site's own. */
@@ -121,6 +141,13 @@ const KIND_SIZES = kindSizes(registry.realSize);
 const STANDARD: DensityStandard | null = registry.texelDensity ?? null;
 const docCache = new Map<string, any>();
 const doc = (rel: string) => { if (!docCache.has(rel)) docCache.set(rel, readJson(proj(rel))); return docCache.get(rel); };
+
+/** Blockbench intake completeness (tools/_bb-sources.mts) over every closure project's source/blockbench. */
+function blockbenchSources() {
+  const rows: any[] = [];
+  for (const entry of registry.catalogs) { try { const r = doc(entry.path)[entry.entries]; if (Array.isArray(r)) rows.push(...r); } catch { /* unreadable catalog: props status reports it */ } }
+  return blockbenchReport(ROOTS, rows);
+}
 
 /** prefab id -> owning catalog rows, in registry order. */
 function catalogued(only?: string): Map<string, Owner[]> {
@@ -178,15 +205,10 @@ const densCache = new Map<string, Density>();
 function density(id: string): Density {
   let hit = densCache.get(id);
   if (!hit) {
-    hit = texelDensity(geometry(id).geo, { pixels: pagePixels });
-    // a triplanar material ignores the mesh's UVs (a variant laying tiling art over an atlas layout): its density is
-    // the texture's width over the metres one tile spans
-    const mats = new Set(geometry(id).geo.tris.map((t) => t.material).filter(Boolean) as string[]);
-    const tri = [...mats].map((m) => { const f = locate(ASSETS, "materials", `${m}.json`); const j = fs.existsSync(f) ? readJson(f) : null; return j?.triplanar && j.map ? { j, f: locate(ASSETS, "textures", j.map) } : null; });
-    if (mats.size && tri.every(Boolean) && tri.every((t) => fs.existsSync(t!.f))) {
-      const px = fs.readFileSync(tri[0]!.f).readUInt32BE(16), v = px / tri[0]!.j.triplanarScale;
-      hit = { ...hit, median: v, p10: v, texturedArea: hit.area, flatArea: 0 };
-    }
+    // a world-projected material (triplanar: a variant laying tiling art over an atlas layout, a landmark's DC rock;
+    // terrain-splat / rock-cap bakes) ignores the mesh's UVs: those triangles count at the texture's pixels over the
+    // metres one repeat spans, beside the UV-mapped parts (a mixed landmark is measured whole, not by its UV share)
+    hit = texelDensity(geometry(id).geo, { pixels: pagePixels, projected: projectedTexels(ASSETS) });
     densCache.set(id, hit);
   }
   return hit;
@@ -212,7 +234,7 @@ const pct = (v: number) => `${Math.round(v * 100)}%`;
 function densityLine(d: Density): string {
   if (!Number.isFinite(d.median)) return `texels/m n/a (no textured surface${d.flatArea ? `, ${pct(d.flatArea / d.area)} flat palette` : ""})`;
   const blown = Object.entries(d.effective).map(([k, v]) => ` | ${k} blown up ${v}x nearest (counted at its real detail)`).join("");
-  return `texels/m median ${d.median.toFixed(1)} p10 ${d.p10.toFixed(1)}${STANDARD ? ` (target ${STANDARD.target}, min ${STANDARD.min}: ${densityState(d)})` : ""} | textured ${pct(d.texturedArea / d.area)} flat ${pct(d.flatArea / d.area)} of ${d.area.toFixed(2)} m2 | tex ${d.textures.map((t) => `${t.size.join("x")} ${t.key}`).join(", ")} | uv overlap ${pct(d.overlap)} coverage ${pct(d.coverage)} islands ${d.islands.length}${blown}`;
+  return `texels/m median ${d.median.toFixed(1)} p10 ${d.p10.toFixed(1)}${STANDARD ? ` (target ${STANDARD.target}, min ${STANDARD.min}: ${densityState(d)})` : ""} | textured ${pct(d.texturedArea / d.area)}${d.projectedArea ? ` (world-projected ${pct(d.projectedArea / d.area)})` : ""} flat ${pct(d.flatArea / d.area)} of ${d.area.toFixed(2)} m2 |${Object.keys(d.byMaterial ?? {}).length > 1 ? ` per material ${Object.entries(d.byMaterial!).sort((a, b) => b[1].area - a[1].area).map(([k, v]) => `${k} ${v.median.toFixed(0)}${v.projected ? "p" : ""} (${pct(v.area / d.area)})`).join(", ")} |` : ""} tex ${d.textures.map((t) => `${t.size.join("x")} ${t.key}`).join(", ")} | uv overlap ${pct(d.overlap)} coverage ${pct(d.coverage)} islands ${d.islands.length}${blown}`;
 }
 const f2 = (v: number) => (Number.isFinite(v) ? +v.toFixed(2) : v);
 const dims = (s: number[]) => s.map((v) => (v >= 10 ? v.toFixed(0) : v < 0.1 ? String(+v.toPrecision(1)) : v.toFixed(1)).replace(/^0\./, ".")).join("x");
@@ -221,7 +243,7 @@ const prefabRoot = (id: string) => { const d = readJson(prefabFile(ASSETS, id));
 /** Every measured/heuristic problem with a declaration. Empty = ok. */
 function audit(id: string, owners: Owner[], data: DressingData, all: Map<string, DressingData>): string[] {
   const why: string[] = [];
-  const { geo, m } = geometry(id);
+  const { geo, m: m0 } = geometry(id), m = data.footing ? measure(geo, data.footing) : m0; // a declared footing: the origin is the foot above it
   // A light-only fixture (a flame + light for a building's OWN sconce or lantern: the bracket is the building's mesh)
   // has nothing to measure; its declared size is the flame's envelope and is taken as given.
   const lightOnly = !geo.tris.length && data.fire && geo.effects.length > 0 && geo.lights > 0;
@@ -241,6 +263,9 @@ function audit(id: string, owners: Owner[], data: DressingData, all: Map<string,
     if (s.kind === "surface") {
       const gap = supportBelow(geo, s.position as V3);
       if (!(gap <= 0.04)) why.push(`socket ${s.id} floats ${Number.isFinite(gap) ? gap.toFixed(2) + " m" : "over nothing"} above the mesh`);
+      // the socket height is the mesh's real top under it, not a number typed in (items on it are seated by the mesh)
+      const top = surfaceTopUnder(geo, s);
+      if (top !== null && Math.abs(top - y) > 0.02) why.push(`socket ${s.id} at y ${y} but the mesh top under it is ${top.toFixed(3)}: declare position[1] = ${top.toFixed(3)}`);
     }
     if (s.kind === "slot") for (const k of s.accepts) if (![...all.values()].some((d) => d.slotKind === k)) why.push(`slot ${s.id} accepts "${k}" but no prop has that slotKind`);
   }
@@ -261,7 +286,7 @@ function audit(id: string, owners: Owner[], data: DressingData, all: Map<string,
   if (/drawer/.test(n) && data.mount === "floor" && !data.provides.some((s) => s.kind === "slot")) why.push("a drawer standing on the floor that provides no drawer slots");
   if (/chandelier/.test(n) && data.mount !== "ceiling") why.push("chandelier not ceiling-mounted");
   if (/paper|scroll|book|letter/.test(n) && data.mount !== "surface" && data.mount !== "wall" && data.mount !== "part" && m.size[1] < 0.5) why.push("document not surface/wall-mounted");
-  if (/wardrobe|bookshelf|^shelf|bed/.test(n) && data.mount === "floor" && data.against !== "wall") why.push("wardrobe/shelf/bed must be against:wall");
+  if (standsAgainstWall(n) && data.mount === "floor" && data.against !== "wall") why.push("wardrobe/shelf/bed must be against:wall");
   if (/candle|torch|brazier|campfire/.test(n) && !/shelf|holder/.test(n) && !data.fire && geo.effects.length) why.push("flame prop not fire:true");
   for (const r of data.rooms) if (!ROOMS.includes(r)) why.push(`room "${r}" not in the vocabulary`);
   const vocab = vocabulary();
@@ -449,6 +474,16 @@ function buildIndex() {
   // a row with `supersededBy` (a reskin or revision under a new id) keeps its declaration, so installed scenes and old
   // plans still check, but the menu offers only its successor
   const superseded = (id: string) => (owners.get(id) ?? []).some((o) => typeof o.row.supersededBy === "string");
+  // a set authored with a superseded piece places its successor (dress does the same), so the menu lists it with that
+  const successor = (id: string): string => {
+    let at = id;
+    for (let i = 0; i < 8; i++) {
+      const next = (owners.get(at) ?? []).map((o) => o.row.supersededBy).find((v) => typeof v === "string" && v !== at);
+      if (!next) break;
+      at = next;
+    }
+    return at;
+  };
   const props = [...data].filter(([id, p]) => p.mount !== "part" && !superseded(id)).map(([id, p]) => ({
     id, mount: p.mount, size: p.size, ...(p.mount === "floor" ? { against: p.against } : {}), category: p.category, use: p.use, rooms: p.rooms, themes: p.themes,
     ...(p.mount === "wall" ? { wallHeight: p.wallHeight } : {}), ...(p.chain ? { chain: true } : {}), ...(p.clearance ? { clearance: p.clearance } : {}),
@@ -463,12 +498,13 @@ function buildIndex() {
     for (const f of fs.readdirSync(setsDir).filter((f) => f.endsWith(".json"))) {
       const parsed = dressingSetSchema.safeParse(readJson(path.join(setsDir, f)));
       if (!parsed.success) { console.error(`set ${f}: invalid (${parsed.error.issues[0]?.message})`); continue; }
-      const s = parsed.data, a = data.get(s.items[0]!.prop);
+      const s: DressingSet = { ...parsed.data, items: parsed.data.items.map((i) => ({ ...i, prop: successor(i.prop) })) }, a = data.get(s.items[0]!.prop);
       const floor = s.items.filter((i, k) => k === 0 || i.place.kind === "floor").map((i) => data.get(i.prop)).filter((d): d is DressingData => !!d);
       // a wall-backed anchor needs a stretch as wide as the members standing beside it along the wall
       const wallNeed = a?.against === "wall" ? +Math.max(a.size[0], s.footprint[0]).toFixed(2) : 0;
       sets.push({
         id: s.id, name: s.name, rooms: s.rooms, wealth: s.wealth, themes: s.themes, footprint: s.footprint, members: s.items.length, anchor: s.items[0]!.prop, props: [...new Set(s.items.map((i) => i.prop))],
+        parts: [...new Set(s.items.map((i) => i.prop))].map((id) => { const n = s.items.filter((i) => i.prop === id).length; return `${id.split("/").pop()}${n > 1 ? ` x${n}` : ""}`; }).join(", "),
         use: a?.use ?? [], against: a?.against ?? "either", wallNeed, tallest: +Math.max(0, ...floor.map((d) => d.size[1])).toFixed(2),
         cover: +floor.filter((d) => d.solid).reduce((m, d) => m + d.size[0] * d.size[2], 0).toFixed(2), loose: floor.filter((d) => isLooseClutter(d)).length,
         shape: s.shape || describeSetShape(s, (id) => data.get(id)),
@@ -490,17 +526,18 @@ function menu() {
   const idx = readJson(INDEX_OUT);
   const props: any[] = idx.props, sets: any[] = idx.sets ?? [];
   const tally = (key: string) => { const c = new Map<string, number>(); for (const p of props) for (const v of [].concat(p[key] ?? [])) if (v !== "") c.set(v, (c.get(v) ?? 0) + 1); return [...c].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}(${n})`).join(" "); };
-  if (flags.rooms) { console.log(`rooms: ${ROOMS.join(" ")}\nin use: ${tally("rooms")}  (props with no rooms fit anywhere)`); return; }
+  if (flags.rooms) { console.log(`rooms: ${ROLE_WORDS()}\nin use: ${tally("rooms")}  (props with no rooms fit anywhere)`); return; }
   if (flags.categories) { console.log(`categories: ${tally("category")}\nmounts: ${tally("mount")}`); return; }
   if (flags.vocabulary) { const v = vocabulary(); console.log(`scale classes: ${v.scales.map((x) => `${x.id} (${x.note})`).join("\n  ")}\ncultures: ${v.cultures.map((x) => x.id).join(" ")}\nin use: scale ${tally("scale")} | cultures ${tally("cultures")}`); return; }
   if (flags.tags) { console.log(`fits tags: ${tally("fits")}\nslot kinds: ${tally("slotKind")}\nthemes: ${tally("themes") || "(none: all neutral)"}`); return; }
   const room = flag("room"), wealth = flag("wealth"), theme = flag("theme"), mount = flag("mount"), category = flag("category"), fits = flag("fits");
-  const pf = placeFilter();
+  const pf = placeFilter(undefined, room ? expandRoomRoles([room]) : []);
   const setting = flag("setting") ?? (room ? (OUTDOOR_ROOMS.has(room) ? "outdoor" : room === "dungeon" ? undefined : "indoor") : undefined);
   const limit = Number(flag("limit") ?? 60);
   if (flag("search")) return searchMenu(props, flag("search")!);
   if (!room && !mount && !category && !fits && !flag("setting") && !pf.scale && !pf.cultures.length) { console.log("usage: menu --room <role> | --setting indoor|outdoor [--wealth w] [--theme t] [--mount m] [--category c] [--fits tag] [--limit 60]; menu --search <word>; menu --rooms | --categories | --tags"); process.exitCode = 1; return; }
-  if (room && !ROOMS.includes(room)) { console.log(`unknown room "${room}". rooms: ${ROOMS.join(" ")}`); process.exitCode = 1; return; }
+  if (room && !knownRole(room)) { console.log(`unknown room "${room}". rooms: ${ROLE_WORDS()}`); process.exitCode = 1; return; }
+  const roles = room ? expandRoomRoles([room]) : [];
   const score = (p: any) => {
     if (mount && p.mount !== mount) return -1;
     if (category && p.category !== category) return -1;
@@ -512,7 +549,7 @@ function menu() {
     if (p.mount === "slot") return -1; // slot items come with their host: never menu'd loose
     if (p.anchorKinds?.length) return -1; // flame-only fixtures fill a building's own anchors (dress fixtures), never furniture
     let s = 1;
-    if (room) { if (p.rooms.includes(room)) s += 4; else if (p.rooms.length) return -1; }
+    if (room) { if (p.rooms.some((r: string) => roles.includes(r))) s += 4; else if (p.rooms.length) return -1; }
     if (wealth && p.wealth.includes(wealth)) s += 1;
     if (theme && p.themes.includes(theme)) s += 2;
     if (p.ok === false) s -= 0.5;
@@ -522,10 +559,10 @@ function menu() {
   const byId = new Map(props.map((p) => [p.id, p]));
   for (const st of sets) {
     if (!(st.props ?? [st.anchor]).every((id: string) => byId.has(id) && pf.ok(byId.get(id)))) continue;
-    if (room && st.rooms.length && !st.rooms.includes(room)) continue;
+    if (room && st.rooms.length && !st.rooms.some((r: string) => roles.includes(r))) continue;
     if (wealth && st.wealth.length && !st.wealth.includes(wealth)) continue;
     if (mount || category || fits) continue;
-    lines.push({ s: 10 + (room && st.rooms.includes(room) ? 4 : 0), t: `set ${st.id} | ${st.members} items | floor ${dims(st.footprint)} | ${st.name}` });
+    lines.push({ s: 10 + (room && st.rooms.some((r: string) => roles.includes(r)) ? 4 : 0), t: `set ${st.id} | ${st.name} | ${st.members} items: ${setMembers(st)} | floor ${dims(st.footprint)}` });
   }
   for (const p of props) {
     const s = score(p);
@@ -565,25 +602,55 @@ function searchMenu(props: any[], word: string) {
   if (hidden.length) console.log(`# exists but not offered (do not remake; use the wrapper named, or wrap/variant it):\n  ${hidden.sort().join("\n  ")}`);
 }
 
+/** A set's pieces in short: "table-a, chair-a x4, bottle". */
+const setMembers = (st: any): string => st.parts ?? (st.props ?? []).map((id: string) => id.split("/").pop()).join(", ");
+
+/** The town a plan or map id belongs to (`<town>--<building>` plan, `<town>-<building>` map), with its doc, or undefined. */
+function townOf(id: string | undefined): { id: string; doc: any } | undefined {
+  if (!id) return undefined;
+  const words = path.basename(id, ".json").split(/-+/);
+  for (let n = words.length - 1; n >= 1; n--) {
+    const t = words.slice(0, n).join("-"), file = proj(`authoring/towns/${t}.json`);
+    if (fs.existsSync(file)) return { id: t, doc: readJson(file) };
+  }
+  return undefined;
+}
+
 /**
- * The place's scale class and cultures: --scale / --culture, else the --plan's `space` (and the room's own override).
+ * The place's scale class and cultures: --scale / --culture, else the --plan's `space` (and the room's own override), else
+ * for a town building (plan `<town>--<b>` / map `<town>-<b>`) the town's people: the town doc's `dressing` { scale,
+ * cultures } or human civic/rural (+ sacred in a chapel). `--culture any` or `--all` lifts the culture/scale default.
  * A prop is offered only when it declares a matching (or `any`) scale and culture; an untagged prop is hidden from a
  * filtered menu, because the resolver warns on it there.
  */
-function placeFilter(roomId?: string): { scale?: string; cultures: string[]; keepCentre: boolean; ok: (p: any) => boolean } {
-  let scale = flag("scale"), cultures = flag("culture") ? flag("culture")!.split(",") : [], keepCentre = false;
+function placeFilter(roomId?: string, roles: string[] = []): { scale?: string; cultures: string[]; keepCentre: boolean; from?: string; ok: (p: any) => boolean } {
+  let scale = flag("scale"), cultures = flag("culture") ? flag("culture")!.split(",") : [], keepCentre = false, from: string | undefined;
   const planRef = flag("plan");
+  let planId: string | undefined;
   if (planRef) {
     const file = fs.existsSync(planRef) ? planRef : proj(`authoring/dressing/plans/${planRef}.json`);
     const plan = dressingPlanSchema.parse(readJson(file)), room = roomId ? plan.rooms[roomId] : undefined;
+    planId = plan.id;
     scale ??= room?.scale ?? plan.space?.scale;
     if (!cultures.length) cultures = room?.cultures ?? plan.space?.cultures ?? [];
     keepCentre = room?.keepCentre ?? plan.space?.kind === "dungeon";
+    if (scale || cultures.length) from = `plan ${plan.id}`;
   }
+  if (!flags.all && !flag("culture") && !flag("scale") && !scale && !cultures.length) {
+    const town = townOf(planId ?? flag("map"));
+    if (town) {
+      const d = town.doc?.dressing ?? TOWN_SPACE;
+      scale = d.scale;
+      cultures = [...(d.cultures ?? [])];
+      if (roles.includes("chapel") && !town.doc?.dressing && !cultures.includes("sacred")) cultures.push("sacred");
+      from = `town ${town.id}${town.doc?.dressing ? "" : " (a town builder town: human)"}`;
+    }
+  }
+  if (cultures.includes("any")) cultures = [];
   const vocab = vocabulary();
   const ok = (p: any): boolean =>
     (!scale || (!!p.scale && scaleFits(vocab, scale, p.scale))) && (!cultures.length || (!!p.cultures && cultureFits(vocab, cultures, p.cultures)));
-  return { ...(scale ? { scale } : {}), cultures, keepCentre, ok };
+  return { ...(scale ? { scale } : {}), cultures, keepCentre, ...(from ? { from } : {}), ok };
 }
 
 /** Words for what a floor piece needs of a wall. */
@@ -600,12 +667,23 @@ function roomMenu() {
   const file = mapId.endsWith(".json") && fs.existsSync(mapId) ? mapId : proj(`authoring/dressing/sockets/${mapId}.json`);
   if (!fs.existsSync(file)) { console.log(`no socket map ${mapId} (authoring/dressing/sockets/${mapId}.json)`); process.exitCode = 1; return; }
   const map = socketMapSchema.parse(readJson(file));
+  if (!map.levels.some((l) => l.rooms.length)) return pitchMenu(map);
   const lv = map.levels.find((l) => l.rooms.some((r) => r.id === roomId));
   if (!roomId || !lv) { console.log(`usage: menu --map ${mapId} --room <room id> [--role r]; rooms: ${map.levels.flatMap((l) => l.rooms.map((r) => r.id)).join(", ")}`); process.exitCode = 1; return; }
-  const room = lv.rooms.find((r) => r.id === roomId)!, role = flag("role") ?? "", wealth = flag("wealth");
-  if (role && !ROOMS.includes(role)) { console.log(`unknown role "${role}". roles: ${ROOMS.join(" ")}`); process.exitCode = 1; return; }
+  const room = lv.rooms.find((r) => r.id === roomId)!, wealth = flag("wealth");
+  // the roles: --role (a catalogue role or a mix such as cottage) plus, with --plan, the room's own role and `also`
+  let planRoles: string[] = [];
+  if (flag("plan")) {
+    const pfile = fs.existsSync(flag("plan")!) ? flag("plan")! : proj(`authoring/dressing/plans/${flag("plan")}.json`);
+    const spec = dressingPlanSchema.parse(readJson(pfile)).rooms[roomId];
+    if (spec) planRoles = [spec.role, ...spec.also];
+  }
+  const role = flag("role") ?? planRoles[0] ?? "";
+  const unknown = [flag("role") ?? "", ...planRoles].filter((r) => r && !knownRole(r));
+  if (unknown.length) { console.log(`unknown role "${unknown.join(", ")}". roles: ${ROLE_WORDS()}`); process.exitCode = 1; return; }
+  const roles = expandRoomRoles([...(flag("role") ? [flag("role")!] : []), ...planRoles]);
   const placeable = placeableFloor(lv).find((f) => f.room === roomId)?.placeable ?? 0;
-  const budget = roomBudget(room.area, role, placeable);
+  const budget = roomBudget(room.area, ROOMS.includes(role) ? role : (expandRoomRoles([role])[1] ?? ""), placeable);
   // highest clear height over placeable floor
   let topHead = 0;
   for (let r = 0; r < lv.rows; r++) for (let c = 0; c < lv.columns; c++) {
@@ -624,8 +702,8 @@ function roomMenu() {
     for (const [a, b] of w.spans) if (b - a > hang) [hang, hangH] = [b - a, w.height];
   }
   const idx = readJson(INDEX_OUT), props: any[] = idx.props, sets: any[] = idx.sets ?? [];
-  const pf = placeFilter(roomId);
-  const roleOk = (rooms: string[]) => !role || !rooms.length || rooms.includes(role);
+  const pf = placeFilter(roomId, roles);
+  const roleOk = (rooms: string[]) => !roles.length || !rooms.length || rooms.some((r) => roles.includes(r));
   const wealthOk = (w: string[]) => !wealth || !w.length || w.includes(wealth);
   const tooBig: string[] = [];
   const fit = (p: any): string | undefined => {
@@ -640,11 +718,11 @@ function roomMenu() {
     if (p.mount === "ceiling") return room.maxHead >= H + 2.0 ? undefined : "ceiling too low";
     return undefined;
   };
-  console.log(`# ROOM ${roomId} of ${mapId} (level ${lv.level}${role ? `, as ${role}` : ""}): ceiling ${room.minHead.toFixed(2)}..${room.maxHead >= 8.75 ? "open" : room.maxHead.toFixed(2)} m, ` +
+  console.log(`# ROOM ${roomId} of ${mapId} (level ${lv.level}${roles.length ? `, as ${roles.join("/")}` : ""}): ceiling ${room.minHead.toFixed(2)}..${room.maxHead >= 8.75 ? "open" : room.maxHead.toFixed(2)} m, ` +
     `placeable floor ${placeable.toFixed(1)} m² of ${room.area.toFixed(1)}, cover ceiling ${budget.maxCoverM2} m² (${Math.round(budget.maxCover * 100)}% of placeable), ` +
     `loose <= ${budget.loose}, at least ${budget.minItems} items; longest free wall stretch ${stand.toFixed(2)} m${standAt ? ` (${standAt}, left to right seen from inside)` : ""}`);
   if (pf.scale || pf.cultures.length || pf.keepCentre)
-    console.log(`# this place: ${pf.scale ? `${pf.scale}-scale` : "any scale"}${pf.cultures.length ? `, ${pf.cultures.join("/")}` : ""}: only matching (or any) props are listed${pf.keepCentre ? "; its MIDDLE stays clear: fill walls and corners first, one set piece (setPiece: true or a centrepiece prop) may stand in the centre" : ""}`);
+    console.log(`# this place: ${pf.scale ? `${pf.scale}-scale` : "any scale"}${pf.cultures.length ? `, ${pf.cultures.join("/")}` : ""}${pf.from ? ` (from ${pf.from}; --culture <c> or --all for others)` : ""}: only matching (or any) props are listed${pf.keepCentre ? "; its MIDDLE stays clear: fill walls and corners first, one set piece (setPiece: true or a centrepiece prop) may stand in the centre" : ""}`);
   console.log(`# place with { "kind": "auto", "room": "${roomId}", "prefer": "wall" | "corner" | "open" | "near", "near": "<item id | hearth | door | stair>" }: sets first, then single pieces; the resolver picks the spot.`);
   const lines: string[] = [];
   const byId = new Map(props.map((p) => [p.id, p]));
@@ -654,7 +732,7 @@ function roomMenu() {
     const why = s.tallest + 0.05 > topHead ? "too tall" : s.cover > budget.maxCoverM2 ? "bigger than the cover ceiling" : s.wallNeed > stand + 1e-6 ? "no wall stretch that long" : undefined;
     if (why) { tooBig.push(`set ${s.id} (${why})`); continue; }
     const wall = s.against === "wall" ? `NEEDS A WALL (${s.wallNeed.toFixed(2)} m stretch)` : s.against === "free" ? "stands in the open" : "wall or open";
-    lines.push(`set ${s.id} | ${(s.use ?? []).join("/") || "-"} | ${wall} | ${dims(s.footprint)} m, ${s.cover} m² cover${s.loose ? `, ${s.loose} LOOSE` : ""} | ${s.shape}`);
+    lines.push(`set ${s.id} | ${s.name} | ${s.members} items: ${setMembers(s)} | ${wall} | ${dims(s.footprint)} m, ${s.cover} m² cover${s.loose ? `, ${s.loose} LOOSE` : ""} | ${s.shape}`);
   }
   const surf: string[] = [];
   for (const p of props) {
@@ -672,8 +750,37 @@ function roomMenu() {
   const limit = flags.all ? Infinity : Number(flag("limit") ?? 80);
   for (const l of lines.slice(0, limit)) console.log(l);
   if (lines.length > limit) console.log(`# ... ${lines.length - limit} more (--all)`);
+  if (!lines.some((l) => l.startsWith("set ")))
+    console.log(`# no named set fits ${roles.length ? `a ${roles.join("/")} room` : "this room"} here${tooBig.some((t) => t.startsWith("set ")) ? " (some are too big: see the last line)" : ""}; sets exist for: ${[...new Set(sets.flatMap((s) => s.rooms))].join(", ")}`);
   if (surf.length) console.log(`# on tables and shelves (place with { "kind": "on", "item": "<host>" }): ${surf.join(", ")}`);
   if (tooBig.length) console.log(`# left out, they do not fit this room: ${tooBig.join("; ")}`);
+}
+
+/**
+ * menu --map <id> on a map with no rooms (a town exterior: tools/town-* writes street-side / door-side pitches as anchors):
+ * the pitches by kind, and the props that stand on the largest pitch of each kind, outdoors, for this place's people.
+ */
+function pitchMenu(map: any) {
+  const anchors: any[] = map.anchors ?? [];
+  if (!anchors.length) { console.log(`# map ${map.id} has no rooms and no pitches: nothing is placed on it by name (re-measure it)`); process.exitCode = 1; return; }
+  const idx = readJson(INDEX_OUT), props: any[] = idx.props;
+  const pf = placeFilter(undefined, flag("role") ? expandRoomRoles([flag("role")!]) : []);
+  const kinds = new Map<string, any[]>();
+  for (const a of anchors) kinds.set(a.kind, [...(kinds.get(a.kind) ?? []), a]);
+  console.log(`# MAP ${map.id}: no rooms, ${anchors.length} pitches. Place one prop per pitch with { "kind": "anchor", "anchor": "<pitch id>" }.` +
+    `${pf.scale || pf.cultures.length ? ` Only ${pf.scale ?? "any"}-scale ${pf.cultures.join("/") || "any-culture"} props${pf.from ? ` (from ${pf.from}; --culture <c> or --all for others)` : ""}.` : ""}`);
+  const limit = flags.all ? Infinity : Number(flag("limit") ?? 40);
+  for (const [kind, list] of kinds) {
+    const big = list.reduce((m, a) => (a.size?.[0] ?? 0) * (a.size?.[2] ?? 0) > (m.size?.[0] ?? 0) * (m.size?.[2] ?? 0) ? a : m, list[0]);
+    const [W, H, D] = (big.size ?? [2, 3, 2]) as number[];
+    const mount = big.mount ?? "floor", outdoor = big.outdoor !== false;
+    console.log(`## ${kind}: ${list.length} pitch(es), up to ${dims([W!, H!, D!])} m (${mount}${outdoor ? ", outdoors" : ""}): ${list.map((a) => a.id).join(", ")}`);
+    const fit = props.filter((p) => p.mount === mount && !p.anchorKinds?.length && pf.ok(p) && p.setting !== (outdoor ? "indoor" : "outdoor") &&
+      Math.max(p.size[0], p.size[2]) <= Math.max(W!, D!) + 1e-6 && Math.min(p.size[0], p.size[2]) <= Math.min(W!, D!) + 1e-6 && p.size[1] <= H! + 1e-6);
+    for (const p of fit.slice(0, limit)) console.log(`${p.id} | ${(p.use ?? []).join("/") || "-"} | ${dims(p.size)} m${p.loose ? " | LOOSE" : ""}${p.fire ? " | FIRE" : ""}`);
+    if (fit.length > limit) console.log(`# ... ${fit.length - limit} more (--all)`);
+    if (!fit.length) console.log(`# nothing catalogued fits a ${kind} pitch for these people: a prop request (props request add)`);
+  }
 }
 
 // --------------------------------------------------------------- report ----
@@ -961,8 +1068,97 @@ async function proof(id: string) {
 }
 
 // ----------------------------------------------------------------- main ----
+// ------------------------------------------------------------- codex ----
+/**
+ * A request the catalogue already answers: a SHARED prop of the same family (FAMILIES) that the request's people and
+ * scale may use. Checked before any Codex run (the duplicate guard, applied to the request's name).
+ */
+function requestDupe(name: string, culture: string, scale: string): string[] {
+  const fam = familyOf(name);
+  if (!fam) return [];
+  const v = vocabulary(), out: string[] = [];
+  for (const [id, owners] of catalogued()) {
+    if (!owners.some((o) => o.entry.shared) || familyOf(id) !== fam) continue;
+    const d = lookup(id, owners);
+    if (d?.kind !== "declared" || d.raw.supersededBy) continue;
+    if (d.raw.scale && !scaleFits(v, scale, d.raw.scale)) continue;
+    if (d.raw.cultures && !cultureFits(v, [culture], d.raw.cultures)) continue;
+    out.push(id);
+  }
+  return out;
+}
+
+async function codexCommand() {
+  const run = await import("./prop-codex/run.mts");
+  const { propName } = await import("./prop-codex/brief.mts");
+  const inst = await import("./prop-codex/install.mts");
+  const PROJECTS_DIR = path.resolve(HERE, "..", "projects"), WK = path.join(PROJECTS_DIR, "world-kit");
+  const tsx = (args: string[]) => {
+    const r = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(import.meta.url), ...args], { encoding: "utf8", cwd: path.resolve(HERE, ".."), maxBuffer: 1 << 26 });
+    return { status: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  };
+  const doInstall = () => {
+    const cards = flag("cards")?.split(",").filter(Boolean);
+    const r = inst.install(WK, { cards, sheet: flag("review-sheet") ? path.resolve(flag("review-sheet")!) : undefined, log: (s) => console.log(s) });
+    console.log(`installed ${r.built.length} codex-craft prop(s)${r.failed.length ? `, ${r.failed.length} failed to build` : ""}; cards ${r.cards.length}${r.sheet ? `; sheet ${r.sheet}` : ""}`);
+    const origins = inst.readOrigins(WK), projects = new Set<string>(["world-kit"]);
+    for (const g of r.built) projects.add(origins[g.name]!.project);
+    for (const [args, what] of [[["sync", "--project", "world-kit"], "sync"], ...[...projects].map((p) => [["index", "--project", p], `index ${p}`])] as [string[], string][]) {
+      const s = tsx(args); console.log(`${what}: ${s.out.trim().split("\n").pop()}`);
+    }
+    const st = tsx(["status", "--project", "world-kit", "--catalog", `authoring/${inst.COLLECTION}/catalog.json`]);
+    console.log(st.out.split("\n").filter((l) => /catalogued prefabs|texel density|STALE|MISSING|LOW|HIGH|real size/.test(l)).join("\n"));
+    if (st.status !== 0) { console.log("props status is not ok: requests stay open"); process.exitCode = 1; return; }
+    if (!r.sheet) { console.log("no review sheet written (--review-sheet <png>): requests stay open until the sheet step has run"); return; }
+    // close only what the review sheet showed (the cards); other built designs wait for their own sheet
+    const shown = new Set(r.cards.map((c) => path.basename(c, ".png").replace(/^prop-/, "")));
+    for (const g of r.built.filter((b) => shown.has(b.name))) {
+      const o = origins[g.name]!;
+      const open = readRequests(path.join(PROJECTS_DIR, o.project)).find((q) => q.id === o.request && q.status === "open");
+      if (!open) continue;
+      const c = tsx(["request", "made", o.request, "--with", `${inst.COLLECTION}/${g.name}`, "--project", o.project]);
+      console.log(c.out.trim().split("\n").pop());
+    }
+  };
+  if (positional[0] === "install") return doInstall();
+
+  const v = vocabulary(), scales = v.scales.filter((s) => s.height > 0).map((s) => ({ id: s.id, height: s.height }));
+  const cultureNotes = Object.fromEntries(v.cultures.map((c: any) => [c.id, c.note ?? ""]));
+  const open = readRequests(PROJECT).filter((r) => r.status === "open");
+  const origins = inst.readOrigins(WK), done = new Set(Object.values(origins).map((o) => `${o.project}:${o.request}`));
+  let picked = positional.length ? positional.map((id) => { const r = open.find((q) => q.id === id); if (!r) throw Error(`no OPEN request ${id} in ${projectName}`); return r; }) : flags.all ? open : [];
+  if (!picked.length) throw Error("codex <request id...> | --all --project <p> [--batch 5] [--names id=name,...] [--designs-only] [--review-sheet png] | codex install [--cards a,b] [--review-sheet png]");
+  const skipped: string[] = [];
+  picked = picked.filter((r) => {
+    if (run.NOT_A_PROP.test(`${r.id} ${r.why}`)) { skipped.push(`${r.id}: not a prop job (kit fault / wall section / sign / wrapper)`); return false; }
+    if (done.has(`${projectName}:${r.id}`) && !flags.redo) { skipped.push(`${r.id}: already has a Codex design`); return false; }
+    return true;
+  });
+  const names = Object.fromEntries((flag("names") ?? "").split(",").filter(Boolean).map((p) => p.split("=") as [string, string]));
+  const batch = picked.slice(0, Number(flag("batch") ?? 5)).filter((r) => {
+    // a redo answers the owner's review of an existing Codex prop: the review, not the name guard, decides it
+    const dup = flags.redo && done.has(`${projectName}:${r.id}`) ? [] : requestDupe(names[r.id] ?? propName(r), r.culture, r.scale);
+    if (dup.length) { skipped.push(`${r.id}: DUPLICATE of ${dup.slice(0, 3).join(", ")} (use it, or name the request apart from that family)`); return false; }
+    return true;
+  });
+  for (const s of skipped) console.log(`skip ${s}`);
+  if (!batch.length) { console.log("nothing to send to Codex"); return; }
+  const scaleOver = Object.fromEntries((flag("scales") ?? "").split(",").filter(Boolean).map((p) => p.split("=") as [string, string]));
+  for (const r of batch) if (scaleOver[r.id]) { console.log(`scale ${r.id}: ${r.scale} -> ${scaleOver[r.id]} (--scales)`); r.scale = scaleOver[r.id]!; }
+  if (flags.dry) { for (const r of batch) console.log(`would send ${r.id} as ${names[r.id] ?? propName(r)} (${r.culture}, ${r.scale})`); return; }
+  console.log(`codex: ${batch.length} design job(s) in parallel: ${batch.map((r) => names[r.id] ?? propName(r)).join(", ")}`);
+  const results = await run.runBatch(batch.map((r) => ({ ...r, project: projectName })), { names, scales, worldKit: WK, projectsDir: PROJECTS_DIR, cultureNotes, reviewNotes: flag("notes-file") ? JSON.parse(fs.readFileSync(path.resolve(flag("notes-file")!), "utf8")) : undefined, jobRoot: flag("job-root") ? path.resolve(flag("job-root")!) : undefined, log: (s) => console.log(s) });
+  for (const j of results) console.log(`${j.status.padEnd(10)} ${j.name.padEnd(36)} ${j.attempts} attempt(s) ${j.seconds}s ${j.tokens ?? "?"} tokens${j.status.endsWith("pass") ? "" : `\n${j.gate.split("\n").map((l) => `    ${l}`).join("\n")}`}`);
+  if (flags["designs-only"]) return;
+  if (!flag("review-sheet")) { console.log("designs landed; run props codex install --cards ... --review-sheet <png> to build, review and close"); return; }
+  const passed = results.filter((j) => j.status.endsWith("pass")).map((j) => j.name);
+  if (!passed.length) return;
+  flags.cards = passed.join(",");
+  doInstall();
+}
+
 async function main() {
-  decode = (await import("./_png.mjs" as string)).decodePng;
+  decode =(await import("./_png.mjs" as string)).decodePng;
   if (cmd === "measure") {
     const ids = positional.length ? positional : flags.all ? [...catalogued(flag("catalog"))].map(([k]) => k) : [];
     if (!ids.length) throw Error("measure <prefab id...> | --all [--catalog <path>]");
@@ -1015,18 +1211,39 @@ async function main() {
     if (!flag("catalog")) {
       // every prefab is either a catalogued row or inside a registered exempt folder: nothing is invisible by accident
       const lost = uncatalogued();
-      if (lost.length) { console.log(`MISSING ${lost.length} prefab(s) in no catalog and no exemptFolders entry of ${INDEX} (invisible to builders): ${lost.slice(0, 12).join(", ")}${lost.length > 12 ? ", ..." : ""}`); process.exitCode = 1; }
+      if (lost.length) { console.log(`MISSING ${lost.length} prefab(s) in no catalog and no exemptFolders entry of ${INDEX} (invisible to builders): ${(flags.all ? lost : lost.slice(0, 12)).join(", ")}${lost.length > 12 && !flags.all ? ", ... (--all lists them)" : ""}`); process.exitCode = 1; }
       const dup = duplicates();
       if (dup.length) {
         console.log(`\n${dup.length} site-made prefab(s) remake something the catalogue offers (a finding, not the exit code; new ones are refused by \`props dupes <id>\`):`);
         if (!flags.quiet) for (const d of dup) console.log(`  ${dupeLine(d)}`);
       }
     }
+    {
+      // Blockbench intake completeness: a WARNING (not the exit code) until the owner has triaged every source
+      const uncut = blockbenchSources().reduce((s, r) => s + r.uncut.length, 0);
+      if (uncut) console.log(`UNCUT   ${uncut} Blockbench element(s)/group(s) in no catalog row and no blockbench-sources.json skip (props sources --uncut lists them)`);
+    }
     if (fs.existsSync(INDEX_OUT)) {
-      const t = fs.statSync(INDEX_OUT).mtimeMs, newer = registry.catalogs.some((c) => c.dressing && fs.existsSync(proj(c.dressing)) && fs.statSync(path.join(PROJECT, c.dressing)).mtimeMs > t);
+      const t = fs.statSync(INDEX_OUT).mtimeMs, newer = registry.catalogs.some((c) => c.dressing && fs.existsSync(proj(c.dressing)) && fs.statSync(proj(c.dressing)).mtimeMs > t); // a sidecar may live in any closure project
       if (newer) { console.log("STALE   prop-index.json is older than a sidecar (run index)"); process.exitCode = 1; }
     } else { console.log("MISSING prop-index.json (run index)"); process.exitCode = 1; }
     if (bad.length) process.exitCode = 1;
+    return;
+  }
+  if (cmd === "sources") {
+    // props sources [--uncut]: every Blockbench source of the closure and the elements/groups no catalog row cuts and
+    // <project>/authoring/blockbench-sources.json does not skip (exit 1 with --uncut when any is left)
+    const reps = blockbenchSources();
+    let n = 0;
+    for (const r of reps) {
+      const rel = path.relative(PROJECTS, r.file).replaceAll("\\", "/");
+      if (r.skipped) { if (!flags.uncut) console.log(`${rel}: skipped (${r.skipped})`); continue; }
+      n += r.uncut.length;
+      console.log(`${rel}: ${r.units} named piece(s), ${r.uncut.length} UNCUT`);
+      for (const u of r.uncut) console.log(`  UNCUT ${u.kind} ${[...u.path, u.name].join(" / ")}`);
+    }
+    console.log(n ? `${n} uncut piece(s): cut each into a catalogued prop (catalog row sourceModel + sourceElement/sourceGroup), or record it under cut/skip in <project>/authoring/blockbench-sources.json` : "every Blockbench piece is cut or skipped");
+    if (flags.uncut && n) process.exitCode = 1;
     return;
   }
   if (cmd === "sync") {
@@ -1082,14 +1299,40 @@ async function main() {
     console.log(`sync: ${r.changed.length} prefab(s) updated. next: props status --catalog authoring/${(flag("id") ?? (out as any).id).replace(/\/[^/]+$/, "")}/catalog.json, props proof <id>, then props index`);
     return;
   }
+  if (cmd === "codex") return codexCommand();
   if (cmd === "request") {
     if (positional[0] === "add") {
       const need = (k: string) => { const v = flag(k); if (!v) throw Error(`request add --name <thing> --culture <c> --scale <s> --for <place> [--why text]: --${k} missing`); return v; };
       const v = vocabulary(), culture = need("culture"), scale = need("scale");
       if (!v.cultures.some((c) => c.id === culture)) throw Error(`culture "${culture}" not in the dressing vocabulary (${v.cultures.map((c) => c.id).join(", ")})`);
       if (!v.scales.some((c) => c.id === scale)) throw Error(`scale "${scale}" not in the dressing vocabulary (${v.scales.map((c) => c.id).join(", ")})`);
-      const r = addRequest(PROJECT, { name: need("name"), culture, scale, for: need("for"), why: flag("why") ?? "" });
-      console.log(`prop request ${r.id} (${r.status}) for ${r.for} -> ${path.relative(process.cwd(), requestsFile(PROJECT))}`);
+      // no --project: the request belongs to the project its --for names ("inverted-spire/orrery-hall"), not the default
+      const forDir = path.resolve(HERE, "..", "projects", need("for").split("/")[0]!);
+      // a request belongs to a project: --project, or the project its --for names; the default project is never assumed
+      if (!flag("project") && !fs.existsSync(path.join(forDir, "project.json"))) throw Error(`request add: --for "${need("for")}" names no project; pass --project <the world or kit the place belongs to> (requests must not land in the default project)`);
+      const RP = flag("project") ? PROJECT : forDir;
+      const lm = flag("landmark") ? Number(flag("landmark")) : undefined, { LANDMARK_MAX_M } = await import("./prop-codex/brief.mts");
+      if (lm !== undefined && !(lm > 6 && lm <= LANDMARK_MAX_M)) throw Error(`request add --landmark <m>: a landmark structure is over 6 m and at most ${LANDMARK_MAX_M} m tall`);
+      const size = flag("size") ? Number(flag("size")) : undefined;
+      if (size !== undefined && !(size > 0 && size <= 30)) throw Error("request add --size <metres tall>: the finished prop's height, 0-30 m");
+      const r = addRequest(RP, { name: need("name"), culture, scale, for: need("for"), why: flag("why") ?? "", ...(lm ? { landmark: lm } : {}), ...(size ? { size } : {}) });
+      console.log(`prop request ${r.id} (${r.status}) for ${r.for} -> ${path.relative(process.cwd(), requestsFile(RP))}`);
+      return;
+    }
+    if (positional[0] === "reopen") {
+      const id = positional[1], why = flag("why");
+      if (!id || !why) throw Error("request reopen <request id> --why <what was wrong with the prop that filled it>");
+      const r = reopenRequest(PROJECT, id, why);
+      console.log(`prop request ${r.id} -> open again (${why}) in ${path.relative(process.cwd(), requestsFile(PROJECT))}`);
+      return;
+    }
+    if (positional[0] === "made" || positional[0] === "drop") {
+      const id = positional[1]; if (!id) throw Error(`request ${positional[0]} <request id> ${positional[0] === "made" ? "--with <catalogue prop id>" : "--why <text>"}`);
+      const note = positional[0] === "made" ? flag("with") : flag("why");
+      if (!note) throw Error(positional[0] === "made" ? "request made: --with <catalogue prop id> names the prop that fills it" : "request drop: --why <text>");
+      if (positional[0] === "made" && !registry[note] && !Object.keys(registry).some((k) => k === note || k.endsWith("/" + note))) console.log(`  note: "${note}" is not a catalogued prop id in this closure; recorded as given`);
+      const r = closeRequest(PROJECT, id, positional[0] === "made" ? "made" : "dropped", note);
+      console.log(`prop request ${r.id} -> ${r.status} (${note}) in ${path.relative(process.cwd(), requestsFile(PROJECT))}`);
       return;
     }
     const list = readRequests(PROJECT).filter((r) => flags.all || r.status === "open");

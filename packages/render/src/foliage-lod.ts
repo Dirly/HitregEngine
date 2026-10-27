@@ -77,6 +77,22 @@ export interface InstancedPropBatch {
  * the rest catch up over the next few frames, which is imperceptible for LOD. */
 const INSTANCES_PER_TICK = 200;
 
+/**
+ * While the camera moves, every batch is re-judged in full at least once per
+ * this many update() calls, however big it is. The fixed tick budget above
+ * was counted over a pool page's whole CAPACITY (2,048 slots, most of them
+ * empty), so a page took ~10 frames per sweep — longer at the frame rates a
+ * streaming sprint produces — and trees ran past their impostor/mesh switch
+ * before their turn came (owner report 2026-10-22: "trees don't change from
+ * their LOD"). Empty slots are now skipped without counting, and a moving
+ * camera raises the budget to live/SWEEP_FRAMES_MOVING. A judgement that
+ * changes nothing is a distance and a few compares; the expensive part (a
+ * slot rewrite) happens only for instances that actually cross a threshold.
+ */
+const SWEEP_FRAMES_MOVING = 3;
+/** Camera movement (world units) between two updates that counts as moving. */
+const MOVING_EPSILON = 0.02;
+
 const UNSET = 0;
 const NEAR = 1;
 const MID = 2;
@@ -111,6 +127,8 @@ interface BatchState {
   nearMidHystSq: number;
   /** Dynamic batches only: 1 = a placed instance, 0 = an empty logical slot. */
   live: Uint8Array | null;
+  /** How many logical instances are placed (all of them for a static batch). */
+  liveCount: number;
   /** Per logical instance: how many culling units currently hide it (0 = drawn by LOD). */
   hidden: Uint8Array;
   /** Past this (squared), too small on screen: no tier. Infinity = never. */
@@ -225,6 +243,8 @@ export class FoliageLodSystem {
    * of waiting for the round-robin to reach it. */
   private lastCamera: THREE.Vector3 | null = null;
   private tanHalfFov = Math.tan((DEFAULT_FOV_DEGREES * Math.PI) / 360);
+  /** Runtime A/B switch: false = the old fixed 200-slots-per-tick sweep (empty slots counted, no moving boost). */
+  movingSweep = true;
 
   constructor(
     /** far threshold: past this, everything collapses to the billboard/box proxy.
@@ -326,6 +346,7 @@ export class FoliageLodSystem {
       nearMidThresholdSq: 0,
       nearMidHystSq: 0,
       live: batch.dynamic ? new Uint8Array(n) : null,
+      liveCount: batch.dynamic ? 0 : n,
       hidden: new Uint8Array(n),
       cullSq: Infinity,
       cullHystSq: Infinity,
@@ -422,6 +443,7 @@ export class FoliageLodSystem {
   addInstance(batch: InstancedPropBatch, i: number, hidden = 0): void {
     const state = this.stateByBatch.get(batch);
     if (!state?.live) return;
+    if (!state.live[i]) state.liveCount++;
     state.live[i] = 1;
     state.tier[i] = UNSET;
     // units already hiding its owner (a model that finished loading after
@@ -449,22 +471,42 @@ export class FoliageLodSystem {
     if (tier !== UNSET) removeFromTier(state, batch, tier, i);
     state.tier[i] = UNSET;
     state.live[i] = 0;
+    state.liveCount--;
     state.hidden[i] = 0;
   }
 
   update(cameraPosition: THREE.Vector3): void {
+    const moving = !this.lastCamera || this.lastCamera.distanceToSquared(cameraPosition) > MOVING_EPSILON * MOVING_EPSILON;
     (this.lastCamera ??= new THREE.Vector3()).copy(cameraPosition);
     for (const [batch, state] of this.stateByBatch) {
       const count = batch.positions.length;
-      if (count === 0) continue;
+      if (count === 0 || state.liveCount <= 0) continue;
       const live = state.live;
-      const steps = Math.min(count, INSTANCES_PER_TICK);
-      for (let step = 0; step < steps; step++) {
-        const i = (state.cursor + step) % count;
+      if (!this.movingSweep) {
+        const steps = Math.min(count, INSTANCES_PER_TICK);
+        for (let step = 0; step < steps; step++) {
+          const i = (state.cursor + step) % count;
+          if (live && live[i] === 0) continue;
+          this.place(batch, state, i, this.decide(batch, state, i, cameraPosition));
+        }
+        state.cursor = (state.cursor + steps) % count;
+        continue;
+      }
+      // judged instances, not scanned slots: a pool page's empty slots are free
+      const budget = Math.min(
+        state.liveCount,
+        moving ? Math.max(INSTANCES_PER_TICK, Math.ceil(state.liveCount / SWEEP_FRAMES_MOVING)) : INSTANCES_PER_TICK,
+      );
+      let judged = 0;
+      let scanned = 0;
+      while (judged < budget && scanned < count) {
+        const i = (state.cursor + scanned) % count;
+        scanned++;
         if (live && live[i] === 0) continue;
         this.place(batch, state, i, this.decide(batch, state, i, cameraPosition));
+        judged++;
       }
-      state.cursor = (state.cursor + steps) % count;
+      state.cursor = (state.cursor + scanned) % count;
     }
   }
 }

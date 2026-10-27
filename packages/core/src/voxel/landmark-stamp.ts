@@ -42,7 +42,20 @@ export interface LandmarkPart {
   polygon?: [number, number][]; profile?: [number, number][]; segments?: number;
   span?: number; rise?: number; legs?: number; thickness?: number; depth?: number;
   parts?: LandmarkPart[]; node?: CsgNode;
+  uv?: LandmarkUvMode; uvRegion?: LandmarkUvRegion;
+  triUv?: number[];
+  bevel?: number;
 }
+
+/** Built mode (`kind: "built"`): how a part's faces get UVs, in metres of its own frame (see landmark-built.ts). */
+export const LANDMARK_UV_MODES = ["box", "planar", "cylindrical"] as const;
+export type LandmarkUvMode = (typeof LANDMARK_UV_MODES)[number];
+export const landmarkUvRegionSchema = z.object({
+  rect: z.tuple([z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1)])
+    .describe("Image region [x0, y0, x1, y1] as fractions, ROWS FROM THE TOP (y0 = top edge). [0,0,1,1] = the whole picture."),
+  face: z.enum(["+x", "-x", "+y", "-y", "+z", "-z"]).default("+z").describe("The part-local face that shows the picture once, stretched to that face's extent (upright, not mirrored). Its other faces sample the region's top-left corner."),
+}).strict();
+export type LandmarkUvRegion = z.infer<typeof landmarkUvRegionSchema>;
 
 export const landmarkPartSchema: z.ZodType<LandmarkPart> = z.lazy(() =>
   z.object({
@@ -71,12 +84,20 @@ export const landmarkPartSchema: z.ZodType<LandmarkPart> = z.lazy(() =>
     depth: z.number().positive().optional().describe("Arch depth through the opening (Z)."),
     parts: z.array(landmarkPartSchema).optional().describe("Group children, in the group's frame."),
     node: z.unknown().optional().describe("A raw core CSG node passed through (generators); its position/rotation are in the parent frame."),
+    uv: z.enum(LANDMARK_UV_MODES).optional().describe("Built mode only: UV projection in the part's frame, metres / the role's `tile`. `box` (default for box/extrude/arch: each face from its dominant axis, v up, u to the viewer's right), `cylindrical` (default for cylinder/cone/lathe/torus/sphere: u around +Y snapped to whole tiles per ring, v up; caps planar), `planar` (local XY on every face)."),
+    uvRegion: landmarkUvRegionSchema.optional().describe("Built mode only: map one face onto an image region ONCE (a relief panel, a lintel, an atlas cell) instead of tiling."),
+    triUv: z.array(z.number().finite()).optional().describe("Built mode, raw `node` parts of shape `mesh` only (generators such as the `wall` operator): explicit UVs in METRES, six numbers [u0, v0, u1, v1, u2, v2] per mesh triangle in index order, tiled by the role tile. Overrides `uv`; a clipped piece keeps its triangle's mapping."),
+    bevel: z.number().min(0).max(4).optional().describe("Built mode, `box` parts only: chamfer every edge by this many metres (a 45-degree arris, clamped below half the box's smallest side), so cut blocks read as dressed stone, not cubes; 0.1-0.25 m for blocks and courses, more for giant work. Overrides the role's `bevel`. DC (stamp) parts use `round`."),
   }).strict(),
 ) as z.ZodType<LandmarkPart>;
 
 export const landmarkSpecSchema = z.object({
   version: z.literal(1),
-  roles: z.record(z.string(), z.object({ noise: landmarkNoiseSchema.nullable().optional() }).strict()).default({}).describe("Per-role defaults. `rock` (and any role named rock/cliff/stone-natural) gets outward rock noise unless set; every other role is crisp."),
+  roles: z.record(z.string(), z.object({
+    noise: landmarkNoiseSchema.nullable().optional(),
+    tile: z.tuple([z.number().positive(), z.number().positive()]).optional().describe("Built mode: metres per texture repeat [u, v]. Omit: the baker derives it from the role material's texture at the town standard (pixels / 40 texels per m)."),
+    bevel: z.number().min(0).max(4).optional().describe("Built mode: default chamfer (metres) for this role's `box` parts (a part's own `bevel` wins)."),
+  }).strict()).default({}).describe("Per-role defaults. `rock` (and any role named rock/cliff/stone-natural) gets outward rock noise unless set; every other role is crisp."),
   parts: z.array(landmarkPartSchema).min(1).describe("Applied IN ORDER (the CSG rule)."),
 }).describe("A landmark shape in its LOCAL frame: origin = footprint centre at the foot (y 0 = where the ground meets it), +Y up, +Z the front.");
 export type LandmarkSpec = z.infer<typeof landmarkSpecSchema>;
@@ -160,6 +181,10 @@ export interface CompiledLandmark {
   voxel: number;
   digest: string;
   thin: { refused: boolean; spots: { part: string; at: [number, number, number]; thickness: number; samples: number }[]; samples: number };
+  /** Built mode: per node (index-for-index) the part's frame (row-major R, yaw baked) and its UV settings. */
+  meta: { frame: number[]; uv?: LandmarkUvMode; uvRegion?: LandmarkUvRegion; segments?: number; triUv?: number[]; bevel?: number }[];
+  /** Built mode: the spec's role tiles (metres per repeat, unscaled by `scale`: texel density is absolute). */
+  roleTiles: Record<string, [number, number]>;
 }
 
 export interface LandmarkCompileOptions {
@@ -181,6 +206,7 @@ export class LandmarkThinWallError extends Error {
 export function compileLandmarkSpec(input: unknown, o: LandmarkCompileOptions): CompiledLandmark {
   const spec = landmarkSpecSchema.parse(input);
   const nodes: CsgNode[] = [], roles: string[] = [], names: string[] = [], thinOk: boolean[] = [];
+  const meta: CompiledLandmark["meta"] = [];
   const s0 = o.scale ?? 1;
   const root: Frame = { R: euler(0, (o.yaw ?? 0) * D2R, 0), t: [0, 0, 0], s: s0, role: "rock" };
   const noiseFor = (part: LandmarkPart, role: string): LandmarkPart["noise"] => {
@@ -204,6 +230,8 @@ export function compileLandmarkSpec(input: unknown, o: LandmarkCompileOptions): 
       ...extra,
     } as unknown as CsgNode);
     roles.push(role); names.push(name); thinOk.push(!!part.thinOk);
+    const pr = part.rot ?? [0, 0, 0];
+    meta.push({ frame: mul(f.R, euler(pr[0]! * D2R, pr[1]! * D2R, pr[2]! * D2R)), ...(part.uv ? { uv: part.uv } : {}), ...(part.uvRegion ? { uvRegion: part.uvRegion } : {}), ...(part.segments ? { segments: part.segments } : {}), ...(local.shape === "box" && (part.bevel ?? spec.roles[role]?.bevel ?? 0) > 0 ? { bevel: r4((part.bevel ?? spec.roles[role]!.bevel!) * f.s) } : {}) });
   };
   const need = (part: LandmarkPart, k: keyof LandmarkPart) => { const v = part[k]; if (v === undefined) throw new Error(`landmark part "${part.name ?? part.shape}": ${part.shape} needs \`${String(k)}\``); return v as number; };
   const walk = (parts: LandmarkPart[], f: Frame) => {
@@ -217,7 +245,7 @@ export function compileLandmarkSpec(input: unknown, o: LandmarkCompileOptions): 
         const R = mul(f.R, euler(n.rotation?.[0] ?? 0, n.rotation?.[1] ?? 0, n.rotation?.[2] ?? 0));
         const p = apply(f.R, (n.position ?? [0, 0, 0]).map((v) => v * f.s));
         nodes.push({ ...n, id: `${n.id ?? "node"}#${seq++}`, position: [r4(p[0] + f.t[0]), r4(p[1] + f.t[1]), r4(p[2] + f.t[2])], rotation: toEuler(R).map(r4) as [number, number, number] } as CsgNode);
-        roles.push(part.role ?? f.role); names.push(part.name ?? String(n.id ?? "node")); thinOk.push(true);
+        roles.push(part.role ?? f.role); names.push(part.name ?? String(n.id ?? "node")); thinOk.push(true); meta.push({ frame: R, ...(part.triUv ? { triUv: part.triUv } : {}) });
         continue;
       }
       switch (part.shape) {
@@ -292,8 +320,12 @@ export function compileLandmarkSpec(input: unknown, o: LandmarkCompileOptions): 
     tiles.push({ min: [r3(x), r3(lo[1]!), r3(z)], max: [r3(Math.min(hi[0]!, x + TILE)), r3(hi[1]!), r3(Math.min(hi[2]!, z + TILE))] });
   const thin = o.skipThin ? { refused: false, spots: [], samples: 0 } : thinWallCheck(nodes, names, thinOk, f);
   if (thin.refused) throw new LandmarkThinWallError(thin.spots, f);
-  const digest = landmarkDigest(JSON.stringify({ f, nodes, roles, salt: o.salt ?? "" }));
-  return { nodes, roles, names, min, max, tiles, voxel: f, digest, thin };
+  // UV settings enter the digest only when a part or role sets them (stamp-mode digests stay what they were)
+  const uvKey = meta.some((m) => m.uv || m.uvRegion || m.triUv) ? meta.map((m) => [m.uv ?? "", m.uvRegion ?? "", ...(m.triUv ? [m.triUv] : [])]) : undefined;
+  const roleTiles: Record<string, [number, number]> = {};
+  for (const [k, r] of Object.entries(spec.roles)) if (r.tile) roleTiles[k] = r.tile;
+  const digest = landmarkDigest(JSON.stringify({ f, nodes, roles, salt: o.salt ?? "", ...(uvKey ? { uv: uvKey } : {}), ...(Object.keys(roleTiles).length ? { tiles: roleTiles } : {}), ...(meta.some((m) => m.bevel) ? { bevel: meta.map((m) => m.bevel ?? 0) } : {}) }));
+  return { nodes, roles, names, min, max, tiles, voxel: f, digest, thin, meta, roleTiles };
 }
 
 /**
@@ -362,8 +394,31 @@ export const landmarkBlendSchema = z.object({
   mound: z.number().min(0).max(4).default(0.8).describe("bury: metres the terrain rises against the foot (hides the cut line), fading out over `feather`."),
   feather: z.number().min(FINE_MIN).max(40).default(8).describe("Metres over which the edit fades back to the natural ground (>= 6: the FINE_MIN rule)."),
   apron: z.number().min(FINE_MIN).max(60).default(6).describe("pad: flat apron width around the foot (>= 6)."),
+  maxSlope: z.number().min(0.3).max(20).optional()
+    .describe("pad: steepest bank (rise/run) the blended ground keeps; feet of steeper banks are filled up to it (default 1). A deep cut whose bank a built wall covers (a quarry floor under its face) takes a steep value, e.g. 8; at 1 the fill climbs back over the floor."),
+  area: z.array(z.tuple([z.number().finite(), z.number().finite()])).min(3).max(128).optional()
+    .describe("Explicit footprint outline [x, z] in the SPEC frame (turned by yaw/scale like the parts) that the ground blend uses INSTEAD of the solid's own footprint: `pad` then levels e.g. a quarry floor or forecourt in front of a built wall without lowering the hill behind it. Keep it >= 6 m across (FINE_MIN)."),
 });
 export type LandmarkBlend = z.infer<typeof landmarkBlendSchema>;
+
+/** World 1 m cells inside a blend `area` outline (spec frame, turned by yaw and scaled like the parts, origin at `at`). */
+export function landmarkAreaCells(area: readonly (readonly [number, number])[], at: readonly [number, number], yaw: number, scale: number): [number, number][] {
+  const c = Math.cos((yaw * Math.PI) / 180), s = Math.sin((yaw * Math.PI) / 180);
+  const poly = area.map(([x, z]) => [at[0] + (x * c + z * s) * scale, at[1] + (-x * s + z * c) * scale] as [number, number]);
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  for (const [x, z] of poly) { x0 = Math.min(x0, x); z0 = Math.min(z0, z); x1 = Math.max(x1, x); z1 = Math.max(z1, z); }
+  const inside = (x: number, z: number) => {
+    let hit = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, zi] = poly[i]!, [xj, zj] = poly[j]!;
+      if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) hit = !hit;
+    }
+    return hit;
+  };
+  const cells: [number, number][] = [];
+  for (let z = Math.floor(z0); z <= Math.ceil(z1); z++) for (let x = Math.floor(x0); x <= Math.ceil(x1); x++) if (inside(x, z)) cells.push([x, z]);
+  return cells;
+}
 
 /** Foot level (world y of spec y 0) and the terrain height patch for the blend (null for `none`). */
 export function landmarkGround(cells: [number, number][], at: [number, number], blend: LandmarkBlend, reader: OperatorFieldReader, y?: number): { footY: number; patch: OperatorPiece | null; ground: { min: number; median: number } } {
@@ -393,7 +448,7 @@ export function landmarkGround(cells: [number, number][], at: [number, number], 
     else { const u = sm(blend.apron, blend.apron + blend.feather, s); hgt = footY + (h0 - footY) * u; w = s <= blend.apron + blend.feather + g ? 1 : 0; }
     heights.push(Math.round(hgt * 100) / 100); weights.push(w);
   }
-  const patch: OperatorPiece = { id: "ground", origin: [x0, z0], size: [(cols - 1) * g, (rows - 1) * g], columns: cols, rows, heights, weights, blend: 2 * g, ...(blend.mode === "pad" ? { maxSlope: 1 } : {}) };
+  const patch: OperatorPiece = { id: "ground", origin: [x0, z0], size: [(cols - 1) * g, (rows - 1) * g], columns: cols, rows, heights, weights, blend: 2 * g, ...(blend.mode === "pad" ? { maxSlope: blend.maxSlope ?? 1 } : {}) };
   return { footY, patch, ground };
 }
 

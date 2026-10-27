@@ -1,6 +1,7 @@
 export { ASSET_KINDS, loadContent, playgroundRoots, type LoadedContent } from "./assets.js";
 export { loadProjectScripts, isClientOnlyScript, type ScriptLoadReport } from "./scripts.js";
 export { fileMeshGeometry } from "./mesh-geometry.js";
+export { groundVerdict, FELL_DEPTH, FELL_HARD_DEPTH, type GroundProbe, type GroundVerdict } from "./ground-recovery.js";
 export {
   HeadlessWorld,
   NULL_INPUT,

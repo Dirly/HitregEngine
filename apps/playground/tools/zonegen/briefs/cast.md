@@ -3,6 +3,7 @@
 Decide, for the WHOLE map at once, what is wrong in each zone and who causes it, so neighbours differ.
 
 **Read**
+- `docs/world-standards/adventure-design.md`: build a fantasy adventure world, with daily life as supporting context.
 - `{adjacency}`: zones, towns, neighbours, walkable borders.
 - `{bestiary}`: the catalogue; factions (story or local) and wildlife come only from here.
 - `{recipe}` `regions` and the map: what the ground offers.

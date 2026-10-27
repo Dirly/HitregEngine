@@ -36,6 +36,8 @@ Closing a tab or losing a connection is not a completed camp. The body remains f
 
 ## Browser caches
 
+Character selection draws the outfit from the committed character sheet. Creation choices describe the body and face; they are not a snapshot of the character's worn gear. The roster supplies worn item identities without exposing carried inventory.
+
 The gateway session, selected main, and last character per world are browser-local caches, not ownership records. Main still validates every character action and ticket. After a page reload the remembered main keeps play and social calls on the selected world; the original gateway remains the directory for changing worlds.
 
 Player-created map markers currently live in localStorage, scoped to character/world/scene. They are not stored in the database and do not follow a player to another browser. Database-backed markers would require a separate authenticated, per-character record and synchronization path; this work does not add that service.

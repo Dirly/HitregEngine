@@ -4,7 +4,9 @@
  * Turns a planned location into the POI creator's intake brief (tools/poi-review/creator/brief.mjs) and prepares the
  * job with the creator's own `prepare.mjs` into zones/<z>/pois/<location>/, so ONE fresh owner agent can be started
  * from that folder. Our plan maps onto the creator's brief:
- *   adventureSize  <- the location's size        hostility   <- whether a zone group/faction holds it
+ *   adventureSize  <- the location's size (the brief place's, when the location IS a place); its tier targets from
+ *                     tools/poi-review/size-tiers.mjs go into the brief (sizeTargets), a requirement and the owner prompt
+ *   hostility      <- whether a zone group/faction holds it
  *   description    <- the plan's own words (location note, holder premise, the quests that happen there)
  *   location       <- the reservation (site, centre, radius, approach; anchor from the recipe POI)
  *   requirements   <- the location's `needs`, every declared quest entity standing there (with the exact entity id the
@@ -22,6 +24,7 @@ import { exists, readJson, writeJson, type Ctx, type Finding } from "../lib.mts"
 import { factionMembers, type Location, type PlannedQuest } from "../schemas.mts";
 import { loadZonePlan, poiJob, poiJobDir, reservationOf, type ZonePlan } from "./_zone.mts";
 import { rel, requireZone } from "./_shared.mts";
+import { reservationTierFault, tierFor, tierTargetsText } from "../../../../../tools/poi-review/size-tiers.mjs";
 
 const ENGINE = path.resolve("..", "..");
 const PREPARE = path.join(ENGINE, "tools", "poi-review", "creator", "prepare.mjs");
@@ -38,6 +41,7 @@ interface CreatorBrief {
   requirements: string[];
   constraints: string[];
   mode: "plan" | "build";
+  sizeTargets: ReturnType<typeof tierFor>;
 }
 
 const condText = (c: unknown): string => JSON.stringify(c);
@@ -68,6 +72,10 @@ function questsAt(plan: ZonePlan, loc: Location): { q: PlannedQuest; line: strin
 export function creatorBrief(ctx: Ctx, plan: ZonePlan, loc: Location, mode: "plan" | "build"): { brief: CreatorBrief; placeholders: string[]; problems: string[] } {
   const problems: string[] = [];
   const res = reservationOf(plan, loc.id);
+  // the size tier: the brief place's when this location IS that place, else the location's own
+  const size = (plan.brief.places.find((x) => x.id === loc.id)?.size ?? loc.size) as CreatorBrief["adventureSize"];
+  const small = res ? reservationTierFault(size, { radius: res.radius, approaches: 1 + res.approaches.length }) : null;
+  if (small) problems.push(`reservation too small for its tier (zonegen reserve): ${small}`);
   if (!res) problems.push(`location ${loc.id} has no reservation`);
   const zb = plan.zoneBestiary;
   const group = zb?.groups.find((g) => g.id === loc.hostile);
@@ -120,7 +128,7 @@ export function creatorBrief(ctx: Ctx, plan: ZonePlan, loc: Location, mode: "pla
     return `${q.title}: ${q.summary}`;
   });
   const description = [
-    `${loc.name}, a ${loc.size} ${loc.kind} in ${plan.brief.name} (${plan.brief.zone}).`,
+    `${loc.name}, a ${size} ${loc.kind} in ${plan.brief.name} (${plan.brief.zone}).`,
     loc.note,
     holder,
     loc.entranceTo ? `It is the way into the dungeon ${loc.entranceTo}; the interior is its own dungeon project, this job builds the surface and the entrance.` : "",
@@ -142,10 +150,14 @@ export function creatorBrief(ctx: Ctx, plan: ZonePlan, loc: Location, mode: "pla
         ? "an `npc` builtin with readable: true and face: false (its text is written later)"
         : e.kind === "object"
           ? "an entity tagged `interactable`, with an `npc` builtin (face: false) when a quest starts from it or it hands something over"
+          : e.kind === "escort"
+          ? "a ROOT entity tagged `interactable` with NO collider, running an `npc` builtin whose `escort` param is its walk: { route: [[x, y, z], ...] ground points from its post to where it is going, clear and walkable in straight lines }"
           : `an \`npc\` builtin whose \`presence\` param is the condition${presenceWhen ? ` ${condText(presenceWhen)}` : ""} (an entity runs ONE script: presence is a param of npc, not a second script)`;
     return `Place quest entity \`${e.id}\` (${e.kind}: ${e.what}) with EXACTLY this entity id, as ${how}. Quests bind to the id; its dialogue/text is written after placement.`;
   };
   const requirements = [
+    `Size, enforced at install (job.mjs measure; tools/poi-review/size-tiers.mjs): ${tierTargetsText(size)}`,
+    "Designed before it expands, enforced before detail and at install (job.mjs design, gate 16): design.json with the premise, the player's journey, the areas, the story elements each made of catalogued props / structures / creatures, ONE area finished at player height, the reference frames; a fresh reviewer passes the rubric's Place lines P1-P5 on that sample (story read from the frames, every element seen, nothing random, worth visiting, finished to the bar) and job.mjs design-review records it.",
     ...loc.needs.map((n) => `Physically present: ${n}.`),
     ...entities.map(entityLine),
     ...here.map((h) => `Must work here: ${h.line}.`),
@@ -175,7 +187,7 @@ export function creatorBrief(ctx: Ctx, plan: ZonePlan, loc: Location, mode: "pla
   ].filter(Boolean);
 
   return {
-    brief: { version: 1, id: loc.id, name: loc.name, project: ctx.project, adventureSize: loc.size, hostility, description, location: { hint, ...(anchor ? { anchor } : {}) }, requirements, constraints, mode },
+    brief: { version: 1, id: loc.id, name: loc.name, project: ctx.project, adventureSize: size, hostility, description, location: { hint, ...(anchor ? { anchor } : {}) }, requirements, constraints, mode, sizeTargets: tierFor(size) },
     placeholders,
     problems,
   };

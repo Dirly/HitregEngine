@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fallFace, fieldSolidProbe, measureFallLip, fitFall, curtainFit, curtainColumns, shoreFoamOnBank, foamLinedBank, type RiverFall } from "../src/index.js";
+import { fallFace, columnReachesPool, fieldSolidProbe, measureFallLip, fitFall, curtainFit, curtainColumns, shoreFoamOnBank, foamLinedBank, type RiverFall } from "../src/index.js";
 
 /** A river at 10 m on a bed at 7 m, ending at a cliff at x = lip; the pool below at 1 m on a floor at 0. */
 function cliff(lip: number, overhang?: { below: number; back: number }) {
@@ -43,6 +43,16 @@ describe("fallFace", () => {
     expect(f.landed).toBe(false);
     const floor = fallFace(cliff(12), fall, 12, 0, 0, -0.5, -7.5, 4);
     expect(floor.landed).toBe(true);
+  });
+});
+
+describe("columnReachesPool (the curtain widens only over a full drop)", () => {
+  it("is true over the cliff to the pool and false where a bank runs on at the river's bed (the Weepwater split)", () => {
+    // the cliff at x = 20 for z < 4; beside it (z >= 4) a second channel's bed runs on at 7 m with no drop
+    const field = { ...cliff(20), height: (x: number, z: number) => (x < 20 || z >= 4 ? 7 : 0), density(x: number, y: number, z: number) { return y - (x < 20 || z >= 4 ? 7 : 0); } };
+    expect(columnReachesPool(field, fall, 19.5, 0, 0)).toBe(true);
+    expect(columnReachesPool(field, fall, 19.5, 0, 6)).toBe(false);
+    expect(columnReachesPool(field, fall, 19.5, 0, -6)).toBe(true);
   });
 });
 

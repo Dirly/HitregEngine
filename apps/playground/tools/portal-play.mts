@@ -1,7 +1,11 @@
 /**
  * portal-play --dungeon <instance scene> [--world <scene>]                 (the dungeon pipeline's last stage)
  * portal-play --scene <world scene> --portal <portal id> --exit <exit portal id>
- *   [--url http://localhost:<p>] [--port <p>] [--out <dir>] [--no-inside] [--headed]
+ *   [--url http://localhost:<p>] [--port <p>] [--out <dir>] [--no-inside] [--headed] [--exit-from x,y,z]
+ *
+ * --exit-from: an exit far from the arrival (a dungeon whose way out is at the end of its route) is walked into from this
+ * point in the instance (dev fast travel there first, in the passage on the exit's approach side), as portal-trip does:
+ * the body walks a straight line and cannot path a dungeon.
  *
  * The REAL-CLIENT portal round trip: the dev app in a browser (Playwright + system Chrome), local play, the player
  * walked with the keyboard (W held, the camera turned toward the goal every 150 ms). Two runs, each a fresh page:
@@ -23,16 +27,17 @@
  * play's scene swap, the arrival placement, the curtain, the collision on the way to the box. Both are gates.
  *
  * Without --url it starts its own vite (agent-test config, --port, default 5263) and stops it by PID afterwards.
- * Needs `playwright` resolvable (`npm i playwright` with PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 anywhere up the tree, or
- * HITREG_PLAYWRIGHT=<path to the playwright package dir>).
+ * Needs playwright: the apps/playground devDependency (`pnpm install`; tools/_playwright.mjs), or an override
+ * HITREG_PLAYWRIGHT=<path to the playwright package dir> / PLAYWRIGHT_MODULE=<its index.mjs>.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import type { SceneDoc } from "@hitreg/core";
 import { portalDigest, walkThroughPortals } from "./_portal-veil-ops.mts";
+// @ts-expect-error plain JS module
+import { loadPlaywright as loadPlaywrightModule } from "./_playwright.mjs";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const arg = (n: string) => { const i = process.argv.indexOf(n); return i >= 0 ? process.argv[i + 1]! : ""; };
@@ -106,14 +111,8 @@ fs.mkdirSync(OUT, { recursive: true });
 // -- browser ---------------------------------------------------------------------------------------
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function loadPlaywright(): Promise<any> {
-  const env = process.env["HITREG_PLAYWRIGHT"];
-  if (env) return createRequire(path.join(env, "package.json"))(env);
-  try { return await import("playwright"); } catch { /* fall through */ }
-  for (const dir of [process.cwd(), PG, path.join(PG, "..", "..")]) {
-    try { return createRequire(path.join(dir, "noop.js"))("playwright"); } catch { /* next */ }
-  }
-  console.error("STOP: playwright is not resolvable — `npm i playwright` (PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1) or set HITREG_PLAYWRIGHT");
-  process.exit(2);
+  // the apps/playground devDependency (tools/_playwright.mjs); HITREG_PLAYWRIGHT / PLAYWRIGHT_MODULE still override
+  try { return await loadPlaywrightModule(); } catch (e) { console.error(`STOP: ${(e as Error).message}`); process.exit(2); }
 }
 
 let vite: ReturnType<typeof spawn> | null = null;
@@ -154,12 +153,14 @@ const where = (id: string) => H((h, id: string) => {
   return [p.x, p.y, p.z];
 }, id) as Promise<V3 | null>;
 const me = () => H((h) => { const id = h.playerId(); const o = id && h.object(id); if (!o) return null; const p = o.position.clone(); o.getWorldPosition(p); return [p.x, p.y, p.z]; }) as Promise<V3 | null>;
-type St = { scene: string; mode: string; curtain: boolean; travelling: boolean; sim: boolean; pid: string | null };
-const state = () => H((h) => ({ scene: h.sceneName(), mode: h.playMode.get(), curtain: h.portalCurtain(), travelling: h.travelling(), sim: !!h.sim, pid: h.playerId() })) as Promise<St>;
+type St = { scene: string; mode: string; curtain: boolean; travelling: boolean; loading: boolean; sim: boolean; pid: string | null };
+const state = () => H((h) => ({ scene: h.sceneName(), mode: h.playMode.get(), curtain: h.portalCurtain(), travelling: h.travelling(), loading: !!h.loading?.(), sim: !!h.sim, pid: h.playerId() })) as Promise<St>;
 /** `anyHold`: also accept a body still held for ground. The trip run fast-travels at once, and a world's dev spawn
  *  (the scene's `player` entity) may stand where no ground ever streams (skelmorrow's sat at 0,56,0 with nothing in
  *  the 60 m below: the hold never released) — not what this test is about. */
-const settled = async (scene: string, ms = 90000, anyHold = false) => waitUntil(async () => { const s = await state(); return s.scene === scene && s.mode === "playing" && !s.curtain && (anyHold || !s.travelling) && s.sim && !!s.pid; }, ms);
+/** How long a scene may take to settle after a trip (world streaming + the load-in screen); generous because the pipeline runs beside other heavy jobs. */
+const SETTLE_MS = 300000;
+const settled = async (scene: string, ms = 90000, anyHold = false) => waitUntil(async () => { const s = await state(); return s.scene === scene && s.mode === "playing" && !s.curtain && (anyHold || !s.travelling) && !s.loading && s.sim && !!s.pid; }, ms);
 
 /** listen on the live event bus (one per play session) for trips and refusals */
 const hookEvents = () => H((h) => {
@@ -216,7 +217,7 @@ async function openInPlay(scene: string, travelNext = false): Promise<void> {
   await sleep(1500);
   await page.locator("canvas").first().focus().catch(() => {});
   await page.keyboard.press("Backquote");
-  if (!(await settled(scene, 180000, travelNext))) throw new Fail(`play never started in ${scene}: ${JSON.stringify(await state())}`);
+  if (!(await settled(scene, SETTLE_MS, travelNext))) throw new Fail(`play never started in ${scene} within ${SETTLE_MS / 1000} s: ${JSON.stringify(await state())}`);
   await H(() => document.exitPointerLock?.());
   await sleep(1500);
 }
@@ -226,9 +227,11 @@ async function goThrough(from: string, door: string, startAt: V3, to: string, sh
   const doorAt = await where(door);
   if (!doorAt) throw new Fail(`no entity ${door} in ${from}`);
   await walkInto(through(startAt, doorAt), from, door, doorAt, 30000);
-  if (!(await settled(to, 180000))) {
+  if (!(await settled(to, SETTLE_MS))) {
     const s = await state();
-    throw new Fail(s.scene === from ? `the trip through ${door} started but never left ${from} (${JSON.stringify(s)})` : `the trip through ${door} went to ${s.scene}, not ${to} (${JSON.stringify(s)})`);
+    const why = s.scene === from ? `started but never left ${from}` : s.scene !== to ? `went to ${s.scene}, not ${to}`
+      : `reached ${to} but never settled in ${SETTLE_MS / 1000} s (${[s.loading && "load screen still up", s.travelling && "still held for ground (travelling)", s.curtain && "curtain up", s.mode !== "playing" && `mode ${s.mode}`].filter(Boolean).join(", ") || "no sim/player"}; a loaded machine streams the world slowly)`;
+    throw new Fail(`the trip through ${door} ${why} (${JSON.stringify(s)})`);
   }
   await sleep(1500);
   const at = (await me())!;
@@ -254,6 +257,15 @@ async function phase(name: string, run: () => Promise<string>): Promise<void> {
 }
 
 console.log(`portal-play: ${SCENE}/${PORTAL} -> ${DEST}, out by ${EXIT}`);
+const EXIT_FROM = arg("--exit-from") ? (arg("--exit-from").split(",").map(Number) as V3) : null;
+/** --exit-from: dev fast travel to the exit's approach inside the instance; returns where the body settled (null: not asked). */
+async function toExitFrom(scene: string): Promise<V3 | null> {
+  if (!EXIT_FROM) return null;
+  if (await H((h, p: V3) => h.travelTo(p[0], p[1] + 1.5, p[2]), EXIT_FROM) !== "ok") throw new Fail("dev fast travel to --exit-from refused");
+  if (!(await settled(scene, 90000))) throw new Fail("fast travel to --exit-from never settled");
+  await sleep(2500);
+  return (await me())!;
+}
 const exitParams = paramsOf(destDoc, EXIT);
 await phase("trip", async () => {
   if (!exitParams) throw new Fail(`${EXIT} in ${DEST} is not a portal: a player cannot leave`);
@@ -279,7 +291,8 @@ await phase("trip", async () => {
   if (!door) throw new Fail(`no entity ${PORTAL} in ${SCENE}`);
   const from = porch ?? door; // no return anchor: walk in from wherever travel put us (the door itself is the goal)
   if (await H((h, p: V3) => h.travelTo(p[0], p[1] + 1.5, p[2]), from) !== "ok") throw new Fail("dev fast travel refused");
-  if (!(await settled(SCENE, 90000))) throw new Fail("fast travel to the porch never settled");
+  // a fast travel streams a whole view in, as a portal arrival does: the same 180 s budget (a cold voxel world after an install needs > 90 s)
+  if (!(await settled(SCENE, 180000))) throw new Fail(`fast travel to the porch never settled: ${JSON.stringify(await state())}`);
   await sleep(2500);
   const start = (await me())!;
   const inAt = await goThrough(SCENE, PORTAL, start, DEST, `${DEST}-arrival.png`);
@@ -287,7 +300,7 @@ await phase("trip", async () => {
   const entry = String(sp["anchor"] ?? "");
   const entryAt = entry ? await where(entry) : null;
   if (entryAt && flat(inAt, entryAt) > 4) throw new Fail(`arrived ${flat(inAt, entryAt).toFixed(1)} m from the entry anchor ${entry}`);
-  const backAt = await goThrough(DEST, EXIT, inAt, SCENE, `${SCENE}-from-${DEST}.png`);
+  const backAt = await goThrough(DEST, EXIT, await toExitFrom(DEST) ?? inAt, SCENE, `${SCENE}-from-${DEST}.png`);
   shots.push(`${SCENE}-from-${DEST}.png`);
   const target = porch ?? start;
   if (flat(backAt, target) > 4) throw new Fail(`came back at ${fmt(backAt)}, ${flat(backAt, target).toFixed(1)} m from the return anchor ${fmt(target)}`);
@@ -300,7 +313,7 @@ if (!process.argv.includes("--no-inside")) {
     if (!fallback) throw new Fail(`${EXIT} has no fallback scene: a player who did not come in by the door (a reload, a GM move) cannot leave`);
     await openInPlay(DEST);
     const start = (await me())!;
-    const outAt = await goThrough(DEST, EXIT, start, fallback, `${fallback}-from-${DEST}-reloaded.png`);
+    const outAt = await goThrough(DEST, EXIT, await toExitFrom(DEST) ?? start, fallback, `${fallback}-from-${DEST}-reloaded.png`);
     shots.push(`${fallback}-from-${DEST}-reloaded.png`);
     const anchor = String(exitParams["anchor"] ?? "");
     const anchorAt = anchor ? await where(anchor) : null;

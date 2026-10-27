@@ -21,14 +21,14 @@ import type { VoxelWorldData } from "../components/voxel.js";
 import type { RiverFall, SurfaceSample, WorldField } from "./field.js";
 import { modelVariantIndex, scatterCell, scatterVariation, type ScatterCellOptions } from "./scatter.js";
 import { rockCapResolver } from "./rock-cap.js";
-import { fallSiteRockInstances } from "./fall-site-rocks.js";
+import { fallSiteRockInstances, rockSetInstances } from "./fall-site-rocks.js";
 import { terraceWallEntities } from "./terrace-walls.js";
 import { kitWallEntities } from "./kit-walls.js";
-import { landmarkEntities } from "./ledge-landmark.js";
+import { landmarkColliderTileRefs, landmarkEntities } from "./ledge-landmark.js";
 import { bridgeSpanEntities } from "./bridge-spans.js";
 import { ribbonEntities, type RibbonDoc, type RibbonSurfaceResolver } from "./ribbon.js";
 import { regionAt } from "./regions.js";
-import { FALL_FACE_CLEAR, fallColumn, fallProbeDepth, fitFall, groundAtProfile, profileFace, type FallFitField } from "./fall-fit.js";
+import { FALL_FACE_CLEAR, columnReachesPool, fallColumn, fallProbeDepth, fitFall, groundAtProfile, profileFace, type FallFitField } from "./fall-fit.js";
 import { resolveCellMesher, type VoxelMesherChoice } from "./mesh.js";
 import type { BridgeDoc, LakeDoc, RiverDoc, ScatterDoc, WorldRecipe } from "./recipe.js";
 
@@ -96,7 +96,31 @@ export function voxelRecipeAssetRefs(recipe: WorldRecipe): Array<{ id: string; k
   for (const b of recipe.features.bridgeSpans ?? []) for (const p of b.solved?.pieces ?? []) add(p.prefab, "prefab");
   for (const w of recipe.features.kitWalls ?? []) for (const p of w.pieces) add(p.prefab, "prefab");
   for (const l of recipe.features.landmarks ?? []) add(l.prefab, "prefab");
+  for (const id of landmarkColliderTileRefs(recipe.features.landmarks, recipe.cellSize)) add(id, "model");
   return [...out].map(([key, kind]) => ({ id: key.slice(kind.length + 1), kind }));
+}
+
+/** Pieces whose largest extent is under this (metres) draw with a scatter rule's `smallMaterial`: every boulder up to a 3-4 m one shows a strata tile as a per-facet checker; outcrops and cliff masses keep it. */
+export const SMALL_ROCK_METRES = 4;
+
+/**
+ * Pieces from SMALL_ROCK_METRES up to (not including) this draw with a scatter rule's `largeMaterial`: free-standing
+ * boulders, fins and tors wear the zone's boulder tile, not the cliff tile painted for 100 m faces. Bigger pieces are
+ * cliff masses and keep `material`.
+ */
+export const LARGE_ROCK_MAX_METRES = 16;
+
+/**
+ * The material a scatter instance draws with: the rule's `smallMaterial` for a piece under SMALL_ROCK_METRES, its
+ * `largeMaterial` for one from SMALL_ROCK_METRES up to LARGE_ROCK_MAX_METRES, else `material`.
+ */
+export function scatterMaterialOf(rule: Pick<ScatterDoc, "material" | "smallMaterial" | "largeMaterial">, colliderSize: readonly number[] | undefined, scale: number): string | undefined {
+  if ((rule.smallMaterial || rule.largeMaterial) && colliderSize) {
+    const size = Math.max(colliderSize[0] ?? 0, colliderSize[1] ?? 0, colliderSize[2] ?? 0) * scale;
+    if (size < SMALL_ROCK_METRES) return rule.smallMaterial ?? rule.material;
+    if (size < LARGE_ROCK_MAX_METRES) return rule.largeMaterial ?? rule.material;
+  }
+  return rule.material;
 }
 
 function propEntity(rule: ScatterDoc, instance: ReturnType<typeof scatterCell>[number], exists?: VoxelChunkOptions["assetExists"]): EntityDoc {
@@ -107,6 +131,7 @@ function propEntity(rule: ScatterDoc, instance: ReturnType<typeof scatterCell>[n
   const own = instance.model && (!exists || exists(instance.model, "model")) ? instance.model : undefined;
   const model = own ?? (useVariant ? variant!.model : rule.model);
   const colliderSize = (own ? instance.colliderSize : undefined) || (!own && useVariant && variant!.colliderSize) || rule.colliderSize;
+  const material = scatterMaterialOf(rule, colliderSize, instance.scale);
   const components: Record<string, unknown> = {
     transform: {
       position: instance.position,
@@ -129,7 +154,7 @@ function propEntity(rule: ScatterDoc, instance: ReturnType<typeof scatterCell>[n
         ...(rule.wind === undefined ? {} : { wind: rule.wind }),
         ...(rule.cameraFade === undefined ? {} : { cameraFade: rule.cameraFade }),
       },
-      ...(rule.material ? { material: rule.material } : {}),
+      ...(material ? { material } : {}),
       // instanced is not an optimisation here, it is the difference between a
       // forest and a slideshow: one InstancedMesh per model per supercell
       renderMode: "instanced",
@@ -598,6 +623,9 @@ function waterEntities(
  * cliff throws far more than a 6 m drop — and batched with every other fall's
  * mist into one draw, since they share one particle configuration.
  */
+/** Mist emitters spread across the foot of each fall (each a third of the spray). */
+const MIST_STREAMS: number = 3;
+
 function mistEntities(field: WorldField, cx: number, cz: number, entities: ChunkDoc["entities"]): void {
   const size = field.recipe.cellSize;
   const x0 = cx * size;
@@ -610,51 +638,58 @@ function mistEntities(field: WorldField, cx: number, cz: number, entities: Chunk
     const grid = size / Math.max(1, Math.round(size / field.voxelSize));
     if (material) entities[`fall_${index}`] = fallCurtain(fall, x0, z0, material, curtainSpan(field, fall), grid, field);
     const spread = Math.max(4, fall.width * 0.9);
-    entities[`mist_${index}`] = {
-      name: `${fall.river} falls mist`,
-      parent: null,
-      tags: ["waterfall-mist"],
-      components: {
-        transform: { position: [fall.x - x0 + fall.dirX * 2, fall.bottom + 0.6, fall.z - z0 + fall.dirZ * 2] },
-        particles: {
-          emitting: true,
-          rate: Math.round(Math.min(26, 4 + height * 0.55)),
-          max: Math.round(Math.min(26, 4 + height * 0.55) * 7),
-          lifetime: [3, 6],
-          shape: "box",
-          shapeSize: [spread, 1.5, spread],
-          coneAngle: 35,
-          spread: 10,
-          turbulence: 0.35,
-          turbulenceSpeed: 0.8,
-          fadeIn: 0.2,
-          // up off the pool, drifting downstream with the water
-          direction: [fall.dirX * 0.35, 1, fall.dirZ * 0.35],
-          radial: "none",
-          speed: [0.6, 1.8 + height * 0.04],
-          gravity: 0,
-          drag: 0.05,
-          sizeStart: 2.5 + height * 0.06,
-          sizeEnd: 7 + height * 0.2,
-          spin: 0.4,
-          colorStart: "#eef6f7",
-          colorEnd: "#cfe2e6",
-          opacityStart: 1,
-          opacityEnd: 0,
-          blending: "normal",
-          sprite: "noise",
-          filter: "linear",
-          steps: 0,
-          snap: 0,
-          frameRate: 0,
-          softFade: 1,
-          stretch: 0,
-          orient: "upright",
-          opacityCurve: [[0, 0], [0.2, 0.32], [0.65, 0.22], [1, 0]],
-          space: "world",
+    // Mist: low streaming spray, not one opaque round blob — MIST_STREAMS emitters spaced across the foot,
+    // each small, faint and drifting DOWN-GORGE with the water (mostly along the flow, little rise)
+    const across: [number, number] = [-fall.dirZ, fall.dirX];
+    const total = Math.min(26, 4 + height * 0.55);
+    for (let j = 0; j < MIST_STREAMS; j++) {
+      const t = MIST_STREAMS === 1 ? 0 : (j / (MIST_STREAMS - 1) - 0.5) * spread * 0.7;
+      entities[`mist_${index}_${j}`] = {
+        name: `${fall.river} falls mist`,
+        parent: null,
+        tags: ["waterfall-mist"],
+        components: {
+          transform: { position: [fall.x - x0 + fall.dirX * 2.5 + across[0] * t, fall.bottom + 0.3, fall.z - z0 + fall.dirZ * 2.5 + across[1] * t] },
+          particles: {
+            emitting: true,
+            rate: Math.max(2, Math.round(total / MIST_STREAMS)),
+            max: Math.max(14, Math.round((total / MIST_STREAMS) * 7)),
+            lifetime: [3, 6],
+            shape: "box",
+            shapeSize: [Math.max(2, spread / MIST_STREAMS), 0.8, Math.max(2, spread / MIST_STREAMS)],
+            coneAngle: 25,
+            spread: 8,
+            turbulence: 0.3,
+            turbulenceSpeed: 0.7,
+            fadeIn: 0.2,
+            // along the water first, a little up: spray streaming down the gorge
+            direction: [fall.dirX, 0.4, fall.dirZ],
+            radial: "none",
+            speed: [0.8, 1.6 + height * 0.03],
+            gravity: 0,
+            drag: 0.05,
+            sizeStart: 1.4 + height * 0.03,
+            sizeEnd: 3.5 + height * 0.08,
+            spin: 0.4,
+            colorStart: "#eef6f7",
+            colorEnd: "#cfe2e6",
+            opacityStart: 1,
+            opacityEnd: 0,
+            blending: "normal",
+            sprite: "noise",
+            filter: "linear",
+            steps: 0,
+            snap: 0,
+            frameRate: 0,
+            softFade: 1,
+            stretch: 0,
+            orient: "upright",
+            opacityCurve: [[0, 0], [0.2, 0.2], [0.6, 0.12], [1, 0]],
+            space: "world",
+          },
         },
-      },
-    };
+      };
+    }
     // Splash: droplets thrown up off the pool and pulled back down, streaked
     // along their flight — the white water the mist rises from.
     const at = [fall.x - x0 + fall.dirX * 1.5, fall.bottom + 0.2, fall.z - z0 + fall.dirZ * 1.5];
@@ -791,6 +826,39 @@ function fallSiteRocks(field: WorldField, cx: number, cz: number, entities: Chun
   }
 }
 
+/**
+ * Boulders a landform operator compiled (`features.rockSets`, e.g. a `scree` fan's): instances of the world's scatter
+ * rules, stood on the meshed surface once per set (fall-site-rocks.ts `rockSetInstances`); a cell takes the ones inside it.
+ */
+function operatorRockSets(field: WorldField, cx: number, cz: number, entities: ChunkDoc["entities"], options: VoxelChunkOptions): void {
+  const recipe = field.recipe;
+  const size = recipe.cellSize;
+  const x0 = cx * size;
+  const z0 = cz * size;
+  for (const set of recipe.features.rockSets ?? []) {
+    if (!set.rocks.some((r) => r.at[0] > x0 - 8 && r.at[0] < x0 + size + 8 && r.at[1] > z0 - 8 && r.at[1] < z0 + size + 8)) continue;
+    for (const rock of rockSetInstances(field, set)) {
+      const [x, y, z] = rock.position;
+      if (x < x0 || x >= x0 + size || z < z0 || z >= z0 + size) continue;
+      const rule = recipe.scatter[rock.ruleIndex];
+      if (!rule || !scatterUsable(rule, options.assetExists)) continue;
+      const variant = rule.modelVariants ? modelVariantIndex(rule, scatterVariation(rock.id, 15, recipe.seed)) : undefined;
+      const rockCap = rule.cap || rule.rockBase !== undefined || rule.rockBaseByCliff ? rockCapResolver(field)(rule, x, y, z) : undefined;
+      entities[rock.id] = propEntity(rule, {
+        rule: rule.id,
+        ruleIndex: rock.ruleIndex,
+        id: rock.id,
+        position: [x - x0, y, z - z0],
+        rotation: rock.rotation,
+        scale: rock.scale,
+        biome: "",
+        ...(variant !== undefined ? { variant } : {}),
+        ...(rockCap ? { rockCap } : {}),
+      }, options.assetExists);
+    }
+  }
+}
+
 /** Where a fall's lip line stands, upstream of its foot (the solved lip is this long). */
 export const FALL_LIP_OFFSET = 3;
 
@@ -864,9 +932,15 @@ function curtainSpan(field: WorldField, fall: RiverFall): [number, number] {
     const hh = (a: number, b: number): number => field.height(a * vs, b * vs);
     return (hh(i, j) * (1 - u) + hh(i + 1, j) * u) * (1 - v) + (hh(i, j + 1) * (1 - u) + hh(i + 1, j + 1) * u) * v;
   };
+  const base = fall.width / 2;
+  const cutX = fall.x - fall.dirX * FALL_CUT, cutZ = fall.z - fall.dirZ * FALL_CUT;
   const edge = (sign: number): number => {
     let last = 0;
     for (let w = 0; w <= fall.reach + 2; w += 0.25) {
+      // past its solved width the sheet widens only over a full drop: upper water running on along a bank with no
+      // drop under it (a second river's channel beside the lip, a ledge) is not this fall (its columns landed on rock
+      // high above the pool: the Weepwater split, 2026-10-19)
+      if (w > base && !columnReachesPool(field, fall, cutX, cutZ, w * sign)) { if (w - last > vs) break; continue; }
       const x = lx - fall.dirZ * w * sign;
       const z = lz + fall.dirX * w * sign;
       // the upper level (or a lake above it, which the lip pieces flatten to
@@ -884,7 +958,6 @@ function curtainSpan(field: WorldField, fall: RiverFall): [number, number] {
   // to the water's edge and a hand past it, no further: the sheet's top must
   // meet the upper water exactly, and a curtain running on into "rock" stood
   // out in the air wherever the walls beside the lip were cut back
-  const base = fall.width / 2;
   return [-Math.max(base, edge(-1) + 0.3), Math.max(base, edge(1) + 0.3)];
 }
 
@@ -1291,6 +1364,7 @@ export function voxelChunkDoc(
     if (!(options.lodStep && options.lodStep > 1)) surfEntities(field, cx, cz, entities);
     fallSiteRocks(field, cx, cz, entities, options);
   }
+  if (recipe.features.rockSets?.length && !(options.lodStep && options.lodStep > 1)) operatorRockSets(field, cx, cz, entities, options);
   if (recipe.features.bridges.length > 0) bridgeEntities(field, cx, cz, entities);
 
   // POIs are authored points, not scattered ones — they belong to whichever
@@ -1396,7 +1470,10 @@ function bridgeEntities(field: WorldField, cx: number, cz: number, entities: Chu
   const z0 = cz * size;
   const x1 = x0 + size;
   const z1 = z0 + size;
+  // a fitted bridge span that `replaces` a placeholder draws instead of it
+  const replaced = new Set((recipe.features.bridgeSpans ?? []).filter((s) => s.solved?.pieces?.length && s.replaces).map((s) => s.replaces!));
   for (const bridge of recipe.features.bridges as readonly BridgeDoc[]) {
+    if (replaced.has(bridge.id)) continue;
     const [a, b] = bridge.points;
     const material = bridge.material ?? recipe.bridgeMaterial;
     if (!material) continue;

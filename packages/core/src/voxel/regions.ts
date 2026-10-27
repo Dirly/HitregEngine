@@ -46,6 +46,22 @@ export const regionMoodSchema = z
     saturation: z.number().min(0).max(3).default(1).describe("Multiplies postfx.grade saturation (needs the scene's grade enabled). 0.7 = drained; 1.2 = lush."),
     contrast: z.number().min(0).max(3).default(1).describe("Multiplies postfx.grade contrast (needs the scene's grade enabled)."),
     temperature: z.number().min(-1).max(1).default(0).describe("Added to postfx.grade temperature: + warm, - cold (needs the scene's grade enabled)."),
+    sunset: moodHex
+      .optional()
+      .describe(
+        "Colour the clouds burn on the sun's side at dawn and dusk here, in place of the day-night script's global " +
+          "`sunsetColor` (#e2593a red-pink) and its ease toward `dawnColor`. A cold zone: #8fa6c8 steel blue; ash country: #a07a5a. " +
+          "Omit = the global colour.",
+      ),
+    cloudGlow: z
+      .number()
+      .min(0)
+      .max(2)
+      .optional()
+      .describe(
+        "Multiplies the day-night script's `cloudGlow` (how hard the sun-facing clouds glow at dawn and dusk) here. " +
+          "0 = an even grey deck at dusk, 0.5 = a muted burn, 1 = unchanged; the result is capped at full glow. Omit = 1.",
+      ),
     mistTop: z
       .number()
       .min(0)
@@ -65,7 +81,7 @@ export const regionMoodSchema = z
       .describe("With `mistTop`: metres over which that mist fades out below its top (small = a hard sheet, large = soft). Omit = the scene's `thickness`."),
   })
   .describe(
-    "Optional look of this zone: tinted sky/haze, sun colour and strength, shadow colour, fog and colour grade. " +
+    "Optional look of this zone: tinted sky/haze, sun colour and strength, shadow colour, fog, colour grade and the dusk/dawn cloud burn. " +
       "Read by the `zone-mood` builtin, which eases it in over the day/night cycle and under the weather; a zone " +
       "without one shows the scene's own look, and a nested town zone without one inherits its parent's.",
   );
@@ -144,11 +160,34 @@ export const regionAmbientLayerSchema = z
     storm: z.number().default(0).describe("Extra rate per unit of storm; negative thins it out in a storm."),
     wind: z.number().min(0).default(0).describe("Metres/second the wind carries it at full gust; 0 = the emitter's own aim."),
     rise: z.number().default(0).describe("Vertical drift m/s added to the wind aim: negative falls (ash), positive rises (spores)."),
+    bearing: z.number().min(0).max(360).optional().describe("Compass bearing (0 = north = -Z, 90 = east = +X) the wind carries this layer along in this zone, in place of the weather's wind angle: a gorge's spray runs down the gorge whatever the sky does. Needs wind > 0. Omit = the weather's."),
     glow: z.number().min(0).max(1).default(0.25).describe("Night brightness floor: 1 = self-lit (fireflies), 0.2 = moonlit only."),
   })
   .describe("An ambient particle layer that lives in this zone (same fields as an `ambient-particles` layer, minus `zones`: the zone IS where).");
 
 export type RegionAmbientLayer = z.infer<typeof regionAmbientLayerSchema>;
+
+/**
+ * The ONE set of tiles a zone may draw per role (Derek 2026-10-21: "the mood, the palette and the story are the
+ * things that stay consistent"). Authoring truth for the tools that pick tiles; they refuse a tile outside it.
+ */
+export const regionPaletteSchema = z
+  .object({
+    ground: z.array(z.string().min(1)).default([]).describe("Palette SURFACE names the zone's open ground may draw: its grass, dirt, accent, road, paving and any place paint on flat ground."),
+    cliff: z.array(z.string().min(1)).default([]).describe("Palette SURFACE names its faces may draw (the zone's cliff stone). A place's face paint (`paint` op `faces: true`) must name one of these."),
+    cap: z.array(z.string().min(1)).default([]).describe("Palette SURFACE names its rocks may wear on top (`rockCap.layer`)."),
+    rockSmall: z.array(z.string().min(1)).default([]).describe("Texture ids (`textures/<id>`) its rocks under 4 m may wear (the small rock material's zone slice)."),
+    rockLarge: z.array(z.string().min(1)).default([]).describe("Texture ids its free-standing 4-16 m rocks may wear (the large rock material's zone slice)."),
+    builtStone: z
+      .record(z.string(), z.union([z.string().min(1), z.array(z.string().min(1))]))
+      .default({})
+      .describe("Built stone: role (face, cap, footing, ashlar...) -> material id(s) its built walls may wear (place-build zone defaults)."),
+  })
+  .describe(
+    "One palette per role for the whole zone: worldgen zone-textures, rock-skins install and place-build refuse a tile outside it, " +
+      "`worldgen rock-audit` measures the drawn surfaces against it (ground tiles on faces > 45 deg, cliff tiles on < 20 deg, off-palette tiles), " +
+      "and zonegen status shows a `palette` row. Places nested `within` the zone use the zone's.",
+  );
 
 export const regionSchema = z.object({
   id: z
@@ -207,6 +246,17 @@ export const regionSchema = z.object({
         "membership across `zoneGround.band`, so a border is a gradient. A zone without it renders the base " +
         "palette. Written by `worldgen zone-textures` from the cast's ground looks; a nested town zone uses its " +
         "parent's unless it declares its own.",
+    ),
+  palette: regionPaletteSchema.optional(),
+  groundBand: z
+    .number()
+    .min(4)
+    .max(400)
+    .optional()
+    .describe(
+      "Metres over which THIS region's `ground` blends in at its border (default: the world's `zoneGround.band`, 150). A " +
+        "corridor that restyles one stretch of its zone (a gorge's own cliff tile) takes a narrow band (40-60) so its polygon " +
+        "can hug the stretch; full effect from about 0.85 x band inside the polygon edge.",
     ),
   mood: regionMoodSchema.optional(),
   sound: regionSoundSchema.optional(),

@@ -217,6 +217,22 @@ interface Timer {
  * component, dispatches collisions, and steps onFixedUpdate. Lives and dies
  * with a play session — the document is never touched.
  */
+/**
+ * Mob distance sleep (the EverQuest/WoW rule): a mob body farther than `far` from EVERY player is ASLEEP — its
+ * subtree's fixed and late steps do not run (controller, brain, combat actor, sockets) and it stops where it stands;
+ * between `near` and `far` they run every `midEvery`-th fixed step with the elapsed time; under `near`, every
+ * step. A mob is the body over a `mob-brain` (the nearest ancestor with a rigidbody). Nothing is disposed, so a
+ * waking mob resumes its roam/leash state where it stopped. Applies once the host says where the players are
+ * (setPlayerFoci): the local play host and the dedicated server both do, so the rule is the same on either.
+ */
+export interface MobSleepRule {
+  near: number;
+  far: number;
+  midEvery: number;
+}
+export const MOB_SLEEP: MobSleepRule = { near: 80, far: 160, midEvery: 3 };
+export type MobBand = "full" | "mid" | "asleep";
+
 export class ScriptRuntime {
   private readonly instances = new Map<string, Script>();
   /** entity id -> its script component's name, for per-script profiler scopes. */
@@ -239,6 +255,14 @@ export class ScriptRuntime {
   private timeMs = 0;
   private tickCount = 0;
   private started = false;
+  /** See MobSleepRule; null turns the sleep off (every mob steps every tick). */
+  mobSleep: MobSleepRule | null = MOB_SLEEP;
+  private playerFoci: ReadonlyArray<readonly [number, number]> | null = null;
+  /** Mob bodies (the body over each `mob-brain`), rebuilt when entities come or go. */
+  private mobBodies: Set<string> | null = null;
+  private readonly mobBodyOfId = new Map<string, string | null>();
+  private readonly mobBands = new Map<string, MobBand>();
+  private readonly mobPhase = new Map<string, number>();
   private activeCameraId: string | null = null;
 
   constructor(private readonly opts: RuntimeOptions) {
@@ -384,8 +408,10 @@ export class ScriptRuntime {
     // one scope per RUN of same-named instances (they sit together: a pack's
     // scripts are added in a row), not one per instance — see fixedUpdate
     let open: string | null = null;
+    const gating = this.mobBands.size > 0;
     for (const [id, script] of this.instances) {
       if (!script.onLateUpdate) continue;
+      if (gating && this.mobBand(id) === "asleep") continue;
       if (profiler) {
         const name = this.instanceNames.get(id) ?? "unknown";
         if (name !== open) {
@@ -482,7 +508,108 @@ export class ScriptRuntime {
     return out;
   }
 
+  /**
+   * Where the players stand (x, z), every fixed step, from the host that simulates mobs. Null (the default) =
+   * unknown: no mob sleeps. See MobSleepRule.
+   */
+  setPlayerFoci(points: ReadonlyArray<readonly [number, number]> | null): void {
+    this.playerFoci = points;
+  }
+
+  /** The sleep band of the mob body that owns this entity (itself or an ancestor); null for a non-mob or no foci. */
+  mobBand(entityId: string): MobBand | null {
+    if (this.mobBands.size === 0) return null;
+    const body = this.mobBodyOf(entityId);
+    return body ? (this.mobBands.get(body) ?? null) : null;
+  }
+
+  private mobBodyOf(entityId: string): string | null {
+    const cached = this.mobBodyOfId.get(entityId);
+    if (cached !== undefined) return cached;
+    const bodies = this.indexMobBodies();
+    let found: string | null = null;
+    for (let at: string | null = entityId, guard = 0; at && guard < 64; guard++) {
+      if (bodies.has(at)) { found = at; break; }
+      at = this.entities.get(at)?.parent ?? null;
+    }
+    this.mobBodyOfId.set(entityId, found);
+    return found;
+  }
+
+  private indexMobBodies(): Set<string> {
+    if (this.mobBodies) return this.mobBodies;
+    const bodies = new Set<string>();
+    for (const [id, entity] of this.entities) {
+      if ((entity.components["script"] as { name?: string } | undefined)?.name !== "mob-brain") continue;
+      // the brain lives on a child of the body: the nearest ancestor (or itself) with a rigidbody, else the top
+      let body = id;
+      for (let at: string | null = id, guard = 0; at && guard < 64; guard++) {
+        const e = this.entities.get(at);
+        if (!e) break;
+        body = at;
+        if (e.components["rigidbody"]) break;
+        at = e.parent ?? null;
+      }
+      bodies.add(body);
+    }
+    this.mobBodies = bodies;
+    return bodies;
+  }
+
+  /** This step's band for every mob body (cleared when sleep is off or no foci are known). */
+  private updateMobBands(): void {
+    const rule = this.mobSleep, foci = this.playerFoci;
+    if (!rule || !foci) {
+      this.mobBands.clear();
+      return;
+    }
+    const near2 = rule.near * rule.near, far2 = rule.far * rule.far;
+    for (const body of this.indexMobBodies()) {
+      const object = this.objects.get(body);
+      if (!object) continue;
+      // a top-level body's position IS its world position; a nested one reads its last world matrix
+      let x = object.position.x, z = object.position.z;
+      if (object.parent && object.parent.parent) {
+        const e = object.matrixWorld.elements;
+        x = e[12]!;
+        z = e[14]!;
+      }
+      let best = Infinity;
+      for (const f of foci) {
+        const dx = f[0] - x, dz = f[1] - z, d2 = dx * dx + dz * dz;
+        if (d2 < best) best = d2;
+      }
+      const band: MobBand = best > far2 ? "asleep" : best > near2 ? "mid" : "full";
+      if (band === "asleep" && this.mobBands.get(body) !== "asleep") {
+        // falling asleep: it stops where it stands (gravity keeps it on the ground; no stride carries on)
+        const v = this.opts.sim?.getLinvel(body);
+        if (v) this.opts.sim!.setLinvel(body, [0, Math.min(v[1], 0), 0]);
+      }
+      this.mobBands.set(body, band);
+    }
+  }
+
+  /** The dt this entity's fixed step runs with on this tick (0 = it does not run). */
+  private mobStepDt(id: string, dt: number): number {
+    const body = this.mobBodyOf(id);
+    if (!body) return dt;
+    const band = this.mobBands.get(body);
+    if (band === "asleep") return 0;
+    if (band !== "mid") return dt;
+    const every = this.mobSleep!.midEvery;
+    let phase = this.mobPhase.get(body);
+    if (phase === undefined) {
+      phase = 0;
+      for (let i = 0; i < body.length; i++) phase = (phase * 31 + body.charCodeAt(i)) >>> 0;
+      phase %= every;
+      this.mobPhase.set(body, phase);
+    }
+    return (this.tickCount + phase) % every === 0 ? dt * every : 0;
+  }
+
   private indexTags(id: string, tags: readonly string[], entity?: SceneDoc["entities"][string]): void {
+    this.mobBodies = null;
+    this.mobBodyOfId.clear();
     const kind = (entity?.components["rigidbody"] as { kind?: string } | undefined)?.kind;
     if (kind === "dynamic" || kind === "kinematic") this.bodyIndex.add(id);
     for (const tag of tags) {
@@ -532,6 +659,10 @@ export class ScriptRuntime {
       const known = this.entities.get(id);
       if (known) this.unindexTags(id, known.tags);
       this.entities.delete(id);
+      this.mobBodies = null;
+      this.mobBodyOfId.clear();
+      this.mobBands.delete(id);
+      this.mobPhase.delete(id);
       this.objects.delete(id);
       if (known && this.started && !opts?.silent) {
         this.opts.events?.emit("entity.destroyed", { entityId: id });
@@ -995,10 +1126,14 @@ export class ScriptRuntime {
     }
     const profiler = this.opts.profiler;
     let openScope: string | null = null;
+    this.updateMobBands();
+    const gating = this.mobBands.size > 0;
     for (const [id, script] of this.instances) {
       // most scripts have no fixed step: skip them before paying two clock
       // reads and a scope lookup each (500 instances = 1,000 calls a tick)
       if (!script.onFixedUpdate) continue;
+      const stepDt = gating ? this.mobStepDt(id, dt) : dt;
+      if (stepDt === 0) continue; // an asleep mob, or a mid-band one between its steps
       // one scope per SCRIPT NAME, not per entity: 200 traffic cars are one
       // useful row ("traffic-car: 4.1ms over 200 calls"), 200 rows of noise
       // otherwise — and per-entity interning would exhaust the scope budget.
@@ -1013,7 +1148,7 @@ export class ScriptRuntime {
         }
       }
       try {
-        script.onFixedUpdate?.(dt);
+        script.onFixedUpdate?.(stepDt);
       } catch (error) {
         console.warn(`[scripts] ${id} onFixedUpdate failed:`, error);
       }

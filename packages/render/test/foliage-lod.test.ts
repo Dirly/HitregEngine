@@ -175,3 +175,69 @@ describe("FoliageLodSystem error-driven near→mid threshold", () => {
     expect(system.nearThresholdFor(batch)).toBe(5);
   });
 });
+
+describe("FoliageLodSystem with a moving camera", () => {
+  /** A pool-style dynamic page: 2,048 empty slots (instances are placed with addInstance). */
+  function poolPage(): InstancedPropBatch {
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
+    const material = new THREE.MeshBasicMaterial();
+    const capacity = 2048;
+    const positions = Array.from({ length: capacity }, () => new THREE.Vector3());
+    const matrices = Array.from({ length: capacity }, () => new THREE.Matrix4());
+    return {
+      near: [new InstancedProps(geometry, material, capacity)],
+      far: new InstancedProps(geometry, material, capacity),
+      positions,
+      matrices,
+      dynamic: true,
+    };
+  }
+
+  it("keeps every live instance in the tier its distance asks for while the camera sprints past", () => {
+    const system = new FoliageLodSystem(40, 0.85, 10);
+    const batch = poolPage();
+    system.register(batch);
+    system.update(new THREE.Vector3(-1000, 0, 0));
+    // scattered across the page's slots, as a pool fills them over many cells
+    const slots: number[] = [];
+    for (let k = 0; k < 600; k++) {
+      const i = (k * 7) % 2048;
+      slots.push(i);
+      batch.positions[i]!.set(k, 0, 0);
+      batch.matrices[i]!.makeTranslation(k, 0, 0);
+      system.addInstance(batch, i);
+    }
+    // a 9.5 m/s sprint at 30 fps: 0.32 m per frame, 600 frames along the row
+    let late = 0;
+    for (let f = 0; f < 600; f++) {
+      const cam = new THREE.Vector3(f * 0.32, 0, 0);
+      system.update(cam);
+      if (f % 3 !== 2) continue; // judged after each full sweep window
+      for (let k = 0; k < 600; k++) {
+        const d = Math.abs(k - cam.x);
+        const near = (system as unknown as { stateByBatch: Map<InstancedPropBatch, { tier: Uint8Array }> }).stateByBatch.get(batch)!.tier[slots[k]!] === 1;
+        // outside the hysteresis band the tier must be settled
+        if (d < 40 * 0.85 - 1 && !near) late++;
+        if (d > 40 + 1 && near) late++;
+      }
+    }
+    expect(late).toBe(0);
+    expect(batch.near[0]!.instanceCount + batch.far.instanceCount).toBe(600);
+  });
+
+  it("a still camera keeps the fixed per-tick budget (no full sweep every frame)", () => {
+    const system = new FoliageLodSystem(40, 0.85, 10);
+    const batch = poolPage();
+    system.register(batch);
+    const cam = new THREE.Vector3(0, 0, 0);
+    system.update(cam);
+    for (let i = 0; i < 2000; i++) {
+      batch.positions[i]!.set(i < 1000 ? 5 : 500, 0, 0);
+      system.addInstance(batch, i);
+    }
+    // move everything near→far behind the system's back; a still camera re-judges 200 per tick
+    for (let i = 0; i < 1000; i++) batch.positions[i]!.set(500, 0, 0);
+    system.update(cam);
+    expect(batch.near[0]!.instanceCount).toBe(800);
+  });
+});

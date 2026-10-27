@@ -79,7 +79,7 @@ export function context(project: string, town: string, worldOpt?: string): Ctx {
     const t = raw.features.towns.find((x: any) => x.id === townDoc.town);
     if (!t) throw new Error(`town ${townDoc.town} not in ${worldFile}`);
     cfg = {
-      world, townId: townDoc.town, site: { x0: Math.round(t.at[0] - 128), z0: Math.round(t.at[1] - 128), size: 256, px: 1024 },
+      world, townId: townDoc.town, site: { x0: Math.round((t.at ?? t.center)[0] - 128), z0: Math.round((t.at ?? t.center)[1] - 128), size: 256, px: 1024 }, // recipe towns name it `center`
       reroutes: [], grades: { street: 0.15, lane: 0.12, stair: 0.5 }, cell: 3.2, envelope: "full", bank: 10, blend: 16,
       patchId: `${town}-town`, roles: [], keyBrief: "key-brief.txt",
       paths: { width: 2, shoulder: 1, grade: 0.2, clearance: 0.5 },
@@ -109,7 +109,57 @@ export function reroute(road: any, cutAt: P, keep: "head" | "tail" = "tail"): an
   const cut = (a?: number[]): number[] | undefined => (a ? (keep === "head" ? a.slice(0, k + 1) : a.slice(k)) : a);
   return { ...road, points: cut(road.points), surfaceY: cut(road.surfaceY), leftY: cut(road.leftY), rightY: cut(road.rightY) };
 }
-export const applyReroutes = (c: Ctx, roads: any[]): any[] =>
+/**
+ * TOWNS DECLARE ENTRANCES, ROADS ARRIVE AT THEM: a town street whose end stops within `reach` of a gate is made to END
+ * ON THE GATE'S CENTRE (`at`, the wall's centreline in the opening). A key traces streets from painted pixels, so the
+ * end lands a metre or two off: outside the wall face or beside a jamb (Cindermoot's east street stopped 2.4 m out and
+ * 1.4 m off-axis, and the town walk hit the jamb). The points at that end that are past the mouth (outward of the
+ * gate's `facing`, within `reach`) or crowd it (< `clear` m) are dropped and the gate centre takes their place. Ends
+ * farther than `reach` from every gate are left alone. Returns the kept slice [from, to) of the input and the gate put
+ * at each end, so per-point arrays (surfaceY, leftY, rightY) can follow.
+ */
+export function snapStreetToGates(
+  pts: P[], gates: { at: P; facing?: P }[], reach = 8, clear = 1.5,
+): { points: P[]; from: number; to: number; start: P | null; end: P | null } {
+  let from = 0, to = pts.length;
+  const ends: (P | null)[] = [null, null];
+  for (const side of [0, 1] as const) {
+    if (to - from < 2) break;
+    const n = to - from;
+    const idx = (k: number): number => (side === 0 ? from + k : to - 1 - k);
+    const tip = pts[idx(0)]!;
+    let g: { at: P; facing?: P } | null = null, gd = reach;
+    for (const q of gates) { const d = dist(tip, q.at); if (d < gd) { gd = d; g = q; } }
+    if (!g) continue;
+    const gate = g;
+    const fl = gate.facing ? Math.hypot(gate.facing[0], gate.facing[1]) : 0;
+    const far = pts[idx(n - 1)]!, fd = dist(gate.at, far) || 1;
+    // outward: the gate's own facing; a gate without one faces away from the street's far end
+    const f: P = fl > 1e-9 ? [gate.facing![0] / fl, gate.facing![1] / fl] : [(gate.at[0] - far[0]) / fd, (gate.at[1] - far[1]) / fd];
+    const drop = (p: P): boolean => dist(p, gate.at) < clear || (dist(p, gate.at) < reach && (p[0] - gate.at[0]) * f[0] + (p[1] - gate.at[1]) * f[1] > 0);
+    let k = 0;
+    while (k < n - 1 && drop(pts[idx(k)]!)) k++;
+    if (side === 0) from += k; else to -= k;
+    ends[side] = [gate.at[0], gate.at[1]];
+  }
+  const points: P[] = [...(ends[0] ? [ends[0]] : []), ...pts.slice(from, to), ...(ends[1] ? [ends[1]] : [])];
+  return { points, from, to, start: ends[0]!, end: ends[1]! };
+}
+/** snapStreetToGates on a road doc: its points and per-point arrays together; `y(at)` is the surface height at a gate. */
+export function snapRoadToGates(road: any, gates: { at: P; facing?: P }[], y: (at: P) => number, reach = 8): any {
+  const s = snapStreetToGates(road.points as P[], gates, reach);
+  if (!s.start && !s.end) return road;
+  // already arriving at its gate(s): same points, nothing to write (re-runs are no-ops)
+  if (s.points.length === road.points.length && s.points.every((p, i) => dist(p, road.points[i]) < 0.005)) return road;
+  const per = (a?: number[]): number[] | undefined => {
+    if (!Array.isArray(a) || a.length !== road.points.length) return a;
+    return [...(s.start ? [round(y(s.start))] : []), ...a.slice(s.from, s.to), ...(s.end ? [round(y(s.end))] : [])];
+  };
+  const out = { ...road, points: s.points.map((p) => p.map((q) => round(q))) };
+  for (const k of ["surfaceY", "leftY", "rightY"]) if (road[k] !== undefined) out[k] = per(road[k]);
+  return out;
+}
+export const applyReroutes =(c: Ctx, roads: any[]): any[] =>
   roads.map((x: any) => { const rr = c.cfg.reroutes.find((q) => q.road === x.id); return rr ? reroute(x, rr.cutAt, rr.keep) : x; });
 export function bareRerouted(c: Ctx, raw: any): any {
   const r = bareRecipe(c, raw);
@@ -709,8 +759,16 @@ export function buildGround(c: Ctx, opts: { dry: boolean }): BuildResult {
   const hAt = (x: number, z: number): number => heights[K(x, z)] ?? 0;
 
   // ---- recipe edits
+  const newGates = cfg.reroutes.map((rr) => {
+    const r = raw.features.roads.find((x: any) => x.id === rr.road);
+    const cut = reroute(r, rr.cutAt, rr.keep);
+    const [p0, p1] = rr.keep === "head" ? [...cut.points].reverse() : cut.points; const l = dist(p0, p1);
+    return { id: rr.gate, at: rr.cutAt, facing: [(p1[0] - p0[0]) / l, (p1[1] - p0[1]) / l], width: 6, approach: 10, tags: [] };
+  }).filter((g, i, a) => a.findIndex((x) => x.id === g.id) === i); // two roads cut at one gate make one gate
+  // a street that stops near a gate ENDS on the gate centre (towns declare entrances, roads arrive at them)
+  const allGates: { at: P; facing?: P }[] = [...town.gates.filter((g: any) => !newGates.some((ng) => ng.id === g.id)), ...newGates] as any;
   const streetRoads: any[] = lines.map((l) => {
-    const pts = resample(l.pts, 3);
+    const pts = snapStreetToGates(resample(l.pts, 3), allGates).points;
     return {
       id: `${TOWN}-street-${l.id}`, points: pts.map((p) => p.map((q) => round(q))), width: round(l.width, 10), shoulder: 1,
       surfaceY: pts.map((p) => round(hAt(p[0], p[1]))), flatten: 1, surface: l.cls === "street" ? "gravel" : "dirt", surfaceEdge: 1, role: "paving",
@@ -729,12 +787,6 @@ export function buildGround(c: Ctx, opts: { dry: boolean }): BuildResult {
     }
     streetRoads.push({ id: `${TOWN}-street-square-${si + 1}`, points: ends.map((p) => p.map((q) => round(q))), width: round(roadW, 10), shoulder: 1, surfaceY: ends.map(() => s.level), flatten: 1, surface: "gravel", surfaceEdge: 1, role: "paving" });
   }
-  const newGates = cfg.reroutes.map((rr) => {
-    const r = raw.features.roads.find((x: any) => x.id === rr.road);
-    const cut = reroute(r, rr.cutAt, rr.keep);
-    const [p0, p1] = rr.keep === "head" ? [...cut.points].reverse() : cut.points; const l = dist(p0, p1);
-    return { id: rr.gate, at: rr.cutAt, facing: [(p1[0] - p0[0]) / l, (p1[1] - p0[1]) / l], width: 6, approach: 10, tags: [] };
-  }).filter((g, i, a) => a.findIndex((x) => x.id === g.id) === i); // two roads cut at one gate make one gate
   const newTown = {
     ...town,
     terraces: placed.map((p) => ({ id: p.terrace.id, points: p.terrace.points, radius: p.terrace.radius ?? 40, falloff: 0, groundY: p.padY, flatten: 0, tags: ["lot-frame"] })),
@@ -820,4 +872,58 @@ export function buildGround(c: Ctx, opts: { dry: boolean }): BuildResult {
     writeJson(planFile, plan);
   };
   return { edits, inverse: result.inverse, recipe: result.recipe, report, heights, summary, writePlan };
+}
+
+/** How far the town kit's entry steps descend below the floor at their foot: 5 risers of 0.137 m (measured on the
+ * cindermoot models, 2026-10-20: treads at -0.14 ... -0.68 m over the 2 m steps). */
+export const KIT_STEP_DROP = 0.68;
+/**
+ * The height a door path starts at, at the step foot: the terrain there, but never more than the steps' own drop below
+ * the building's floor — on a slope the settled floor sits well above the ground at the door, and a path left at
+ * terrain height leaves a ledge under the last tread that the player body cannot climb (door walk "stuck at the foot").
+ */
+/** The raised path foot sits this far UNDER the steps' foot: burnt to exactly floor - stepDrop it was coplanar with the
+ * kit's bottom tread (Reedholt zfight 0.44-0.80 m2 at three doors, n up, building vs terrain); 4 cm is far inside autostep. */
+export const DOOR_FOOT_SINK = 0.04;
+export function doorFootY(terrainY: number, floorY: number | undefined, stepDrop = KIT_STEP_DROP): number {
+  if (typeof floorY !== "number" || !Number.isFinite(floorY)) return terrainY;
+  const tread = floorY - stepDrop;
+  // ground within the sink of the tread is pushed under it too: coplanar either way
+  return terrainY > tread + DOOR_FOOT_SINK ? terrainY : tread - DOOR_FOOT_SINK;
+}
+
+/**
+ * Burn a graded path (points + per-point surface heights) into a town height patch, in place: full weight inside the
+ * half width, a smoothstep to the ground over the shoulder. The town patch is applied AFTER roads, so a door path that
+ * is only a road feature never shapes the ground under the patch (Hagsend net-loft, Cindermoot ore-house: the path's
+ * raised foot stayed a 0.9 m ledge below the last tread). Returns the number of cells changed.
+ */
+export function burnPathIntoPatch(
+  patch: { origin: number[]; size: number[]; columns: number; rows: number; heights: number[] },
+  pts: [number, number][], hs: number[], half: number, shoulder: number,
+): number {
+  const dx = patch.size[0]! / (patch.columns - 1), dz = patch.size[1]! / (patch.rows - 1);
+  const reach = half + shoulder;
+  const xs = pts.map((p) => p[0]), zs = pts.map((p) => p[1]);
+  const i0 = Math.max(0, Math.floor((Math.min(...xs) - reach - patch.origin[0]!) / dx)), i1 = Math.min(patch.columns - 1, Math.ceil((Math.max(...xs) + reach - patch.origin[0]!) / dx));
+  const j0 = Math.max(0, Math.floor((Math.min(...zs) - reach - patch.origin[1]!) / dz)), j1 = Math.min(patch.rows - 1, Math.ceil((Math.max(...zs) + reach - patch.origin[1]!) / dz));
+  let changed = 0;
+  for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+    const x = patch.origin[0]! + i * dx, z = patch.origin[1]! + j * dz;
+    let best = Infinity, y = 0;
+    for (let k = 1; k < pts.length; k++) {
+      const [ax, az] = pts[k - 1]!, [bx, bz] = pts[k]!;
+      const vx = bx - ax, vz = bz - az, L2 = vx * vx + vz * vz || 1;
+      const t = Math.max(0, Math.min(1, ((x - ax) * vx + (z - az) * vz) / L2));
+      const d = Math.hypot(x - (ax + vx * t), z - (az + vz * t));
+      if (d < best) { best = d; y = hs[k - 1]! + (hs[k]! - hs[k - 1]!) * t; }
+    }
+    if (best > reach) continue;
+    const u = best <= half ? 0 : (best - half) / (shoulder || 1);
+    const w = 1 - u * u * (3 - 2 * u);
+    const at = j * patch.columns + i, h = patch.heights[at]!;
+    const nh = Math.round((h + (y - h) * w) * 100) / 100;
+    if (nh !== h) { patch.heights[at] = nh; changed++; }
+  }
+  return changed;
 }

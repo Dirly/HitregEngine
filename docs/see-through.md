@@ -41,7 +41,10 @@ The see-through gate looks at the screen instead.
 4. **Allowed openings.** Walk-through portal triggers (the `portal` script's box, grown by 1.5 m) are always allowed. List
    real openings (a cave mouth to the outside, a skylight) in `<project>/authoring/see-through-openings.json` as
    `[{ "name", "min": [x,y,z], "max": [x,y,z] }]` or `{ "name", "center", "half" }`. A ray through one of these boxes,
-   within 60 m, does not count.
+   at ANY distance (no reach limit), does not count.
+   - **Rope rails:** the gaps between a rope rail's strands are deliberate, so a site whose every entity is a rope rail
+     part (the stilt-village-kit rope rail and its collider, matched by id or name "rope rail") is listed as
+     `ropeRailOpenings`, not a hole. Hidden colliders in general are not covered.
 5. **Cause.** Every hole is explained from the scene itself, by ray casts against every surface mesh. Each mesh is tested
    double-sided for the moment of the cast, and hidden meshes are included.
    - The first surface IN the hole decides when there is one (within 1.3× the rim depth):
@@ -58,11 +61,14 @@ The see-through gate looks at the screen instead.
    crop), plus the crops and a `sheet.png` contact sheet of the 24 worst sites. Results are cached by an inputs hash
    (scene file, the project's models, route, openings, options, the tool and the probe), so a re-run with nothing changed
    is instant.
+7. **Out of place.** In scene mode a site on world meshes only (scatter vegetation, terrain: no scene entity) that lies
+   more than `--within` m (default 40, XZ) from every route sample is listed under `outOfPlace` and not counted: a far
+   scatter tree's cutout is the world's, not the place's.
 
 ## Commands
 
-The commands run from `apps/playground`. They need Playwright with system Chrome; set `HITREG_PLAYWRIGHT` to the playwright
-package dir. The runner starts its own vite on port 5284 (`--port` changes it, `--url` reuses a dev app).
+The commands run from `apps/playground`. They need Playwright with system Chrome: the apps/playground devDependency (`pnpm install`),
+or `HITREG_PLAYWRIGHT=<playwright package dir>` to override. The runner starts its own vite on port 5284 (`--port` changes it, `--url` reuses a dev app).
 
 ```
 node node_modules/tsx/dist/cli.mjs tools/see-through.mts scene <dungeon> --batch 1/3     # then 2/3, 3/3: each < 4 min

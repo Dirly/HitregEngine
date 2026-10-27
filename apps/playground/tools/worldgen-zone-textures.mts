@@ -17,15 +17,29 @@
  * Nothing is baked: voxel cells mesh from the recipe as they stream, so a reload shows it. Town streets
  * take the zone's `paving` once their roads carry `role: "paving"` (`town-ground paving --town <t>`).
  * `worldgen status` reports the row `zone-textures`.
+ *
+ * A CORRIDOR (one stretch of a zone restyled, e.g. a gorge's walls darker than the rest of the zone):
+ *
+ *   worldgen zone-textures <world> --project <p> --region <id> --palette <palette> [--within <zone> --polygon "x,z;..."
+ *     --name "..."] [--band m] [--rock-cap <role>[:amount]] [--rock-slice n] [--extend-palette] [--inverse f.json] | --undo f.json
+ *
+ * applies one palette to ONE region nested in a zone (creating it as a look-only `place` region when --polygon is
+ * given): its roles over the zone's own ground (a nested region's membership takes the zone's share, so every role
+ * the zone restyles is carried over, else the base tile would show through), every tile inside the ZONE's palette
+ * (regions[].palette; refused otherwise), its rock skins (the 8 rock slices are full in a big world: `--rock-slice`
+ * reclaims one, by ruling). Keep the region's polygon ~1 band (zoneGround.band) wider than the stretch it restyles.
+ * `--inverse` records every recipe key and material file it changes; `--undo` restores them.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { NATURAL_SURFACE_ROLES, recipeSplatIndexed, type WorldRecipe } from "@hitreg/core";
 // @ts-expect-error plain JS helper
 import { decodePng } from "./_png.mjs";
+import { motifScore } from "./texture-swatch.mjs";
 import { groundPaletteSchema, type GroundPalette } from "./zonegen/schemas.mts";
 import { closure, findAsset } from "./_closure.mjs";
 import { writeRockSkinTemplate } from "./rock-skins.mts";
+import { paletteRefusals, zoneOf, zonePalette } from "./_zone-palette.mts";
 
 export interface ZoneTexturesHost {
   argv: string[];
@@ -90,6 +104,17 @@ function readPalette(project: string, id: string): GroundPalette | null {
   return parsed.data;
 }
 
+/** Tiles that read as wood: a street or road is never planks (Derek rejected the Drownmere plank street, 2026-10-21). */
+const WOOD_TILE = /plank|board|deck/i;
+const STREET_ROLES = ["road", "paving"];
+
+/** A palette's road/paving tiles that are wood (planks, boards, decking), as printable faults. */
+export function woodenStreetFaults(palette: GroundPalette, paletteId = palette.id): string[] {
+  return entries(palette)
+    .filter((e) => STREET_ROLES.includes(e.role) && WOOD_TILE.test(e.texture))
+    .map((e) => `${paletteId}.${e.role}: tile ${e.texture} is wood — roads and streets are dirt, gravel or stone, never planks/boards/decking (pick or paint a ground tile; a note does not excuse it)`);
+}
+
 type Entry = { role: string; texture: string; uvScale?: number; roughness?: number };
 function entries(palette: GroundPalette): Entry[] {
   return Object.entries(palette.ground).map(([role, v]) =>
@@ -129,6 +154,8 @@ export function commandZoneTextures(host: ZoneTexturesHost, world: string): void
     const i = host.argv.indexOf(`--${name}`);
     return i >= 0 && host.argv[i + 1] && !host.argv[i + 1]!.startsWith("--") ? host.argv[i + 1]! : "";
   };
+  if (opt("undo")) return undoRegionTextures(host, world, opt("undo"));
+  if (opt("region")) return commandRegionTextures(host, world, opt);
   const only = opt("zone");
   const rows = readCast(project, world).filter((r) => !only || r.zone === only);
   if (rows.length === 0) host.fail(only ? `no cast row for zone "${only}" in authoring/zonegen/${world}/cast.json` : `no cast rows in authoring/zonegen/${world}/cast.json`);
@@ -150,7 +177,7 @@ export function commandZoneTextures(host: ZoneTexturesHost, world: string): void
   }
 
   let applied = 0;
-  const rockPrefer: Record<string, string> = {};
+  const rockPrefer: Record<string, string> = {}, rockSmallPrefer: Record<string, string> = {}, rockLargePrefer: Record<string, string> = {};
   for (const row of rows) {
     const palette = readPalette(project, row.palette);
     if (!palette) {
@@ -161,10 +188,16 @@ export function commandZoneTextures(host: ZoneTexturesHost, world: string): void
     }
     const region = recipe.regions.find((r) => r.id === row.zone);
     if (!region) host.fail(`${row.zone}: no such region in ${world} (run worldgen zones, or fix the cast)`);
+    const wood = woodenStreetFaults(palette, row.palette);
+    if (wood.length) host.fail(`${row.zone}: FAULT\n  ${wood.join("\n  ")}`);
     const ground: Record<string, string> = {};
     for (const e of entries(palette)) {
       const png = textureFile(project, e.texture);
       if (!png) host.fail(`${row.palette}.${e.role}: texture ${e.texture} not found under assets/textures of ${(closure(project) as string[]).join(", ")}`);
+      // a lone mark on a tile repeats into a grid of icons on the ground (Hagsheer 2026-10-21: lichen clovers read as
+      // plus signs); tools/texture-swatch.mjs writes the 4 x 4 swatch to look at
+      const motif = (() => { try { const im = decodePng(fs.readFileSync(png)) as { width: number; height: number; data: Uint8Array }; return motifScore(im.width, im.height, im.data); } catch { return { score: 0 }; } })();
+      if (motif.score >= 1) host.fail(`${row.palette}.${e.role}: FAULT tile ${e.texture} has a lone mark (motif ${motif.score}) that repeats into a grid of icons: node tools/texture-swatch.mjs ${path.relative(process.cwd(), png)} and repaint or pick another tile`);
       const name = surfaceName(row.palette, e.role);
       const base = recipe.surfaces.find((s) => s.role === e.role);
       const surface = {
@@ -179,15 +212,30 @@ export function commandZoneTextures(host: ZoneTexturesHost, world: string): void
       else recipe.surfaces.push(surface as (typeof recipe.surfaces)[number]);
       ground[e.role] = name;
     }
+    // ONE palette per role per zone (regions[].palette): the cast may not hand a zone a tile its palette refuses
+    const zp = zonePalette(recipe, region.id);
+    if (zp) {
+      const bad = [
+        ...paletteRefusals(zp, "cliff", ground["cliff"] ? [ground["cliff"]] : []).map((t) => `cliff ${t}`),
+        ...paletteRefusals(zp, "ground", Object.entries(ground).filter(([r]) => r !== "cliff").map(([, s]) => s)).map((t) => `ground ${t}`),
+        ...(palette.rockSmall ? paletteRefusals(zp, "rockSmall", [palette.rockSmall]).map((t) => `rockSmall ${t}`) : []),
+        ...(palette.rockLarge ? paletteRefusals(zp, "rockLarge", [palette.rockLarge]).map((t) => `rockLarge ${t}`) : []),
+      ];
+      if (bad.length) host.fail(`${row.zone}: REFUSED ${bad.join(", ")}: outside the zone palette (recipe regions[].palette; change the palette first, by ruling)`);
+    }
     region.ground = ground as typeof region.ground;
     if (palette.rock && ground["cliff"]) rockPrefer[ground["cliff"]] = palette.rock;
+    if (palette.rockSmall && ground["cliff"]) rockSmallPrefer[ground["cliff"]] = palette.rockSmall;
+    if (palette.rockLarge && ground["cliff"]) rockLargePrefer[ground["cliff"]] = palette.rockLarge;
     applied++;
     console.log(`  ${row.zone} (${region.name}) <- ${row.palette}: ${Object.entries(ground).map(([r, s]) => `${r}=${s}`).join(", ")}`);
   }
   if (applied === 0) host.fail("no zone had a ground look to apply");
   recipe.splat = "indexed";
   // 5. the stone follows the place: each zone's cliff gets a slice of the world's rock material (recipe.rockSkins)
-  writeRockSkinTemplate(project, recipe, rockPrefer);
+  // its small rocks (under 4 m) a grainy small-rock tile in the parallel slot of the small rock material, and its
+  // free-standing large rocks (4-16 m) its boulder tile in the large rock material
+  writeRockSkinTemplate(project, recipe, rockPrefer, rockSmallPrefer, rockLargePrefer);
   host.writeRecipe(recipe, file);
   host.writeTerrainMaterial(recipe, recipe.material ?? `terrain/${recipe.name}`, true);
   console.log(
@@ -221,6 +269,7 @@ export function zoneTexturesStageCheck(recipe: WorldRecipe, project: string, ass
       problems.push(`${row.zone}: no region`);
       continue;
     }
+    problems.push(...woodenStreetFaults(palette, row.palette));
     for (const e of entries(palette)) {
       const name = surfaceName(row.palette, e.role);
       const surface = recipe.surfaces.find((s) => s.name === name);
@@ -248,4 +297,162 @@ export function zoneTexturesStageCheck(recipe: WorldRecipe, project: string, ass
     if (mat.splat?.source !== source || !mapsMatch) problems.push("terrain material does not match the palette (worldgen material)");
   }
   return problems.length > 0 ? problems.slice(0, 4).join("; ") : null;
+}
+
+// ------------------------------------------------------------------ one nested region (a corridor)
+
+interface RegionTexturesInverse {
+  world: string;
+  region: string;
+  created: boolean;
+  recipe: { surfaces: unknown; region: unknown; rockSkins: unknown; splat: unknown; zone?: string; zonePalette?: unknown };
+  files: Record<string, string | null>;
+}
+
+/** The files a region apply may write: the rock-cap materials of the world's scatter rules and the terrain material. */
+function touchedFiles(host: ZoneTexturesHost, recipe: WorldRecipe): string[] {
+  const out = new Set<string>();
+  for (const r of recipe.scatter)
+    for (const id of [r.material, r.smallMaterial, r.largeMaterial]) {
+      if (!id) continue;
+      const f = findAsset(host.project, `materials/${id}.json`) as string | null;
+      if (f) out.add(path.resolve(f));
+    }
+  out.add(path.resolve(path.join(host.assetsRoot(), "materials", `${recipe.material ?? `terrain/${recipe.name}`}.json`)));
+  return [...out];
+}
+
+/** The ground a nested region draws: its zone's roles, the palette's own roles over them. Pure. */
+export function nestedRegionGround(parent: Record<string, string> | undefined, own: Record<string, string>): Record<string, string> {
+  return { ...(parent ?? {}), ...own };
+}
+
+function commandRegionTextures(host: ZoneTexturesHost, world: string, opt: (n: string) => string): void {
+  const { project } = host;
+  const id = opt("region");
+  const paletteId = opt("palette") || host.fail("--region needs --palette <palette id> (authoring/zonegen/palettes/<id>.json)");
+  const palette = readPalette(project, paletteId) ?? host.fail(`no palette ${paletteId} (${path.relative(process.cwd(), paletteFile(project, paletteId))})`);
+  const { recipe, file } = host.loadRecipe(world);
+  const inverse: RegionTexturesInverse = {
+    world,
+    region: id,
+    created: !recipe.regions.some((r) => r.id === id),
+    recipe: {
+      surfaces: JSON.parse(JSON.stringify(recipe.surfaces)),
+      region: JSON.parse(JSON.stringify(recipe.regions.find((r) => r.id === id) ?? null)),
+      rockSkins: JSON.parse(JSON.stringify((recipe as { rockSkins?: unknown }).rockSkins ?? null)),
+      splat: (recipe as { splat?: unknown }).splat ?? null,
+    },
+    files: Object.fromEntries(touchedFiles(host, recipe).map((f) => [f, fs.existsSync(f) ? fs.readFileSync(f, "utf8") : null])),
+  };
+  let region = recipe.regions.find((r) => r.id === id);
+  const polygonText = opt("polygon");
+  const polygon = polygonText ? polygonText.split(";").map((p) => p.split(",").map(Number) as [number, number]) : null;
+  if (polygon && (polygon.length < 3 || polygon.some((p) => p.length !== 2 || p.some((v) => !Number.isFinite(v))))) host.fail('--polygon "x,z;x,z;x,z..." (3+ points)');
+  if (!region) {
+    if (!polygon) host.fail(`no region ${id}: give --within <zone> --polygon "x,z;..." to create it (a look-only place region)`);
+    const within = opt("within") || host.fail("a new region needs --within <zone>");
+    if (!recipe.regions.some((r) => r.id === within)) host.fail(`no zone ${within}`);
+    region = { id, name: opt("name") || id, story: "", polygon, landmarks: [], within, tags: ["place"] } as unknown as (typeof recipe.regions)[number];
+    // LAST: a place earlier in the list (its own mood, vegetation, cap) keeps winning where the two overlap
+    recipe.regions.push(region);
+  } else if (polygon) region.polygon = polygon;
+  if (!region.within) host.fail(`${id} is a top-level zone: give it its look through the cast (zone-textures --zone)`);
+  const parent = recipe.regions.find((r) => r.id === region!.within);
+  const own: Record<string, string> = {};
+  for (const e of entries(palette)) {
+    const png = textureFile(project, e.texture) ?? host.fail(`${paletteId}.${e.role}: texture ${e.texture} not found`);
+    const motif = (() => {
+      try {
+        const im = decodePng(fs.readFileSync(png)) as { width: number; height: number; data: Uint8Array };
+        return motifScore(im.width, im.height, im.data);
+      } catch {
+        return { score: 0 };
+      }
+    })();
+    if (motif.score >= 1) host.fail(`${paletteId}.${e.role}: FAULT tile ${e.texture} has a lone mark (motif ${motif.score}) that repeats into a grid of icons: node tools/texture-swatch.mjs ${path.relative(process.cwd(), png)}`);
+    const name = surfaceName(paletteId, e.role);
+    const base = recipe.surfaces.find((s) => s.role === e.role);
+    const surface = { name, color: averageColor(png), roughness: e.roughness ?? base?.roughness ?? 0.95, map: e.texture, uvScale: e.uvScale ?? base?.uvScale ?? DEFAULT_UV[e.role] ?? 4 };
+    const at = recipe.surfaces.findIndex((s) => s.name.toLowerCase() === name.toLowerCase());
+    if (at >= 0) recipe.surfaces[at] = surface as (typeof recipe.surfaces)[number];
+    else recipe.surfaces.push(surface as (typeof recipe.surfaces)[number]);
+    own[e.role] = name;
+  }
+  const ground = nestedRegionGround(parent?.ground as Record<string, string> | undefined, own);
+  const cap = opt("rock-cap");
+  const [capRole, capAmount] = cap ? cap.split(":") : ["", ""];
+  const zp = zonePalette(recipe, region.id);
+  if (zp) {
+    const bad = [
+      ...paletteRefusals(zp, "cliff", ground["cliff"] ? [ground["cliff"]] : []).map((t) => `cliff ${t}`),
+      ...paletteRefusals(zp, "ground", Object.entries(ground).filter(([r]) => r !== "cliff").map(([, s]) => s)).map((t) => `ground ${t}`),
+      ...(palette.rockSmall ? paletteRefusals(zp, "rockSmall", [palette.rockSmall]).map((t) => `rockSmall ${t}`) : []),
+      ...(palette.rockLarge ? paletteRefusals(zp, "rockLarge", [palette.rockLarge]).map((t) => `rockLarge ${t}`) : []),
+      ...(capRole && own[capRole] ? paletteRefusals(zp, "cap", [own[capRole]!]).map((t) => `cap ${t}`) : []),
+    ];
+    if (bad.length && !host.argv.includes("--extend-palette")) host.fail(`${id}: REFUSED ${bad.join(", ")}: outside zone ${region.within}'s palette (worldgen palette --zone ${region.within} --set ..., or --extend-palette by ruling)`);
+    if (bad.length) {
+      // by ruling: the corridor's tiles join the zone's palette (one palette per role per ZONE: the corridor is part of it)
+      const zone = zoneOf(recipe, region.id)!;
+      inverse.recipe.zone = zone.id;
+      inverse.recipe.zonePalette = JSON.parse(JSON.stringify(zone.palette ?? null));
+      const p = (zone as { palette: Record<string, string[]> }).palette;
+      for (const b of bad) {
+        const [role, tile] = b.split(" ") as [string, string];
+        (p[role] ??= []).includes(tile) || p[role]!.push(tile);
+      }
+      console.log(`  zone ${zone.id} palette extended: ${bad.join(", ")}`);
+    }
+  }
+  region.ground = ground as typeof region.ground;
+  if (opt("band")) (region as { groundBand?: number }).groundBand = Number(opt("band"));
+  if (capRole) {
+    const layer = own[capRole] ?? host.fail(`--rock-cap ${capRole}: the palette has no ${capRole} tile`);
+    (region as { rockCap?: { layer: string; amount: number } }).rockCap = { layer, amount: capAmount ? Number(capAmount) : 0.6 };
+  }
+  const cliff = own["cliff"];
+  const prefer: Record<string, string> = palette.rock && cliff ? { [cliff]: palette.rock } : {};
+  const small: Record<string, string> = palette.rockSmall && cliff ? { [cliff]: palette.rockSmall } : {};
+  const large: Record<string, string> = palette.rockLarge && cliff ? { [cliff]: palette.rockLarge } : {};
+  const slice = opt("rock-slice");
+  const assign: Record<string, number> = slice !== "" && cliff ? { [cliff]: Number(slice) } : {};
+  recipe.splat = "indexed";
+  const inv = opt("inverse");
+  // keep the FIRST inverse: a re-run (a repainted tile, a moved polygon) must still undo to the state before the corridor
+  if (inv && fs.existsSync(inv)) console.log(`inverse kept: ${inv} (from the first apply)`);
+  else if (inv) {
+    fs.mkdirSync(path.dirname(inv), { recursive: true });
+    fs.writeFileSync(inv, JSON.stringify(inverse, null, 1));
+    console.log(`inverse -> ${inv}`);
+  }
+  writeRockSkinTemplate(project, recipe, prefer, small, large, assign);
+  host.writeRecipe(recipe, file);
+  host.writeTerrainMaterial(recipe, recipe.material ?? `terrain/${recipe.name}`, true);
+  console.log(`  ${id} (within ${region.within}) <- ${paletteId}: ${Object.entries(ground).map(([r, s]) => `${r}=${s}`).join(", ")}${capRole ? `; rockCap ${cap}` : ""}`);
+}
+
+function undoRegionTextures(host: ZoneTexturesHost, world: string, invFile: string): void {
+  const inv = JSON.parse(fs.readFileSync(invFile, "utf8")) as RegionTexturesInverse;
+  if (inv.world !== world) host.fail(`${invFile} is for world ${inv.world}`);
+  const { recipe, file } = host.loadRecipe(world);
+  recipe.surfaces = inv.recipe.surfaces as typeof recipe.surfaces;
+  const at = recipe.regions.findIndex((r) => r.id === inv.region);
+  if (inv.created) {
+    if (at >= 0) recipe.regions.splice(at, 1);
+  } else if (at >= 0) recipe.regions[at] = inv.recipe.region as (typeof recipe.regions)[number];
+  if (inv.recipe.zone) {
+    const z = recipe.regions.find((r) => r.id === inv.recipe.zone) as { palette?: unknown } | undefined;
+    if (z) z.palette = inv.recipe.zonePalette ?? undefined;
+  }
+  if (inv.recipe.rockSkins === null) delete (recipe as { rockSkins?: unknown }).rockSkins;
+  else (recipe as { rockSkins?: unknown }).rockSkins = inv.recipe.rockSkins;
+  (recipe as { splat?: unknown }).splat = inv.recipe.splat ?? undefined;
+  for (const [f, text] of Object.entries(inv.files)) {
+    if (text === null) {
+      if (fs.existsSync(f)) fs.rmSync(f);
+    } else fs.writeFileSync(f, text);
+  }
+  host.writeRecipe(recipe, file);
+  console.log(`undone: ${inv.region} (${inv.created ? "removed" : "restored"}), ${Object.keys(inv.files).length} file(s) restored`);
 }

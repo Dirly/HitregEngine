@@ -1,0 +1,112 @@
+{
+  "size": 512,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "skull",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#8c0000": {
+      "name": "skull-crown",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff8080": {
+      "name": "skull-under",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff00ff": {
+      "name": "jaw",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff8000": {
+      "name": "spine",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ffff00": {
+      "name": "ribs-side",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#8c8c00": {
+      "name": "ribs-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#c0c060": {
+      "name": "ribs-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00ff00": {
+      "name": "pelvis",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#008c00": {
+      "name": "pelvis-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00ff80": {
+      "name": "clavicle",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0000ff": {
+      "name": "humerus",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00008c": {
+      "name": "forearm",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#8000ff": {
+      "name": "hand",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0080ff": {
+      "name": "femur",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00468c": {
+      "name": "shin",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#46008c": {
+      "name": "foot",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    }
+  }
+}

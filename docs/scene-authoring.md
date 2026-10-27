@@ -60,6 +60,12 @@ follows is the map and the judgment the schema can't encode.
   the component only to opt out of a field or tune relevancy/send rate. In a
   session the host simulates these; other tabs suspend their local copy and
   render interpolated ghosts.
+  Exception: a script class with `static clockDriven = true` (the `lift`
+  builtin) moves from the shared sim clock alone, so every peer runs it on a
+  real body and it never replicates — riders on clients need a solid deck.
+- **Moving decks carry riders.** A kinematic body driven by
+  `setKinematicTarget` (`lift`, or your own) carries what stands on it; never
+  move a deck with `object.position` (the physics readback overwrites it).
 - **`collider` without `rigidbody` = static scenery.** `trimesh`/`convex`/
   `heightmap` colliders cook exact collision from the entity's own mesh (GLB
   models included) and ignore `size`.

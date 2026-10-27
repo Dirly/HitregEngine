@@ -6,7 +6,8 @@
  *   import { runPipeline, standardStages } from "../../../../../tools/dungeon-pipeline/pipeline.mjs";
  *   runPipeline(import.meta.url, standardStages({ id: "my-dungeon", override: { fight: { run: "..." } } }));
  *
- * For every stage: ok / STALE (older than an input, or its `fresh()` says no) / FAILED (its report says it did not
+ * For every stage: ok / STALE (older than an input, or its `fresh()` says no) / UNJUDGED (its report says `unjudged`:
+ * prove fight under load, step-jitter.mjs) / FAILED (its report says it did not
  * pass) / MISSING, and the command that produces it. The first stage not ok is the next to run.
  *
  *   node authoring/pipeline.mjs              the table
@@ -46,7 +47,8 @@ const readJson = (full) => { try { return JSON.parse(fs.readFileSync(full, "utf8
 export function writePlanGeometry(root, { populationKeys, stamp }) {
   const plan = readJson(path.join(root, "authoring/plan.json"));
   if (!plan) return;
-  const shape = Object.fromEntries(Object.entries(plan).filter(([k]) => !populationKeys.includes(k)));
+  // `portalPlay` (where the real-client test starts its walk to the exit) is test data, never geometry
+  const shape = Object.fromEntries(Object.entries(plan).filter(([k]) => !populationKeys.includes(k) && k !== "portalPlay"));
   const hash = (v) => createHash("sha256").update(JSON.stringify(v)).digest("hex").slice(0, 20);
   // prose (a space's name, any note / about) never changes geometry: renaming a room or writing "unlit" in its note
   // must not ask for a Blender export
@@ -62,7 +64,34 @@ export function writePlanGeometry(root, { populationKeys, stamp }) {
   if (have?.digest === legacy && before !== null) { fs.utimesSync(file, new Date(before), new Date(before)); return; }
   // first time: the shape has not changed since the last export (only the population did), so it is not newer than it
   const exp = mtimeOf(path.join(root, stamp));
-  if (!have && exp !== null) fs.utimesSync(file, new Date(exp - 1000), new Date(exp - 1000));
+  if (!have) { if (exp !== null) fs.utimesSync(file, new Date(exp - 1000), new Date(exp - 1000)); return; }
+  // a real shape change: the file is as old as the plan edit that made it, not the board run that noticed it, so an
+  // export that ran between that edit and this run (and consumed that very plan) is not marked STALE
+  const pm = mtimeOf(path.join(root, "authoring/plan.json"));
+  if (pm !== null) fs.utimesSync(file, new Date(pm), new Date(pm));
+}
+
+/**
+ * The `portal play` command for a dungeon. A plan may declare `portalPlay.exitFrom: [x, y, z]` (ENGINE metres, inside
+ * the instance): where the client is fast-travelled before it walks into the return portal — an exit at the end of a
+ * long route is not reached by the straight-line walk from the arrival (tipped-kirk stopped 23 m short).
+ */
+export function portalPlayRun(id, plan) {
+  const at = plan?.portalPlay?.exitFrom;
+  const ok = Array.isArray(at) && at.length === 3 && at.every((v) => typeof v === "number" && Number.isFinite(v));
+  return `(pg) npx tsx tools/portal-play.mts --dungeon ${id}${ok ? ` --exit-from ${at.join(",")}` : ""}  (own vite on 5263; --url <dev app> to reuse one)`;
+}
+
+/** The see-through stage runs in 3 batches that merge when all are present: name the first batch still missing or
+ *  older than the stage's inputs, so a loop over `--next` finishes the stage instead of repeating batch 1. */
+export function seeThroughRun(id, root) {
+  const n = 3;
+  const inputs = ["reports/walk.json", "reports/split-floor.json", `assets/scenes/${id}.scene.json`, "authoring/see-through-openings.json"].map((r) => mtimeOf(path.join(root, r)) ?? 0);
+  const newest = Math.max(0, ...inputs);
+  let k = 1;
+  for (; k <= n; k++) { const m = mtimeOf(path.join(root, `reports/see-through.part${k}of${n}.json`)) ?? 0; if (!m || m < newest) break; }
+  if (k > n) k = 1; // every part is fresh: any batch run merges them
+  return `(pg) node node_modules/tsx/dist/cli.mjs tools/see-through.mts scene ${id} --batch ${k}/${n}  (batch ${k} of ${n}: each under 4 min; own vite on 5284, --port to move it; cached by inputs hash)`;
 }
 
 /** The quality gate stage `name` (tools/dungeon-pipeline/quality.mjs), run from the project folder. */
@@ -90,8 +119,8 @@ export function standardStages({ id, blender = BLENDER, exportInputs = [], overr
     { name: "thin-walls", out: "reports/thin-walls.json", inputs: [stamp, "authoring/plan.json"], report: "reports/thin-walls.json",
       run: `node ../../../../tools/mesh-dc/thin-walls.mjs ${stamp} --plan authoring/plan.json --report reports/thin-walls.json`,
       note: "PRE-BAKE: no shell wall under 3 DC voxels (the bake would perforate it: holes you can see through the map, every later audit passing). Only walls with a side looking out of the map count; planks, hulls, decals and flat-art slabs (by name, or dc_thin_ok) are exempt. Fix: thicken the source (room kit shell rules) or bake the group finer" },
-    { name: "dc-bake", out: "reports/dc-bake.json", inputs: [stamp], report: "reports/dc-bake.json", run: `(pg) ${big} npx tsx ${pj}/dc-bake.mts --voxel .12`, note: "offline convert -> dual contouring -> meshAudit" },
-    { name: "import", out: "reports/import.json", inputs: [stamp], run: "node authoring/import.mjs", note: "the registered Blender to DC tool (hitreg.mesh-dc run.mjs): editable volume, palette, stamp prefab" },
+    { name: "dc-bake", out: "reports/dc-bake.json", inputs: [stamp], digests: { [stamp]: "sourceSha256" }, report: "reports/dc-bake.json", run: `(pg) ${big} npx tsx ${pj}/dc-bake.mts --voxel .12`, note: "offline convert -> dual contouring -> meshAudit" },
+    { name: "import", out: "reports/import.json", inputs: [stamp], digests: { [stamp]: "sourceSha256" }, run: "node authoring/import.mjs", note: "the registered Blender to DC tool (hitreg.mesh-dc run.mjs): editable volume, palette, stamp prefab" },
     { name: "merged bake", out: "reports/engine/bake-merged.json", inputs: ["reports/import.json"], check: (j) => j && (j.auditFailures ?? []).length === 0, run: `(pg) ${big} npx tsx ${pj}/bake.mts --force`, note: "exact coplanar merge to GLB, audited both sides (what ships)" },
     { name: "split-floor", out: "reports/split-floor.json", inputs: ["reports/engine/bake-merged.json", "authoring/split-floor.mts"], report: "reports/split-floor.json", run: `(pg) npx tsx ${pj}/split-floor.mts`, note: "floors -> TERRAIN layer, masonry -> WORLD (combat's ground ray, mob steering)" },
     gateStage("stairs"),
@@ -99,13 +128,16 @@ export function standardStages({ id, blender = BLENDER, exportInputs = [], overr
     gateStage("atlas"),
     gateStage("matte"),
     { name: "dress maps", out: "reports/dress-maps.json", inputs: ["reports/engine/bake-merged.json", "authoring/dress-maps.mjs"], report: "reports/dress-maps.json", run: `(pg) node ${pj}/dress-maps.mjs`, note: "socket maps of every dressable floor; then the dressing plans (props by name, one light bucket)" },
-    { name: "scene", out: "reports/scene-build.json", inputs: ["reports/split-floor.json", "reports/materials.json", "reports/dress-maps.json", "authoring/build-scene.mts", "authoring/plan.json"], report: "reports/scene-build.json", run: `(pg) npx tsx ${pj}/build-scene.mts && npx tsx tools/dress.mts owner-apply --project ${id} --scene ${id}`, note: "applyOps scene + dress check/apply of every plan + the return portal; then the owner's in-editor edits of installer-placed props LAST (dress owner-apply, idempotent; plan props keep theirs through dress apply)" },
+    { name: "scene", out: "reports/scene-build.json", inputs: ["reports/split-floor.json", "reports/materials.json", "reports/dress-maps.json", "authoring/build-scene.mts", "authoring/plan.json", "authoring/dressing/plans"], report: "reports/scene-build.json", run: `(pg) npx tsx ${pj}/build-scene.mts && npx tsx tools/dress.mts owner-apply --project ${id} --scene ${id}`, note: "applyOps scene + dress check/apply of every plan + the return portal; then the owner's in-editor edits of installer-placed props LAST (dress owner-apply, idempotent; plan props keep theirs through dress apply)" },
     gateStage("decals"),
     { name: "flat-art", out: "reports/flat-art.json", inputs: [`assets/scenes/${id}.scene.json`, "reports/scene-build.json"], report: "reports/flat-art.json", run: `(pg) npx tsx tools/flat-art.mts check ${id} --out projects/${id}/reports/flat-art.json  (a flipped slab: --fix, inverse in authoring/sweeps/flat-art)`, note: "every flat-art slab (door relief, plaque, panel: a GLB wearing an engine material) shows its picture upright and unmirrored; engine material maps load flipY, so a slab stores v = 1 - row (tools/flat-art.mts)" },
     gateStage("arrival"),
+    gateStage("water"),
     { name: "portals", out: `reports/portal-cover/${id}.json`, inputs: ["reports/scene-build.json", "authoring/portal-veils.json"], report: `reports/portal-cover/${id}.json`, run: `(pg) npx tsx tools/portal-cover.mts --scene ${id}`, note: "every walk-through portal's trigger and veil cover the measured opening (server colliders, approach-side views); a failure: re-run with --fit (sizes kept in authoring/portal-veils.json)" },
     { name: "lighting", out: "reports/lighting.json", inputs: ["reports/scene-build.json", "../../../../tools/dungeon-pipeline/lighting.json", "authoring/lighting.json"], run: `(pg) npx tsx ../../tools/dungeon-pipeline/lighting.mts --project projects/${id}`, note: "the readability floor: hemisphere fill, fog to the fill tone, exposure/vignette, interior cullingProfile (lighting.json; one applyOps batch, inverse in the report)" },
     { name: "float", out: "reports/float.json", inputs: [`assets/scenes/${id}.scene.json`, "reports/scene-build.json"], report: "reports/float.json", run: `(pg) npx tsx tools/float.mts scene ${id} --out projects/${id}/reports/float.json  (re-seat: --fix, inverse in authoring/sweeps)`, note: "nothing hangs in the air: every placed prop, fire, basket and fixture seated on the real floor (DC meshes, colliders, voxel density) by its catalogue contact — base/legs/embed/hang/wall (docs/voxel-worlds.md \"Seat\")" },
+    { name: "zfight", gate: true, out: "reports/engine/zfight.json", inputs: [`assets/scenes/${id}.scene.json`, "reports/scene-build.json", "../../../../tools/dungeon-pipeline/thresholds.json", "authoring/quality-exceptions.json"], report: "reports/engine/zfight.json", run: `(pg) node node_modules/tsx/dist/cli.mjs tools/zfight.mts ${id} --decals`, note: "one mesh owns each plane: no two draws (DC group shells, kit floors, built pads, props) on one plane within 2 cm facing the same way (close-range flicker). Each cluster names both meshes and where; fix the builder that emits the second copy (thresholds.json zfight)" },
+    { name: "decal place", gate: true, out: "reports/engine/decals.json", inputs: [`assets/scenes/${id}.scene.json`, "reports/scene-build.json", "../../../../tools/dungeon-pipeline/thresholds.json", "authoring/quality-exceptions.json"], report: "reports/engine/decals.json", run: `(pg) node node_modules/tsx/dist/cli.mjs tools/zfight.mts ${id} --decals`, note: "every decal lands on its surface: a ray grid from each projector box (as decals.ts builds it) is at most 10% BLOCKED by geometry in front of the painted surface (blocker named) and 25% EMPTY (in air, past an edge)" },
     { name: "water-edges", out: "reports/water-edges.json", inputs: [`assets/scenes/${id}.scene.json`, "reports/scene-build.json"], report: "reports/water-edges.json", run: `(pg) npx tsx tools/water-edges.mts scene ${id} --out projects/${id}/reports/water-edges.json  (re-cut to the walls + finish what stays open: --fix, inverse in authoring/sweeps)`, note: "no water ends in the air: every pool, channel and sump re-cut to its walls (buried rim) or ending at a declared finish — drain, lip-fall, dark (a channel going on into darkness), built (docs/voxel-worlds.md \"Water edges\")" },
     gateStage("recipe"),
     gateStage("culling"),
@@ -113,18 +145,18 @@ export function standardStages({ id, blender = BLENDER, exportInputs = [], overr
     { name: "fight", out: "reports/fight.json", inputs: ["reports/scene-build.json", "authoring/prove.mts"], report: "reports/fight.json", run: `(pg) npx tsx ${pj}/prove.mts fight --player-hp 3000`, note: "the packs, the named and the boss hurt the player, die to strikes, drops in the bags" },
     gateStage("loot"),
     { name: "views", out: "reports/views/sheet.png", inputs: ["reports/scene-build.json", "authoring/views/views.json"],
-      run: `(pg) PLAYWRIGHT_MODULE=<playwright index.mjs> node tools/town-shots.mjs --base http://localhost:5403/ --scene ${id} --views ${pj}/views/views.json --out projects/${id}/reports/views  (own vite on 5403)`,
+      run: `(pg) node tools/town-shots.mjs --base http://localhost:5403/ --scene ${id} --views ${pj}/views/views.json --out projects/${id}/reports/views  (own vite on 5403)`,
       note: "player-height pictures at the SHIPPED light (reports/views)" },
     gateStage("readability"),
     gateStage("compare"),
     { name: "see-through", out: "reports/see-through.json", inputs: ["reports/walk.json", "reports/split-floor.json", `assets/scenes/${id}.scene.json`, "authoring/see-through-openings.json"], report: "reports/see-through.json",
-      run: `(pg) HITREG_PLAYWRIGHT=<playwright package dir> node node_modules/tsx/dist/cli.mjs tools/see-through.mts scene ${id} --batch 1/3  (then 2/3, 3/3: each under 4 min; own vite on 5284, --port to move it; cached by inputs hash)`,
+      run: (root) => seeThroughRun(id, root),
       note: "no holes you can see through the map: the shipped scene drawn with a magenta sentinel background from eye height every 3.5 m of the walk route (six views each); every magenta pixel is a hole (thin DC shells, seams between groups, single-sided faces, culled groups). Allowed openings: authoring/see-through-openings.json (docs/see-through.md)" },
     { name: "loading art", out: `assets/loading/${id}.png`, inputs: [], report: "reports/loading-art.json",
-      run: `(pg) PLAYWRIGHT_MODULE=<playwright index.mjs> npx tsx tools/loading-art.mts --project ${id} --base <dev server>  [--view <name>]`,
+      run: `(pg) npx tsx tools/loading-art.mts --project ${id} --base <dev server>  [--view <name>]`,
       note: "the portal's loading screen: a views snapshot repainted by the image generator at half display resolution, recorded as the scene's loadingScreen (docs/hosting.md → \"Loading art\"); mark the set-piece view \"loading\": true in views.json" },
     { name: "portal play", out: "reports/portal-play.json", inputs: [`assets/scenes/${id}.scene.json`, "authoring/portal-veils.json"], report: "reports/portal-play.json",
-      run: `(pg) HITREG_PLAYWRIGHT=<playwright package dir> npx tsx tools/portal-play.mts --dungeon ${id}  (own vite on 5263; --url <dev app> to reuse one)`,
+      run: (root) => portalPlayRun(id, readJson(path.join(root, "authoring/plan.json"))),
       note: "LAST CHECK, a real browser client: walk in through the world's door and back out through the return portal, then open the dungeon itself (a reload) and walk out — a player must get in AND out (reports/portal-play/*.png). No world door built yet: portal-play records WAITING (not FAILED) and the return portal rests on the portals stage until the door exists" },
   ];
   for (const { after, stage } of insert) { const i = stages.findIndex((s) => s.name === after); stages.splice(i < 0 ? stages.length : i + 1, 0, stage); }
@@ -132,20 +164,44 @@ export function standardStages({ id, blender = BLENDER, exportInputs = [], overr
   return stages;
 }
 
+/** sha256 (hex) of a file's bytes; null when absent. */
+export function fileSha256(full) {
+  try { return createHash("sha256").update(fs.readFileSync(full)).digest("hex"); } catch { return null; }
+}
+
+/**
+ * An input newer than the stage's output that the stage recorded by digest: `digests` maps an input to the field of the
+ * stage's report (`report`, else `out`) holding the sha256 it ran on. A byte-identical re-write (a Blender re-export
+ * of the same stamp) only moves the mtime, so the input still counts as current. Inputs not in `digests`, or a report
+ * without the field, are judged by mtime as before.
+ */
+export function digestCurrent(root, s, input) {
+  const field = s.digests?.[input];
+  if (!field) return false;
+  const j = readJson(path.resolve(root, s.report ?? s.out));
+  const want = field.split(".").reduce((o, k) => (o == null ? o : o[k]), j);
+  return typeof want === "string" && want.length > 0 && want === fileSha256(path.resolve(root, input));
+}
+
 /** Evaluate every stage of a project (root = the project folder). */
 export function evaluate(root, stages) {
   const full = (rel) => path.resolve(root, rel);
   return stages.map((s) => {
     const inputs = typeof s.inputs === "function" ? s.inputs(root) : s.inputs ?? [];
+    // a command may depend on the project (the plan's portalPlay.exitFrom): run(root)
+    const run = typeof s.run === "function" ? s.run(root) : s.run;
     const out = mtimeOf(full(s.out));
-    const newest = inputs.map((i) => mtimeOf(full(i))).filter((t) => t !== null).sort((a, b) => b - a)[0] ?? null;
+    // an input newer than the output but recorded by digest and byte-identical does not age the stage
+    const newest = inputs.map((i) => { const t = mtimeOf(full(i)); return t !== null && out !== null && t > out && digestCurrent(root, s, i) ? null : t; })
+      .filter((t) => t !== null).sort((a, b) => b - a)[0] ?? null;
     const stale = (out !== null && newest !== null && out < newest) || (out !== null && s.fresh && !s.fresh());
-    let failed = false, failures = [], waiting = null;
-    if (out !== null && s.report) { const j = readJson(full(s.report)); failed = j?.passed !== true; if (s.gate && j) failures = (j.failures ?? []).map((f) => f.what ?? String(f)); waiting = j?.passed !== true && typeof j?.waiting === "string" ? j.waiting : null; }
+    let failed = false, failures = [], waiting = null, unjudged = null;
+    if (out !== null && s.report) { const j = readJson(full(s.report)); failed = j?.passed !== true; if (s.gate && j) failures = (j.failures ?? []).map((f) => f.what ?? String(f)); waiting = j?.passed !== true && typeof j?.waiting === "string" ? j.waiting : null; unjudged = j?.passed !== true && typeof j?.unjudged === "string" ? j.unjudged : null; }
     if (out !== null && s.check) failed = !s.check(readJson(full(s.out)));
     // WAITING: the stage cannot run yet for a reason outside the dungeon (portal play before the world's door is built)
-    const status = out === null ? "MISSING" : waiting ? "WAITING" : failed ? "FAILED" : stale ? "STALE" : "ok";
-    return { ...s, inputs, status, out_mtime: out, failures };
+    // UNJUDGED: the run could not judge (prove fight on a machine too loaded to keep the fixed step: step-jitter.mjs)
+    const status = out === null ? "MISSING" : waiting ? "WAITING" : unjudged ? "UNJUDGED" : failed ? "FAILED" : stale ? "STALE" : "ok";
+    return { ...s, inputs, run, status, out_mtime: out, failures: unjudged ? [unjudged, ...failures] : failures };
   });
 }
 

@@ -27,12 +27,13 @@ import {
   type CharacterBuild,
   type CharacterCreation,
   type CreationFrame,
+  type EquipmentSlot,
 } from "@hitreg/core";
 
 /** The 3D half of the screen, supplied by the host (it owns the renderer and the model loader). */
 export interface CreationPreview {
   /** Show this build (body model, socketed pieces). Called on every change. */
-  update(build: CharacterBuild): void;
+  update(build: CharacterBuild, equipment?: Partial<Record<EquipmentSlot, string>>): void;
   /** Turn the model (radians) — the screen drags it. */
   setYaw(radians: number): void;
   /** Whole body, or a close-up of the face. */

@@ -28,8 +28,11 @@ Record each place's pick in the brief as `places[].site`; the reserve lint refus
 - `wasted-climb` (warning: a route climbs a crest only to give it back) -> re-route, or put the place on the crest.
 - `empty-landform` (a plateau/large flat landform with under a quarter near a place) -> a place on it, or declare it a
   deliberate hidden find.
-- Empty disc over the limit / density under the floor (places per km2; radius >= 10 m counts, pinpoints do not) ->
-  add places, small finds count. Target: something round every corner, no land far from anything.
+- `empty-land` (an empty disc over the limit) -> add places; small finds count. Target: something round every
+  corner, no land far from anything.
+- `sparse` / `crowded` / `no-big-places` (density = the share of the zone's dry land that place footprints claim,
+  by size tier: `AREA_CLAIM` in `_site-finder.mts`, not places per km2) -> grow or add medium/large places (the size
+  tiers want fewer, bigger places); finds fill corners but never carry the share.
 - `off-site` (reserve) -> centre the reservation on the pick. A reservation circle is not a site; the pick is.
 - `wall-gap` -> the town wall: one short heavy wall on the drawn line across the narrowest neck between cliff and
   water (or two cliffs). Open ground elsewhere is a choice, not a site.
@@ -46,6 +49,9 @@ Record each place's pick in the brief as `places[].site`; the reserve lint refus
 - Measure what a place depends on before the freeze (a conduit's source level; a trail's grade-capped length).
 - A dungeon door needs rock behind it along its facing, deep enough for its creatures' door height.
 - Ranking is heuristic: rim perches on one cliff crowd the top; look at the picture, not only rank 1.
+- A big river or gorge wants a bridge where it splits two banks' roads/places. Encoded: `crossing` candidates (rim-to-rim
+  gap 25-260 m between natural tops, bank height match, depth, view along the course, users on each bank, an existing
+  road crossing noted); `detail.banks[]` gives each top (x, y, z), its nearest road and place.
 - DC terrain (recipe `planarCliffs` / `seaCliffs` / `buttes`): the finder samples the drawn ground (`field.ground`) and adds
   `fall-lip`, `plunge-pool`, `sea-stack`, `stack-cluster` (2-4 stacks near the cliff, a bridge chain), `headland`,
   `butte-top`, `canyon-bend`. Stacks and butte tops are unreachable by design: their `access` candidate is the bridge,

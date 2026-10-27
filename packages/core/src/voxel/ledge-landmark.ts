@@ -23,6 +23,7 @@ import type { ChunkDoc } from "../chunks.js";
 import { encodeHeightfieldValues, type CsgNode, type VolumeDoc } from "./csg.js";
 import { fringeShelves, valueNoise, type ShelvingGrid } from "./shelving.js";
 import type { OperatorPiece } from "./operator-registry.js";
+import { landmarkComponentSchema } from "../components/landmark.js";
 
 export const landmarkSchema = z.object({
   id: z.string().describe("`op:<operator id>:landmark` — compiled by a landform operator (`ledges`); never hand-edited."),
@@ -30,10 +31,44 @@ export const landmarkSchema = z.object({
   position: z.tuple([z.number(), z.number(), z.number()]).describe("World origin of the prefab (the landmark's footprint centre at y 0); it streams in the cell this stands in."),
   radius: z.number().positive().describe("Horizontal reach of the solids from `position`, metres (bounds, culling, previews)."),
   digest: z.string().describe("Hash of the CSG solids the prefab must be baked from; a bake with another digest is stale."),
+  fog: landmarkComponentSchema.optional().describe("From the operator's `fog`: the placed landmark gets this `landmark` component (reads through zone fog to `fogReach`)."),
 });
 export type LandmarkDoc = z.infer<typeof landmarkSchema>;
 
-/** Every landmark whose origin stands in chunk cell (cx, cz), as a collapsed prefab instance. */
+/**
+ * COLLIDER TILES. A landmark is drawn once, from the cell its origin stands in, but a body anywhere over it needs its
+ * collider, and physics (server and client alike) holds only the `rings.simulation` cells around each focus: a 135 m
+ * ramp streamed from its origin cell had no collider at either end. So a bake splits the welded collider surface by
+ * MAP CELL (each triangle in the cell its centroid stands in) into one model per cell,
+ * `landmarkColliderTileId(prefab, cx, cz)`, and leaves the colliders out of the prefab; every cell the landmark's
+ * bounds overlap streams its own tile (a hidden static trimesh), so physics follows the body, never the origin.
+ * A bake without tiles (older bakes: colliders inside the prefab) streams as before.
+ */
+export function landmarkColliderTileId(prefab: string, cx: number, cz: number): string {
+  return `${prefab}.collider.${cx}_${cz}.glb`;
+}
+
+/** The map cells a landmark's bounds (position +- radius, square) overlap: where its collider tiles may stand. */
+export function landmarkTileCells(l: Pick<LandmarkDoc, "position" | "radius">, cellSize: number): { cx0: number; cx1: number; cz0: number; cz1: number } {
+  const [x, , z] = l.position, r = l.radius + 1;
+  return { cx0: Math.floor((x - r) / cellSize), cx1: Math.floor((x + r) / cellSize), cz0: Math.floor((z - r) / cellSize), cz1: Math.floor((z + r) / cellSize) };
+}
+
+/** Every collider tile model a recipe's landmarks may name (the asset-presence list a worker host sends). */
+export function landmarkColliderTileRefs(landmarks: readonly LandmarkDoc[] | undefined, cellSize: number): string[] {
+  const out: string[] = [];
+  for (const l of landmarks ?? []) {
+    const b = landmarkTileCells(l, cellSize);
+    for (let cz = b.cz0; cz <= b.cz1; cz++) for (let cx = b.cx0; cx <= b.cx1; cx++) out.push(landmarkColliderTileId(l.prefab, cx, cz));
+  }
+  return out;
+}
+
+/**
+ * Every landmark whose origin stands in chunk cell (cx, cz), as a collapsed prefab instance, plus the collider tile of
+ * every landmark whose bounds overlap the cell (see {@link landmarkColliderTileId}). Tiles need `assetExists` (only a
+ * tile the bake wrote is placed: an absent model would fall back to a box).
+ */
 export function landmarkEntities(
   landmarks: readonly LandmarkDoc[] | undefined,
   cellSize: number,
@@ -44,6 +79,23 @@ export function landmarkEntities(
 ): void {
   for (const l of landmarks ?? []) {
     const [x, y, z] = l.position;
+    if (assetExists) {
+      const b = landmarkTileCells(l, cellSize);
+      const tile = landmarkColliderTileId(l.prefab, cx, cz);
+      if (cx >= b.cx0 && cx <= b.cx1 && cz >= b.cz0 && cz <= b.cz1 && assetExists(l.prefab, "prefab") && assetExists(tile, "model")) {
+        entities[`lmc_${l.id}`] = {
+          name: `${l.id} collider tile ${cx},${cz}`,
+          parent: null,
+          tags: ["landmark", "collider", l.id],
+          components: {
+            transform: { position: [x - cx * cellSize, y, z - cz * cellSize] },
+            visibility: { visible: false },
+            mesh: { source: { kind: "asset", assetId: tile }, static: true, castShadow: false, receiveShadow: false, hlod: false },
+            collider: { shape: "trimesh" },
+          },
+        };
+      }
+    }
     if (Math.floor(x / cellSize) !== cx || Math.floor(z / cellSize) !== cz) continue;
     if (assetExists && !assetExists(l.prefab, "prefab")) continue;
     entities[`lm_${l.id}`] = {
@@ -53,6 +105,7 @@ export function landmarkEntities(
       components: {
         transform: { position: [x - cx * cellSize, y, z - cz * cellSize] },
         prefab: { prefabId: l.prefab, props: {}, overrides: [] },
+        ...(l.fog ? { landmark: l.fog } : {}),
       },
     };
   }

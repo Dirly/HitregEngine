@@ -30,6 +30,10 @@ export interface OperatorFieldReader {
    * without it they fall back to the heightfield (`height` columns).
    */
   density?(x: number, y: number, z: number): number;
+  /** Optional: the world's palette surface names (`paint`/`scree` refuse a surface that is not in it). */
+  readonly surfaces?: readonly string[];
+  /** Optional: the world's scatter rule ids (`scree` boulders must name existing rules). */
+  readonly scatterRules?: readonly string[];
 }
 
 /** A compiled feature: an object for one `features.<kind>` array, `id` LOCAL to the operator (namespaced on apply). */

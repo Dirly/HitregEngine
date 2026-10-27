@@ -164,8 +164,6 @@ export function rayHitsBox(o: V3, d: V3, box: Opening, maxT = Infinity): boolean
 export interface SeeThroughRule {
   mode: "indoor" | "outdoor" | "enclosed";
   openings?: readonly Opening[];
-  /** How far an opening box is honoured along the ray (m). */
-  openingReach?: number;
   ground?: (x: number, z: number) => number;
   groundReach?: number;
   horizonDip?: number;
@@ -241,14 +239,13 @@ export function groundExpected(eye: V3, d: V3, ground: (x: number, z: number) =>
 export function countedPixels(rule: SeeThroughRule, eye: V3, view: SeeThroughView, size: number, fovDeg: number, c: SentinelCluster): number[] {
   const out: number[] = [];
   const openings = rule.openings ?? [];
-  const reach = rule.openingReach ?? 60;
   const dip = rule.horizonDip ?? 0.03;
   const enclosedOk = !c.touchesBorder && c.members.length <= (rule.enclosedMax ?? Infinity);
   if (rule.mode === "enclosed" && c.touchesBorder) return out;
   for (const i of c.members) {
     const px = i % size, py = (i - px) / size;
     const d = pixelRay(view, size, px, py, fovDeg);
-    if (openings.length && openings.some((b) => rayHitsBox(eye, d, b, reach))) continue;
+    if (openings.length && openings.some((b) => rayHitsBox(eye, d, b))) continue;
     if (rule.mode === "outdoor") {
       const below = d[1] < -dip && rule.ground && groundExpected(eye, d, rule.ground, rule.groundReach ?? 80) !== null
         && (!rule.solid || solidAlong(eye, d, rule.solid, rule.groundReach ?? 80) !== null);

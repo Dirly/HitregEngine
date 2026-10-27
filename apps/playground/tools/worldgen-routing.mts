@@ -480,12 +480,20 @@ export function solveProfile(
     if (pinned.end !== undefined) p[last] = pinned.end;
   };
   applyPins();
+  // a pinned point is never moved BY the grade passes: clamping it to its neighbour and restoring it after left the
+  // backward pass grading towards the wrong height, so a road pinned to a pad (or a floor) ended in a step up to it
+  const fixed = new Uint8Array(last + 1);
+  if (pinned.at) for (let i = 0; i <= last; i++) if (pinned.at[i] !== undefined) fixed[i] = 1;
+  if (pinned.start !== undefined) fixed[0] = 1;
+  if (pinned.end !== undefined) fixed[last] = 1;
   const clampGrade = (): void => {
     for (let i = 1; i <= last; i++) {
+      if (fixed[i]) continue;
       const limit = spans[i]! * options.maxGrade;
       p[i] = Math.max(p[i - 1]! - limit, Math.min(p[i - 1]! + limit, p[i]!));
     }
     for (let i = last - 1; i >= 0; i--) {
+      if (fixed[i]) continue;
       const limit = spans[i + 1]! * options.maxGrade;
       p[i] = Math.max(p[i + 1]! - limit, Math.min(p[i + 1]! + limit, p[i]!));
     }

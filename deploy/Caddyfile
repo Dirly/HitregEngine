@@ -11,10 +11,10 @@
 	encode zstd gzip
 
 	# gateway HTTP (accounts, characters, /play, parties) and the cluster socket
-	@gateway path /auth/* /characters* /play /party* /status /health /admin/* /cluster
+	@gateway path /auth/* /characters* /creation /worlds /play /party* /social* /guild* /reports /status /health /admin/* /cluster
 	reverse_proxy @gateway main:8780
 
-	# the playground client, built with `pnpm -F playground build`
+	# Editor-free bundle, built with `pnpm -F playground build:game <project> <scene>.scene.json`
 	root * /srv/client
 	try_files {path} /index.html
 	file_server

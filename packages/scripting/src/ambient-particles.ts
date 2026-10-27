@@ -32,6 +32,8 @@ export interface AmbientLayer {
   wind: number;
   /** Vertical drift m/s added to the wind aim: negative falls (leaves, ash), positive rises (spray, spores). */
   rise: number;
+  /** Compass bearing the wind carries it along here (0 = north = -Z, 90 = east = +X), in place of the weather's wind angle; -1 = the weather's. */
+  bearing: number;
   /** Brightness floor at night: 1 = self-lit (fireflies), 0.2 = only what the moon gives it (leaves). */
   glow: number;
 }
@@ -50,13 +52,13 @@ export interface AmbientSample {
 }
 
 const DEFAULT_LAYERS: AmbientLayer[] = [
-  { id: "fireflies", biomes: "grassland,forest,swamp,fen,jungle,moor,savanna", when: "night", zones: "", match: "all", town: "never", needWater: false, waterBoost: 1.5, rate: 6, storm: -1, wind: 0, rise: 0, glow: 1 },
-  { id: "leaves", biomes: "forest,taiga,jungle", when: "always", zones: "", match: "all", town: "any", needWater: false, waterBoost: 0, rate: 5, storm: 2, wind: 3, rise: -0.7, glow: 0.22 },
-  { id: "dust", biomes: "desert,badlands,savanna,crag", when: "day", zones: "", match: "all", town: "any", needWater: false, waterBoost: 0, rate: 5, storm: 1, wind: 1.5, rise: 0.05, glow: 0.2 },
-  { id: "moths", biomes: "", when: "night", zones: "town", match: "all", town: "only", needWater: false, waterBoost: 0, rate: 1.2, storm: -1, wind: 0, rise: 0, glow: 0.6 },
-  { id: "spray", biomes: "beach,seabed", when: "always", zones: "", match: "all", town: "any", needWater: true, waterBoost: 0, rate: 8, storm: 2, wind: 2.5, rise: 0.9, glow: 0.25 },
-  { id: "spores", biomes: "swamp,fen", when: "always", zones: "", match: "any", town: "never", needWater: false, waterBoost: 0.5, rate: 4, storm: -0.7, wind: 0.4, rise: 0.12, glow: 0.5 },
-  { id: "ash", biomes: "blight", when: "always", zones: "", match: "any", town: "any", needWater: false, waterBoost: 0, rate: 5, storm: 1, wind: 1.2, rise: -0.35, glow: 0.3 },
+  { id: "fireflies", biomes: "grassland,forest,swamp,fen,jungle,moor,savanna", when: "night", zones: "", match: "all", town: "never", needWater: false, waterBoost: 1.5, rate: 6, storm: -1, wind: 0, rise: 0, bearing: -1, glow: 1 },
+  { id: "leaves", biomes: "forest,taiga,jungle", when: "always", zones: "", match: "all", town: "any", needWater: false, waterBoost: 0, rate: 5, storm: 2, wind: 3, rise: -0.7, bearing: -1, glow: 0.22 },
+  { id: "dust", biomes: "desert,badlands,savanna,crag", when: "day", zones: "", match: "all", town: "any", needWater: false, waterBoost: 0, rate: 5, storm: 1, wind: 1.5, rise: 0.05, bearing: -1, glow: 0.2 },
+  { id: "moths", biomes: "", when: "night", zones: "town", match: "all", town: "only", needWater: false, waterBoost: 0, rate: 1.2, storm: -1, wind: 0, rise: 0, bearing: -1, glow: 0.6 },
+  { id: "spray", biomes: "beach,seabed", when: "always", zones: "", match: "all", town: "any", needWater: true, waterBoost: 0, rate: 8, storm: 2, wind: 2.5, rise: 0.9, bearing: -1, glow: 0.25 },
+  { id: "spores", biomes: "swamp,fen", when: "always", zones: "", match: "any", town: "never", needWater: false, waterBoost: 0.5, rate: 4, storm: -0.7, wind: 0.4, rise: 0.12, bearing: -1, glow: 0.5 },
+  { id: "ash", biomes: "blight", when: "always", zones: "", match: "any", town: "any", needWater: false, waterBoost: 0, rate: 5, storm: 1, wind: 1.2, rise: -0.35, bearing: -1, glow: 0.3 },
 ];
 
 function list(value: unknown): string[] {
@@ -91,6 +93,7 @@ export function normalizeLayer(raw: Partial<AmbientLayer> & { id: string }): Amb
     storm: num(raw.storm, 0),
     wind: Math.max(0, num(raw.wind, 0)),
     rise: num(raw.rise, 0),
+    bearing: raw.bearing === undefined ? -1 : ((num(raw.bearing, 0) % 360) + 360) % 360,
     glow: Math.min(1, Math.max(0, num(raw.glow, 0.25))),
   };
 }
@@ -356,7 +359,9 @@ export class AmbientParticles extends Script {
     const light = this.sample.daylight;
     const scale = Math.round((L.glow + (1 - L.glow) * light) * 50) / 50;
     const aimed = L.wind > 0 && rate > 0;
-    const angleMoved = aimed && !(Math.abs(this.windAngle - s.sentAngle) < 0.05);
+    // a layer with its own bearing blows along it (the engine's wind angle runs x = sin, z = cos: that is pi - bearing)
+    const angle = L.bearing >= 0 ? Math.PI - (L.bearing * Math.PI) / 180 : this.windAngle;
+    const angleMoved = aimed && !(Math.abs(angle - s.sentAngle) < 0.05);
     if (rate === s.sentRate && scale === s.sentScale && !angleMoved) return;
     const msg = s.msg;
     msg.emitting = rate > 0;
@@ -364,15 +369,15 @@ export class AmbientParticles extends Script {
     msg.colorScale = scale;
     if (aimed) {
       const blow = L.wind * (0.35 + 0.65 * this.gust);
-      s.dir[0] = Math.sin(this.windAngle) * blow;
+      s.dir[0] = Math.sin(angle) * blow;
       s.dir[1] = L.rise;
-      s.dir[2] = Math.cos(this.windAngle) * blow;
+      s.dir[2] = Math.cos(angle) * blow;
       const speed = Math.hypot(s.dir[0], s.dir[1], s.dir[2]) || 1;
       s.spd[0] = speed * 0.6;
       s.spd[1] = speed * 1.3;
       msg.direction = s.dir;
       msg.speed = s.spd;
-      s.sentAngle = this.windAngle;
+      s.sentAngle = angle;
     } else {
       msg.direction = undefined;
       msg.speed = undefined;

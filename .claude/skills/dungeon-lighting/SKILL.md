@@ -31,6 +31,8 @@ exposure 1, vignette <= 0.25; the interior `cullingProfile`.
 - `culling` pop-in > 2 m inside a room -> `cullingProfile` missing or reveal too short; rerun the lighting stage.
 - `recipe` light lines (visible sources outside 2-5; a point/spot light with no fixture prop beside it; a long
   passage unlit) -> place fixtures through the dressing plan; "unlit" in the plan for a deliberate dark run.
+  A light whose source is the place (daylight down an oculus, light off water) is tagged `sky-source`/`water-source`
+  (no fixture, max 12 per dungeon); show its source with architecture or world-kit `fixtures/light-shaft`, not halo stacks.
 - `dress check` `LIGHTS:` line -> a fixture from another bucket, or lights that fit no single bucket.
 
 ## Judgment

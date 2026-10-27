@@ -24,6 +24,9 @@ import type { WorldField, RiverFall } from "./field.js";
 import type { FallSiteDoc } from "./fall-sites.js";
 import type { RiverDoc, ScatterDoc } from "./recipe.js";
 import { rockFormationSolid, type RockFormationSolid } from "./rock-formations.js";
+import { rockSetBounds, type RockSetDoc } from "./rock-sets.js";
+import { fieldSolidProbe, seatObject } from "./seat.js";
+import { scatterEmbed, scatterSeatSize } from "./scatter.js";
 
 type Vec3 = [number, number, number];
 type Quat = [number, number, number, number];
@@ -1299,5 +1302,43 @@ export function wallRocks(field: WorldField, md: MeshDensity, site: FallSiteDoc)
     }
   };
   rest({ max: walls.max, scale: walls.scale }, 31);
+  return out;
+}
+
+// ---- operator rock sets (rock-sets.ts): the same standing, without a river
+
+const rockSetCache = new WeakMap<WorldField, Map<string, readonly SiteRockInstance[]>>();
+
+/** Every rock of one set stood on the mesh (dropped ones omitted). Cached per field and set id. */
+export function rockSetInstances(field: WorldField, set: RockSetDoc): readonly SiteRockInstance[] {
+  let perField = rockSetCache.get(field);
+  if (!perField) { perField = new Map(); rockSetCache.set(field, perField); }
+  const hit = perField.get(set.id);
+  if (hit) return hit;
+  const b = rockSetBounds(set);
+  let box: DensityBox | undefined;
+  if (b) {
+    let y0 = Infinity, y1 = -Infinity;
+    for (const r of set.rocks) { const g = field.height(r.at[0], r.at[1]); y0 = Math.min(y0, g - 22); y1 = Math.max(y1, g + 18); }
+    box = { x0: b.x0, z0: b.z0, x1: b.x1, z1: b.z1, y0, y1 };
+  }
+  const md = meshDensity(field, box);
+  // the fall-site solver reads only `id` and `rocks` (lift 0 = resting on the ground)
+  const site = { id: set.id.replace(/[^A-Za-z0-9-]+/g, "-"), rocks: set.rocks.map((r) => ({ ...r, lift: 0 })) } as unknown as FallSiteDoc;
+  const out: SiteRockInstance[] = [];
+  // then the float gate's own seat (seat.ts, embed contact): a rock stood by the support test can still show its
+  // underside on a steep fan; sunk to embed by the same measure `worldgen float` applies, or dropped if nothing holds it
+  const probe = fieldSolidProbe(field);
+  for (const r of standSiteRocks(md, field, site)) {
+    if (!r) continue;
+    const rule = field.recipe.scatter[r.ruleIndex]!;
+    const q = r.rotation, yaw = Math.atan2(2 * (q[3] * q[1] + q[0] * q[2]), 1 - 2 * (q[1] * q[1] + q[2] * q[2]));
+    const sz = scatterSeatSize(rule, r.scale);
+    const seat = seatObject(probe, { x: r.position[0], z: r.position[2], y: r.position[1], yaw, ...sz, align: rule.alignToNormal }, "embed", { tol: 0.05, embed: scatterEmbed(rule), embedMin: scatterEmbed(rule), reachDown: Math.max(4, sz.height * 2) });
+    if (seat.status === "unsupported" || seat.y === null) continue;
+    const position: Vec3 = seat.status === "off" ? [r.position[0], seat.y, r.position[2]] : r.position;
+    out.push({ id: r.id, rule: r.rule, ruleIndex: r.ruleIndex, position, rotation: r.rotation, scale: r.scale });
+  }
+  perField.set(set.id, out);
   return out;
 }

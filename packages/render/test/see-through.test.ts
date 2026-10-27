@@ -81,6 +81,12 @@ describe("see-through probe", () => {
     for (const [x, y] of rim) expect(isSentinel(px[(y * 32 + x) * 4]!, px[(y * 32 + x) * 4 + 1]!, px[(y * 32 + x) * 4 + 2]!)).toBe(false);
   });
 
+  it("a declared opening is honoured at any distance (no reach limit)", () => {
+    const [c] = sentinelClusters(view(16, [[4, 4, 11, 11]]), 16);
+    const far = { name: "far gap", min: [-400, -400, -501] as V3, max: [400, 400, -500] as V3 };
+    expect(countedPixels({ mode: "indoor", openings: [far] }, [0, 0, 0], face("-z"), 16, 90, c!)).toHaveLength(0);
+  });
+
   it("counts every pixel indoors except through a declared opening", () => {
     const px = view(16, [[4, 4, 11, 11]]);
     const [c] = sentinelClusters(px, 16);

@@ -10,7 +10,7 @@
 // marked "loading": true, else the most readable picture of the views stage (reports/views/*.png: lit, contrasty,
 // least near-black). The snapshot is the views stage's camera at the SHIPPED light (editor chrome hidden), lifted to a
 // readable exposure, and kept for review at assets/loading/<scene>.snapshot.png (never shipped, never referenced).
-// Needs Playwright (PLAYWRIGHT_MODULE = its index.mjs) and a running playground dev server on --base.
+// Needs Playwright (the apps/playground devDependency; PLAYWRIGHT_MODULE / HITREG_PLAYWRIGHT override) and a running playground dev server on --base.
 // Never runs codex itself: the painting goes through tools/image-request.mjs gen --paint.
 import fs from "node:fs";
 import path from "node:path";
@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { applyOps, ComponentRegistry, registerCoreComponents, sceneDocSchema, type Op, type SceneDoc } from "@hitreg/core";
 // @ts-expect-error untyped helper module
 import { decodePng, encodePng } from "./_png.mjs";
+import { applyOpsToSceneFile } from "./_scene-write.mts";
 
 const pg = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -127,8 +128,9 @@ function liftExposure(img: { width: number; height: number; data: Uint8Array }, 
 
 async function capture(): Promise<{ gamma: number }> {
   const base = (opt("base", "http://localhost:5173/") ?? "").replace(/\/?$/, "/");
-  const mod = process.env["PLAYWRIGHT_MODULE"] ?? die("set PLAYWRIGHT_MODULE to Playwright's index.mjs (docs: headless browser recipe)");
-  const { chromium } = (await import(mod.startsWith("file:") ? mod : `file:///${mod.replace(/\\/g, "/")}`)) as typeof import("playwright");
+  // the apps/playground devDependency; PLAYWRIGHT_MODULE / HITREG_PLAYWRIGHT override (tools/_playwright.mjs)
+  // @ts-expect-error plain JS module
+  const { chromium } = (await (await import("./_playwright.mjs")).loadPlaywright()) as typeof import("playwright");
   const browser = await chromium.launch({ channel: "chrome", headless: true, args: ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist"] });
   try {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
@@ -212,8 +214,8 @@ function record(): { entity: string; ops: Op[]; inverse: Op[] } {
   const ops: Op[] = settings
     ? [{ op: "set-component", id: settings, component: "loadingScreen", data }]
     : [{ op: "add-entity", id: "loading-screen", entity: { name: "Loading screen", parent: null, tags: [], components: { loadingScreen: data } } }];
-  const result = applyOps(doc, ops, registry);
-  fs.writeFileSync(sceneFile, JSON.stringify(result.doc, null, 2) + (text.endsWith("\n") ? "\n" : ""));
+  let result = applyOps(doc, ops, registry);
+  result = applyOpsToSceneFile(sceneFile, ops, (d, o) => applyOps(d, o, registry), { label: "loading-art", trailer: text.endsWith("\n") ? "\n" : "" }); // fresh read under the scene lock
   return { entity: settings ?? "loading-screen", ops, inverse: result.inverse };
 }
 

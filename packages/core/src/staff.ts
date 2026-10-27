@@ -41,3 +41,33 @@ export function staffRole(store: { get(key: string): unknown }, peerId: string |
   const role = store.get(staffKey(peerId));
   return (STAFF_ROLES as readonly unknown[]).includes(role) ? (role as StaffRole) : null;
 }
+
+/**
+ * client → authority: the console's `/teleport` (and a map click) from a STAFF peer on a dedicated server. The
+ * server checks {@link staffTeleportRefusal}, waits for the destination's ground (the same hold a joining or
+ * portal-arriving body gets), lands the body on the first collider over the column (else the field surface) and
+ * answers a refusal as `character.refused` with request "teleport". In local play the client moves its own body.
+ */
+export const STAFF_TELEPORT_EVENT = "staff.teleport";
+
+export const staffTeleportSchema = z
+  .object({
+    actorId: z.string().min(1).describe("The body to move: the requester's own (owner/<actorId> must be the sender)."),
+    x: z.number().finite().describe("World X, metres."),
+    z: z.number().finite().describe("World Z, metres."),
+    y: z.number().finite().optional().describe("Height to land at; omitted = the server's ground under (x, z)."),
+  })
+  .describe(
+    "The console's /teleport on a server: move your own body to (x, z). Honoured only from a STAFF peer " +
+      "(staff/<peer>, from the signed ticket) or a local emission; a player is refused.",
+  );
+
+export type StaffTeleportRequest = z.infer<typeof staffTeleportSchema>;
+
+/** Why the authority refuses a teleport request from `from` (undefined = a local emission), or null to honour it. */
+export function staffTeleportRefusal(store: { get(key: string): unknown }, from: string | undefined, actorId: string): string | null {
+  if (from === undefined) return null;
+  if (staffRole(store, from) === null) return "Only staff (a GM or dev account) can teleport on a server.";
+  if (store.get(`owner/${actorId}`) !== from) return "That is not your character.";
+  return null;
+}

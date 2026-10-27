@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyOps, ComponentRegistry, portalAnchorOf, portalVolumeForCorridor, registerChunkComponents, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
+import { applyOpsToSceneFile } from "./_scene-write.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argi = (n: string) => process.argv.indexOf(n);
@@ -48,7 +49,7 @@ if (flag("--remove")) {
 const reg = new ComponentRegistry();
 registerCoreComponents(reg);
 registerChunkComponents(reg);
-const res = applyOps(doc, ops, reg);
+let res = applyOps(doc, ops, reg);
 if (flag("--dry")) { console.log(`[dry] ${exit} in ${sceneId}: ${flag("--remove") ? "would become a plain anchor" : "would become a walk-through return portal"}`); process.exit(0); }
-fs.writeFileSync(file, JSON.stringify(res.doc, null, 2) + "\n");
+res = applyOpsToSceneFile(file, ops, (d, o) => applyOps(d, o, reg), { label: "portal-return" }); // fresh read under the scene lock (tools/_scene-write.mts)
 console.log(`${exit} in ${project}/${sceneId}: ${flag("--remove") ? "plain anchor (passage sealed)" : "walk-through return portal"}`);

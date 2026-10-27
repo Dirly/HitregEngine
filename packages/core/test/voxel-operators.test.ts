@@ -169,6 +169,11 @@ describe("the 6 m rule", () => {
     expect(rep.legacy.map((f) => f.id)).toEqual(["old-step"]);
     expect(rep.exempt).toBe(1);
     expect(fineCarves(r, { legacy: ["kings-step-1", "pebble", "kerb", "old-step"] }).ok).toBe(true);
+    // a coordinator ruling (the world's fine-exceptions file) excepts by kind/id: counted, never failed
+    const ruled = fineCarves(r, { legacy: ["passages/old-step"], excepted: ["passages/kings-step-1", "blobs/pebble", "heightPatches/kerb"] });
+    expect(ruled.ok).toBe(true);
+    expect(ruled.excepted.map((f) => f.id).sort()).toEqual(["kerb", "kings-step-1", "pebble"]);
+    expect(fineCarves(r, { excepted: ["kings-step-1"] }).faults.map((f) => f.id)).toContain("kings-step-1"); // bare ids are not a ruling
     expect(FINE_REMEDY).toMatch(/kit\/hero piece or an operator/);
   });
 

@@ -289,6 +289,22 @@ describe("rock formations", () => {
     }
     expect(fillers).toBeGreaterThan(0);
   });
+
+  it("a member on stone ground drops the anchor's cap (it is judged on the ground it stands on)", () => {
+    const recipe = worldRecipeSchema.parse({ ...base, cellSize: 32, resolution: 16, scatter: [rule({ kinds: [{ kind: "cluster" }, { kind: "spill" }], spill: 6 }, { cap: "auto", capAmount: 0.6, slopeMax: 1, density: 0.03 })] });
+    const field = createWorldField(recipe);
+    const probe = rockSkinProbe(field);
+    let onStone = 0;
+    for (let cz = -8; cz <= 8; cz++) for (let cx = -8; cx <= 8; cx++)
+      for (const i of scatterCell(field, cx, cz)) {
+        if (!i.id.includes("_f")) continue;
+        const wx = i.position[0] + cx * 32, wz = i.position[2] + cz * 32;
+        if (probe.groundBand(wx, field.ground(wx, wz), wz).band !== "bare") continue;
+        onStone++;
+        expect(i.rockCap?.amount ?? 0).toBe(0);
+      }
+    expect(onStone).toBeGreaterThan(0);
+  }, 30_000);
 });
 
 describe("cliff-scale masses (cliff fit)", () => {
@@ -317,6 +333,21 @@ describe("cliff-scale masses (cliff fit)", () => {
     return out;
   };
   const all = sample();
+
+  it("a cliff piece on stone ground wears no cap where it stands (the gate reads it at its instance position)", () => {
+    const capped = worldRecipeSchema.parse({ ...recipe, scatter: recipe.scatter.map((r) => ({ ...r, cap: "auto", capAmount: 0.6, yOffset: -0.6 })) });
+    const field = createWorldField(capped);
+    const probe = rockSkinProbe(field);
+    let onStone = 0;
+    for (let cz = -8; cz <= 8; cz++) for (let cx = -8; cx <= 8; cx++)
+      for (const i of scatterCell(field, cx, cz)) {
+        const g = probe.groundBand(i.position[0] + cx * 32, i.position[1], i.position[2] + cz * 32);
+        if (g.band !== "bare") continue;
+        onStone++;
+        expect(i.rockCap?.amount ?? 0, i.id).toBe(0);
+      }
+    expect(onStone).toBeGreaterThan(0);
+  }, 30_000);
 
   it("places every mode, seed-stable, unique ids", () => {
     expect(JSON.stringify(all)).toBe(JSON.stringify(sample()));
@@ -448,16 +479,17 @@ describe("rock skins: the stone follows the place, the cap follows the ground", 
 
   it("above the snow line a rock wears the snow, whatever the zone's cap or the rule's fixed cap says", () => {
     const sandy = [{ ...zone, rockCap: { layer: "sand", amount: 0.6 } }];
-    const recipe = make({}, sandy);
+    // abstract heights, not points on the ground: the ledge probe (capLedge) is off here; it has its own tests
+    const recipe = make({ scatter: [{ ...rule, capLedge: 0 }] }, sandy);
     const resolve = createRockCapResolver(createWorldField(recipe));
     const low = resolve(recipe.scatter[0]!, -600, 10, 40)!;
     const high = resolve(recipe.scatter[0]!, -600, 600, 40)!;
     expect(names[low.layer]).toBe("sand");
     expect(names[high.layer]).toBe("snow");
     expect(high.amount).toBeGreaterThan(0);
-    const fixed = make({ scatter: [{ ...rule, cap: "sand" }] }, sandy);
+    const fixed = make({ scatter: [{ ...rule, cap: "sand", capLedge: 0 }] }, sandy);
     expect(names[createRockCapResolver(createWorldField(fixed))(fixed.scatter[0]!, -600, 600, 40)!.layer]).toBe("snow");
-    const band = rockSkinProbe(createWorldField(recipe)).groundBand(-600, 600, 40);
+    const band = rockSkinProbe(createWorldField(recipe)).groundBand(-600, 600, 40, 0);
     expect(band).toMatchObject({ band: "climate", worthy: true });
     expect(names[band.surface]).toBe("snow");
   });
@@ -471,5 +503,35 @@ describe("rock skins: the stone follows the place, the cap follows the ground", 
     wall[names.indexOf("slate")] = 0.1;
     expect(zoneWallStone(field, wall, 1)).toBe(null);
     expect(zoneWallStone(field, wall, 0)).toBe(null);
+  });
+});
+
+describe("no cap on a wall or a narrow shelf (capLedge)", () => {
+  // a 40 m wall at x = 0..4 (a 2x2 patch can only ramp, so 4 columns: flat 100, wall, a 2 m crest at 140, wall down)
+  const base = defaultWorldRecipe();
+  const recipe = worldRecipeSchema.parse({
+    ...base, cellSize: 32, resolution: 16, bounds: undefined,
+    terrain: { ...base.terrain, overhang: { ...base.terrain.overhang, strength: 0 }, caves: { ...base.terrain.caves, enabled: false } },
+    features: {
+      ...base.features,
+      heightPatches: [{ id: "crest", origin: [-2, -40], size: [6, 80], columns: 4, rows: 2, heights: [100, 140, 140, 100, 100, 140, 140, 100], blend: 1, feather: 0.1 }],
+    },
+  });
+  const field = createWorldField(recipe);
+  const probe = rockSkinProbe(field);
+
+  it("a rock set into the wall is bare; the same spot under the flat-ground probe alone (capLedge 0) is not", () => {
+    // mid-wall on the west face (x = -1.5, between the 100 m floor at x = -2 and the crest edge at x = 0)
+    const y = 120;
+    expect(probe.groundBand(-1.5, y, 0, 0).band).toBe("zone");
+    expect(probe.groundBand(-1.5, y, 0).band).toBe("bare");
+  });
+
+  it("a shelf narrower than capLedge is bare, wide enough ground keeps its cap", () => {
+    const crest = field.height(1, 0);
+    expect(probe.groundBand(1, crest, 0, 1).band).toBe("zone"); // 2 m crest, 1 m asked
+    expect(probe.groundBand(1, crest, 0, 3).band).toBe("bare"); // 2 m crest, 3 m asked
+    const floor = field.height(-30, 0);
+    expect(probe.groundBand(-30, floor, 0).band).toBe("zone"); // open ground, default 2 m
   });
 });

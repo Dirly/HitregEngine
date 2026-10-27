@@ -1,9 +1,14 @@
 /**
  * portal-trip --scene <world scene> --portal <portal entity id> --exit <exit anchor id in the destination scene> [--no-cover]
+ *             [--exit-from x,y,z]
  *
  * Proves one walk-through portal both ways with a real server-side body (PortalHarness): it stands at the portal's
  * return anchor, walks through the portal, must arrive in the portal's destination scene and stay there, walks out
  * through the exit, and must land back within 4 m of the return anchor. Exit 1 on any failure. No quest is involved.
+ *
+ * --exit-from: an exit far from the arrival (a dungeon whose way out is at the end of its route) is walked through from this
+ * point in the destination scene (in the passage on the exit's approach side), not from the arrival: the harness walks a
+ * straight line and cannot path a dungeon.
  *
  * First it runs tools/portal-cover.mts on both doors (the portal in the world scene, the exit in the destination): a
  * trip through a box that does not span its opening proves only the line the harness walked. --no-cover skips it.
@@ -43,7 +48,8 @@ if (!inn || inn.to !== DEST) { console.log("TRIP FAILED:", JSON.stringify(inn), 
 console.log("trip in", JSON.stringify(inn));
 h.step(300); at("5 s after arriving");
 if (h.scene !== DEST) { console.log("BOUNCED BACK"); process.exit(1); }
-const out = await h.walkThrough(EXIT); at("back");
+const exitFrom = arg("--exit-from") ? (arg("--exit-from").split(",").map(Number) as [number, number, number]) : undefined;
+const out = await h.walkThrough(EXIT, exitFrom ? { from: exitFrom } : {}); at("back");
 console.log("trip out", JSON.stringify(out));
 h.step(300); at("5 s after returning");
 const p = h.positionOf()!;

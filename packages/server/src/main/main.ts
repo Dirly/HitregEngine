@@ -25,7 +25,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { randomBytes } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import { characterBuildSchema, regionAt, validateBuild, type CharacterBuild, type CharacterCreation, type PlayerDataBackend, type RegionDoc, type WorldRecipe } from "@hitreg/core";
+import { characterBuildSchema, characterSheetSchema, EQUIPMENT_SLOTS, regionAt, validateBuild, type CharacterBuild, type CharacterCreation, type PlayerDataBackend, type RegionDoc, type WorldRecipe } from "@hitreg/core";
 import { ServerRegistry, type ServerEntry } from "./registry.js";
 import { SocialError, SocialStore, isBlocked, type FriendRef } from "./social.js";
 import { GuildStore, rankAbove, type GuildRank, type GuildRecord } from "./guilds.js";
@@ -959,7 +959,19 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     if (p === "/characters" && method === "GET") {
       const account = await requireAccount(req);
       if (purgeDeleted(account)) await saveAccount(account);
-      return send(res, 200, rosterOf(account));
+      // Character selection draws the committed character, not its creation-time outfit.
+      const characters = await Promise.all(here(liveCharacters(account)).map(async (character) => {
+        const saved = await opts.playerData.load({ playerId: character.saveId ?? account.id, experienceId: opts.experienceId }, "character");
+        const parsed = characterSheetSchema.safeParse(saved?.data["sheet"]);
+        const sheet = parsed.success ? parsed.data : null;
+        const equipment = Object.fromEntries(EQUIPMENT_SLOTS.flatMap((slot) => {
+          const uid = sheet?.equipment[slot];
+          const item = uid ? sheet?.items[uid]?.itemId : undefined;
+          return item ? [[slot, item]] : [];
+        }));
+        return { ...character, ...(sheet?.build ? { build: sheet.build } : {}), equipment };
+      }));
+      return send(res, 200, { ...(rosterOf(account) as object), characters });
     }
     // is a name free for a new character? (the creation screen asks as you type; POST /characters decides)
     if (p === "/characters/name" && method === "GET") {

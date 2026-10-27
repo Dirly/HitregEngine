@@ -10,6 +10,8 @@ You dress ONE outdoor area of a place, for the creatures or people who live ther
    - by intent: `{ "kind": "auto", "room": "{area}", "prefer": "near", "near": "hearth" }`; `prefer`: `wall` (back to a tent side or cliff edge), `corner`, `open`, `near` (an earlier item id or an anchor kind: `hearth`, `door`, `cave-mouth`, `water-edge`...).
    - on a named pitch: `{ "kind": "anchor", "anchor": "{area}/hearth-seat-2" }` (one prop per anchor; the pitch already faces the right way).
    Order matters: earlier items win. Biggest and most important first, then single pieces.
+   Quest objects of this place (a quest binds only to an entity with that exact id; choose each prop by name from the menu, e.g. a strongbox, a ledger on a desk, a bell on a post):
+{questObjects}
 5. Check: `npx tsx tools/dress.mts check --project {project} --plan {plan} --quiet`. Last line: `CHECK <plan>: N placements, V violations, W warnings -> ok|FAILED`.
 6. Adjust only what it names (smaller piece, another `prefer`, another anchor, earlier in the list). Fix every warning about your plan.
 

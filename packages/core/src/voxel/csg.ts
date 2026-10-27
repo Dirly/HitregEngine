@@ -351,6 +351,8 @@ interface PreparedNode {
    * cannot be changed by this node, so skipping it is exact.
    */
   union?: { min: [number, number, number]; max: [number, number, number]; slack: number };
+  /** The same box for a hard `sub` mesh node (a plane-owner cut, tools/mesh-dc/plane-owner.mjs). */
+  cut?: { min: [number, number, number]; max: [number, number, number]; slack: number };
   /** World-space AABB of everything this node can affect, blend and round included. */
   min: [number, number, number];
   max: [number, number, number];
@@ -483,6 +485,7 @@ function prepare(node: CsgNode, fallback: CsgSurface): PreparedNode {
     inv,
     mesh,
     union: mesh && node.op === "add" && node.blend === 0 ? unionBound(mesh, rot, node, center, e) : undefined,
+    cut: mesh && node.op === "sub" && node.blend === 0 ? unionBound(mesh, rot, node, center, e) : undefined,
     noise: node.noise ? compileNoise(node.noise, mesh, mesh ? [0, 1, 2].map((a) => mesh.min[a]! - pad) : undefined, mesh ? [0, 1, 2].map((a) => mesh.max[a]! + pad) : undefined) : undefined,
     surface: node.surface ?? fallback,
     min: [worldCenter[0]! - half[0]!, worldCenter[1]! - half[1]!, worldCenter[2]! - half[2]!],
@@ -834,6 +837,19 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
         const ez = z < u.min[2] ? u.min[2] - z : z > u.max[2] ? z - u.max[2] : 0;
         if (ex * ex + ey * ey + ez * ez > 0 && Math.sqrt(ex * ex + ey * ey + ez * ez) - u.slack >= d) continue;
       }
+      // Exact skip for a hard sub mesh node: max(d, -ds) moves d only where ds < -d, so a sample whose box
+      // distance (minus slack) is at least max(0, -d) away keeps d, and its owner. Inside, a bound of -d + slack
+      // is enough for the same reason a union's bound is.
+      const c = p.cut;
+      let cutBound: number | undefined;
+      if (c) {
+        const ex = x < c.min[0] ? c.min[0] - x : x > c.max[0] ? x - c.max[0] : 0;
+        const ey = y < c.min[1] ? c.min[1] - y : y > c.max[1] ? y - c.max[1] : 0;
+        const ez = z < c.min[2] ? c.min[2] - z : z > c.max[2] ? z - c.max[2] : 0;
+        const box = Math.sqrt(ex * ex + ey * ey + ez * ez);
+        if (box > 0 && box - c.slack >= Math.max(0, -d)) continue;
+        if (d < 0) cutBound = -d + c.slack;
+      }
       const px = x - node.position[0]!;
       const py = y - node.position[1]!;
       const pz = z - node.position[2]!;
@@ -842,7 +858,8 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
       const ly = m[3]! * px + m[4]! * py + m[5]! * pz;
       const lz = m[6]! * px + m[7]! * py + m[8]! * pz;
       // A hard-union mesh node only matters where it is nearer than the current d (plus its slack).
-      let ds = u && p.mesh && d < SOLID_OUTSIDE ? p.mesh.distance(lx, ly, lz, d + u.slack) - node.round : shapeDistance(node, lx, ly, lz);
+      let ds = u && p.mesh && d < SOLID_OUTSIDE ? p.mesh.distance(lx, ly, lz, d + u.slack) - node.round
+        : cutBound !== undefined && p.mesh ? p.mesh.distance(lx, ly, lz, cutBound) - node.round : shapeDistance(node, lx, ly, lz);
       if (p.noise) ds += p.noise(lx, ly, lz, ds);
       const before = d;
       if (node.op === "add") {
@@ -1218,7 +1235,7 @@ const volumeMeshes = new Map<string, VoxelMesh>();
  * held ~130 MB in a tab that streams none. `getVolume`/`csgMesh` compile on
  * first use.
  */
-const pendingVolumes = new Map<string, unknown>();
+const pendingVolumes = new Map<string, { doc?: unknown; load?: () => unknown }>();
 /** Compiling threw: warned once, resolves to null until re-registered. */
 const failedVolumes = new Set<string>();
 
@@ -1226,10 +1243,10 @@ function resolveVolume(id: string): Volume | null {
   const built = volumes.get(id);
   if (built) return built;
   if (!pendingVolumes.has(id)) return null;
-  const doc = pendingVolumes.get(id);
+  const entry = pendingVolumes.get(id)!;
   pendingVolumes.delete(id);
   try {
-    const volume = createVolume(doc);
+    const volume = createVolume(entry.load ? entry.load() : entry.doc);
     volumes.set(id, volume);
     return volume;
   } catch (error) {
@@ -1243,7 +1260,15 @@ function resolveVolume(id: string): Volume | null {
 export function registerVolumeDoc(id: string, doc: unknown): void {
   volumes.delete(id);
   failedVolumes.delete(id);
-  pendingVolumes.set(id, doc);
+  pendingVolumes.set(id, { doc });
+  invalidateVolume(id);
+}
+
+/** Register encoded/file-backed data without retaining its parsed triangle arrays. */
+export function registerVolumeLoader(id: string, load: () => unknown): void {
+  volumes.delete(id);
+  failedVolumes.delete(id);
+  pendingVolumes.set(id, { load });
   invalidateVolume(id);
 }
 

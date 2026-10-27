@@ -24,6 +24,14 @@ const report = findSites({
   content: [{ id: "town", kind: "town", x: 1300, z: 600, radius: 60 }],
 });
 
+test("a peak over the sea (its summit cut away by a sea cliff) is no site; on land it is", () => {
+  // one cone summit (y 120 at 0,0) on a y 20 plain; the 2D height keeps it, the real surface says sea at y 0
+  const cone: FieldLike = { height: (x, z) => Math.max(20, 120 - Math.hypot(x, z) * 0.5), waterSurface: () => false };
+  const run = (f: FieldLike) => findSites({ field: f, seaLevel: 0, polygon: [[-600, -600], [600, -600], [600, 600], [-600, 600]], zone: "p", roads: [{ id: "t", trail: true, points: [[300, 0], [300, -300]] }], content: [{ id: "town", kind: "town", x: 500, z: 500, radius: 60 }] }).candidates.filter((c) => c.kind === "peak");
+  assert.ok(run({ ...cone, surfaceCast: (x, z) => cone.height(x, z) }).length > 0, "a summit on land is a peak");
+  assert.equal(run({ ...cone, surfaceCast: () => 0 }).length, 0, "a summit over the sea is not");
+});
+
 test("finds the closed end of the trench, mouth to the east, back wall at its foot", () => {
   const end = report.candidates.find((c) => c.kind === "canyon-end");
   assert.ok(end, "a canyon end");
@@ -47,7 +55,7 @@ test("a path that climbs and stops leads nowhere", () => {
 test("the empty plateau is a large landform nobody uses, and the largest empty disc is big", () => {
   assert.ok(report.landforms.some((l) => l.areaHa > 100 && l.covered < 0.25));
   assert.ok(report.largestEmpty && report.largestEmpty.radius > 450);
-  assert.ok(report.perKm2 < 1);
+  assert.ok(report.claim.share < 0.05 && report.claim.byTier.town.places === 1);
 });
 
 // ---- world-standards sites.md: hostile places off town-to-town roads, lake islands, access devices
@@ -210,4 +218,85 @@ test("a world without DC features finds none of the DC kinds", () => {
   const dc = new Set(["fall-lip", "plunge-pool", "sea-stack", "stack-cluster", "butte-top", "canyon-bend"]);
   assert.ok(!report.candidates.some((c) => dc.has(c.kind)));
   assert.ok(!report2.candidates.some((c) => dc.has(c.kind)));
+});
+
+// ---- density as land claimed by place footprints, by size tier (not places per km2)
+import { areaClaim, claimFaults, tierOfDiameter, AREA_CLAIM } from "../tools/zonegen/commands/_site-finder.mts";
+
+test("a footprint's tier comes from its diameter (size tiers)", () => {
+  assert.equal(tierOfDiameter(24), "pinpoint");
+  assert.equal(tierOfDiameter(120), "small");
+  assert.equal(tierOfDiameter(200), "medium");
+  assert.equal(tierOfDiameter(600), "large");
+});
+
+test("three big districts fill a zone that thirty cairns leave empty; overlaps count once, for the bigger tier", () => {
+  // 2 x 2 km of land on a 10 m grid
+  const grid = { nx: 201, nz: 201, x0: 0, z0: 0, step: 10, land: new Uint8Array(201 * 201).fill(1) };
+  const districts = [[400, 400], [1500, 600], [900, 1500]].map(([x, z]) => ({ x: x!, z: z!, radius: 300, tier: "large" as const }));
+  const big = areaClaim(grid, districts);
+  assert.ok(big.share > 0.18 && big.share < 0.25, `share ${big.share}`);
+  assert.equal(big.bigShare, big.share);
+  assert.deepEqual(claimFaults(big), []);
+  const cairns = Array.from({ length: 30 }, (_, i) => ({ x: 100 + (i % 6) * 350, z: 100 + Math.floor(i / 6) * 400, radius: 15, tier: "pinpoint" as const }));
+  const finds = areaClaim(grid, cairns);
+  assert.ok(finds.share < 0.01);
+  assert.deepEqual(claimFaults(finds).map((x) => x.code), ["sparse", "no-big-places"]);
+  // a door (pinpoint) inside its district adds no land and is credited to the district
+  const both = areaClaim(grid, [...districts, { x: 400, z: 400, radius: 12, tier: "pinpoint" }]);
+  assert.equal(both.share, big.share);
+  assert.equal(both.byTier.pinpoint.share, 0);
+  assert.equal(both.byTier.pinpoint.places, 1);
+  // water is not land: the same districts on a half-flooded zone claim a bigger share of what is left
+  const wet = { ...grid, land: grid.land.map((_, k) => (k % 201 < 100 ? 1 : 0)) };
+  assert.ok(areaClaim(wet, districts).landKm2 < 2.1);
+  // wall-to-wall places are crowded
+  const crowd = areaClaim(grid, [{ x: 1000, z: 1000, radius: 1000, tier: "large" }]);
+  assert.ok(crowd.share > AREA_CLAIM.max);
+  assert.deepEqual(claimFaults(crowd).map((x) => x.code), ["crowded"]);
+});
+
+
+// ---- crossings: a river in a 70 m gorge running east-west; its south rim is 30 m higher east of x = 100, a road
+// reaches each rim at x = -200, and a creek in the north plain is too narrow to be one
+test("a crossing spans the gorge rim to rim where the banks match and both banks have a road", () => {
+  const rim = (x: number, z: number): number => (z > 0 && x > 100 ? 110 : 80);
+  const gorgeH = (x: number, z: number): number => {
+    const d = Math.abs(z);
+    return d < 20 ? 8 : d < 40 ? 8 + ((d - 20) / 20) * (rim(x, z) - 8) : rim(x, z);
+  };
+  const creek = (x: number, z: number): boolean => Math.abs(z + 400) < 3;
+  const f: FieldLike = {
+    height: (x, z) => (creek(x, z) ? 78 : gorgeH(x, z)),
+    waterSurface: (x, z, out) => {
+      if (Math.abs(z) < 10) (out.y = 12), (out.kind = "river");
+      else if (creek(x, z)) (out.y = 79), (out.kind = "river");
+      else return false;
+      return true;
+    },
+    rivers: [{ id: "deep", points: [[-700, 0], [700, 0]] }, { id: "creek", points: [[-700, -400], [700, -400]] }],
+  };
+  const rep = findSites({
+    field: f,
+    seaLevel: -100,
+    polygon: [[-700, -600], [700, -600], [700, 600], [-700, 600]],
+    zone: "z",
+    roads: [
+      { id: "north", trail: true, points: [[-200, -500], [-200, -90]] },
+      { id: "south", trail: true, points: [[-200, 500], [-200, 90]] },
+    ],
+    content: [{ id: "t", kind: "town", x: 600, z: 550, radius: 30 }],
+  });
+  const xs = rep.candidates.filter((c) => c.kind === "crossing");
+  assert.ok(xs.length >= 1, "a crossing");
+  assert.ok(xs.every((c) => c.detail.river === "deep"), "the creek is too narrow");
+  const top = xs[0]!;
+  assert.ok(top.at[0] < 100 && Math.abs(top.at[0] + 200) < 160, `best crossing where the banks match, near the roads: ${top.at}`);
+  assert.ok(top.detail.span >= 60 && top.detail.span <= 100, `span ${top.detail.span}`);
+  assert.ok(top.detail.depth >= 60 && top.detail.match <= 1, `depth ${top.detail.depth} match ${top.detail.match}`);
+  assert.ok(Math.abs(top.detail.waterWidth - 20) <= 8, `water ${top.detail.waterWidth}`);
+  assert.deepEqual(top.detail.banks.map((b: { road: string }) => b.road).sort(), ["north", "south"]);
+  assert.ok(top.y >= 79, "the candidate stands at deck height");
+  const east = xs.find((c) => c.at[0] > 200);
+  assert.ok(!east || east.score < top.score, "the mismatched banks score lower");
 });

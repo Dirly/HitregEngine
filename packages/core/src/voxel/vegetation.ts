@@ -163,6 +163,7 @@ export interface VegetationRecipe {
   features: {
     clearings?: readonly ClearingDoc[];
     ribbons?: readonly { clearing?: [number, number][] }[];
+    groundPaints?: readonly { polygon?: [number, number][]; center?: [number, number]; radius?: number; feather?: number; clear?: { scatter: boolean; cover: boolean } }[];
     kitWalls?: readonly { cuts: readonly { origin: readonly number[]; dir: readonly number[]; s: readonly number[]; n: readonly number[] }[] }[];
   };
 }
@@ -311,7 +312,13 @@ export class VegetationIndex {
       push(last.origin[0]! + last.dir[0]! * last.s[1]!, last.origin[1]! + last.dir[1]! * last.s[1]!, last.dir, last.n[1]!);
       return [clearingSchema.parse({ id: `kit-wall-${i}`, polygon: [...back, ...front.reverse()], feather: 1 })];
     });
-    this.clearings = [...(recipe.features.clearings ?? []), ...ribbonClearings, ...wallClearings];
+    // an operator's ground paint with `clear` (a scree fan, a quarry floor) keeps its outline clear the same way
+    const paintClearings = (recipe.features.groundPaints ?? []).flatMap((p, i) =>
+      p.clear && (p.clear.scatter || p.clear.cover)
+        ? [clearingSchema.parse({ id: `paint-${i}`, ...(p.polygon ? { polygon: p.polygon } : { center: p.center, radius: p.radius }), feather: Math.min(60, p.feather ?? 3), scatter: p.clear.scatter, cover: p.clear.cover })]
+        : [],
+    );
+    this.clearings = [...(recipe.features.clearings ?? []), ...ribbonClearings, ...wallClearings, ...paintClearings];
     this.hasClearings = this.clearings.length > 0;
     this.clearingIndex = this.hasClearings
       ? new PolygonIndex(

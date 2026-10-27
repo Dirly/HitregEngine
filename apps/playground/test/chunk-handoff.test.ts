@@ -45,15 +45,16 @@ test("demoted full-detail terrain survives until its proxy is published", () => 
 
 test("promotion keeps merged neighbours visible and queues an atomic replacement", () => {
   const { manager, queued } = fixture();
-  const old = proxy(manager, "0_0", ["2_0", "3_0"]);
-  manager.loaded.set("2_0", { rep: "fullRender", simulated: false });
+  // focus 0 (corner 0): 1_0 is d=1.08 (fullRender), 2_0 d=2.05 (hlod) — see computeChunkStates
+  const old = proxy(manager, "0_0", ["1_0", "2_0"]);
+  manager.loaded.set("1_0", { rep: "fullRender", simulated: false });
   manager.update(0, 0);
   assert.equal(old.parts.length, 1);
   assert.ok(old.group.parent);
   const replacement = queued.find(([key, , mode]) => key === "0_0" && mode === "replace");
   assert.ok(replacement);
-  assert.ok(replacement[1].has("3_0"));
-  assert.equal(replacement[1].has("2_0"), false);
+  assert.ok(replacement[1].has("2_0"));
+  assert.equal(replacement[1].has("1_0"), false);
 });
 
 test("a block with no desired proxy membership waits for unloaded near cells", () => {
@@ -98,15 +99,16 @@ test("departing HLOD block does not starve its far-tier successor", () => {
 
 test("replacement preserves another promoted cell that has not loaded yet", () => {
   const { manager, queued } = fixture();
-  proxy(manager, "0_0", ["1_0", "2_0", "3_0"]);
-  manager.loaded.set("2_0", { rep: "fullRender", simulated: false });
+  // focus 0 (corner 0): -2_0 and 1_0 are d=1.08 (fullRender), 2_0 d=2.05 (hlod)
+  proxy(manager, "0_0", ["-2_0", "1_0", "2_0"]);
+  manager.loaded.set("1_0", { rep: "fullRender", simulated: false });
   manager.update(0, 0);
   const replacement = queued.find(([key, , mode]) => key === "0_0" && mode === "replace");
-  assert.ok(replacement[1].has("1_0"));
-  assert.ok(replacement[1].has("3_0"));
+  assert.ok(replacement[1].has("-2_0"));
+  assert.ok(replacement[1].has("2_0"));
 });
 
-test("arrival waits for distant coverage even when the landing pad is ready", () => {
+test("complete view readiness waits for distant coverage even when the landing pad is ready", () => {
   const { manager } = fixture();
   manager.lastFocus = [0, 0];
   manager.desiredCells = new Map([["0_0", "simulation"], ["5_0", "far"]]);
@@ -115,6 +117,35 @@ test("arrival waits for distant coverage even when the landing pad is ready", ()
   assert.equal(manager.isViewReady(), false);
   proxy(manager, "f0_0", ["5_0"], true);
   assert.equal(manager.isViewReady(), true);
+});
+
+test("playable arrival waits for the simulation ring, while distant scenery continues loading", () => {
+  const { manager } = fixture();
+  manager.lastFocus = [0, 0];
+  manager.desiredCells = new Map([["0_0", "simulation"], ["2_0", "simulation"],
+    ["3_0", "fullRender"], ["5_0", "far"]]);
+  manager.loaded.set("0_0", {});
+  assert.equal(manager.isLandingReady(0, 0), true);
+  assert.equal(manager.isArrivalReady(0, 0), false);
+  manager.loaded.set("2_0", {});
+  assert.equal(manager.isArrivalReady(0, 0), true);
+  assert.equal(manager.isViewReady(), false);
+  manager.loaded.delete("0_0");
+  assert.equal(manager.isArrivalReady(0, 0), false, "the landing cell must remain published");
+});
+
+test("playable arrival requires a streaming focus and respects intentionally suppressed cells", () => {
+  const { manager } = fixture();
+  manager.desiredCells = new Map([["0_0", "simulation"], ["2_0", "simulation"]]);
+  manager.loaded.set("0_0", {});
+  manager.suppressed.add("2_0");
+  assert.equal(manager.isArrivalReady(0, 0), false);
+  manager.lastFocus = [0, 0];
+  assert.equal(manager.isArrivalReady(0, 0), true);
+  manager.loaded.set("10_10", {});
+  assert.equal(manager.isArrivalReady(10, 10), false, "a teleport needs residency at its new focus");
+  manager.streamer = null;
+  assert.equal(manager.isArrivalReady(100, 100), true);
 });
 
 test("an HLOD bake fetches its member cells together, and marks them bulk", async () => {
@@ -153,4 +184,73 @@ test("an HLOD bake fetches its member cells together, and marks them bulk", asyn
     urgencies.every((u) => u === "bulk"),
     `member cells must be requested at bulk urgency, saw ${[...new Set(urgencies)].join(", ")}`,
   );
+});
+
+test("static models that land after a cell's merge are re-merged once they stop arriving", async () => {
+  const { STATIC_BATCH_FLAG } = await import("@hitreg/render");
+  const { manager } = fixture();
+  const root = new THREE.Group();
+  const material = new THREE.MeshStandardMaterial();
+  for (let i = 0; i < 3; i++) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), material);
+    mesh.position.x = i * 2;
+    mesh.userData["entityId"] = `piece-${i}`;
+    mesh.userData[STATIC_BATCH_FLAG] = true;
+    root.add(mesh);
+  }
+  const group = new THREE.Group();
+  group.add(root);
+  manager.scene.add(group);
+  const chunk = { group, root, expanded: { entities: {} }, objects: new Map(), rep: "fullRender", simulated: false,
+    batch: null, poolOwner: {}, cullRoots: [], cullUnits: [], lateModels: 3 };
+  manager.loaded.set("0_0", chunk);
+  manager.rebatchAt.set("0_0", 1000);
+  assert.equal(manager.pumpRebatches(999), 0, "waits out the coalescing delay");
+  assert.equal(manager.pumpRebatches(1000), 1);
+  assert.equal(chunk.batch.stats.merged, 3);
+  assert.equal(chunk.batch.stats.batches, 1);
+  assert.equal(chunk.lateModels, 0);
+  assert.equal(manager.rebatchAt.size, 0);
+  // an unloaded cell's pending re-merge is dropped, not run
+  manager.rebatchAt.set("9_9", 0);
+  assert.equal(manager.pumpRebatches(1e9), 0);
+});
+
+test("ground coverage: a resident cell or proxy covers its ground, and the version moves only on publish/drop", () => {
+  const { manager } = fixture();
+  manager.streamer = { ...manager.streamer, cellSize: 48 };
+  manager.supercellEpoch.set("0_0", 1);
+  const v0 = manager.groundVersion;
+  assert.equal(manager.coversGround(10, 10), false); // nothing streamed: placed content here would float
+  assert.equal(manager.groundVersion, v0); // asking is free
+  // an HLOD part publishes cell 3_0
+  const part = { group: new THREE.Group(), cellKeys: new Set(["3_0"]), entityCount: 1, far: false };
+  manager.publishSupercell("0_0", part, "append", 1);
+  assert.ok(manager.groundVersion > v0);
+  assert.equal(manager.coversGround(3 * 48 + 5, 5), true);
+  assert.equal(manager.coversGround(10, 10), false);
+  // and drops it
+  const v1 = manager.groundVersion;
+  manager.unloadSupercell("0_0");
+  assert.ok(manager.groundVersion > v1);
+  assert.equal(manager.coversGround(3 * 48 + 5, 5), false);
+  // no cell to stream there (outside the world): nothing to wait for
+  manager.provider = { has: (cx: number) => cx < 100 };
+  manager.hasCellMemo.clear();
+  assert.equal(manager.coversGround(200 * 48, 0), true);
+});
+
+test("arrival becomes ready once every scheduled near cell has loaded, on a diagonal too", () => {
+  for (const [x, z] of [[0.3, 0.3], [-0.45, 0.49], [0.49, -0.49], [10.7, -3.2]] as const) {
+    const { manager } = fixture();
+    manager.streamer = chunkStreamerSchema.parse({ source: "w", cellSize: 1, keepPadding: 1,
+      hlodSupercellFactor: 4, rings: { simulation: 2, fullRender: 3, hlod: 7, farTerrain: 12 } });
+    manager.update(x, z);
+    assert.equal(manager.isArrivalReady(x, z), false);
+    // load exactly what the residency pass scheduled (queued near cells), nothing more
+    const scheduled = [...manager.cellQueue];
+    assert.ok(scheduled.length > 0);
+    for (const key of scheduled) manager.loaded.set(key, { rep: manager.desiredCells.get(key), simulated: true });
+    assert.equal(manager.isArrivalReady(x, z), true, `focus ${x},${z}: scheduled ${scheduled.length}`);
+  }
 });

@@ -27,8 +27,12 @@
  * Path 1 (the town pipeline): a standalone building GLB in its own frame, ground floor flat at --floor-y
  *   (buildings stand on a flat foundation pad, so the shell needs no ground slab). Without --footprint the
  *   footprint is the largest region the walls enclose (slices up to lintel height close doors and windows);
- *   without --door the door is the widest wall gap where the interior meets the outside, preferring +Z.
- *   --facing points INTO the building.
+ *   without --door the door is the kit's own door socket (manifest.json beside the GLB, models[<name>].door), and
+ *   only without one (or with --detect-door) the widest wall gap where the interior meets the outside, preferring +Z
+ *   (detection picked window bays and porches on 12 of 41 skelmorrow buildings: their signs hung off the door).
+ *   --facing points INTO the building. The `sign-bracket` anchor is the door opening's centre on the outer face,
+ *   SIGN_ABOVE_LINTEL over the lintel (a hanging sign's bottom edge), size[1] = clear height up to the eave; each
+ *   `window` marker becomes a `window` anchor (the `sign-over-door` check keeps signs out of in front of it).
  * Path 2 (test path for Brinehold): one building is cut out of its baked district GLB (manifest beside it),
  *   moved into its model frame (origin at the footprint centre on its ground, yaw and preRot removed, so the
  *   street/door side is local +Z as the WFC exporter builds it) and run through the same pipeline. --auto
@@ -146,6 +150,8 @@ class Mesh {
       f(u * ay + w * by + (1 - u - w) * cy, (bz - az) * (cx - ax) - (bx - ax) * (cz - az), t);
     }
   }
+  /** An up-facing surface between lo and hi metres over y: a raised tier, shelf or bench top standing on the level's cell. */
+  raisedAt(x: number, z: number, y: number, lo: number, hi: number) { let hit = false; this.column(x, z, (yy, ny) => { if (ny > 0 && yy > y + lo && yy <= y + hi) hit = true; }); return hit; }
   /** Lowest down-facing surface more than 1 m above y (a ceiling or roof underside); Infinity = open sky. */
   roofAbove(x: number, z: number, y: number) { let best = Infinity; this.column(x, z, (yy, ny) => { if (yy > y + 1.0 && ny < 0 && yy < best) best = yy; }); return best; }
   /** An up-facing surface within 0.2 m of y (a floor slab). */
@@ -207,6 +213,9 @@ export interface SocketInput {
   footprint?: P2[];
   /** Outside door point and the unit vector pointing INTO the building. Omitted = detected. */
   door?: P2; facing?: P2;
+  /** The door point lies ON the facade (the kit's own door socket): the facade is the wall line through it, not the longest
+   *  line within 7 m (a door and two windows break the front wall; an unbroken interior wall behind it would win). */
+  doorOnFace?: boolean;
   source?: { model: string; sha256: string };
 }
 export interface SocketProbes { surfaces: Surfaces; lines: ProbeLine[] }
@@ -399,15 +408,18 @@ export function buildSocketMap(input: SocketInput): { map: SocketMap; report: So
         for (const sg of lines.segs) {
           const l = lines.lines[sg.line]!; if (Math.abs(l.nx * m[0] + l.nz * m[1]) < Math.cos((15 * Math.PI) / 180)) continue;
           const mx = (sg.s[0]! + sg.s[2]!) / 2 - door[0], mz = (sg.s[1]! + sg.s[3]!) / 2 - door[1], s = mx * m[0] + mz * m[1], u = mx * -m[1] + mz * m[0];
-          if (s < -0.5 || s > 7 || Math.abs(u) > 5) continue;
+          if (s < -0.5 || s > (input.doorOnFace ? DOOR_FACE_DEPTH : 7) || Math.abs(u) > 5) continue;
           along.set(sg.line, (along.get(sg.line) ?? 0) + Math.hypot(sg.s[2]! - sg.s[0]!, sg.s[3]! - sg.s[1]!));
         }
         const dp: P2 = door, sOfLine = (li: number) => { const l = lines.lines[li]!, dn = l.nx * m[0] + l.nz * m[1]; return (l.c - (l.nx * dp[0] + l.nz * dp[1])) / dn; };
         let wallS = 1.5, best = -1, bestLen = 0;
         for (const [li, len] of along) if (len > bestLen) { bestLen = len; best = li; }
+        // a kit door point lies ON the outer face: the facade is the wall line through it (a door and windows break that line
+        // up, so the unbroken inner face behind it would otherwise win)
+        if (input.doorOnFace) { let bs = Infinity; for (const [li, len] of along) { const sv = Math.abs(sOfLine(li)); if (len >= 0.5 && sv < bs) { bs = sv; best = li; } } }
         if (best >= 0) {
           const s0 = sOfLine(best); wallS = s0;
-          for (const [li, len] of along) { const s = sOfLine(li); if (len >= 0.6 * bestLen && s < wallS && s > s0 - 1.0) wallS = s; }
+          if (!input.doorOnFace) for (const [li, len] of along) { const s = sOfLine(li); if (len >= 0.6 * bestLen && s < wallS && s > s0 - 1.0) wallS = s; }
           const l = lines.lines[best]!, sg = l.nx * m[0] + l.nz * m[1] > 0 ? 1 : -1; m = [l.nx * sg, l.nz * sg]; inward = m;
         } else notes.push("no facade wall found near the door point; door facing kept as given");
         const t: P2 = [-m[1], m[0]];
@@ -437,11 +449,18 @@ export function buildSocketMap(input: SocketInput): { map: SocketMap; report: So
 
     // ---- characters
     const ch = new Array<string>(N).fill(SOCKET_CELLS.outside);
+    let raised = 0;
     for (let k = 0; k < N; k++) {
       if (!inside[k]) continue;
       const c = cell[k]!;
       ch[k] = c === 4 ? SOCKET_CELLS.well : zone[k] === 1 ? SOCKET_CELLS.stair : c === 2 ? SOCKET_CELLS.wall : zone[k] === 3 ? SOCKET_CELLS.doorway : entry[k] ? SOCKET_CELLS.entry : c === 3 ? SOCKET_CELLS.open : c === 0 ? SOCKET_CELLS.outside : SOCKET_CELLS.free;
+      // a RAISED cell is not this level's floor: a tier, a rock shelf or a bench top under the hip slice (0.45 m) stands on
+      // it, so its edge reads as wall but its top read as free floor at the level's height, and a prop placed there was
+      // buried in the tier (the wreck-hole wash-up's 0.75 m shelf: a crate 0.68 m deep in the rock, its faces on the
+      // slab's underside). It is wall to the dresser.
+      if ((ch[k] === SOCKET_CELLS.free || ch[k] === SOCKET_CELLS.open) && mesh.raisedAt(cx(k % W), cz((k - (k % W)) / W), gy, Math.max(0.35, 2 * RELIEF), 1.2)) { ch[k] = SOCKET_CELLS.wall; raised++; }
     }
+    if (raised) notes.push(`level ${level}: ${raised} cell(s) under a raised tier or shelf top (0.35-1.2 m over the floor) are wall`);
 
     // ---- upper floors: a stair strip no body can stand on (one cell of top tread showing beside a balustrade, between the well
     // and a wall) is part of the well, not a stair a lane must reach: no cell of it has a walkable 3 x 3 around it
@@ -613,7 +632,51 @@ export function buildSocketMap(input: SocketInput): { map: SocketMap; report: So
         const u = sgn * side, s = outerS(u) - 0.05;
         anchors.push({ id: `door-${name}`, kind: "door-side", level: 0, position: place(s, u, gy + Math.min(1.9, doorTop + 0.1)), yaw, mount: "wall", outdoor: true });
       }
-      anchors.push({ id: "sign", kind: "sign-bracket", level: 0, position: place(outerS(0) - 0.05, 0, gy + Math.min(doorTop + 0.45, STOREY - 0.3)), yaw, mount: "wall", outdoor: true });
+      // the sign bracket: the centre of the door opening on the outer face, SIGN_ABOVE_LINTEL over the lintel; the sign hangs with
+      // its bottom edge there (resolver), and its size carries the clear height up to the lowest eave / overhang in front of the wall
+      const sy = gy + doorTop + SIGN_ABOVE_LINTEL, sw = outerS(0);
+      let eave = Infinity;
+      // from EAVE_FROM off the wall (timber rails, window hoods and door trims stand ~0.1 m proud: not eaves) to past the sign's
+      // depth, across its width; a door's own trim is skipped (its underside sits at the lintel)
+      for (const out of [EAVE_FROM, 0.45, 0.65, 0.9]) for (const u of [-0.5, 0, 0.5]) {
+        const px = d[0] + m[0] * (sw - out) + t[0] * (gapU + u), pz = d[1] + m[1] * (sw - out) + t[1] * (gapU + u);
+        mesh.column(px, pz, (yy, ny) => { if (ny < 0 && yy > gy + doorTop + 0.15 && yy < eave) eave = yy; });
+      }
+      // and the wall itself: the sign's back needs wall face behind it, so the clear height also stops where the outer face ends
+      // (a door whose lintel meets the wall plate leaves only roof slope above it)
+      let wallTop = sy + SIGN_OPEN_SKY;
+      for (const u of [-0.4, 0, 0.4]) {
+        const px = d[0] + m[0] * (sw + 0.02) + t[0] * (gapU + u), pz = d[1] + m[1] * (sw + 0.02) + t[1] * (gapU + u);
+        for (let y = sy; y < wallTop; y += 0.1) {
+          const near = mesh.slice(y, [px - 0.3, px + 0.3, pz - 0.3, pz + 0.3]).some((sg) => segDist(px, pz, sg) < 0.12);
+          if (!near) { wallTop = y; break; }
+        }
+      }
+      const clear = Math.min(Number.isFinite(eave) ? eave - sy : SIGN_OPEN_SKY, wallTop - sy);
+      anchors.push({ id: "sign", kind: "sign-bracket", level: 0, position: place(sw - 0.05, 0, sy), yaw, mount: "wall", outdoor: true, size: [r2(gapW), r2(clear), 1] });
+      // beside the door, each side: where a PROJECTING sign hangs when the wall over the door has no room. The bracket plate stands
+      // SIGN_BESIDE_GAP past the door's edge; its anchor is the lowest bottom edge allowed (head room), `prefer` lifts it to the
+      // lintel, and size[1] is the clear height there: the wall behind the plate, and no eave over the arm and board (1.3 m out)
+      const lintel = gy + doorTop, low = Math.min(lintel, gy + SIGN_HEADROOM);
+      const besideClear = (u: number): { su: number; top: number } => {
+        const su = outerS(u);
+        let top = low + SIGN_OPEN_SKY;
+        for (const out of [EAVE_FROM, 0.55, 0.85, 1.1, 1.3]) for (const du of [-0.15, 0.15]) {
+          const px = d[0] + m[0] * (su - out) + t[0] * (gapU + u + du), pz = d[1] + m[1] * (su - out) + t[1] * (gapU + u + du);
+          mesh.column(px, pz, (yy, ny) => { if (ny < 0 && yy > low + 0.05 && yy < top) top = yy; });
+        }
+        const px = d[0] + m[0] * (su + 0.02) + t[0] * (gapU + u), pz = d[1] + m[1] * (su + 0.02) + t[1] * (gapU + u);
+        for (let y = low; y < top; y += 0.1) if (!mesh.slice(y, [px - 0.3, px + 0.3, pz - 0.3, pz + 0.3]).some((sg) => segDist(px, pz, sg) < 0.12)) { top = y; break; }
+        return { su, top };
+      };
+      // each side: the spot SIGN_BESIDE_GAP..1.35 m past the door's edge with the most clear height (a grand door's portico
+      // or a jamb pilaster leaves no wall right beside the opening; the wall a little farther along takes the bracket)
+      for (const [name, sgn] of [["l", -rightSign], ["r", rightSign]] as const) {
+        let best: { u: number; su: number; top: number } | null = null;
+        for (const off of [SIGN_BESIDE_GAP, 0.6, 0.85, 1.1, 1.35]) { const u = sgn * (gapW / 2 + off), c = besideClear(u); if (!best || c.top > best.top + 0.05) best = { u, ...c }; }
+        const { u, su, top } = best!;
+        anchors.push({ id: `sign-beside-${name}`, kind: "sign-beside", level: 0, position: place(su - 0.05, u, low), yaw, mount: "wall", outdoor: true, prefer: r2(lintel - low), size: [0.2, r2(top - low), 1.3] });
+      }
     }
   }
 
@@ -676,6 +739,18 @@ export function buildSocketMap(input: SocketInput): { map: SocketMap; report: So
 // ---------------------------------------------------------------- fixture markers
 
 /** Marker kind -> the anchor mount it becomes. A marker's position is where the fixture prefab's ORIGIN goes. */
+/** With the door on the facade (kit door socket), the facade wall's outer face is within this depth behind the door point, metres. */
+const DOOR_FACE_DEPTH = 1.0;
+/** A hanging sign's bottom edge sits this far above the door's lintel (owner walk 2026-10-21: signs over the doors, not on them). */
+export const SIGN_ABOVE_LINTEL = 0.3;
+/** Eave probes start this far off the wall face: framing rails, window hoods and trims stand closer; an eave overhangs farther, metres. */
+const EAVE_FROM = 0.25;
+/** A projecting sign hung beside a door: its bracket plate this far past the door's edge, metres. */
+const SIGN_BESIDE_GAP = 0.35;
+/** A projecting sign's bottom edge never hangs lower than this over the ground floor (a 1.8 m player walks under it), metres. */
+const SIGN_HEADROOM = 2.0;
+/** The clear height recorded over a sign bracket with no eave or overhang in front of the wall. */
+const SIGN_OPEN_SKY = 3;
 export const MARKER_MOUNTS: Record<string, { mount: "floor" | "wall" | "ceiling"; outdoor?: boolean }> = {
   hearth: { mount: "floor" },
   forge: { mount: "floor" },
@@ -703,6 +778,13 @@ export function applyMarkers(map: SocketMap, markers: FixtureMarker[]): string[]
   for (const m of markers) {
     const level = m.level ?? 0, yaw = m.yaw ?? 0;
     if (!Array.isArray(m.position) || m.position.length !== 3 || m.position.some((v) => !Number.isFinite(v))) { lines.push(`marker ${m.id}: no usable position, skipped`); continue; }
+    if (m.kind === "window") { // the opening (centre, [w, h, depth]): the sign-over-door check keeps signs out of in front of it
+      const [w = 1, h0 = 0, d0 = 0] = m.size ?? [], h = h0 || d0 || 1;
+      let id = m.id; for (let k = 2; ids.has(id); k++) id = `${m.id}-${k}`; ids.add(id);
+      map.anchors.push({ id, kind: "window", level, position: [m.position[0], m.position[1], m.position[2]], yaw, mount: "wall", outdoor: true, size: [w, h, 0.1] });
+      lines.push(`marker ${m.id}: window ${w} x ${h} m -> anchor "${id}"`);
+      continue;
+    }
     const stairWay = STAIR_MARKERS.has(m.kind);
     if (m.kind === "hearth-clearance" || stairWay) {
       const lv = map.levels.find((l) => l.level === level);
@@ -736,6 +818,19 @@ export function applyMarkers(map: SocketMap, markers: FixtureMarker[]): string[]
     lines.push(`marker ${m.id}: ${m.kind} -> ${spec.outdoor ? "outdoor " : ""}${spec.mount} anchor "${id}"`);
   }
   return lines;
+}
+
+/**
+ * The door socket the kit exporter recorded for a building model: `manifest.json` beside the GLB, `models[<name>].door`
+ * (position [x, y, z] in the model frame, `facing` the OUTWARD unit [x, z]). Null when there is none.
+ */
+export function kitDoor(glb: string): { door: P2; out: P2; manifest: string } | null {
+  const manifest = path.join(path.dirname(glb), "manifest.json");
+  if (!fs.existsSync(manifest)) return null;
+  const m = JSON.parse(fs.readFileSync(manifest, "utf8")) as { models?: Record<string, { door?: { position?: number[]; facing?: number[] } }> };
+  const d = m.models?.[path.basename(glb).replace(/.glb$/i, "")]?.door;
+  if (!d?.position || d.position.length < 3 || !d.facing || d.facing.length < 2) return null;
+  return { door: [d.position[0]!, d.position[2]!], out: [d.facing[0]!, d.facing[1]!], manifest };
 }
 
 const sha256 = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
@@ -789,10 +884,15 @@ export async function run(argv: string[]): Promise<void> {
     const model = opt("--model"), id = opt("--id"); if (!model || !id) throw new Error("dress sockets: --model <glb> and --id <map id> are required (or --from-layout + --building)");
     const file = resolve(model); if (!fs.existsSync(file)) throw new Error(`no model ${file}`);
     if (!markersFile) { const beside = file.replace(/.glb$/i, ".markers.json"); if (beside !== file && fs.existsSync(beside)) markersFile = beside; }
-    const fp = opt("--footprint"), door = opt("--door"), facing = opt("--facing");
-    if ((door == null) !== (facing == null)) throw new Error("--door and --facing go together");
+    const fp = opt("--footprint"), doorOpt = opt("--door"), facingOpt = opt("--facing");
+    if ((doorOpt == null) !== (facingOpt == null)) throw new Error("--door and --facing go together");
+    // the building's actual door: --door, else the kit's own door socket from the town manifest beside the model, and only
+    // then detection (the widest wall gap, which picks a window bay or a porch on some kit buildings)
+    const kit = argv.includes("--detect-door") ? null : kitDoor(file);
+    if (kit) console.log(`${id}: door from the kit manifest (${rel(kit.manifest)}): [${kit.door.join(", ")}] facing out [${kit.out.join(", ")}]`);
     input = { id, tris: glbTriangles(file), floorY: opt("--floor-y") ? Number(opt("--floor-y")) : 0, storey, step, floorRelief,
-      footprint: fp ? fp.split(";").map(pair) : undefined, door: door ? pair(door) : undefined, facing: facing ? pair(facing) : undefined,
+      footprint: fp ? fp.split(";").map(pair) : undefined,
+      door: doorOpt ? pair(doorOpt) : kit?.door, doorOnFace: !doorOpt && !!kit, facing: facingOpt ? pair(facingOpt) : kit ? [-kit.out[0], -kit.out[1]] : undefined,
       source: { model: rel(file), sha256: sha256(file) } };
     const g = opt("--grade"); if (g !== undefined) { const gy = Number(g); ground = () => gy; groundLabel = `flat grade y ${gy} (--grade)`; }
     else { ground = () => 0; groundLabel = "ASSUMED flat grade at model y 0 (no --grade)"; }

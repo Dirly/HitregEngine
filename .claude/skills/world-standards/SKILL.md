@@ -1,6 +1,6 @@
 ---
 name: world-standards
-description: Coordinating or reviewing generated world content: the standing rules for an unattended zone run (places before quests, a reviewer agent before detail work, acceptance on the server, no re-proving, revisions overwrite in place (no iteration files), rulings live in tools) and which task skill each job loads. Use before briefing, reviewing or installing any site, dungeon or town.
+description: "Coordinating or reviewing generated world content: the standing rules for an unattended zone run (places before quests, a reviewer agent before detail work, acceptance on the server, no re-proving, revisions overwrite in place (no iteration files), rulings live in tools) and which task skill each job loads. Use before briefing, reviewing or installing any site, dungeon or town."
 ---
 
 # world-standards
@@ -16,13 +16,15 @@ How a zone run is run: `docs/zone-creation.md` (skill `zone-creator`). Reviewer 
 | air and light of a zone or place | `zone-mood` |
 | outdoor site design / props | `site-standards`, `poi-creator` / `site-dressing`, `prop-intake` |
 | dungeon design / build + gates / light / doors | `dungeon-standards` / `dungeon-build` / `dungeon-lighting` / `portals` |
+| dungeon entrances, gatehouses, towers, hero landmarks | `grand-entrance` |
 | towns, buildings, styles | `town-planner`, `building-constructor`, `building-styles`, `town-npcs` |
 | rooms and furnishing | `interior-standards` |
 | creatures | `encounter-standards` |
 
 ## Taste and decisions
-- Taste goes in once: owner rulings become data and checks. Feedback after a zone ships makes rules for later zones; it
-  does not send a finished zone back. Proving zones are dogfooding: faults become tools, not patches.
+- Owner feedback updates tools and shared standards so later work improves. When the owner requests a retrofit,
+  revisit the shipped content within that scope; an old PASS cannot override the owner's rejection or new direction.
+  Preserve unrelated work and distinguish rewritten plans from physically completed changes.
 - Rules state what was learned, never where: no place names in a skill or standard.
 - The coordinator decides design and scope calls inside the agreed direction and reports in one line; it asks only for
   new fan-outs, destructive or outward actions, or a contradicted ruling. Silence is not approval.
@@ -38,10 +40,17 @@ How a zone run is run: `docs/zone-creation.md` (skill `zone-creator`). Reviewer 
 - Nothing floats: a placed object's height is measured on the REAL solid under its footprint (cuts, carves, formations, decks, DC floors), never taken from a number computed earlier; contact (base/legs/embed/hang/wall) comes from the catalogue. Encoded: `worldgen float` (zonegen `float` row, `worldgen status` stage), `tools/float.mts scene` (dungeon `float` stage), `job.mjs` gate 5 (install needs a passing `reports/float.json` newer than the ops).
 - Stone follows the place: every rock, boulder and cliff mass (scatter or placed) is the stone the terrain draws where it stands (its zone's cliff, or the cliff it leans on), and its cap is what the ground beside it wears (snow over the snow line, nothing on bare stone). Encoded: `worldgen rock-skins` (zonegen `rock-skins` row, `worldgen status` stage), `job.mjs` gate 6 (install needs a passing `reports/rock-skins.json`); fix with `recipe.rockSkins`, never per-instance materials (docs/voxel-worlds.md "Rock skins").
 - No water ends in the air: a fall curtain hangs from the lip the terrain REALLY has and hugs its face down to the pool; every water body's edge is buried in solid or ends at a declared finish (drain, lip-fall, dark, built). Encoded: `worldgen water-edges` (zonegen `water-edges` row, `worldgen status` stage), `tools/water-edges.mts scene` (dungeon `water-edges` stage, `--fix` re-cuts to the walls), `job.mjs` gate 7 (docs/voxel-worlds.md "Water edges").
+- Water bodies agree: a river through a fen runs AT the fen's level and leaves it only over a declared outlet (`river.weirs`, the dam/weir/spillway the brief names); no lake takes a river and lets none out. Encoded: `worldgen water-logic` (`worldgen status` stage; docs/voxel-worlds.md "Weirs: rivers held at a fen's level").
 - No holes you can see through the map: nothing shows the void where ground or built geometry must be, seen from eye height along the real route. Encoded: `tools/see-through.mts scene` (dungeon `see-through` stage; POIs with `--route <walk-route.json>`), `job.mjs` gate 8 for jobs with built structures, and the catalogue's see-through prop review for DC props >= 8 m (docs/see-through.md).
-- Ground is shaped by landform operators, never by raw carve boxes: an agent writes an operator doc (terrace, path, ...) with a handful of numbers, the owner approves its `worldgen op-preview` look, then `worldgen op --apply` installs it. Nothing finer than 6 m (three 2 m voxels) goes into the terrain: that is a kit or hero piece. Encoded: `worldgen fine` (the 6 m gate; `worldgen status` row `terrain-fine`, legacy carves recorded and counted), `job.mjs` gate 11 (docs/voxel-worlds.md "Landform operators").
+- One mesh owns each plane; zfight gate: two separately drawn surfaces on one plane (shell under a kit floor, a pad on terrain, overlapping kit pieces, a prop sunk flush) flicker at close range. Encoded: `tools/zfight.mts <project> [--scene id] [--decals]` (dungeon `zfight` + `decal place` stages; reports/engine/zfight.json names both meshes and where); fix the builder that emits the second copy.
+- Ground is shaped by landform operators, never by raw carve boxes: an agent writes an operator doc (terrace, path, ...) with a handful of numbers, the owner approves its `worldgen op-preview` look, then `worldgen op --apply` installs it. Nothing finer than 6 m (three 2 m voxels) goes into the terrain: that is a kit or hero piece. Encoded: `worldgen fine` (the 6 m gate; `worldgen status` row `terrain-fine`, legacy carves recorded and counted), `job.mjs` gate 11 (coordinator-ruled exceptions only, per job in `<world>.fine-exceptions.json`; docs/voxel-worlds.md "Landform operators").
 - Reviews compare side by side with the owner-approved references (rubric Q2, dungeon `compare`).
 - Nothing installs before the final quality review passes (Encoded: installers call `requireFinalReview` from `tools/poi-review/job.mjs`; `--force-dogfood` is the coordinator's). Acceptance is on the dedicated server with creatures spawned.
+- A real body walks every POI before install: geometric reach floods and coordinator PASSes are estimates. Encoded: `tools/poi-walk.mts <job>` (server boot scoped to the scene closure, cold starts, handoff `navigation.routes` both ways plus every derived door/opening/portal/area/clearing/quest target; FALL/STUCK/MISS/ONE-WAY/PORTAL/SHADOW/STREAM/NO-ROUTES), `job.mjs` gate 14 (install needs a whole-run passing `reports/walk.json` newer than the ops).
+- A place looks like where it stands: its surfaces match the terrain's texel scale and the zone ground's value band, use more than one material, and every door leads somewhere or is shut. Encoded: `tools/art-check.mts <job>` (texel / value / variety / portal / form / scale; thresholds in tools/_art-check.mts), `job.mjs` gate 15 (install needs a passing `reports/art-check.json`), zonegen `portals` row (a zone brief dungeon with no portal is MISSING).
+- A tiling texture has no lone mark: one clover, skull or bright fleck on a tile repeats into a grid of icons (Hagsheer rocks read as health packs). Encoded: `node tools/texture-swatch.mjs <tile.png>` writes the 4 x 4 swatch and exits 1 on MOTIF; `worldgen zone-textures` refuses such a tile. Look at the swatch before a new tile is used.
+- POIs are the size of their tier and are reviewed by someone else: tiers live in `tools/poi-review/size-tiers.mjs` (large = 300-600 m district); Encoded: `zonegen reserve` `under-tier`, `poi-brief` refuses an under-tier reservation, `job.mjs measure` + install gate 12 (measured size), gate 13 (`Reviewer:` id that is not the owner or the coordinator, every Q/S rubric line answered; the coordinator never records a PASS — only Derek's hand-written `ownerApproval` overrides).
+- Places are DESIGNED before they expand (owner ruling 2026-10-22): `design.json` (premise, journey, areas, story elements of catalogued things, one finished area, reference frames) and a fresh reviewer's PASS on the rubric's Place lines P1-P5 — story read from the frames, every element seen, nothing random, worth visiting, finished to the bar — before detail and before install; the final review answers P1-P5 again. Encoded: `job.mjs design` / `design-review`, gate 16 in `stageBlock` + `installBlock`, place-build `build` refusal + `design` gate row, `zonegen status` poi rows. A Place line is never n/a and a missing element is never a prop request.
 - Proven work is not proved again unless its own inputs changed (content digests of the zone's slice).
 
 ## Agents and briefs

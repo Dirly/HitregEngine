@@ -1,13 +1,13 @@
 // Full-window review shots of one fall site in the mmo scene (edit mode, orbit camera, no editor chrome).
 //   node tools/_fall-site-shots.mjs <baseUrl> <outDir> [river]      (run from apps/playground)
-// Needs Playwright: set PLAYWRIGHT_MODULE to its index.mjs (default: a scratchpad install on this machine).
+// Needs Playwright: the apps/playground devDependency (PLAYWRIGHT_MODULE / HITREG_PLAYWRIGHT override; tools/_playwright.mjs).
 // Views: the 5 from tools/_site-views.mts + 2 from tools/_site-shot-extra.mts (pool eye level, 3/4 hero),
 // then a 2x4 contact sheet sheet.png. The editor panels/stats are hidden by CSS injection and the canvas is
 // forced to the full 1280x800 window (main.ts onResize sizes the renderer from canvas.clientWidth/Height).
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? "file:///C:/Users/Derek/AppData/Local/Temp/claude/D--Users-Derek-Desktop-HitRegStudios-Engine/29863f0b-4711-4d4d-aeda-fe4ad134b25a/scratchpad/node_modules/playwright/index.mjs");
+const { chromium } = await (await import("./_playwright.mjs")).loadPlaywright();
 
 const base = (process.argv[2] ?? "http://localhost:5199/").replace(/\/?$/, "/");
 const outDir = path.resolve(process.argv[3] ?? "shots/latest");

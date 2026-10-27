@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createWorldField, worldRecipeSchema, type WorldRecipe } from "@hitreg/core";
+import { readJsonTracked, writeJsonFile } from "./_scene-write.mts";
 
 const argv = process.argv.slice(2);
 const opt = (name: string, fallback: string): string => {
@@ -27,7 +28,7 @@ if (!Number.isFinite(ax) || !Number.isFinite(az)) {
   console.error("usage: road-regrade --project <p> --world <w> --at x,z --radius <m> [--dry]");
   process.exit(2);
 }
-const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+const raw = readJsonTracked(file);
 const recipe: WorldRecipe = worldRecipeSchema.parse(raw);
 const inside = (p: [number, number]): boolean => Math.hypot(p[0] - ax, p[1] - az) <= radius;
 const touched = recipe.features.roads.filter((r) => r.points.some(inside) && r.leftY && r.rightY);
@@ -66,5 +67,5 @@ for (const road of raw.features.roads as { id: string; points: [number, number][
 }
 if (argv.includes("--dry")) process.exit(0);
 worldRecipeSchema.parse(raw);
-fs.writeFileSync(file, `${JSON.stringify(raw, null, 2)}\n`);
+writeJsonFile(file, raw, { label: "road-regrade" }); // refused if another tool wrote since the read
 console.log(`wrote ${path.relative(process.cwd(), file)}`);

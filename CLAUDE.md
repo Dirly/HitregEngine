@@ -88,6 +88,10 @@ Read the relevant sections once, and revisit them when the task or code changes.
 atlases, icons, art and audio generation, rivers and falls): read
 **`docs/workflows.md`** — the routing for every content workflow and the tool
 `--project` to use — then the README of the project you are working in.
+For fantasy places and their stories, read **`docs/world-standards/adventure-design.md`**
+before choosing premises or writing quests. Skelmorrow's POIs are fantasy
+discoveries and adventures; medieval trades are supporting context. A grim name,
+a corpse or ordinary pests do not by themselves turn a work yard into one.
 
 - **Accounts, world selection, persistence, camp/logout, or reconnect behavior:** read
   `docs/storage.md` and the relevant flow in `docs/hosting.md`.

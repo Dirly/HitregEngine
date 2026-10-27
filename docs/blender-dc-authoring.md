@@ -32,10 +32,11 @@ blend file) and hand a build module to whoever owns the live session.
 - Every structural piece is a **closed solid with thickness**. Rings for round walls,
   prisms for treads, shells with rims for domes. Open shells are refused.
 - Solids may overlap or touch; inside one `dc_group` they union in the field.
-  Between groups, place joins inside solid stone and check the assembled surfaces.
-  A lap along an exposed coplanar wall or floor still produces overlapping faces
-  and can z-fight. Union pieces sharing exposed surfaces in one field, or partition
-  at buried interfaces. Do not hide duplicate surfaces with depth bias.
+  Between groups the converter makes one mesh own each plane: a group is cut by the
+  crisp solids of every group ranked before it (stamp order, `ownerOrder` first), so a
+  lap along a shared wall or threshold floor bakes once (tools/mesh-dc/plane-owner.mjs).
+  Natural (noised) solids never cut other groups; keep their laps buried. Do not hide duplicate
+  surfaces with depth bias; the zfight gate checks the assembly.
 - One `dc_group` per room, storey or tunnel. Keep each under 15 M cells at the intended
   voxel size (0.12 m blockout, 0.06 m for inspected stair detail).
 - Audit both each extracted mesh and the assembled groups. Per-mesh manifold

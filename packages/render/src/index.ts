@@ -108,8 +108,10 @@ export {
   EngineRenderer,
   type Backend,
   type BloomOptions,
+  type EngineRendererOptions,
   type RenderScopeSink,
 } from "./renderer.js";
+export { isSkyDepth } from "./depth.js";
 export {
   POST_PASS_ORDER,
   PostChain,
@@ -286,6 +288,16 @@ export { PortraitView, type PortraitOptions } from "./portrait.js";
 export { FaceShots, type FaceShotSource, type FaceShotsOptions } from "./face-shots.js";
 export { buildTerrainSplatMaterial, SPLAT_ATTRIBUTE, SPLAT_ATTRIBUTES, SPLAT_INDEX_ATTRIBUTE, SPLAT_TOP_ATTRIBUTE, type SplatData } from "./terrain-splat.js";
 export {
+  applyLandmarkFog,
+  landmarkFogFactor,
+  landmarkFogMaterial,
+  landmarkFogSource,
+  landmarkFogTone,
+  landmarkFogVariantCount,
+  LANDMARK_MIN_FOG_SHARE,
+  type LandmarkFog,
+} from "./landmark-fog.js";
+export {
   CullingSystem,
   CullUnit,
   cullRootsOf,
@@ -293,8 +305,10 @@ export {
   applyCullingProfile,
   cullRootIndex,
   registerCullRoots,
+  landmarkSettings,
   type CullUnitOptions,
   type CullingStats,
+  type GroundCoverage,
   type CullRoot,
   type CullRootSettings,
 } from "./culling.js";

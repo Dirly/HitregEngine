@@ -52,3 +52,15 @@ export function assetIds(project, kind, ext = ".json") {
   for (const d of assetDirs(project, kind)) for (const f of fs.readdirSync(d)) if (f.endsWith(ext)) ids.add(f.slice(0, -ext.length));
   return ids;
 }
+
+/**
+ * The first `<root>/<rel>` that exists, or null. `roots` are closure project folders, own first: a world's tools
+ * read a file (a catalog, a dressing sidecar) wherever the closure keeps it, never only in the world itself.
+ */
+export function firstExisting(roots, rel) {
+  for (const r of roots) {
+    const f = path.join(r, rel);
+    if (fs.existsSync(f)) return f;
+  }
+  return null;
+}

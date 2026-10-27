@@ -8,7 +8,8 @@
  * road see it, the bearing it should face). The zone master picks places from this list and the map, then writes the
  * brief (a place records its pick in `site`); reserve checks the reservation stands on it.
  *
- * Gate (lint): every path that climbs leads somewhere; no large empty landform; places per km2 of land and the
+ * Gate (lint): every path that climbs leads somewhere; no large empty landform; the share of the zone's land claimed by
+ * place footprints (by size tier: ./_site-finder.mts AREA_CLAIM, not places per km2: the size tiers make places fewer and bigger) and the
  * largest empty disc against the thresholds in ./_site-finder.mts. The engine is ./_site-finder.mts (no I/O).
  *
  * Options: --focus x,z,r draws one area close up (sites-<x>_<z>_<r>.png); --step the sample grid in metres.
@@ -25,7 +26,7 @@ import { exists, finish, loadRecipe, readJson, writeJson, type Ctx, type Finding
 import { collectMapData, DEFAULT_LAYERS, layerCounts, type LayerId } from "../../../src/map-layers.ts";
 import { err, requireZone, warn } from "./_shared.mts";
 import { findScene, gatherExtras, shootMap } from "./map.mts";
-import { CLIMB_NEEDS_PLACE, EMPTY_MAX, findSites, travelRoads, LANDFORM_COVER, LANDFORM_HA, MIN_PER_KM2, type Content, type RoadLine, type SiteReport, type Vec2 } from "./_site-finder.mts";
+import { AREA_CLAIM, claimFaults, CLIMB_NEEDS_PLACE, EMPTY_MAX, findSites, travelRoads, LANDFORM_COVER, LANDFORM_HA, type Content, type RoadLine, type SiteReport, type Vec2 } from "./_site-finder.mts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type J = Record<string, any>;
@@ -54,8 +55,8 @@ export function standingContent(ctx: Ctx, recipe: J): Content[] {
 
 // the overlay drawn on the review map (runs in the page: plain JS, no imports)
 const DRAW = String.raw`
-const COLORS = { "cliff-water": "#4fc3f7", "canyon-end": "#ff8a65", plateau: "#ffd54f", peak: "#e0e0e0", saddle: "#ba68c8", "wall-gap": "#ef5350", cove: "#4dd0e1", waterfall: "#81d4fa", "path-end": "#aed581", switchback: "#9ccc65", "empty-land": "#ffffff", island: "#26a69a", access: "#ff4081", "fall-lip": "#b3e5fc", "plunge-pool": "#0288d1", "sea-stack": "#bcaaa4", "stack-cluster": "#ffab40", headland: "#90caf9", "butte-top": "#ffb300", "canyon-bend": "#d84315" };
-const SHAPE = { "cliff-water": "tri", "canyon-end": "chev", plateau: "square", peak: "tri", saddle: "diamond", "wall-gap": "bar", cove: "circle", waterfall: "drop", "path-end": "circle", switchback: "z", "empty-land": "ring", island: "circle", access: "bar", "fall-lip": "drop", "plunge-pool": "drop", "sea-stack": "circle", "stack-cluster": "diamond", headland: "tri", "butte-top": "square", "canyon-bend": "chev" };
+const COLORS = { "cliff-water": "#4fc3f7", "canyon-end": "#ff8a65", plateau: "#ffd54f", peak: "#e0e0e0", saddle: "#ba68c8", "wall-gap": "#ef5350", cove: "#4dd0e1", waterfall: "#81d4fa", "path-end": "#aed581", switchback: "#9ccc65", "empty-land": "#ffffff", island: "#26a69a", access: "#ff4081", "fall-lip": "#b3e5fc", "plunge-pool": "#0288d1", "sea-stack": "#bcaaa4", "stack-cluster": "#ffab40", headland: "#90caf9", "butte-top": "#ffb300", "canyon-bend": "#d84315", crossing: "#f06292" };
+const SHAPE = { "cliff-water": "tri", "canyon-end": "chev", plateau: "square", peak: "tri", saddle: "diamond", "wall-gap": "bar", cove: "circle", waterfall: "drop", "path-end": "circle", switchback: "z", "empty-land": "ring", island: "circle", access: "bar", "fall-lip": "drop", "plunge-pool": "drop", "sea-stack": "circle", "stack-cluster": "diamond", headland: "tri", "butte-top": "square", "canyon-bend": "chev", crossing: "bar" };
 ctx.save();
 ctx.font = "bold 12px system-ui, sans-serif";
 ctx.textBaseline = "middle";
@@ -93,6 +94,11 @@ for (const c of data.candidates) {
   if (c.kind === "wall-gap" && c.detail.line) {
     ctx.strokeStyle = col; ctx.lineWidth = 5;
     ctx.beginPath(); ctx.moveTo(toX(c.detail.line[0][0]), toY(c.detail.line[0][1])); ctx.lineTo(toX(c.detail.line[1][0]), toY(c.detail.line[1][1])); ctx.stroke();
+  }
+  if (c.kind === "crossing" && c.detail.banks) {
+    const [a, b] = c.detail.banks;
+    ctx.strokeStyle = col; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(toX(a.top[0]), toY(a.top[2])); ctx.lineTo(toX(b.top[0]), toY(b.top[2])); ctx.stroke();
   }
   // facing tick: the way the site should face its approach
   const a = (c.approach.faces * Math.PI) / 180;
@@ -181,7 +187,7 @@ export async function run(ctx: Ctx): Promise<number> {
     }
     if (x.kind === "wasted-climb") warn(f, "wasted-climb", x.message, x.road);
   }
-  if (report.perKm2 < MIN_PER_KM2) err(f, "sparse", `${report.places} place(s) and town(s) on ${report.landKm2} km2 of land = ${report.perKm2}/km2 (at least ${MIN_PER_KM2}/km2): too much open space`);
+  for (const x of claimFaults(report.claim)) err(f, x.code, x.message);
   if (report.largestEmpty && report.largestEmpty.radius > EMPTY_MAX)
     err(f, "empty-land", `nothing within ${report.largestEmpty.radius} m of [${report.largestEmpty.at.join(", ")}] (${report.largestEmpty.landform}); at most ${EMPTY_MAX} m`);
   for (const l of report.landforms) {
@@ -203,7 +209,7 @@ export async function run(ctx: Ctx): Promise<number> {
     zone,
     at: new Date().toISOString(),
     step: report.step,
-    density: { landKm2: report.landKm2, places: report.places, perKm2: report.perKm2, min: MIN_PER_KM2, largestEmpty: report.largestEmpty, emptyMax: EMPTY_MAX },
+    density: { landKm2: report.landKm2, places: report.places, claim: report.claim, gate: AREA_CLAIM, largestEmpty: report.largestEmpty, emptyMax: EMPTY_MAX },
     empties: report.empties,
     landforms: report.landforms,
     paths: report.paths,
@@ -211,7 +217,7 @@ export async function run(ctx: Ctx): Promise<number> {
   };
   const listFile = path.join(reports, "sites-candidates.json");
   writeJson(listFile, listing);
-  console.log(`\n  land ${report.landKm2} km2, ${report.places} places -> ${report.perKm2}/km2 (min ${MIN_PER_KM2}); largest empty ${report.largestEmpty ? `${report.largestEmpty.radius} m at [${report.largestEmpty.at}]` : "none"}`);
+  console.log(`\n  land ${report.landKm2} km2, ${report.places} places claim ${Math.round(report.claim.share * 100)}% of it (${AREA_CLAIM.min * 100}-${AREA_CLAIM.max * 100}%; medium+ ${Math.round(report.claim.bigShare * 100)}%, at least ${AREA_CLAIM.bigMin * 100}%): ${Object.entries(report.claim.byTier).filter(([, v]) => v.places).map(([t, v]) => `${t} ${v.places} ${Math.round(v.share * 100)}%`).join(", ")}; largest empty ${report.largestEmpty ? `${report.largestEmpty.radius} m at [${report.largestEmpty.at}]` : "none"}`);
   console.log(`  top candidates (score, kind, where, approach):`);
   for (const c of listing.candidates.filter((c) => c.kind !== "empty-land").slice(0, Math.min(top, 25)))
     console.log(`  ${c.id} ${String(c.score).padStart(4)} ${c.kind.padEnd(11)} [${c.at.join(", ")}] y${Math.round(c.y)}  ${c.usedBy ? `(used: ${c.usedBy}) ` : ""}${c.why}; road ${c.approach.road ?? "-"} ${c.approach.distance} m, climb ${c.approach.climb} m, seen from ${c.approach.seenM} m of road, faces ${c.approach.facesWord}${c.approach.note ? ` (${c.approach.note})` : ""}`);

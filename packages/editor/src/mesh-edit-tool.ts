@@ -1200,7 +1200,9 @@ export class MeshEditTool {
     return {
       x: rect.left + ((ndc.x + 1) / 2) * rect.width,
       y: rect.top + ((1 - ndc.y) / 2) * rect.height,
-      z: ndc.z,
+      // callers test `z > 1` for "behind the camera": a reversed-depth camera
+      // stores 1 - depth (behind = negative), so turn it back the classic way round
+      z: this.opts.camera.reversedDepth ? 1 - ndc.z : ndc.z,
       world,
     };
   }

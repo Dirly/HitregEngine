@@ -10,15 +10,24 @@
  *   stall-<n>           pitches round the square's edge, facing its middle (stalls, carts, a notice board)
  *   quay-<n>            along the quay deck's landward edge (nets, crates, barrels, a boat on rollers)
  *   street-<road>-<n>   just outside each street's walking band, every ~12 m (a cart, a rack, barrels)
+ *   door-sign-<lot>     a WALL point over each building's door (its own map's sign-bracket: the door opening's centre, lintel
+ *                       + 0.3 m, carried by the lot's transform): the building's hanging sign hangs ABOVE it, never inside
+ *                       (tools/_door-signs.mts); door-sign-<lot>-l/-r beside it take a PROJECTING sign when the wall
+ *                       over the door has no room; door-sign-<lot>-post-l/-r are FLOOR points for a freestanding sign post
+ *                       beside the door (window-free side only); window-<lot>-<id> marks each window so `sign-over-door` keeps signs off them
  * Each candidate keeps a clearance radius for its kind and is REFUSED when that disc touches: a street or lane band
  * (half width + 0.4 m), a door path (+0.6 m), a lantern (1.2 m), a building's full footprint, another kept anchor,
  * standing water, a slope (ground under the disc varying more than 0.45 m), or anything built standing on it (a ray
  * from above must land on the ground, or on the quay deck for a quay pitch). The square keeps a 4 m lane through its middle.
  * The map is in WORLD coordinates (apply with --at 0,0,0 --yaw 0); its one level is a stub (outdoor anchors carry their
  * own height). Writes authoring/dressing/sockets/<town>-exterior.json and prints every anchor kept and refused.
+ *
+ *   npx tsx tools/town-exterior.mts door-signs --project proving --town tidewell
+ * rewrites only the door-sign and window anchors of an existing exterior map (no boot, nothing else touched).
  */
 import fs from "node:fs";
 import path from "node:path";
+import { doorSignAnchors, type BuildingAnchor } from "./_door-signs.mts";
 import {
   HeadlessWorld, TerrainStreamer, defaultEvents, defaultRegistry, defaultScripts, loadContent, loadProjectScripts, playgroundRoots, resolveServerVoxelWorld,
 } from "../../../packages/server/src/index.ts";
@@ -26,12 +35,27 @@ import {
 type P2 = [number, number];
 const argv = process.argv.slice(2);
 const opt = (n: string, d = ""): string => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1]! : d; };
-if (argv[0] !== "sockets") { console.error("usage: town-exterior sockets --project <p> --town <name> [--scene <scene>]"); process.exit(2); }
+if (argv[0] !== "sockets" && argv[0] !== "door-signs") { console.error("usage: town-exterior sockets|door-signs --project <p> --town <name> [--scene <scene>]"); process.exit(2); }
 const project = opt("project", "proving"), town = opt("town");
 if (!town) { console.error("--town is required"); process.exit(2); }
 const proj = path.join("projects", project);
 const towns = path.join(proj, "authoring", "towns");
 const readJ = <T,>(f: string): T => JSON.parse(fs.readFileSync(f, "utf8")) as T;
+const socketsDir = path.join(proj, "authoring", "dressing", "sockets");
+const buildingAnchors = (model: string): BuildingAnchor[] | undefined => {
+  const f = path.join(socketsDir, `${town}-${model}.json`);
+  return fs.existsSync(f) ? readJ<{ anchors?: BuildingAnchor[] }>(f).anchors ?? [] : undefined;
+};
+const doorSigns = () => doorSignAnchors(readJ<{ buildings: Parameters<typeof doorSignAnchors>[0] }>(path.join(towns, `${town}-layout.json`)).buildings, buildingAnchors);
+if (argv[0] === "door-signs") {
+  const file = path.join(socketsDir, `${town}-exterior.json`);
+  const map = readJ<{ anchors: Array<{ kind: string }> }>(file);
+  const { anchors, skipped } = doorSigns();
+  map.anchors = [...map.anchors.filter((a) => a.kind !== "door-sign" && a.kind !== "door-sign-beside" && a.kind !== "door-sign-post" && a.kind !== "window"), ...anchors];
+  fs.writeFileSync(file, JSON.stringify(map, null, 1) + "\n");
+  console.log(`${town}: ${anchors.filter((x) => x.kind === "door-sign").length} door-sign + ${anchors.filter((x) => x.kind === "door-sign-post").length} sign-post + ${anchors.filter((x) => x.kind === "window").length} window anchors -> ${path.relative(".", file)}${skipped.length ? `; skipped: ${skipped.join(", ")}` : ""}`);
+  process.exit(0);
+}
 const doc = readJ<{ world?: string; scene?: string }>(path.join(towns, `${town}.json`));
 const scene = opt("scene", doc.scene ?? doc.world ?? "proving");
 interface Lot { id: string; district?: string; full?: P2[]; corners?: P2[]; door?: P2; facing?: P2 }
@@ -58,7 +82,7 @@ const polyDist = (p: P2, poly: P2[]): number => (inPoly(p, poly) ? 0 : Math.min(
 const yawFacing = (dx: number, dz: number): number => +((Math.atan2(dx, dz) * 180) / Math.PI).toFixed(1);
 
 // ---- boot the real ground
-const content = loadContent(playgroundRoots(path.resolve(".")));
+const content = loadContent(playgroundRoots(path.resolve("."), scene)); // the scene's closure only, as serve.ts loads it
 const sceneDoc = content.scenes.get(scene);
 if (!sceneDoc) throw new Error(`no scene ${scene}`);
 const events = defaultEvents();
@@ -158,9 +182,13 @@ const map = {
   id: `${town}-exterior`,
   source: { model: `authoring/towns/${town}-layout.json (outdoors, measured on scene ${scene})`, sha256: "" },
   levels: [{ level: 0, floorY: 0, origin: [centre[0], centre[1]], step: 1, columns: 1, rows: 1, cells: [" "], head: ["."], room: ["."], rooms: [], walls: [], paths: [] }],
-  anchors: kept.map((k) => ({ id: k.id, kind: k.kind, level: 0, position: [+k.at[0].toFixed(2), +k.y.toFixed(2), +k.at[1].toFixed(2)], yaw: yawFacing(k.face[0], k.face[1]), mount: "floor", outdoor: true, size: [+(k.r * 2).toFixed(1), 3, +(k.r * 2).toFixed(1)] })),
+  anchors: [
+    ...kept.map((k) => ({ id: k.id, kind: k.kind, level: 0, position: [+k.at[0].toFixed(2), +k.y.toFixed(2), +k.at[1].toFixed(2)], yaw: yawFacing(k.face[0], k.face[1]), mount: "floor", outdoor: true, size: [+(k.r * 2).toFixed(1), 3, +(k.r * 2).toFixed(1)] })),
+    ...doorSigns().anchors,
+  ],
 };
 const file = path.join(proj, "authoring", "dressing", "sockets", `${town}-exterior.json`);
+fs.mkdirSync(path.dirname(file), { recursive: true });
 fs.writeFileSync(file, JSON.stringify(map, null, 1) + "\n");
 const byKind = (k: string): string => kept.filter((x) => x.kind === k).map((x) => x.id.replace(/^(door|street|quay|stall)-/, "")).join(" ");
 console.log(`${town}: ${kept.length} of ${cands.length} pitches kept -> ${path.relative(".", file)}`);

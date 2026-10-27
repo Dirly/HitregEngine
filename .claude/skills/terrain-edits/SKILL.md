@@ -10,11 +10,14 @@ Sources: `docs/voxel-worlds.md` "Height-patch edges", section 31 "What grows in 
 
 **Paths are ribbons; never carve a path into the terrain**: a route is a `path` operator (docs/voxel-worlds.md "Path ribbons"), never a road band, carve boxes or a hand patch.
 
+**A wall, retaining wall, quay or causeway ramp is the `wall` operator** (a swept profile along a line, `variant` free/retaining/quay/ramp), never a chain of boxes or a terrain step: it stands on its own terrain-following footing, ties its ends into the hill, and its ramp turns steep stretches into stairs.
+
 **Never write raw carve boxes (passages, narrow patches, blobs) for landforms: call an operator** (`features.operators`,
 `worldgen op`, previewed with `worldgen op-preview` and approved by the owner first; docs/voxel-worlds.md "Landform
-operators"). Anything under 6 m in its smallest dimension fails `worldgen fine` (the 6 m rule) — that is a kit/hero piece.
+operators"). Anything under 6 m in its smallest dimension fails `worldgen fine` (the 6 m rule) — that is a kit/hero piece. Only a coordinator ruling excepts one: listed per job in `<project>/authoring/terrain/<world>.fine-exceptions.json` ({ id, job, reason, ruling, carves }, merged by id by the installer), read by `job.mjs` gate 11 (`job.mjs fine <jobDir> [--no-exceptions]`) and by `worldgen fine` / status `terrain-fine`.
 **A natural ledge system on a cliff is the `ledges` operator** (landmark mode: stacked rock masses baked by `tools/ledge-landmark.mts`, one triplanar cliff material); prove reach on its collider, not the field, and keep brows to single-band lips (docs/voxel-worlds.md "Landform operators").
 **Any hero shape (arch, tower, spire) is the `landmark` operator** (CSG spec / Blender / generator -> DC bake by `tools/landmark.mts`, bury/pad blend >= 6 m, shells >= 3 voxels); bake, then run op --check, fine, lips, float near it (docs/voxel-worlds.md "Landmark stamp").
+**Scree/talus fans are the `scree` operator and a ground texture over an area is the `paint` operator** (never a stamped fan mesh, never decals): `scree` heaps rock at the angle of repose from a lip source to a toe (fill only, painted `scree-pale`, chute down the face, graded catalogued boulders; on a tall face set `apexDrop` so it is a cone at the foot, `to` short of the trail); `paint` lays a palette surface (`cut-stone`, `scree-pale`, ash) over a polygon/disc limited by `slope`/`height` — add the world-kit `ground/` tile to the palette + `worldgen material` first. Operators compose in recipe order: `op --apply` re-applies the later overlapping ones, `op --check` must be all ok.
 **A stepped hillside (town site, farm) is the `terrace` operator**: contour shelves + kit-walled risers + spanning-tree ramps; `op-preview` it on the gentler slope first, then check `unlinked` = [] and `tallRiserCells` = 0 in its report.
 
 ## Commands
@@ -23,7 +26,7 @@ npx tsx tools/worldgen.mts op-preview <world> --project <p> --op op.json [--near
 npx tsx tools/worldgen.mts op <world> --project <p> --apply op.json | --remove <id> | --undo <inverse.json> | --check
 npx tsx tools/worldgen.mts fine <world> --project <p> [--near x,z,r] [--out f.json]          # the 6 m gate
 npx tsx tools/worldgen.mts lips <world> --project <p> [--near x,z,r] [--list] [--json] [--allow ids]
-npx tsx tools/worldgen.mts seated <world> --project <p> --slab x,z,halfX,halfZ,yawDeg,baseY | --slabs file.json
+npx tsx tools/worldgen.mts seated <world> --project <p> --slab x,z,halfX,halfZ,yawDeg,baseY | --slabs file.json | --wall <op> | --walls [--out f]
 npx tsx tools/worldgen.mts terrace-place <world> --project <p> --spec terrace.json | --id x --path "x,z x,z" --height m [--insert stair-turn@4:0] ; --refit --all ; --check --all
 npx tsx tools/worldgen.mts vegetation <world> --project <p> --region <id> --set <json|file> [--dry-run]
 npx tsx tools/worldgen.mts vegetation <world> --project <p> --clearings <file> | --remove-clearings <owner|ids> | --at x,z
@@ -52,7 +55,11 @@ pnpm -F playground exec tsx tools/voxel-blades.mts <recipe.json> --sites --caves
 - `seated` `gap` > 0.25 m (hangs) / `clip` > 0.6 m (terrain through) -> lower/raise the slab or patch under it. It reads the
   REAL solid (cuts and formations are ground; `--drawn` = the old heightfield reading). Props and rocks: `worldgen float`.
   Installers that place walls/platforms on terrain run it.
+- `seated --wall <op>` / `--walls`: a baked `wall` op against the DRAWN ground per <= 4 m segment; daylight > 0.05 m or a
+  STALE bake fails (town row `wall`) -> `worldgen op --apply <op>` + `tools/landmark.mts` (the foot reseats on the lowest
+  ground of each span), else deepen `footing.depth`. Never prop a wall up with a terrain patch.
 - `scatter-float` > 0.35 m -> a clearing over the edit, or let the engine re-seat; never bury additive blobs to kill foliage.
+- Stray rock hanging in the air (overhang noise on steep banks, carve slivers) -> `tsx tools/voxel-floaters.mts <world> --project <p> --river <id> | --box x0,z0,x1,z1 | --world --apply` (status row `floaters`; `--mesh` counts what the mesher draws, `--undo`); never hand-carve them.
 - `voxel-blades` skirt ends in air / open edges > 0 -> a mesher seam fault: report it with coordinates (engine work);
   "blades" from field shape (MC interpolation, a step in `height()`) are the height source, not the mesher.
 - Walk gate catches plants on routes -> clearings must cover every walked route and ramp, not only structures.

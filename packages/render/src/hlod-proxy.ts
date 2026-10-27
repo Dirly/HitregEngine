@@ -15,6 +15,8 @@ import {
   polygonGeometry,
   type BuildOptions, type ImpostorPageItem, cachedImpostor, cachedMergedMaterial, impostorBatchFor, impostorPageBatchFor, submeshBounds } from "./scene-builder.js";
 import { voxelGeometry, voxelGeometryFromMesh } from "./voxel-geometry.js";
+import { landmarkFogKey, landmarkFogMaterial, type LandmarkFog } from "./landmark-fog.js";
+import { landmarkSettings } from "./culling.js";
 
 /**
  * Build a cheap "HLOD proxy" render group from a static build document
@@ -466,7 +468,7 @@ const sharedHlodMaterialCache = new Map<string, THREE.Material>();
 export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}): Promise<HlodProxy> {
   // `mesh.hlod: false` (small rocks, pebbles): culled past the full-render ring rather than baked
   if (Object.values(doc.entities).some((e) => (e.components["mesh"] as ProxyMesh | undefined)?.hlod === false)) {
-    doc = { ...doc, entities: Object.fromEntries(Object.entries(doc.entities).filter(([, e]) => (e.components["mesh"] as ProxyMesh | undefined)?.hlod !== false)) };
+    doc = { ...doc, entities: Object.fromEntries(Object.entries(doc.entities).filter(([, e]) => (e.components["mesh"] as ProxyMesh | undefined)?.hlod !== false || !!e.components["landmark"])) };
   }
   const group = new THREE.Group();
   group.name = "hlod-proxy";
@@ -495,7 +497,13 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     }
     return entityMatrix.compose(p, q, s);
   };
-  const addToBucket = (key: string, material: THREE.Material | THREE.Material[], geometry: THREE.BufferGeometry): void => {
+  // A landmark (core landmarkOf carries it onto the bake entity) merges apart, drawn with its fog variant.
+  const landmarkOf = (entity: SceneDoc["entities"][string]): LandmarkFog | null => landmarkSettings(entity.components["landmark"]);
+  const addToBucket = (key: string, material: THREE.Material | THREE.Material[], geometry: THREE.BufferGeometry, landmark?: LandmarkFog | null): void => {
+    if (landmark) {
+      key = `${key}#landmark:${landmarkFogKey(landmark)}`;
+      material = Array.isArray(material) ? material.map((m) => landmarkFogMaterial(m, landmark)) : landmarkFogMaterial(material, landmark);
+    }
     let bucket = buckets.get(key);
     if (!bucket) {
       bucket = { material, geoms: [] };
@@ -559,7 +567,8 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     // keep merging as real geometry — a rock has no atlas and needs none.
     let toMerge = entities;
     if (options.bakeImpostor) {
-      const lodded = entities.filter(([, entity]) => (entity.components["mesh"] as { lod?: boolean }).lod !== false);
+      // a landmark stays real geometry: an impostor card cannot carry its fog curve or its silhouette
+      const lodded = entities.filter(([, entity]) => (entity.components["mesh"] as { lod?: boolean }).lod !== false && !entity.components["landmark"]);
       const source: THREE.Object3D = node ? (gltf.scene.getObjectByName(node) ?? gltf.scene) : gltf.scene;
       // bake (cached) up front so a model with no atlas keeps merging as geometry
       if (lodded.length > 0 && cachedImpostor(assetId, node, source, submeshBounds(submeshes), options)) {
@@ -571,7 +580,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
           matrices: lodded.map(([, entity]) => entityTransform(entity).clone()),
           vegetationTints: lodded.map(([, entity]) => instanceTintOf((entity.components["mesh"] as ProxyMesh & { source: { kind: "asset" } }).source)),
         });
-        toMerge = entities.filter(([, entity]) => (entity.components["mesh"] as { lod?: boolean }).lod === false);
+        toMerge = entities.filter(([, entity]) => (entity.components["mesh"] as { lod?: boolean }).lod === false || !!entity.components["landmark"]);
       }
     }
     for (const [, entity] of toMerge) {
@@ -582,6 +591,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       // full-detail ring.
       const lookId = (entity.components["mesh"] as ProxyMesh).material;
       const tint = instanceTintOf((entity.components["mesh"] as ProxyMesh & { source: { kind: "asset" } }).source);
+      const landmark = landmarkOf(entity);
       submeshes.forEach((sub, index) => {
         // `sub.geometry` belongs to the shared glTF cache — every other chunk
         // and every un-merged instance of this model holds the same object, so
@@ -593,7 +603,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
         const look = lookId && !Array.isArray(sub.material) ? proxyLookMaterial(lookId, options, materialCache) : null;
         if (look) {
           // every piece drawn with this material asset shares one merged draw, whatever model it came from
-          addToBucket(`look:${lookId}`, look, prepped);
+          addToBucket(`look:${lookId}`, look, prepped, landmark);
           return;
         }
         let bucketKey = Array.isArray(sub.material)
@@ -627,7 +637,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
         // InstancedProps transform node and expect instance attributes
         const material = withoutFoliageWind(cachedMergedMaterial(bucketKey, sub.material));
         if (hasRoles) for (const m of Array.isArray(material) ? material : [material]) (m as THREE.MeshStandardMaterial).vertexColors = true;
-        addToBucket(bucketKey, material, prepped);
+        addToBucket(bucketKey, material, prepped, landmark);
       });
     }
   }
@@ -766,7 +776,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       const prepped = prepForMerge(surfaceGeometry(mesh.source), false);
       prepped.applyMatrix4(entityTransform(entity));
       const key = mesh.material ?? "__default";
-      addToBucket(key, materialForId(mesh.material, options, materialCache), prepped);
+      addToBucket(key, materialForId(mesh.material, options, materialCache), prepped, landmarkOf(entity));
       continue;
     }
     if ((mesh.source as { kind: string }).kind === "poly") {
@@ -780,7 +790,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       const prepped = prepForMerge(geometry, false);
       prepped.applyMatrix4(entityTransform(entity));
       const key = mesh.material ?? "__default";
-      addToBucket(key, materialForId(mesh.material, options, materialCache), prepped);
+      addToBucket(key, materialForId(mesh.material, options, materialCache), prepped, landmarkOf(entity));
       continue;
     }
     // Anything else with no merge path here — any future source kind — is
@@ -817,7 +827,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
 
     const key = mesh.material ?? "__default";
     const material = materialForId(mesh.material, options, materialCache);
-    addToBucket(key, material, prepped);
+    addToBucket(key, material, prepped, landmarkOf(entity));
   }
 
   let mergedDrawCalls = impostorDrawCalls;

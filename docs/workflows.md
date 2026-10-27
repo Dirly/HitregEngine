@@ -52,6 +52,8 @@ Tools read a project's `dependsOn` closure, so a world sees foundation and world
   buckets), `portals` (veil, cover/--fit, trip, real-client play, loading art). Design bars: `site-standards`,
   `dungeon-standards`, `interior-standards`, `encounter-standards`, `world-standards`; towns: `town-planner`
   (wall, settle, wear, lights). New lessons go into a skill or a check, not `docs/zone-creation-lessons.md`.
+- **Small/medium outdoor places** (camp, croft row, shrine, graveyard, landing, work yard, den, watch ruin, halt
+  yard, cuttings): `tools/place-build.mts all` from a place archetype; read `docs/place-builder.md`. Hero places below.
 - **Complete POI creation/revision:** use `tools/poi-review/creator/SKILL.md` for
   one owner agent per whole location, an explicit adventure brief and early
   playable design review. Its intake schema and preparer live beside it. The

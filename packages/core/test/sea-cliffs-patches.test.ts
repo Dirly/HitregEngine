@@ -83,3 +83,17 @@ describe("sea cliffs keep their wall and stacks under patches and POIs", () => {
     expect(f.seaCliffs()!.stacksIn(-2000, -2000, 2000, 2000).length).toBe(pl.seaCliffs()!.stacksIn(-2000, -2000, 2000, 2000).length);
   });
 });
+
+describe("stacks.omit keeps a view corridor clear", () => {
+  it("drops only the stack at an omitted point; the others keep their sites, radii and tops", () => {
+    const plain = createWorldField(recipe());
+    const before = plain.seaCliffs()!.stacksIn(-2000, -2000, 2000, 2000);
+    const gone = before[0]!;
+    const r = recipe();
+    (r.terrain.seaCliffs![0]!.stacks as { omit?: [number, number][] }).omit = [[gone.x + 2, gone.z - 2]];
+    const after = createWorldField(r).seaCliffs()!.stacksIn(-2000, -2000, 2000, 2000);
+    expect(after.length).toBe(before.length - 1);
+    expect(after.some((s) => s.x === gone.x && s.z === gone.z)).toBe(false);
+    for (const s of after) expect(before.some((b) => b.x === s.x && b.z === s.z && b.radius === s.radius && b.top === s.top)).toBe(true);
+  });
+});

@@ -460,11 +460,19 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   // the cell's column (`dualMeshExperiment.seams`), which puts their border on the plane too,
   // and then take the same skirts. Unclipped ("own"), equal-LOD dual
   // neighbours still agree exactly but an LOD step cracks.
+  // Full-detail cells clamp their skirts to the rendered section (what the player sees up close). An HLOD cell keeps
+  // the lattice clamp and hangs COARSE_SKIRT_K x deeper: its strip is what covers the crack where the near cell's
+  // clamped skirt no longer reaches (measured at the 1:4 join on terraced DC cliffs: 138/117/28 visible holes before
+  // the clamp, 156/143/29 clamped on both sides, 136/113/27 like this).
+  const sectionHere = dualMeshExperiment.skirtSection && lodStep === 1;
+  const skirtK = lodStep > 1 && dualMeshExperiment.skirtSection ? COARSE_SKIRT_K : 1;
   const skirted =
-    mesher === "mc"
+    mesher === "mc" && !dualMeshExperiment.skirtSection
       ? addSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS, block)
+      : mesher === "mc"
+      ? addInwardSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS * skirtK, block, true, sectionHere)
       : dualMeshExperiment.seams === "clip"
-      ? addInwardSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, Math.max(step * SKIRT_STEPS, dualMeshExperiment.skirtMin), block)
+      ? addInwardSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, Math.max(step * SKIRT_STEPS * skirtK, dualMeshExperiment.skirtMin), block, false, sectionHere)
       : { ...result, splat, tint };
   const positions = skirted.positions;
   let minX = Infinity;
@@ -576,21 +584,25 @@ function flatCellMesh(field: WorldField, block: SampledBlock): MarchResult | nul
 
 /**
  * EXPERIMENT switches for the dual meshers, mutable so a measuring tool can
- * A/B them (`tools/voxel-seams.mts`); the shipping MC path never reads them.
+ * A/B them (`tools/voxel-seams.mts`); the shipping MC path reads only `skirtSection`.
  * - `seams`: "clip" ends each dual cell on its column planes and skirts it
  *   like MC, so an LOD step closes; "own" is the original face-ownership rule
  *   (no skirts — equal-LOD seams exact, LOD steps crack).
  * - `crease`: radians; `"dc"` splits a vertex's normal where its cell's
  *   crossing normals spread wider (0 = one averaged normal). 0.6 = 34 deg.
+ * - `skirtSection`: clamp every skirt (MC and dual) to the cell's rendered cross-section on its plane as well as to
+ *   the lattice ({@link sectionRun}); false is the lattice-only clamp (A/B for the scan and the build-time bench).
  * - `skirtMin`: metres; the dual meshers' skirts hang at least this far (0 = SKIRT_STEPS lattice steps). Measured
  *   on terrace cliffs at the 1:4 HLOD join: 0, 12, 16 and 24 m leak alike — the leaks there were the FIELD moving
  *   with the lattice (fixed in sampleBlock: coarse blocks read the full-detail planar function), not skirt depth.
  * Meshes are cached by source, so flip these before meshing, not between.
  */
-export const dualMeshExperiment: { seams: "clip" | "own"; crease: number; hermiteSteps: number; hermiteGate: number; skirtMin: number } = { seams: "clip", crease: 0.6, hermiteSteps: 3, hermiteGate: -2, skirtMin: 0 };
+export const dualMeshExperiment: { seams: "clip" | "own"; crease: number; hermiteSteps: number; hermiteGate: number; skirtMin: number; skirtSection: boolean } = { seams: "clip", crease: 0.6, hermiteSteps: 3, hermiteGate: -2, skirtMin: 0, skirtSection: true };
 
 /** Skirt depth in lattice steps: a full-detail cell drops 6 m, an HLOD cell (4x lattice) 24 m. */
 const SKIRT_STEPS = 3;
+/** An HLOD cell's skirt depth multiplier (see `sectionHere` in buildVoxelMesh). */
+const COARSE_SKIRT_K = 3;
 
 interface SkirtInput {
   positions: Float32Array;
@@ -598,6 +610,143 @@ interface SkirtInput {
   indices: Uint32Array;
   vertexCount: number;
   triangleCount: number;
+}
+
+/**
+ * The cell's own cross-section on one side plane, as the mesh draws it: every boundary edge in that plane as a 2D
+ * segment (u = the plane's horizontal axis, then y) with its air-side normal. A skirt belongs INSIDE this section
+ * (that is where the crack it covers lies, and nowhere else is hidden), so each skirt run is also clamped where its
+ * ray leaves the section — measured against the geometry that renders, not only against the sampled lattice.
+ *
+ * Why the lattice alone was not enough (the pale blades on Skelmorrow's gorge walls): on a planar cliff the dual
+ * mesher puts the wall where the exact planar function says, while trilinear interpolation of the lattice puts the
+ * zero crossing somewhere between two samples of a density that jumps by tens across a wall. A ledge-top skirt
+ * hung down past a brink then read "rock" on the lattice and stood proud of the riser below, shaded as the ledge
+ * top: a pale shard on a dark wall.
+ */
+interface PlaneSection {
+  /** ua, ya, ub, yb, nu, ny per segment (n zero when the edge's normal lies across the plane: no side known). */
+  seg: Float64Array;
+  count: number;
+  uAxis: 0 | 2;
+  uMin: number;
+  uMax: number;
+}
+
+function planeSections(
+  positions: Float32Array,
+  normals: Float32Array,
+  edges: readonly number[],
+  planes: readonly { axis: 0 | 2 }[],
+  x0: number,
+  z0: number,
+  cellSize: number,
+): PlaneSection[] {
+  const counts = planes.map(() => 0);
+  for (let e = 0; e < edges.length; e += 3) counts[edges[e + 2]! % planes.length]!++;
+  const sections: PlaneSection[] = planes.map((plane, p) => {
+    const uAxis: 0 | 2 = plane.axis === 0 ? 2 : 0;
+    const u0 = uAxis === 2 ? z0 : x0;
+    return { seg: new Float64Array(counts[p]! * 6), count: 0, uAxis, uMin: u0, uMax: u0 + cellSize };
+  });
+  for (let e = 0; e < edges.length; e += 3) {
+    const a = edges[e]!, b = edges[e + 1]!;
+    const s = sections[edges[e + 2]! % planes.length]!;
+    const ua = positions[a * 3 + s.uAxis]!, ya = positions[a * 3 + 1]!;
+    const ub = positions[b * 3 + s.uAxis]!, yb = positions[b * 3 + 1]!;
+    const du = ub - ua, dy = yb - ya;
+    const len = Math.sqrt(du * du + dy * dy);
+    let nu = 0, ny = 0;
+    if (len > 1e-9) {
+      // the in-plane perpendicular, turned to the side the surface normals point (air)
+      const pu = dy / len, py = -du / len;
+      const side = pu * (normals[a * 3 + s.uAxis]! + normals[b * 3 + s.uAxis]!) + py * (normals[a * 3 + 1]! + normals[b * 3 + 1]!);
+      if (side > 1e-3) { nu = pu; ny = py; }
+      else if (side < -1e-3) { nu = -pu; ny = -py; }
+    }
+    const o = s.count++ * 6;
+    s.seg[o] = ua; s.seg[o + 1] = ya; s.seg[o + 2] = ub; s.seg[o + 3] = yb; s.seg[o + 4] = nu; s.seg[o + 5] = ny;
+  }
+  return sections;
+}
+
+const TWO_PI = Math.PI * 2;
+/** A skirt ray within this of the surface itself (radians) lies along the face: it covers nothing and grazes out. */
+const GRAZE = 0.02;
+/** Angle of v from u, counter-clockwise, in [0, 2π). */
+const turn = (uu: number, uy: number, vu: number, vy: number): number => {
+  const a = Math.atan2(uu * vy - uy * vu, uu * vu + uy * vy);
+  return a < 0 ? a + TWO_PI : a;
+};
+
+/**
+ * How far a skirt ray from the section's boundary point (pu, py), unit direction (du, dy) in the plane, stays inside
+ * the section: 0 when it starts into air (or along the surface itself), else up to `maxRun`, stopping `margin` short
+ * of the first boundary it meets and at the cell's own span of the plane.
+ */
+function sectionRun(s: PlaneSection, pu: number, py: number, du: number, dy: number, maxRun: number, margin: number): number {
+  let limit = maxRun;
+  if (du > 1e-9) limit = Math.min(limit, (s.uMax - pu) / du);
+  else if (du < -1e-9) limit = Math.min(limit, (s.uMin - pu) / du);
+  let hit = Infinity;
+  let incident = 0;
+  let w1u = 0, w1y = 0, n1u = 0, n1y = 0, w2u = 0, w2y = 0, n2u = 0, n2y = 0;
+  const seg = s.seg;
+  for (let i = 0, o = 0; i < s.count; i++, o += 6) {
+    const ua = seg[o]!, ya = seg[o + 1]!, ub = seg[o + 2]!, yb = seg[o + 3]!;
+    const atA = Math.abs(ua - pu) < 1e-4 && Math.abs(ya - py) < 1e-4;
+    const atB = Math.abs(ub - pu) < 1e-4 && Math.abs(yb - py) < 1e-4;
+    if (atA || atB) {
+      if (atA && atB) continue; // zero-length
+      const ou = (atA ? ub : ua) - pu, oy = (atA ? yb : ya) - py;
+      const l = Math.sqrt(ou * ou + oy * oy);
+      if (incident === 0) { w1u = ou / l; w1y = oy / l; n1u = seg[o + 4]!; n1y = seg[o + 5]!; }
+      else if (incident === 1) { w2u = ou / l; w2y = oy / l; n2u = seg[o + 4]!; n2y = seg[o + 5]!; }
+      incident++;
+      continue;
+    }
+    const eu = ub - ua, ey = yb - ya;
+    const denom = du * ey - dy * eu;
+    if (Math.abs(denom) < 1e-12) continue; // parallel
+    const wu = ua - pu, wy = ya - py;
+    const t = (wu * ey - wy * eu) / denom;
+    if (t <= 1e-6 || t >= hit) continue;
+    const sAlong = (wu * dy - wy * du) / denom;
+    if (sAlong >= -1e-6 && sAlong <= 1 + 1e-6) hit = t;
+  }
+  // Does the ray start into the solid side? One edge here (a span end): the half-plane behind it. Two: the wedge
+  // between them that holds -(n1 + n2) — the air side's bisector turned round — is the solid one.
+  if (incident === 1 && (n1u !== 0 || n1y !== 0)) {
+    if (du * n1u + dy * n1y > -0.02) return 0;
+  } else if (incident >= 2 && (n1u !== 0 || n1y !== 0) && (n2u !== 0 || n2y !== 0)) {
+    let mu = -(n1u + n2u), my = -(n1y + n2y);
+    if (mu * mu + my * my < 1e-8) { mu = -n1u; my = -n1y; }
+    const wedge = turn(w1u, w1y, w2u, w2y);
+    const td = turn(w1u, w1y, du, dy);
+    // along the surface itself: a flap with no area outside it, or a coplanar sliver on it
+    const G = GRAZE;
+    if (td < G || Math.abs(td - wedge) < G || td > TWO_PI - G) return 0;
+    if (td < wedge !== turn(w1u, w1y, mu, my) < wedge) return 0;
+  }
+  const run = Math.min(limit, hit - margin);
+  return run > margin * 0.5 ? run : 0;
+}
+
+/** Does the open segment (u0, y0)-(u1, y1) cross any boundary of the section? (Touching at its own ends does not count.) */
+function sectionCrossed(s: PlaneSection, u0: number, y0: number, u1: number, y1: number): boolean {
+  const du = u1 - u0, dy = y1 - y0;
+  const seg = s.seg;
+  for (let i = 0, o = 0; i < s.count; i++, o += 6) {
+    const ua = seg[o]!, ya = seg[o + 1]!, eu = seg[o + 2]! - ua, ey = seg[o + 3]! - ya;
+    const denom = du * ey - dy * eu;
+    if (Math.abs(denom) < 1e-12) continue;
+    const wu = ua - u0, wy = ya - y0;
+    const t = (wu * ey - wy * eu) / denom;
+    if (t <= 1e-4 || t >= 1 - 1e-4) continue;
+    const along = (wu * dy - wy * du) / denom;
+    if (along >= -1e-6 && along <= 1 + 1e-6) return true;
+  }
+  return false;
 }
 
 /**
@@ -626,6 +775,9 @@ interface SkirtInput {
  * column (a quarter step short of the first air crossing). Where there is
  * less rock than `depth` the strip is shorter; where there is none it is
  * omitted. `auditVoxelMesh` (mesh-audit.ts) is the check.
+ *
+ * Since 2026-10-22 this is only the A/B baseline (`dualMeshExperiment.skirtSection = false`): straight down/up hung
+ * from a near-vertical wall runs ALONG the face and grazes out of it. MC cells now take {@link addInwardSkirts}.
  */
 function addSkirts(
   mesh: SkirtInput,
@@ -744,12 +896,19 @@ function addSkirts(
     outTint[to * 3 + 2] = tint[from * 3 + 2]!;
   };
   // A boundary vertex is shared by two boundary edges; measure each once.
+  // Per (vertex, plane, direction): the lattice run, then clamped to the rendered section on that plane.
+  const sections = dualMeshExperiment.skirtSection ? planeSections(positions, normals, edges, planes, x0, z0, cellSize) : [];
   const runs = new Map<number, number>();
-  const runOf = (vertex: number, dir: number): number => {
-    const key = dir > 0 ? -1 - vertex : vertex;
+  const runOf = (vertex: number, encodedPlane: number): number => {
+    const key = vertex * 8 + encodedPlane;
     let run = runs.get(key);
     if (run === undefined) {
+      const dir = encodedPlane >= planes.length ? 1 : -1;
       run = buriedRun(vertex, dir);
+      if (run > 0 && dualMeshExperiment.skirtSection) {
+        const s = sections[encodedPlane % planes.length]!;
+        run = Math.min(run, sectionRun(s, positions[vertex * 3 + s.uAxis]!, positions[vertex * 3 + 1]!, 0, dir, run, probe));
+      }
       runs.set(key, run);
     }
     return run;
@@ -760,8 +919,8 @@ function addSkirts(
     const encodedPlane = edges[e * 3 + 2]!;
     const plane = planes[encodedPlane % planes.length]!;
     const up = encodedPlane >= planes.length;
-    const runA = runOf(a, up ? 1 : -1);
-    const runB = runOf(b, up ? 1 : -1);
+    const runA = runOf(a, encodedPlane);
+    const runB = runOf(b, encodedPlane);
     // No rock to hide in on either end (a sliver of rock thinner than half a
     // probe): no skirt. A crack at an LOD seam is better than a blade.
     if (runA <= 0 && runB <= 0) continue;
@@ -802,7 +961,7 @@ function addSkirts(
 }
 
 /**
- * Skirts for the CLIPPED dual meshers: the same strip from every boundary edge
+ * Skirts for every mesher (the CLIPPED dual ones and, since 2026-10-22, MC): the same strip from every boundary edge
  * on a side plane, but extruded INTO THE ROCK along the surface's inward normal
  * projected into that plane, instead of straight down (or up).
  *
@@ -812,7 +971,7 @@ function addSkirts(
  * the faces stays open. DC keeps faces vertical (that is the point of it), so
  * its skirts follow the face: a floor's skirt still hangs down, an underside's
  * still rises, a wall's goes back into the wall. Same rock-run clamp as
- * {@link addSkirts}, measured along the new direction.
+ * {@link addSkirts}, measured along the new direction, then the rendered-section clamp ({@link sectionRun}).
  */
 function addInwardSkirts(
   mesh: SkirtInput,
@@ -824,6 +983,10 @@ function addInwardSkirts(
   cellSize: number,
   depth: number,
   block: SampledBlock,
+  /** MC: hang ground and underside strips plumb (as `addSkirts` did); only steeper faces extrude into the face. */
+  vertical = false,
+  /** Clamp to the rendered section (`dualMeshExperiment.skirtSection`); off = the lattice-only baseline. */
+  section = dualMeshExperiment.skirtSection,
 ): SkirtInput & { splat: Float32Array; tint: Float32Array } {
   const { positions, normals, indices, vertexCount, triangleCount } = mesh;
   const eps = 1e-4;
@@ -864,7 +1027,8 @@ function addInwardSkirts(
     return lerp(lerp(x00, x10, ty), lerp(x01, x11, ty), tz);
   };
   const probe = step / 4;
-  /** Per (vertex, plane): unit in-plane inward direction and how far it stays in rock along it. */
+  const sections = section ? planeSections(positions, normals, edges, planes, x0, z0, cellSize) : [];
+  /** Per (vertex, plane): unit in-plane inward direction and how far it stays in rock along it (lattice, then section). */
   const runs = new Map<number, [number, number, number, number]>();
   const runOf = (v: number, p: number): [number, number, number, number] => {
     const key = v * 4 + p;
@@ -879,6 +1043,11 @@ function addInwardSkirts(
     if (l < 0.2) {
       dx = 0;
       dy = -1;
+      dz = 0;
+    } else if (vertical && Math.abs(dy) >= Math.hypot(dx, dz)) {
+      // ground or underside (MC): straight down or up, which covers the most LOD-step height per metre of strip
+      dx = 0;
+      dy = dy > 0 ? 1 : -1;
       dz = 0;
     } else {
       dx /= l;
@@ -897,6 +1066,10 @@ function addInwardSkirts(
       prevT = t;
       prevD = d;
     }
+    if (run > 0 && section) {
+      const s = sections[p]!;
+      run = Math.min(run, sectionRun(s, positions[v * 3 + s.uAxis]!, y, s.uAxis === 2 ? dz : dx, dy, run, probe));
+    }
     r = [dx, dy, dz, run];
     runs.set(key, r);
     return r;
@@ -912,14 +1085,20 @@ function addInwardSkirts(
   outTint.set(tint);
   outIndices.set(indices);
   let v = vertexCount, tri = triangleCount;
-  // one skirt vertex per (boundary vertex, plane), shared by the two strips that meet at it
+  // Lattice-only (the A/B baseline): one skirt vertex per (boundary vertex, plane), shared by the two strips that
+  // meet at it. Section-clamped: each strip gets its own ends; if its far edge or diagonal would cross a boundary of
+  // the section, its ends are evened to the shorter run, then halved — two ends at very different runs made a long
+  // triangle whose diagonal cut across a thin air layer (a strata shelf over its undercut): the pale shard on a wall.
+  const shared = !section;
   const skirtVertex = new Map<number, number>();
-  const extruded = (from: number, p: number): number => {
-    const [dx, dy, dz, run] = runOf(from, p);
+  const extruded = (from: number, p: number, run: number): number => {
     if (run <= 0) return from;
+    const [dx, dy, dz] = runOf(from, p);
     const key = from * 4 + p;
-    const hit = skirtVertex.get(key);
-    if (hit !== undefined) return hit;
+    if (shared) {
+      const hit = skirtVertex.get(key);
+      if (hit !== undefined) return hit;
+    }
     const to = v++;
     outPositions[to * 3] = positions[from * 3]! + dx * run;
     outPositions[to * 3 + 1] = positions[from * 3 + 1]! + dy * run;
@@ -927,14 +1106,39 @@ function addInwardSkirts(
     for (let k = 0; k < 3; k++) outNormals[to * 3 + k] = normals[from * 3 + k]!;
     for (let k = 0; k < surfaceCount; k++) outSplat[to * surfaceCount + k] = splat[from * surfaceCount + k]!;
     for (let k = 0; k < 3; k++) outTint[to * 3 + k] = tint[from * 3 + k]!;
-    skirtVertex.set(key, to);
+    if (shared) skirtVertex.set(key, to);
     return to;
   };
   const P = (i: number): [number, number, number] => [outPositions[i * 3]!, outPositions[i * 3 + 1]!, outPositions[i * 3 + 2]!];
   for (let e = 0; e < count; e++) {
     const a = edges[e * 3]!, b = edges[e * 3 + 1]!, p = edges[e * 3 + 2]!;
     const plane = planes[p]!;
-    const a2 = extruded(a, p), b2 = extruded(b, p);
+    let runA = runOf(a, p)[3], runB = runOf(b, p)[3];
+    if (!shared) {
+      const s = sections[p]!;
+      const [ax, ay, az] = runOf(a, p), [bx, by, bz] = runOf(b, p);
+      const au = positions[a * 3 + s.uAxis]!, ayy = positions[a * 3 + 1]!, bu = positions[b * 3 + s.uAxis]!, byy = positions[b * 3 + 1]!;
+      const adu = s.uAxis === 2 ? az : ax, bdu = s.uAxis === 2 ? bz : bx;
+      // the strip's far edge a2-b2 and its diagonal a-b2 (both triangles use it); one-ended, the diagonal alone
+      const crossesAt = (ra: number, rb: number): boolean => {
+        const fu = bu + bdu * rb, fy = byy + by * rb;
+        return sectionCrossed(s, au + adu * ra, ayy + ay * ra, fu, fy) || (rb > 0 && sectionCrossed(s, au, ayy, fu, fy));
+      };
+      if (crossesAt(runA, runB)) {
+        // even the ends out (a long end beside a short one is what cut across a shelf), then keep the longest common
+        // run that crosses nothing (bisection: halving threw away cover the LOD seam needed)
+        const top = runA > 0 && runB > 0 ? Math.min(runA, runB) : Math.max(runA, runB);
+        const fa = runA > 0 ? 1 : 0, fb = runB > 0 ? 1 : 0;
+        if (!crossesAt(top * fa, top * fb)) { runA = top * fa; runB = top * fb; }
+        else {
+          let lo = 0, hi = top;
+          for (let k = 0; k < 6; k++) { const mid = (lo + hi) / 2; if (crossesAt(mid * fa, mid * fb)) hi = mid; else lo = mid; }
+          runA = lo * fa; runB = lo * fb;
+          if (lo < probe * 0.5) runA = runB = 0;
+        }
+      }
+    }
+    const a2 = extruded(a, p, runA), b2 = extruded(b, p, runB);
     if (a2 === a && b2 === b) continue;
     // wind so the strip faces OUT of the cell: its normal's plane-axis component along `outward`
     const far = b2 !== b ? b2 : a2;

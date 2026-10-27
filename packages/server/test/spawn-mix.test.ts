@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hiddenFromAll, pickHiddenPoint, pickRoutePoint, pointOnRoute, populationOf, resolveSpawnArea, rollMix, spawnTable, type MixRow } from "../src/spawn-areas.js";
+import { hiddenFromAll, hoursOpen, SpawnAreaManager, pickHiddenPoint, pickRoutePoint, pointOnRoute, populationOf, resolveSpawnArea, rollMix, spawnTable, type MixRow } from "../src/spawn-areas.js";
 
 /** The pure halves of roaming spawn areas: the table, the roll, the spot. */
 
@@ -118,5 +118,31 @@ describe("route placement", () => {
       expect(along).toBeGreaterThanOrEqual(20 - 1e-9);
       expect(Math.hypot(p[0] - 100, p[2] - 100)).toBeGreaterThanOrEqual(40);
     }
+  });
+});
+
+describe("wandering packs: bands, loops, hours", () => {
+  it("a mix row's `with` companions ride along in the table", () => {
+    const t = spawnTable(resolveSpawnArea({ placement: "route", patrol: [[0, 0, 0], [10, 0, 0]], mix: [{ template: "footpad", count: [1, 1], with: ["cutpurse", "lookout"] }] }));
+    expect(t[0]!.with).toEqual(["cutpurse", "lookout"]);
+    expect(spawnTable(resolveSpawnArea({ placement: "anywhere", mix: [{ template: "rat" }] }))[0]!.with).toBeUndefined();
+  });
+
+  it("a loop route is closed (first point repeated last); a corridor is not", () => {
+    const area = (loop: boolean) => ({ id: "a", position: [100, 0, 50], data: resolveSpawnArea({ placement: "route", loop, patrol: [[0, 0, 0], [10, 0, 0], [10, 0, 10], [0, 0, 10]] }) }) as never;
+    const closed = SpawnAreaManager.route(area(true));
+    expect(closed).toHaveLength(5);
+    expect(closed[4]).toEqual([100, 0, 50]);
+    expect(SpawnAreaManager.route(area(false))).toHaveLength(4);
+  });
+
+  it("hours: an open window, a window past midnight, and no clock", () => {
+    expect(hoursOpen(undefined, 12)).toBe(true);
+    expect(hoursOpen([19, 5], undefined)).toBe(true);
+    expect(hoursOpen([19, 5], 21)).toBe(true);
+    expect(hoursOpen([19, 5], 3)).toBe(true);
+    expect(hoursOpen([19, 5], 12)).toBe(false);
+    expect(hoursOpen([8, 18], 12)).toBe(true);
+    expect(hoursOpen([8, 18], 18)).toBe(false);
   });
 });

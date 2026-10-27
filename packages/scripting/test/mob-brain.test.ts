@@ -26,7 +26,7 @@ import {
   type SimLike,
 } from "../src/index.js";
 import { GROUND_LAYERS, OBSTACLE_LAYERS } from "../src/steering.js";
-import { MOVE_TARGET_RULES } from "../src/mob-brain.js";
+import { ALERT_SIGHT_GRACE, MOVE_TARGET_RULES } from "../src/mob-brain.js";
 
 const coreRegistry = new ComponentRegistry();
 registerCoreComponents(coreRegistry);
@@ -731,6 +731,111 @@ describe("mob-brain packs", () => {
     h.step(60);
     expect(h.driveOf("boar2")).toEqual([0, 0]);
   });
+
+  // Multi-level dungeons: a shout carries in 3D, never across a storey, and
+  // only to mobs that can see the shouter or the target.
+  it("a shout from a pack above does not pull a pack below behind rock", () => {
+    const h = harness({
+      params: { roam: 0, aggroRange: 16, alertRadius: 20, faction: "boar", speed: 4 },
+      playerAt: [0, 0, 10],
+      extras: [{
+          id: "boar2",
+          at: [8, -8, 0],
+          tags: ["npc"],
+          script: {
+            name: "mob-brain",
+            params: { roam: 0, aggroRange: 1, alertRadius: 20, faction: "boar", speed: 4, leash: 100 },
+          },
+        }],
+      walls: [{ minX: 3, maxX: 5, minZ: -4, maxZ: 12 }],
+    });
+    h.step(60);
+    expect(h.alerts().filter((a) => a.payload["mobId"] === "mob")).toHaveLength(1);
+    expect(h.driveOf("boar2")).toEqual([0, 0]);
+  });
+
+  it("a same-level packmate behind rock (sees neither shouter nor target) does not answer", () => {
+    const h = harness({
+      params: { roam: 0, aggroRange: 16, alertRadius: 20, faction: "boar", speed: 4 },
+      playerAt: [0, 0, 10],
+      extras: [{
+          id: "boar2",
+          at: [8, 0, 0],
+          tags: ["npc"],
+          script: {
+            name: "mob-brain",
+            params: { roam: 0, aggroRange: 1, alertRadius: 20, faction: "boar", speed: 4, leash: 100 },
+          },
+        }],
+      walls: [{ minX: 3, maxX: 5, minZ: -4, maxZ: 12 }],
+    });
+    h.step(60);
+    expect(h.driveOf("boar2")).toEqual([0, 0]);
+  });
+
+  it("a same-level visible packmate still answers", () => {
+    const h = harness({
+      params: { roam: 0, aggroRange: 16, alertRadius: 20, faction: "boar", speed: 4 },
+      playerAt: [0, 0, 10],
+      extras: [{
+          id: "boar2",
+          at: [8, 1.5, 0],
+          tags: ["npc"],
+          script: {
+            name: "mob-brain",
+            params: { roam: 0, aggroRange: 1, alertRadius: 20, faction: "boar", speed: 4, leash: 100 },
+          },
+        }],
+    });
+    h.step(60);
+    const [vx, vz] = h.driveOf("boar2");
+    expect(Math.hypot(vx, vz)).toBeGreaterThan(0.5);
+  });
+
+  // Ally sees the shouter (z = 0 is clear) but a wall cuts its view of the player.
+  const blindAlly = { minX: 10, maxX: 13, minZ: 1, maxZ: 3 };
+
+  it("drops a shouted target it never sees once the grace window passes", () => {
+    const h = harness({
+      params: { roam: 0, aggroRange: 16, alertRadius: 20, faction: "boar", speed: 4 },
+      playerAt: [0, 0, 10],
+      extras: [{
+          id: "boar2",
+          at: [14, 0, 0],
+          tags: ["npc"],
+          script: {
+            name: "mob-brain",
+            params: { roam: 0, aggroRange: 1, alertRadius: 20, faction: "boar", speed: 4, leash: 100 },
+          },
+        }],
+      walls: [blindAlly],
+    });
+    h.step(30);
+    expect(Math.hypot(...h.driveOf("boar2"))).toBeGreaterThan(0.5); // answered: it saw the shouter
+    h.step(Math.ceil(60 * (ALERT_SIGHT_GRACE + 0.5)));
+    expect(h.driveOf("boar2")).toEqual([0, 0]); // never saw the player: let go
+  });
+
+  it("keeps a shouted target it cannot see once that target has hit it", () => {
+    const h = harness({
+      params: { roam: 0, aggroRange: 16, alertRadius: 20, faction: "boar", speed: 4 },
+      playerAt: [0, 0, 10],
+      extras: [{
+          id: "boar2",
+          at: [14, 0, 0],
+          tags: ["npc"],
+          script: {
+            name: "mob-brain",
+            params: { roam: 0, aggroRange: 1, alertRadius: 20, faction: "boar", speed: 4, leash: 100 },
+          },
+        }],
+      walls: [blindAlly],
+    });
+    h.step(30);
+    h.bus.emit("mob.threat", { mobId: "boar2", sourceId: "player", amount: 5 });
+    h.step(Math.ceil(60 * (ALERT_SIGHT_GRACE + 0.5)));
+    expect(Math.hypot(...h.driveOf("boar2"))).toBeGreaterThan(0.5);
+  });
 });
 
 describe("mob-brain debug", () => {
@@ -1144,5 +1249,34 @@ describe("mob-brain patrolDir", () => {
     const h = harness({ params: { patrol: route, roamSpeed: 2 }, mobAt: [25, 0, 0], playerAt: [0, 0, 500] });
     h.step(30);
     expect(h.drive()[0]).toBeLessThan(-0.5); // nearest point is 20: it walks back to it first
+  });
+});
+
+describe("mob-brain patrolLoop", () => {
+  // a closed square (last point = first): round and round, never back
+  const loop = [[0, 0, 0], [20, 0, 0], [20, 0, 20], [0, 0, 20], [0, 0, 0]];
+  const run = (patrolLoop: boolean) => {
+    const h = harness({ params: { patrol: loop, patrolDir: 1, patrolLoop, roamSpeed: 3 }, mobAt: [10, 0, 20], playerAt: [0, 0, 500] });
+    let home = false;
+    let left = 60 * 5; // look 5 s past the closing point
+    let after = { x: 0, z: 0 };
+    for (let i = 0; i < 60 * 40 && left > 0; i++) {
+      h.step(1);
+      const p = h.mob.position;
+      if (!home && Math.hypot(p.x, p.z) < 1.5) home = true;
+      else if (home) { left--; after = { x: Math.max(after.x, p.x), z: Math.max(after.z, p.z) }; }
+    }
+    return { home, after };
+  };
+  it("a loop carries on past its closing point instead of turning back", () => {
+    const r = run(true);
+    expect(r.home).toBe(true);
+    expect(r.after.x).toBeGreaterThan(8); // off along the first leg, +x
+  });
+  it("without patrolLoop the same route is walked out and back", () => {
+    const r = run(false);
+    expect(r.home).toBe(true);
+    expect(r.after.z).toBeGreaterThan(8); // back up the leg it came down, +z
+    expect(r.after.x).toBeLessThan(4);
   });
 });

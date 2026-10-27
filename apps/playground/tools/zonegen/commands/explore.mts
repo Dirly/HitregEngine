@@ -12,6 +12,7 @@
  *     nothing.
  */
 import path from "node:path";
+import { reservationTierFault } from "../../../../../tools/poi-review/size-tiers.mjs";
 import { exists, finish, load, readJson, writeJson, type Ctx, type Finding } from "../lib.mts";
 import type { WorldRecipe } from "@hitreg/core";
 import { explorationSchema, type Exploration } from "../schemas.mts";
@@ -52,6 +53,8 @@ export async function run(ctx: Ctx): Promise<number> {
       continue;
     }
     if (region && !inZone(region, r.center[0], r.center[1])) err(f, "outside-zone", `added location ${l.id}: centre outside ${zone}`, l.id);
+    const small = reservationTierFault(l.size, { radius: r.radius, approaches: 1 + r.approaches.length });
+    if (small) err(f, "under-tier", `added location ${l.id}: ${small} (tools/poi-review/size-tiers.mjs)`, l.id);
     for (const o of plan.reservations.reservations) {
       const d = Math.hypot(o.center[0] - r.center[0], o.center[1] - r.center[1]);
       if (d < o.radius + r.radius) err(f, "overlap", `added location ${l.id} overlaps ${o.location} (${Math.round(d)} m apart)`, l.id);

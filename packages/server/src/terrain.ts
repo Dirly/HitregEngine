@@ -232,7 +232,7 @@ export class TerrainStreamer {
   }
 
   /** Is this cell inside the world (past the limit is open sea floor nobody stands on)? */
-  private inWorld(cx: number, cz: number): boolean {
+  inWorld(cx: number, cz: number): boolean {
     return Number.isFinite(cx) && Number.isFinite(cz) && Math.hypot(cx + 0.5, cz + 0.5) <= this.limitCells;
   }
 

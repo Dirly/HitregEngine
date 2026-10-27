@@ -29,6 +29,7 @@ import {
   NetStateStore,
   registerCharacterNetState,
   registerTransferLockNetState,
+  registerCooldownNetState,
   registerLandingNetState,
   registerStaffNetState,
   registerNoticeNetState,
@@ -194,6 +195,7 @@ export class HeadlessWorld {
     this.netState.setAuthority(true);
     registerCharacterNetState(this.netState); // character/<bodyId> sheets validate + appear in the spec
     registerTransferLockNetState(this.netState); // transferLock/<bodyId> — combat scripts hold a body on this server
+    registerCooldownNetState(this.netState); // cooldown/<bodyId>.<abilityId> — ability ready times, written by combat scripts
     registerLandingNetState(this.netState); // landing/<bodyId> — a body that just arrived; brains leave it alone
     registerStaffNetState(this.netState); // staff/<peerId> — a GM/dev account, from its signed ticket
     registerNoticeNetState(this.netState); // notice/<bodyId> — how far brains notice a body (a game's stealth)

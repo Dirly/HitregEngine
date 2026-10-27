@@ -1,6 +1,7 @@
 import { assetFileUrl } from "./asset-url.js";
 import { mountVolumePaint } from './volume-paint.js';
 import { startFramePump } from "./frame-pump.js";
+import { GroundLoadHold } from "./ground-load-hold.js";
 import { mountPropEdit } from "./prop-edit.js";
 import { createWorldMapOverlay } from "./world-map.js";
 import CameraControls from "camera-controls";
@@ -63,6 +64,7 @@ import {
   type ToolDefinition,
   type ToolResult,
   staffRole,
+  STAFF_TELEPORT_EVENT,
 } from "@hitreg/core";
 import {
   AnimationSystem,
@@ -199,7 +201,8 @@ import { NetPresence, type NetReplica } from "./net-presence.js";
 import { mountCreationScreen } from "./character-creation.js";
 import { createCreationPreview } from "./creation-preview.js";
 import { registerCommsEvents } from "@hitreg/comms";
-import { NetRuntimeWorld, planSuspension, resolveNetEndpoint, stripServerPlayers } from "./net-session.js";
+import { acceptSceneGrant, NetRuntimeWorld, planSuspension, resolveNetEndpoint, stripServerPlayers, takePendingGrant } from "./net-session.js";
+import { GatewayClient, mountGatewayPanel, type GatewayCharacter, type PlayGrant } from "./gateway.js";
 import {
   createSessionComms,
   mountConnectionOverlay,
@@ -223,21 +226,69 @@ import {
   voxelChunkProvider,
   voxelMeshViaWorker,
   voxelSupercellViaWorker,
+  voxelDiskCacheStats,
 } from "./voxel-world.js";
 import { createPinStore } from "./pins.js";
 import { installCameraBridge, postContext, publishEngineSpec } from "./dev-bridge.js";
 import { openProfilerWindow } from "./profiler-window.js";
 import { createSocketPreview } from "./socket-preview.js";
 import { foliageSink, syncWorldCover, voxelGroundProbes } from "./voxel-ground.js";
+import { parseSceneScope, scopeStreamer } from "./scene-scope.js";
+/** ?at= / ?streamRadius= (scene-scope.ts): a place-scoped load of a streamed world. */
+const sceneScope = parseSceneScope(globalThis.location?.search ?? "");
 
 CameraControls.install({ THREE });
 
 async function main(): Promise<void> {
   clientLog("boot: main() start");
+  const sessionStore = (() => {
+    try {
+      return sessionStorage;
+    } catch {
+      return null;
+    }
+  })();
+  const netEndpoint = resolveNetEndpoint({
+    query: new URLSearchParams(location.search),
+    host: "dev",
+    storage: (() => {
+      try {
+        return localStorage;
+      } catch {
+        return null;
+      }
+    })(),
+  });
+  const netGateway = netEndpoint.kind === "gateway" ? netEndpoint.url : null;
+  const netServerUrl: string | null =
+    netEndpoint.kind === "gateway" ? "gateway" : netEndpoint.kind === "server" ? netEndpoint.url : null;
+  let resumed: { grant: PlayGrant; character: GatewayCharacter } | null = netGateway
+    ? takePendingGrant<PlayGrant, GatewayCharacter>(sessionStore)
+    : null;
   const canvas = document.getElementById("app") as HTMLCanvasElement;
   const hud = document.getElementById("hud")!;
   const sceneLoadingEl = document.getElementById("scene-loading")!;
   const sceneLoadingTextEl = document.getElementById("scene-loading-text")!;
+
+  if (netGateway && !resumed) {
+    // Match the published host: no world assets, terrain, graphics device or
+    // thousands of scene models behind sign-in and character selection.
+    clientLog("boot: waiting for character selection");
+    hud.textContent = "Choose your character to enter the world.";
+    resumed = await new Promise<{ grant: PlayGrant; character: GatewayCharacter }>((resolve) => {
+      const panel = mountGatewayPanel({
+        client: new GatewayClient(netGateway),
+        textureUrl: (id) => assetFileUrl(`textures/${id}`),
+        preview: (previewCanvas, creation) => createCreationPreview(previewCanvas, creation,
+          (id) => assetFileUrl(`models/${id}`), (id) => assetFileUrl(`textures/${id}`)),
+        onPlay: (grant, character) => {
+          panel.dispose();
+          resolve({ grant, character });
+        },
+      });
+    });
+  }
+  if (resumed) hud.textContent = `Loading ${resumed.grant.scene}…`;
 
   // Frame profiler: ALWAYS on, deliberately. Its per-scope cost is the same
   // two performance.now() calls the hand-rolled EMA counters it replaced were
@@ -284,6 +335,8 @@ async function main(): Promise<void> {
   // scene build AND both streamers, so every source registers into the same
   // system and gets updated from the same camera each frame
   const foliageLod = new FoliageLodSystem();
+  /** The tree switch with no streamed ring to fit (and its ceiling with one): see chunkManager.configure below. */
+  const FOLIAGE_LOD_DISTANCE = 170;
   // streamed cells share one set of instanced batches per model (prop-pool.ts)
   // instead of one per cell — the cell count stops multiplying the draw count
   const propPool = new InstancedPropPool(foliageLod);
@@ -411,6 +464,8 @@ async function main(): Promise<void> {
   });
   chunkManager.profiler = profiler; // chunk loads land as spans, see ChunkManager.profiler
   chunkManager.setCulling(culling);
+  // `grounded` units (base-scene content) hide while the cell under them has no drawn terrain
+  culling.ground = chunkManager;
   // additive scene modules: whole scene files placed as one-line `subscene`
   // entities, streamed by proximity (or resident with mode "always")
   const subsceneManager = new SubsceneManager(assets, registry, {
@@ -470,6 +525,8 @@ async function main(): Promise<void> {
   let loadedSceneContent = "";
   try {
     const preferredScene = (() => {
+      // A server placement takes precedence over the last dungeon inspected in the editor.
+      if (resumed) return resumed.grant.scene;
       // A shareable authoring URL opens a specific scene without mutating the
       // last-scene preference through browser internals. loadAssets resolves
       // only exact ids present in the asset index; this is not a file path.
@@ -484,7 +541,9 @@ async function main(): Promise<void> {
       // first run: the main scene of the first project in the menu
       return sceneMenu.get()[0]?.projects[0]?.main ?? null;
     })();
+    clientLog(`boot: loading assets for ${preferredScene}`);
     const loaded = await loadAssets(assets, preferredScene);
+    clientLog(`boot: assets loaded for ${loaded?.id}`);
     if (loaded) {
       const parsed = sceneDocSchema.safeParse(JSON.parse(loaded.content));
       if (parsed.success) {
@@ -1196,7 +1255,7 @@ async function main(): Promise<void> {
     staticBatch?.dispose();
     staticBatch = null;
     if (!built) return;
-    // a `culling` entity's meshes merge apart from the rest, so it can hide alone
+    // a `culling` or `landmark` entity's meshes merge apart from the rest, so it can hide (and fog) alone
     const cullRoots = lastExpanded ? cullRootsOf(lastExpanded) : [];
     const cullRootOf = cullRootIndex(cullRoots);
     // Merge groups. An AUTHORED culling unit (a `culling` component: an
@@ -1209,11 +1268,17 @@ async function main(): Promise<void> {
     const cullRootById = new Map(cullRoots.map((root) => [root.id, root]));
     const authoredUnit = (rootId: string | undefined): string | undefined => {
       for (let root = rootId ? cullRootById.get(rootId) : undefined; root; root = root.parent ? cullRootById.get(root.parent) : undefined) {
-        if (lastExpanded.entities[root.id]?.components["culling"]) return root.id;
+        const components = lastExpanded.entities[root.id]?.components;
+        if (components?.["culling"] || components?.["landmark"]) return root.id;
       }
       return undefined;
     };
+    // A mesh wider than a batch cell (an ocean plane) does not stand on any one cell's ground: it merges apart, in
+    // `wide`, which the ground gate below leaves alone.
     const cellOf = (mesh: THREE.Mesh): string => {
+      if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+      const radius = (mesh.geometry.boundingSphere?.radius ?? 0) * mesh.matrixWorld.getMaxScaleOnAxis();
+      if (radius > STATIC_BATCH_CELL) return "wide";
       const e = mesh.matrixWorld.elements;
       return `cell:${Math.floor(e[12]! / STATIC_BATCH_CELL)},${Math.floor(e[14]! / STATIC_BATCH_CELL)}`;
     };
@@ -1226,7 +1291,19 @@ async function main(): Promise<void> {
         return !!id && built.objects.get(id) === node && subtreeStill(id);
       },
     });
-    baseCullUnits = registerCullRoots(culling, cullRoots, built.objects, staticBatch);
+    // Base-scene content stands on STREAMED ground: every unit (POIs, dressings, and each batch cell's merged town
+    // buildings, stairs and structures) is hidden while the terrain under it has not streamed in, so nothing hangs
+    // over unloaded cells kilometres off (docs/culling.md, "Over unloaded ground"). Judged on chunk load/unload only.
+    baseCullUnits = registerCullRoots(culling, cullRoots, built.objects, staticBatch, { grounded: true });
+    for (const [key, group] of staticBatch?.groups ?? []) {
+      if (key.startsWith("cell:")) baseCullUnits.push(culling.register({ name: `static-${key}`, objects: [group], grounded: true }));
+    }
+    // placed creatures (populate's `npc` roots) stand on the same streamed ground; they move, so no horizon test
+    for (const [id, entity] of Object.entries(lastExpanded?.entities ?? {})) {
+      if (entity.parent !== null || cullRootOf.has(id) || !entity.tags?.includes("npc")) continue;
+      const object = built.objects.get(id);
+      if (object) baseCullUnits.push(culling.register({ name: id, objects: [object], grounded: true, occlusion: false }));
+    }
     // Build every pipeline the level needs now rather than on first sight of
     // each object. WebGPU compiles per material/geometry pair on first DRAW, so
     // without this the cost arrives as a stall each time the camera pans
@@ -1396,21 +1473,7 @@ async function main(): Promise<void> {
    * until then, and `netPresence.rehome()` sets the real one (again on
    * every `transfer` the layer sends).
    */
-  // the one order both hosts read it in (net-session.ts resolveNetEndpoint)
-  const netEndpoint = resolveNetEndpoint({
-    query: new URLSearchParams(location.search),
-    host: "dev",
-    storage: (() => {
-      try {
-        return localStorage;
-      } catch {
-        return null;
-      }
-    })(),
-  });
-  const netGateway = netEndpoint.kind === "gateway" ? netEndpoint.url : null;
-  const netServerUrl: string | null =
-    netEndpoint.kind === "gateway" ? "gateway" : netEndpoint.kind === "server" ? netEndpoint.url : null;
+  // The endpoint was resolved before character selection and world loading.
   /** Gateway mode: sign-in, the grant (play sessions wait for it), social, transfers (net-client.ts). */
   let gatewayFlow: GatewayFlow | null = null;
   /**
@@ -1779,10 +1842,20 @@ async function main(): Promise<void> {
   const STILL_COMPONENTS = new Set([
     "transform", "mesh", "collider", "dressing", "culling", "light", "audio", "decal",
     "visibility", "spawnArea", "portalAnchor", "prefab", "tags", "lod",
+    // fog data only (landmark-fog): the batcher already merges a landmark apart so its unit can fog it
+    "landmark",
     // effects read their entity's position and draw from their own batches;
     // they never move it (a lamp's flame must not make its post unbatchable)
     "vfx", "particles",
   ]);
+  // a script that declares it never moves its entity with these params (Script.stillWith); the registry is created
+  // further down, so this reads it through a late-bound lookup
+  let stillScriptClass: ((name: string) => { stillWith?: (params: Record<string, unknown>) => boolean } | undefined) | null = null;
+  const scriptKeepsStill = (data: unknown): boolean => {
+    const script = data as { name?: string; params?: Record<string, unknown> } | undefined;
+    if (!script?.name || !stillScriptClass) return false;
+    return stillScriptClass(script.name)?.stillWith?.(script.params ?? {}) === true;
+  };
   let autoStaticDoc: SceneDoc | null = null;
   const autoStaticMemo = new Map<string, boolean>();
   const isAutoStatic = (id: string): boolean => {
@@ -1793,7 +1866,7 @@ async function main(): Promise<void> {
     const known = autoStaticMemo.get(id);
     if (known !== undefined) return known;
     const entity = lastExpanded?.entities[id];
-    let still = !!entity && Object.keys(entity.components).every((k) => STILL_COMPONENTS.has(k));
+    let still = !!entity && Object.keys(entity.components).every((k) => STILL_COMPONENTS.has(k) || (k === "script" && scriptKeepsStill(entity.components[k])));
     if (still && entity!.parent) still = isAutoStatic(entity!.parent);
     autoStaticMemo.set(id, still);
     return still;
@@ -2051,7 +2124,17 @@ async function main(): Promise<void> {
     if (voxelWorld) streamer = voxelWorld.streamer;
     activeVoxelWorld = voxelWorld?.data.world ?? null;
     activeWorldHasWater = worldHasWater(voxelWorld?.field ?? null);
+    // ?streamRadius=<m> (scene-scope.ts): every ring clamped, so a place shot loads only its chunks
+    streamer = scopeStreamer(streamer, sceneScope.streamRadius);
     void chunkManager.configure(streamer, built.scene);
+    // The instanced trees' mesh->impostor switch sits inside the full-detail ring's guaranteed reach (fullRender
+    // cells less half a cell's diagonal: 110 m on a 48 m grid with fullRender 3). Beyond it the cells are HLOD
+    // proxies whose trees can ONLY be impostors, so a farther switch just made loaded cells' trees switch late
+    // and unloaded ones never — measured 2026-10-22 at no frame cost either way.
+    {
+      const rings = streamer?.rings;
+      foliageLod.setLodDistance(rings && streamer ? Math.min(FOLIAGE_LOD_DISTANCE, Math.max(40, rings.fullRender * streamer.cellSize - streamer.cellSize / Math.SQRT2)) : FOLIAGE_LOD_DISTANCE);
+    }
     // subscene components: whole scene files composed additively at runtime
     const subscenes: SubsceneInstance[] = [];
     const worlds = worldTransforms(expanded);
@@ -2137,7 +2220,8 @@ async function main(): Promise<void> {
     else startScripts();
   }
 
-  const renderer = new EngineRenderer(canvas);
+  // ?reversedDepth=0: standard depth buffer, for diagnosing depth-related looks
+  const renderer = new EngineRenderer(canvas, { reversedDepth: new URLSearchParams(location.search).get("reversedDepth") !== "0" });
   // Let the renderer break its own scope down. `render` is almost always the
   // biggest number in a profile and it is the one number that names nothing:
   // the scene's per-frame lighting work, a postfx graph rebuild and the draw
@@ -2146,7 +2230,9 @@ async function main(): Promise<void> {
     begin: (name) => profiler.begin(name),
     end: () => profiler.end(),
   });
+  clientLog("boot: initializing graphics and physics");
   const [backend] = await Promise.all([renderer.init(), initPhysics()]);
+  clientLog(`boot: graphics and physics ready (${backend})`);
   // unit-frame face pictures (ctx.faceShot): shot once per look through this renderer, cached
   const faceShots = createFaceShotHost({
     renderer: renderer.renderer,
@@ -2173,7 +2259,12 @@ async function main(): Promise<void> {
   const controls = new CameraControls(camera, canvas);
   /** Scratch for the editor streaming focus (the orbit target) — see the frame loop. */
   const editorFocus = new THREE.Vector3();
-  controls.setLookAt(18, 12, 22, 0, 1, 0, false);
+  // ?at=x,z[,y] (scene-scope.ts): start the editor camera, i.e. the edit-mode streaming focus, at that place
+  {
+    const at = sceneScope.at;
+    if (at) controls.setLookAt(at.x + 18, (at.y ?? 0) + 12, at.z + 22, at.x, (at.y ?? 0) + 1, at.z, false);
+    else controls.setLookAt(18, 12, 22, 0, 1, 0, false);
+  }
 
   // editor fly-cam: hold LEFT mouse + WASD (QE = down/up, Shift = boost);
   // plain left-drag keeps orbiting. Once a fly key is pressed, camera-controls
@@ -2683,6 +2774,41 @@ async function main(): Promise<void> {
   // the whole expanded doc (every streamed entity) each time was one of the
   // top allocation sources in play. Remember the answer and re-check it.
   let cachedPlayerId: string | null = null;
+  /**
+   * Where every player body stands (x, z), for the runtime's mob distance sleep (MobSleepRule): mobs farther than
+   * 160 m from all of them do not step, 80-160 m step at 20 Hz. Read from the objects' last world matrices.
+   */
+  const mobFoci: Array<[number, number]> = [];
+  function playerFoci(runtime: { findByTag(tag: string): string[] }): Array<[number, number]> | null {
+    let n = 0;
+    for (const id of runtime.findByTag("player")) {
+      const object = built.objects.get(id);
+      if (!object) continue;
+      const e = object.matrixWorld.elements;
+      const slot = mobFoci[n] ?? (mobFoci[n] = [0, 0]);
+      slot[0] = e[12]!;
+      slot[1] = e[14]!;
+      n++;
+    }
+    mobFoci.length = n;
+    // no player body (a scene without one): unknown, so nothing sleeps
+    return n > 0 ? mobFoci : null;
+  }
+  /** Animation skip for sleeping mobs (asleep: never; 80-160 m: only inside the camera frustum). */
+  const mobFrustum = new THREE.Frustum();
+  const mobFrustumMatrix = new THREE.Matrix4();
+  const mobSphere = new THREE.Sphere(new THREE.Vector3(), 3);
+  function skipMobPose(entityId: string): boolean {
+    const band = scripts?.mobBand(entityId) ?? null;
+    if (band === null || band === "full") return false;
+    if (band === "asleep") return true;
+    const object = built.objects.get(entityId);
+    if (!object) return false;
+    mobSphere.center.setFromMatrixPosition(object.matrixWorld);
+    return !mobFrustum.intersectsSphere(mobSphere);
+  }
+  animations.skip = skipMobPose;
+
   function localPlayerId(): string | null {
     if (netWorld.selfId && built.objects.has(netWorld.selfId)) return netWorld.selfId;
     if (cachedPlayerId !== null && lastExpanded.entities[cachedPlayerId]?.tags.includes("player")) return cachedPlayerId;
@@ -2822,8 +2948,12 @@ async function main(): Promise<void> {
       const out: NetReplica[] = [];
       for (const [id, e] of Object.entries(lastExpanded.entities)) {
         const netObj = e.components["netObject"] as NetObjectData | undefined;
+        const script = e.components["script"] as { name?: string } | undefined;
+        // a clock-driven script (a lift) runs identically on every peer — never replicated (Script.clockDriven)
         const implicit =
-          e.components["script"] !== undefined && e.components["rigidbody"] !== undefined;
+          script !== undefined &&
+          e.components["rigidbody"] !== undefined &&
+          (scriptRegistry.get(script.name ?? "") as { clockDriven?: boolean } | undefined)?.clockDriven !== true;
         if (!netObj && !implicit) continue;
         if (e.tags.includes("player")) continue; // presence/prediction path
         if (netObj?.authority === "owner") continue; // ownership wiring: task #14
@@ -2934,6 +3064,19 @@ async function main(): Promise<void> {
       preview: (canvas, creation) => createCreationPreview(canvas, creation, (id) => assets.getModel(id)?.url, (id) => assets.getTexture(id)?.url),
       zoneName: netZoneName,
       say: (text) => sessionComms?.comms.chat.system(text),
+      accept: (grant, character) => {
+        // A missing destination must not loop through reloads or join with the wrong ground.
+        if (resumed?.grant === grant && grant.scene !== store.doc.name) {
+          throw new Error(`Cannot enter ${grant.scene}: the scene could not be loaded.`);
+        }
+        return acceptSceneGrant(store.doc.name, grant, character, sessionStore, (scene) => {
+          persistScene();
+          const next = new URL(location.href);
+          next.searchParams.set("scene", scene);
+          location.replace(next.href);
+        });
+      },
+      resume: resumed ?? undefined,
       onPlay: () => {
         if (playMode.get() !== "playing") playMode.set("playing");
       },
@@ -2944,7 +3087,7 @@ async function main(): Promise<void> {
   const socialPanel = gatewayFlow?.social ?? null;
   // the load-in screen: a painted screen until the world around the player is streamed in and the frame rate has
   // settled (shaders compiled, models uploaded) — instead of dropping them into a hitching, half-built world
-  mountLoadScreen({
+  const loadScreen = mountLoadScreen({
     creation: () => findCreation(assets),
     textureUrl: (id) => assets.getTexture(id)?.url,
     signals: {
@@ -2955,6 +3098,12 @@ async function main(): Promise<void> {
         return !!id && built.objects.has(id);
       },
       loading: () => chunkManager.stats.loading + subsceneManager.stats.loading,
+      ready: () => {
+        const id = localPlayerId();
+        const position = id ? sim?.getPosition(id) : null;
+        return !!position && chunkManager.isArrivalReady(position[0], position[2]) &&
+          (!!activeVoxelWorld || gltfLoadingCount() === 0) && subsceneManager.stats.loading === 0;
+      },
       switching: () => sceneSwitchPending,
       place: () => {
         const id = netServerUrl ? netWorld.selfId : localPlayerId();
@@ -3131,6 +3280,7 @@ async function main(): Promise<void> {
   // under the floor, the shaft rock above), the body dropped before the floor existed, landed on the shell and the
   // floor collider then came in ABOVE it (wreck-hole, 2026-10-12: stuck under the deck at y 0.3, 5.6 m short of the exit).
   let travelHold: { id: string; pos: [number, number, number]; meshesSince?: number } | null = null;
+  const groundHold = new GroundLoadHold();
   let travelView: { x: number; z: number; started: number } | null = null;
   const travelLoadingEl = document.createElement("div");
   travelLoadingEl.setAttribute("role", "status");
@@ -3181,7 +3331,17 @@ async function main(): Promise<void> {
       const groundY = world.field.height(x, z);
       const y = Math.max(groundY, world.field.recipe.seaLevel);
       if (playMode.get() === "playing") {
-        if (netServerUrl) return "a dedicated server owns your position — travel is host-side only";
+        if (netServerUrl) {
+          // the server owns the body: a STAFF account asks it to move us (core STAFF_TELEPORT_EVENT; the server waits
+          // for the destination's ground, lands the body and refuses anyone else); a player is told no here
+          const body = localPlayerId();
+          const peer = body ? netPresence?.netState.get(`owner/${body}`) : undefined;
+          if (!body || !eventBus || !netPresence || typeof peer !== "string") return "no local player to move";
+          if (staffRole(netPresence.netState, peer) === null) return "a dedicated server owns your position — only staff (a GM or dev account) can travel";
+          eventBus.emit(STAFF_TELEPORT_EVENT, { actorId: body, x, z });
+          clientLog(`travel: asked the server to move ${body} -> ${x.toFixed(0)}, ${z.toFixed(0)}`);
+          return;
+        }
         const playerId = localPlayerId();
         if (!sim || !playerId) return "no local player to move";
         // a metre and a half of air: the capsule is centred on the entity, and
@@ -3281,6 +3441,7 @@ async function main(): Promise<void> {
   // -- play mode: physics world + script runtime from the expanded doc --------
 
   const scriptRegistry = new ScriptRegistry();
+  stillScriptClass = (name) => scriptRegistry.get(name) as { stillWith?: (params: Record<string, unknown>) => boolean } | undefined; // statics are not on the ScriptClass type
   // events + assets so builtins that declare `static events`/`dataTypes`
   // (character-sheet's request contracts) register them like project scripts do
   registerBuiltinScripts(scriptRegistry, events, assets);
@@ -3343,7 +3504,7 @@ async function main(): Promise<void> {
   }
   function worldToScreen(x: number, y: number, z: number): { x: number; y: number; distance: number } | null {
     screenPoint.set(x, y, z).project(camera);
-    if (screenPoint.z < -1 || screenPoint.z > 1 || Math.abs(screenPoint.x) > 1.1 || Math.abs(screenPoint.y) > 1.1) return null;
+    if (screenPoint.z < (camera.reversedDepth ? 0 : -1) || screenPoint.z > 1 || Math.abs(screenPoint.x) > 1.1 || Math.abs(screenPoint.y) > 1.1) return null;
     const rect = canvasRect();
     return {
       x: rect.left + ((screenPoint.x + 1) / 2) * rect.width,
@@ -3671,6 +3832,7 @@ async function main(): Promise<void> {
     }
   }
   function endPlaySession(): void {
+    groundHold.reset();
     netSuspended.clear(); // the session owns nothing anymore
     for (const id of [...netProxies]) despawnNetProxy(id); // anchors + bodies
     scripts?.dispose();
@@ -4215,7 +4377,9 @@ async function main(): Promise<void> {
     }
     refreshCameraColliders();
   });
+  clientLog("boot: building scene");
   rebuild();
+  clientLog("boot: scene built");
 
   const refreshThumbnails = () => void renderThumbnails({
     assets, registry, renderer, backend, thumbnails, thumbnailRequests,
@@ -4545,6 +4709,7 @@ async function main(): Promise<void> {
       renderer,
       chunkManager,
       propPool,
+      voxelCache: voxelDiskCacheStats,
       foliageLod,
       culling,
       // ground cover: a probe can read each layer's fade reach and placement state
@@ -4593,6 +4758,12 @@ async function main(): Promise<void> {
       // driving it along a path is a repeatable streaming benchmark
       controls,
       camera,
+      // the live script runtime (null outside play): a probe can switch the mob distance sleep (`mobSleep`)
+      get scripts() {
+        return scripts;
+      },
+      // the editor overlay on/off: a probe hides it for a clean picture of the world
+      editorVisible,
       // the play-mode third-person rig: a headless session can read the
       // resolved boom and drive mouse-look without a pointer lock
       cameraRig,
@@ -4637,6 +4808,8 @@ async function main(): Promise<void> {
         return "ok";
       },
       travelling: () => travelView !== null || travelHold !== null,
+      // the painted load-in screen is still up (world streaming / frame rate settling): the body is held meanwhile
+      loading: () => loadScreen.showing(),
       scene: () => built.scene,
       // submit an ops batch exactly as the inspector does — a probe can then
       // test an edit's real path (live script-param patching during play)
@@ -4852,6 +5025,8 @@ async function main(): Promise<void> {
       profiler.begin("physics.step");
       sim.step(dt);
       profiler.end();
+      // Hidden tabs still simulate. Ground protection must not depend on the render/update callback.
+      groundHold.update(sim, localPlayerId(), (x, z) => chunkManager.isCellLoaded(x, z));
       profiler.begin("physics.readback");
       for (const [id, state] of sim.states()) {
         const object = built.objects.get(id);
@@ -4876,6 +5051,7 @@ async function main(): Promise<void> {
       // a dedicated server's client reads deadlines stamped on the server's clock
       const hostMs = netPresence?.hostSimNow() ?? null;
       if (hostMs !== null) scripts?.syncClock(hostMs);
+      if (scripts) scripts.setPlayerFoci(playerFoci(scripts));
       scripts?.fixedUpdate(dt);
       profiler.end();
       profiler.end(); // fixed
@@ -4960,6 +5136,8 @@ async function main(): Promise<void> {
         const animationCameraId = scripts?.getActiveCameraId();
         const animationCamera = (animationCameraId && built.cameras.get(animationCameraId)) ||
           (!followTargetId && built.activeCamera) || camera;
+        mobFrustumMatrix.multiplyMatrices(animationCamera.projectionMatrix, animationCamera.matrixWorldInverse);
+        mobFrustum.setFromProjectionMatrix(mobFrustumMatrix, animationCamera.coordinateSystem, (animationCamera as { reversedDepth?: boolean }).reversedDepth);
         animations.update(dt, animationCamera, followTargetId);
         profiler.end();
         profiler.begin("late-scripts");
@@ -4985,7 +5163,7 @@ async function main(): Promise<void> {
           // collider is in and the body may fall the last metre on its own
           const ground = sim.raycast([hold.pos[0] + 1.5, hold.pos[1] + 20, hold.pos[2]], [0, -1, 0], 60, { exclude: [hold.id] });
           const meshesIn = hold.meshesSince === undefined || gltfLoadingCount() === 0 || performance.now() - hold.meshesSince > 20000;
-          if (ground && meshesIn && chunkManager.isLandingReady(hold.pos[0], hold.pos[2]) && chunkManager.isViewReady()) travelHold = null;
+          if (ground && meshesIn && chunkManager.isArrivalReady(hold.pos[0], hold.pos[2])) travelHold = null;
           else {
             sim.setPosition(hold.id, hold.pos);
             sim.setLinvel(hold.id, [0, 0, 0]);
@@ -5025,7 +5203,7 @@ async function main(): Promise<void> {
       }
       if (travelView) {
         const elapsed = performance.now() - travelView.started;
-        if (elapsed > 300 && !travelHold && chunkManager.isLandingReady(travelView.x, travelView.z) && chunkManager.isViewReady()) {
+        if (elapsed > 300 && !travelHold && chunkManager.isArrivalReady(travelView.x, travelView.z)) {
           travelView = null;
           travelLoadingEl.style.display = "none";
         } else if (elapsed > 15000) {
@@ -5066,17 +5244,20 @@ async function main(): Promise<void> {
       profiler.begin("particles");
       particles.update(dt, renderCamera); // billboards face the camera actually used
       billboards.update(dt); // flipbook VFX frames
-      // per mode and per built scene: a rebuilt scene is a new render context too
-      const warmFor = `${playMode.get() === "playing" ? "play" : "edit"}:${built.scene.uuid}`;
-      if (vfxWarmedFor !== warmFor) {
-        // on the first frame, and again when Play starts: compile every effect
-        // pipeline now, not on the first cast (VfxSystem.warmup measured that
-        // stall at 265–739 ms). Play draws through a post chain with another
-        // render-target layout, and a pipeline compiled for the editor's fails
-        // validation there and is rebuilt on first use — so warm per mode.
+      // Only Play needs the entire spell catalog ready for a first cast.
+      // Warming it in the editor uploads every effect page and compiles graphs
+      // that Play must build again for its different render-target layout.
+      // Standing scene effects still prepare themselves through ambientVfx.
+      const warmFor = built.scene.uuid;
+      if (playMode.get() === "edit") vfxWarmedFor = "";
+      else if (playMode.get() === "playing" && vfxWarmedFor !== warmFor) {
         vfxWarmedFor = warmFor;
         const camera = renderCamera;
-        vfxWarming = vfxWarming.then(() => warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, camera, built.scene), camera)).catch(() => undefined);
+        const scene = built.scene;
+        vfxWarming = vfxWarming.then(() => {
+          if (playMode.get() !== "playing" || built.scene !== scene) return;
+          return warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, camera, scene), camera);
+        }).catch(() => undefined);
       }
       // standing effects start/stop/follow before the plays step, and before
       // the light budget re-aims its slots at their lights
@@ -5260,7 +5441,7 @@ async function main(): Promise<void> {
           : "")(clusterLod.stats()) +
       ((c) =>
         c.units > 0
-          ? `culling: ${c.units} units · ${c.occluded} behind terrain · ${c.small} small · ${c.interior} interiors · ${tiers.culled} props · ${c.ms.toFixed(2)} ms\n`
+          ? `culling: ${c.units} units · ${c.occluded} behind terrain · ${c.small} small · ${c.interior} interiors · ${c.ungrounded} unloaded ground · ${tiers.culled} props · ${c.ms.toFixed(2)} ms\n`
           : "")(culling.stats()) +
       `draw calls: ${info.render.drawCalls}  ·  tris: ${info.render.triangles.toLocaleString()}\n` +
       `geometries: ${info.memory.geometries}  ·  textures: ${info.memory.textures}\n` +
@@ -5313,4 +5494,10 @@ async function main(): Promise<void> {
   };
 }
 
-void main();
+void main().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  clientLog(`boot: failed: ${error instanceof Error ? error.stack : message}`);
+  const hud = document.getElementById("hud");
+  if (hud) hud.textContent = `Could not start the game: ${message}`;
+  console.error("[boot] startup failed:", error);
+});

@@ -187,6 +187,7 @@ describe("ComponentRegistry", () => {
       "dressing",
       "grass",
       "joint",
+      "landmark",
       "light",
       "loadingScreen",
       "mesh",

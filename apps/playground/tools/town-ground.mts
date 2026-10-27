@@ -27,7 +27,11 @@
  *       painted with the zone's paving tile (recipe `regions[].ground.paving`, `worldgen zone-textures`) instead of
  *       their gravel. Paint only: heights, widths and points are untouched. `build` writes the role itself; this is
  *       for towns built before it. --off restores `road`. Writes paving-inverse.json.
- *   npx tsx tools/town-ground.mts undo    --project proving --town tidewell --step build|doors
+ *   npx tsx tools/town-ground.mts gates   --project proving --town tidewell [--dry]
+ *       ROAD-ONLY: every `<townId>-street-*` road whose end stops within 8 m of a declared gate is made to END ON the
+ *       gate's centre (`at`, on the wall's centreline), dropping the points past the mouth (snapStreetToGates; `build`
+ *       does the same). Lots, the height patch and every other road are untouched. Writes gates-inverse.json.
+ *   npx tsx tools/town-ground.mts undo    --project proving --town tidewell --step build|doors|gates
  *       apply the saved inverse (build also restores the plan saved before it).
  */
 import fs from "node:fs";
@@ -38,14 +42,14 @@ import { applyRecipeEdits, createWorldField, worldRecipeSchema } from "@hitreg/c
 // @ts-expect-error plain JS helper
 import { encodePng } from "./_png.mjs";
 import {
-  PRE, bareRecipe, bareRerouted, buildGround, context, dist, envelopeOf, parseKey, readJson, resample, round, segDist, writeJson,
+  PRE, bareRecipe, bareRerouted, buildGround, burnPathIntoPatch, context, dist, doorFootY, envelopeOf, parseKey, readJson, resample, round, segDist, snapRoadToGates, writeJson,
   Heap, type Ctx, type P,
 } from "./_town-ground.mts";
 
 const argv = process.argv.slice(2);
 const opt = (name: string, fallback = ""): string => { const i = argv.indexOf(`--${name}`); return i >= 0 && argv[i + 1] && !argv[i + 1]!.startsWith("--") ? argv[i + 1]! : fallback; };
 const flag = (name: string): boolean => argv.includes(`--${name}`);
-const COMMANDS = ["export", "request", "key", "build", "doors", "paving", "undo"];
+const COMMANDS = ["export", "request", "key", "build", "doors", "paving", "gates", "undo"];
 const cmd = argv.find((a) => COMMANDS.includes(a)) ?? "";
 if (!COMMANDS.includes(cmd) || !opt("town")) {
   console.error(`usage: town-ground <${COMMANDS.join("|")}> --project <p> --town <town> [--world <w>]  (see the header)`);
@@ -229,8 +233,8 @@ function build(): void {
 }
 function undo(): void {
   const step = opt("step");
-  const inv = path.join(c.dir, step === "build" ? "ground-inverse.json" : step === "doors" ? "doors-inverse.json" : "");
-  if (!step || !fs.existsSync(inv)) throw new Error("undo --step build|doors (needs the saved inverse)");
+  const inv = path.join(c.dir, step === "build" ? "ground-inverse.json" : step === "doors" ? "doors-inverse.json" : step === "gates" ? "gates-inverse.json" : "");
+  if (!step || !fs.existsSync(inv)) throw new Error("undo --step build|doors|gates (needs the saved inverse)");
   const recipe = worldRecipeSchema.parse(readJson(c.worldFile));
   writeRecipe(applyRecipeEdits(recipe, readJson(inv)).recipe);
   const planInv = path.join(c.dir, "plan-inverse.json");
@@ -316,7 +320,7 @@ function doors(): void {
     while (out < 15 && polyDist(lots[li]!.pts, door[0] + df[0] * out, door[1] + df[1] * out) < 1) out += 0.25;
     const startAt = Math.max(out, steps + 1);
     const start: P = [door[0] + df[0] * startAt, door[1] + df[1] * startAt];
-    Object.assign(row, { door: door.map((v) => round(v)), facing: df.map((v) => round(v, 1000)), foot: foot.map((v) => round(v)), stepsDepth: round(steps), footY: round(hAt(...foot)) });
+    Object.assign(row, { door: door.map((v) => round(v)), facing: df.map((v) => round(v, 1000)), foot: foot.map((v) => round(v)), stepsDepth: round(steps), footY: round(doorFootY(hAt(...foot), b.groundY)) });
     const s0 = KK(...start);
     if (s0 < 0) { row.status = "unreached"; row.why = "door outside the grid"; continue; }
     if (streetOf[s0]! >= 0 || streetOf[KK(...foot)] >= 0) { row.status = "at-street"; row.joins = streets[Math.max(streetOf[s0]!, streetOf[KK(...foot)]!)]!.id; row.length = 0; continue; }
@@ -366,7 +370,7 @@ function doors(): void {
     const t = pts.map((p) => hAt(p[0], p[1]));
     const L = pts.length, s: number[] = [0];
     for (let i = 1; i < L; i++) s.push(s[i - 1]! + dist(pts[i]!, pts[i - 1]!));
-    const yA = hAt(...foot), yB = hAt(...pts.at(-1)!);
+    const yA = doorFootY(hAt(...foot), b.groundY), yB = hAt(...pts.at(-1)!); // the foot meets the last tread, not a ledge below it
     const G = PC.grade;
     const hs = t.map((v, i) => {
       const lo = Math.max(yA - s[i]! * G, yB - (s[L - 1]! - s[i]!) * G), hi = Math.min(yA + s[i]! * G, yB + (s[L - 1]! - s[i]!) * G);
@@ -389,7 +393,14 @@ function doors(): void {
     features.push(feature);
     Object.assign(row, { status: "painted", road: feature.id, joins, length: round(length, 10), points: L, from: round(yA), to: round(yB), maxGrade: round(maxGrade, 1000), gradeOk: maxGrade <= G + 0.005, maxCutFill: round(maxCut), minClearToOtherLot: round(minClear), nearestLot: nearest });
   }
+  // the town patch is applied after roads: burn every door path into it too, or a raised foot never reaches the ground
+  const patch0 = (recipe0.features.heightPatches ?? []).find((p: any) => p.id === c.cfg.patchId) as any;
+  const patch = patch0 ? { ...patch0, heights: [...patch0.heights] } : null;
+  let burnt = 0;
+  if (patch) for (const f of features) burnt += burnPathIntoPatch(patch, f.points, f.surfaceY, f.width / 2, f.shoulder);
+  if (patch) console.log(`  door paths burnt into ${patch.id}: ${burnt} cell(s)`);
   const edits: any[] = [
+    ...(patch && burnt ? [{ edit: "update-feature", kind: "heightPatches", id: patch.id, feature: patch }] : []),
     ...recipe0.features.roads.filter((r) => r.id.startsWith(PREFIX)).map((r) => ({ edit: "remove-feature", kind: "roads", id: r.id })),
     ...features.map((f) => ({ edit: "add-feature", kind: "roads", feature: f })),
   ];
@@ -462,7 +473,39 @@ function paving(): void {
   if (role === "paving" && !(zone?.ground?.paving || parent?.ground?.paving)) console.log(`  note: ${parent?.id ?? "its zone"} has no ground.paving yet — run worldgen zone-textures; until then the streets keep their gravel`);
 }
 
+// ------------------------------------------------------------------ gates
+function gates(): void {
+  // road-only, on the raw file read fresh: only the town's own street roads that end near a gate are rewritten
+  const raw = readJson(c.worldFile);
+  const town = raw.features.towns.find((t: any) => t.id === c.cfg.townId);
+  const declared: { id: string; at: P; facing?: P }[] = town?.gates ?? [];
+  if (!declared.length) { console.log(`${c.town}: no gates declared — nothing to snap`); return; }
+  const field = createWorldField(worldRecipeSchema.parse(raw));
+  const y = (p: P): number => { const h = field.height(p[0], p[1]); return field.surfaceCast(p[0], p[1], h + 40, h - 40) ?? h; };
+  const prefix = `${c.cfg.townId}-street-`;
+  const inverse: any[] = [];
+  const roads = raw.features.roads as any[];
+  for (let i = 0; i < roads.length; i++) {
+    const road = roads[i];
+    if (typeof road.id !== "string" || !road.id.startsWith(prefix)) continue;
+    const next = snapRoadToGates(road, declared, y);
+    if (next === road) continue;
+    const ends = [next.points[0], next.points.at(-1)].map((q: P) => declared.find((g) => dist(g.at, q) < 0.01)?.id).filter(Boolean);
+    console.log(`  ${road.id}: end(s) -> ${ends.join(", ")} (was [${road.points[0]}] .. [${road.points.at(-1)}], ${road.points.length} -> ${next.points.length} points)`);
+    inverse.push({ edit: "update-feature", kind: "roads", id: road.id, feature: road });
+    roads[i] = next;
+  }
+  if (!inverse.length) { console.log(`${c.town}: every ${prefix}* road already ends on its gate (or far from any) — nothing written`); return; }
+  worldRecipeSchema.parse(raw); // never leave a broken world on disk
+  if (flag("dry")) { console.log(`--dry: ${inverse.length} road(s) would change; nothing written`); return; }
+  writeRecipe(raw);
+  fs.mkdirSync(c.dir, { recursive: true });
+  writeJson(path.join(c.dir, "gates-inverse.json"), inverse);
+  console.log(`${c.town}: ${inverse.length} street road(s) snapped to their gates; inverse ${rel(path.join(c.dir, "gates-inverse.json"))}`);
+}
+
 if (cmd === "export") exportSite();
+else if (cmd === "gates") gates();
 else if (cmd === "paving") paving();
 else if (cmd === "request") request();
 else if (cmd === "key") { const k = opt("key"); if (!k) throw new Error("key --key <file in the -ground folder>"); console.log(parseKey(c, k)); }

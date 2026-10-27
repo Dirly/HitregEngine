@@ -46,7 +46,7 @@ its skill's Gates and delete it here.
 - Town plot/street/door-path clearings written from the town's lots.
 - DC rock formations as a world-wide rule; frames fitting noised openings; route tunnel >= 2.2 m; pool rims and dais
   tiers <= 0.3 m; roadside set pieces given room.
-- OPEN: site size-class numbers; the mood list and what each sets; foliage relation between neighbouring zones
+- OPEN: the mood list and what each sets; foliage relation between neighbouring zones
   (mountains); entrance mix (landmark vs hidden) per zone.
 
 **Dungeons**

@@ -2,14 +2,18 @@
  * Reach over a landmark's COLLIDER (the baked trimesh) plus the terrain where the rock does not cover it — the truth a
  * body walks on, not the solve's estimate. Shared by tools/ledge-landmark.mts (`--fix-reach`) and the reach scripts.
  *
- * Multi-level flood on a 0.5 m grid: a node is a walkable surface (a rock face whose normal is under 50 deg, or the
- * terrain outside the rock) with >= 1.8 m clear above it; neighbours step <= 0.5 * tan(50) + 0.15 m. The flood starts on
+ * Multi-level flood on a 0.5 m grid with the REAL body's limits (DEFAULT_CHARACTER): a node is a walkable surface (a
+ * rock face under the body's climb angle, never one buried under the terrain, or the terrain outside the rock) with
+ * >= 1.8 m clear above it; a neighbour is reached by a step <= the body's autostep (0.4 m), or up a continuous slope
+ * under the climb angle (a half-way probe must split the rise into two such steps). A target counts within 0.5 m. The flood starts on
  * the hillside (every node on the grid's border) and walks through the caves as the real geometry they are. "Without
  * caves" drops every node roofed within 6 m that lies inside a cave bore's corridor.
  *
  * `closeReach` is the loop: bake, walk, add a repair ramp for each unreached core shelf (<= 0.5 grade, from the nearest
  * reached ground), re-bake — at most `maxRounds` times; whatever is still unreached comes back as `faults`.
  */
+
+import { DEFAULT_CHARACTER } from "@hitreg/physics";
 
 export type Vec3 = [number, number, number];
 export interface ColliderMesh {
@@ -28,6 +32,8 @@ export interface ReachSite {
   anchors: Vec3[];
   /** Cave floor polylines [x, y, z]. */
   caves: Vec3[][];
+  /** Per anchor: EXACT (an opening): reached only on its own cell, at its own height, with clear headroom there. */
+  exact?: boolean[];
 }
 export interface ReachRepair { from: Vec3; to: Vec3 }
 export interface ColliderReach {
@@ -42,8 +48,13 @@ export interface ColliderReach {
   stats: { triangles: number; grid: number; cells: number };
 }
 
-const WALK_DEG = 50, CLEAR = 1.8, G = 0.5;
-const REACH_R = Number(process.env.REACH_R ?? 1), REACH_DY = Number(process.env.REACH_DY ?? 0.75);
+/** The REAL body (packages/physics DEFAULT_CHARACTER, what PlayerDriver walks with): its climb limit and autostep. A walk
+ *  that allows more (it once took 0.75 m per 0.5 m node, twice the body's step) passes risers the body is stopped by. */
+const WALK_RAD = DEFAULT_CHARACTER.maxSlopeClimbAngle, STEP = DEFAULT_CHARACTER.autostep.maxHeight, CLEAR = 1.8, G = 0.5;
+/** A rock floor this far under the installed terrain is buried (the terrain fills it). */
+const BURIED = 0.1;
+/** A target counts when a reached node within REACH_R m (XZ) stands within REACH_DY m of the surface there. */
+const REACH_R = Number(process.env.REACH_R ?? 0.5), REACH_DY = Number(process.env.REACH_DY ?? 0.5);
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
 export function colliderReach(mesh: ColliderMesh, site: ReachSite): ColliderReach {
@@ -51,20 +62,21 @@ export function colliderReach(mesh: ColliderMesh, site: ReachSite): ColliderReac
   const P = mesh.positions, I = mesh.indices;
   const px = (v: number) => P[v * 3]! + ox, py = (v: number) => P[v * 3 + 1]! + oy, pz = (v: number) => P[v * 3 + 2]! + oz;
   const R = site.radius + 26, [cx, cz] = site.center, n = Math.ceil((2 * R) / G) + 1, x0 = cx - R, z0 = cz - R;
-  // bin triangles on the grid, then cast a vertical ray per cell: every crossing (y, up-facing, walkable)
+  // bin triangles on the grid (each into every cell whose G square its bounds overlap, so a ray anywhere in the
+  // square, the half-step probe included, finds it), then cast a vertical ray: every crossing (y, up-facing, walkable)
   const bins: number[][] = Array.from({ length: n * n }, () => []);
   for (let t = 0; t < I.length; t += 3) {
     const a = I[t]!, b = I[t + 1]!, c = I[t + 2]!;
-    const c0 = Math.max(0, Math.ceil((Math.min(px(a), px(b), px(c)) - x0) / G)), c1 = Math.min(n - 1, Math.floor((Math.max(px(a), px(b), px(c)) - x0) / G));
-    const r0 = Math.max(0, Math.ceil((Math.min(pz(a), pz(b), pz(c)) - z0) / G)), r1 = Math.min(n - 1, Math.floor((Math.max(pz(a), pz(b), pz(c)) - z0) / G));
+    const c0 = Math.max(0, Math.ceil((Math.min(px(a), px(b), px(c)) - x0) / G - 0.5)), c1 = Math.min(n - 1, Math.floor((Math.max(px(a), px(b), px(c)) - x0) / G + 0.5));
+    const r0 = Math.max(0, Math.ceil((Math.min(pz(a), pz(b), pz(c)) - z0) / G - 0.5)), r1 = Math.min(n - 1, Math.floor((Math.max(pz(a), pz(b), pz(c)) - z0) / G + 0.5));
     for (let r = r0; r <= r1; r++) for (let q = c0; q <= c1; q++) bins[r * n + q]!.push(t);
   }
-  const cosWalk = Math.cos((WALK_DEG * Math.PI) / 180);
+  const cosWalk = Math.cos(WALK_RAD);
   type Node = { y: number; roof: number };
-  const nodes: Node[][] = new Array(n * n);
-  for (let r = 0; r < n; r++) for (let q = 0; q < n; q++) {
-    const x = x0 + q * G, z = z0 + r * G, hits: { y: number; up: boolean; walk: boolean }[] = [];
-    for (const t of bins[r * n + q]!) {
+  /** The surfaces a body could stand on at (x, z) through the triangles of bin `bin`, with >= CLEAR headroom. */
+  const surfacesAt = (x: number, z: number, bin: number): Node[] => {
+    const hits: { y: number; up: boolean; walk: boolean }[] = [];
+    for (const t of bins[bin] ?? []) {
       const a = I[t]!, b = I[t + 1]!, c = I[t + 2]!;
       const ax = px(a), az = pz(a), bx = px(b), bz = pz(b), qx = px(c), qz = pz(c);
       const d = (bz - qz) * (ax - qx) + (qx - bx) * (az - qz);
@@ -82,10 +94,23 @@ export function colliderReach(mesh: ColliderMesh, site: ReachSite): ColliderReac
     const above = hits.filter((h) => h.y > th + 0.05);
     // the terrain counts where it is not inside the rock (an even number of crossings above it)
     if (above.length % 2 === 0) out.push({ y: th, roof: above.length ? above[0]!.y - th : Infinity });
-    hits.forEach((h, k) => { if (h.up && h.walk) { const nx = hits[k + 1]; out.push({ y: h.y, roof: nx ? nx.y - h.y : Infinity }); } });
-    nodes[r * n + q] = out.filter((o) => o.roof >= CLEAR);
-  }
-  const STEP = G * Math.tan((WALK_DEG * Math.PI) / 180) + 0.15;
+    // a rock floor BURIED under the terrain is not a floor (the terrain fills it: a recess the ground blend filled)
+    hits.forEach((h, k) => { if (h.up && h.walk && h.y >= th - BURIED) { const nx = hits[k + 1]; out.push({ y: h.y, roof: nx ? nx.y - h.y : Infinity }); } });
+    return out.filter((o) => o.roof >= CLEAR);
+  };
+  const nodes: Node[][] = new Array(n * n);
+  for (let r = 0; r < n; r++) for (let q = 0; q < n; q++) nodes[r * n + q] = surfacesAt(x0 + q * G, z0 + r * G, r * n + q);
+  // a neighbour is reached by a STEP the real body climbs (autostep) or, for more, up a continuous SLOPE under its climb
+  // limit: then the half-way probe must find a walkable surface splitting the rise into two steps of <= STEP each
+  // (a 1.6 m riser has no surface half way up it; a 45 deg ramp does)
+  const SLOPE_RISE = G * Math.tan(WALK_RAD);
+  const linked = (i: number, y: number, j: number, yj: number): boolean => {
+    const dy = Math.abs(yj - y);
+    if (dy <= STEP) return true;
+    if (dy > SLOPE_RISE + 0.02) return false;
+    const mx = x0 + ((i % n) + (j % n)) * G / 2, mz = z0 + (Math.floor(i / n) + Math.floor(j / n)) * G / 2;
+    return surfacesAt(mx, mz, i).some((m) => Math.abs(m.y - y) <= STEP && Math.abs(yj - m.y) <= STEP && Math.min(y, yj) - 0.02 <= m.y && m.y <= Math.max(y, yj) + 0.02);
+  };
   const cellOf = (x: number, z: number) => { const q = Math.round((x - x0) / G), r = Math.round((z - z0) / G); return q < 0 || r < 0 || q >= n || r >= n ? -1 : r * n + q; };
   const segD = (x: number, z: number, p: Vec3, s: Vec3) => { const dx = s[0] - p[0], dz = s[2] - p[2], ll = dx * dx + dz * dz || 1, t = Math.max(0, Math.min(1, ((x - p[0]) * dx + (z - p[2]) * dz) / ll)); return Math.hypot(x - p[0] - dx * t, z - p[2] - dz * t); };
   const inCave = (x: number, z: number) => site.caves.some((fl) => fl.some((p, k) => k < fl.length - 1 && segD(x, z, p, fl[k + 1]!) < 4));
@@ -99,7 +124,7 @@ export function colliderReach(mesh: ColliderMesh, site: ReachSite): ColliderReac
       const [i, k] = st.pop()!, y = nodes[i]![k]!.y, q = i % n, r = Math.floor(i / n);
       for (const j of [q > 0 ? i - 1 : -1, q < n - 1 ? i + 1 : -1, r > 0 ? i - n : -1, r < n - 1 ? i + n : -1]) {
         if (j < 0) continue;
-        nodes[j]!.forEach((nd, m) => { if (Math.abs(nd.y - y) <= STEP && ok(j, m) && mark(j, m)) st.push([j, m]); });
+        nodes[j]!.forEach((nd, m) => { if (ok(j, m) && linked(i, y, j, nd.y) && mark(j, m)) st.push([j, m]); });
       }
     }
     return seen;
@@ -111,22 +136,28 @@ export function colliderReach(mesh: ColliderMesh, site: ReachSite): ColliderReac
   const caveless = (i: number, k: number) => !(nodes[i]![k]!.roof < 6 && inCave(x0 + (i % n) * G, z0 + Math.floor(i / n) * G));
   if (process.env.REACH_FROM) { const a = site.anchors[Number(process.env.REACH_FROM)]!, i = cellOf(a[0], a[1]); hill.length = 0; nodes[i]!.forEach((nd, k) => { if (Math.abs(nd.y - a[2]) < 2) hill.push([i, k]); }); }
   const seenC = flood(hill, all), seenN = flood(hill, caveless);
-  const topAt = (i: number, fallback: number) => (nodes[i]?.length ? Math.max(...nodes[i]!.map((o) => o.y)) : fallback);
+  // the shelf top under a ROOFED anchor (a gate's terrace under a rock lintel, a portal in a hall) is the highest walkable
+  // surface a body standing there could be on: at most CLEAR over the anchor, never the roof's own top far above it
+  const topAt = (i: number, ay: number) => { const ys = (nodes[i] ?? []).map((o) => o.y).filter((y) => y <= ay + CLEAR); return ys.length ? Math.max(...ys) : ay; };
   // an anchor counts when a reached node within REACH_R m of it stands within REACH_DY m of the shelf TOP there (its own
   // cell's highest walkable surface: a lower ledge beside a raised block does not count as standing on it)
-  // the anchor's cell: the nearest cell within 1.5 m that has a walkable surface (a steep facet can sit on the exact spot)
-  const anchorCell = (a: Vec3) => {
+  // the anchor's cell: its own, or the nearest within 0.5 m that has a walkable surface (a steep facet can sit on the
+  // exact spot); an EXACT anchor (an opening: it must be cut) only its own cell
+  const anchorCell = (a: Vec3, exact = false) => {
     const i0 = cellOf(a[0], a[1]);
     if (i0 < 0) return -1;
+    if (exact) return nodes[i0]!.length ? i0 : -1;
     let best = -1, bd = Infinity;
-    for (let dr = -3; dr <= 3; dr++) for (let dq = -3; dq <= 3; dq++) { const j = i0 + dr * n + dq, d = dr * dr + dq * dq; if (j >= 0 && j < n * n && d < bd && nodes[j]!.length) { bd = d; best = j; } }
+    for (let dr = -1; dr <= 1; dr++) for (let dq = -1; dq <= 1; dq++) { const j = i0 + dr * n + dq, d = dr * dr + dq * dq; if (j >= 0 && j < n * n && d < bd && nodes[j]!.length) { bd = d; best = j; } }
     return best;
   };
-  const reached = (seen: Seen) => site.anchors.map((a) => {
-    const i = anchorCell(a);
+  const reached = (seen: Seen) => site.anchors.map((a, k) => {
+    const exact = !!site.exact?.[k];
+    const i = anchorCell(a, exact);
     if (i < 0) return false;
     const yA = topAt(i, a[2]);
-    const rr = Math.round(REACH_R / G);
+    if (exact && Math.abs(yA - a[2]) > REACH_DY) return false; // no floor with headroom AT the opening: it is not cut
+    const rr = exact ? 0 : Math.round(REACH_R / G);
     for (let dr = -rr; dr <= rr; dr++) for (let dq = -rr; dq <= rr; dq++) { const s = seen.get(i + dr * n + dq); if (!s) continue; for (const m of s) if (Math.abs(nodes[i + dr * n + dq]!.at(m)!.y - yA) < REACH_DY) return true; }
     return false;
   });

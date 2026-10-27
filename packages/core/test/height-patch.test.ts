@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyRecipeEdits, createWorldField, defaultWorldRecipe, heightPatchSchema, worldRecipeSchema, featureFootprint } from '../src/index.js';
+import { applyRecipeEdits, createWorldField, defaultWorldRecipe, heightPatchSchema, worldRecipeSchema, featureFootprint, prepareHeightPatch } from '../src/index.js';
 
 const patch = { id:'image', origin:[0,0], size:[96,96], columns:2, rows:2, heights:[-8,4,16,28], blend:16, feather:16 };
 describe('raster terrain patches', () => {
@@ -60,5 +60,45 @@ describe('raster terrain patches', () => {
     const a=field.sampleBlock({origin:[-2,-10,28],nx:28,ny:24,nz:8,step});
     const b=field.sampleBlock({origin:[-8,-10,28],nx:31,ny:24,nz:8,step});
     for(let z=0;z<8;z++)for(let y=0;y<24;y++)for(let x=0;x<28;x++)expect(b[x+3+y*31+z*31*24]).toBe(a[x+y*28+z*28*24]);
+  });
+  it('raiseOnly never lowers the ground under the patch', () => {
+    const world=defaultWorldRecipe(), base=createWorldField(world);
+    const low={...patch,id:'low',heights:[-200,-200,-200,-200]};
+    const cut=createWorldField(applyRecipeEdits(world,[{edit:'add-feature',kind:'heightPatches',feature:low}]).recipe);
+    const kept=createWorldField(applyRecipeEdits(world,[{edit:'add-feature',kind:'heightPatches',feature:{...low,raiseOnly:true}}]).recipe);
+    expect(cut.height(48,48)).toBeLessThan(base.height(48,48)-50);
+    expect(kept.height(48,48)).toBe(base.height(48,48));
+    const high=createWorldField(applyRecipeEdits(world,[{edit:'add-feature',kind:'heightPatches',feature:{...patch,heights:[400,400,400,400],raiseOnly:true}}]).recipe);
+    expect(high.height(48,48)).toBeCloseTo(400,6);
+  });
+  it('a raiseOnly patch takes a column from the sea-cliff / butte walls only where it lifts gentle ground (hold)', () => {
+    const flat=()=>0, stack=(x:number)=>(x<44?85:0), high=()=>50;
+    const plain=prepareHeightPatch(heightPatchSchema.parse(patch),2,stack);
+    const fill=(under:(x:number,z:number)=>number)=>prepareHeightPatch(heightPatchSchema.parse({...patch,raiseOnly:true}),2,under);
+    expect(plain.hold(48,48)).toBe(1);                       // a plain patch: its weight
+    expect(fill(flat).hold(48,48)).toBe(1);                  // lifts gentle ground: holds
+    expect(fill(high).hold(48,48)).toBe(0);                  // lifts nothing (raster 10 under 50): the walls keep it
+    expect(fill(stack).hold(48,48)).toBe(0);                 // a stack's top plane 4 m off: the walls keep it
+    expect(fill(stack).apply(48,48,0)).toBeCloseTo(10,6);    // the height itself is still raised
+  });
+});
+
+describe('calm height patches (built ground)', () => {
+  it('switch the overhang noise off where the patch pulls the ground, and only there', () => {
+    const raw = defaultWorldRecipe(); raw.terrain.overhang.strength = 4; raw.terrain.overhang.slopeStart = 0; raw.terrain.overhang.slopeEnd = 0.01; raw.terrain.caves.enabled = false;
+    const world = worldRecipeSchema.parse(raw);
+    const steep = { ...patch, heights: [0, 60, 0, 60] };
+    const noisy = createWorldField(applyRecipeEdits(world, [{ edit: 'add-feature', kind: 'heightPatches', feature: steep }]).recipe);
+    const calm = createWorldField(applyRecipeEdits(world, [{ edit: 'add-feature', kind: 'heightPatches', feature: { ...steep, calm: true } }]).recipe);
+    let worst = 0, calmWorst = 0;
+    for (let x = 30; x <= 66; x += 3) for (let dy = -2; dy <= 2; dy += 1) {
+      const h = noisy.height(x, 48), y = h + dy;
+      worst = Math.max(worst, Math.abs(noisy.density(x, y, 48) - dy));
+      calmWorst = Math.max(calmWorst, Math.abs(calm.density(x, y, 48) - (y - calm.height(x, 48))));
+    }
+    expect(worst).toBeGreaterThan(0.3);
+    expect(calmWorst).toBeLessThan(1e-6);
+    // outside the patch the noise is untouched
+    expect(calm.density(200, noisy.height(200, 48) + 1, 48)).toBeCloseTo(noisy.density(200, noisy.height(200, 48) + 1, 48), 9);
   });
 });

@@ -19,6 +19,7 @@ describe("EventRegistry", () => {
       "player.joined",
       "player.left",
       "player.logout",
+      "staff.teleport",
       "trigger.enter",
       "trigger.exit",
 "zone.entered",

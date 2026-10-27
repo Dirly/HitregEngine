@@ -43,6 +43,7 @@ command). Tool manual: header of `apps/playground/tools/props.mts`. Vocabulary: 
   say so in the handoff ("story not yet visible" when the read depends on it). Never re-purpose another culture's or
   scale's prop, never glue unrelated parts and cards into a story object. Encoded: `props compose` refuses mixed
   cultures/scales and resized stand-ins; `props request add` logs to authoring/dressing/prop-requests.json.
+- A landmark structure over 6 m (a headframe, a beacon frame) is a request with `--landmark <m>`: Codex builds it at full height at 40 tx/m. Never `props wrap --scale` a small prop up (x3 = 13 tx/m, the art gate refuses it).
 - Complex mechanisms (cranes, hoists, treadwheels, lifts, sluices, capstans, grates) are owner-made: request them.
 
 ## Judgment

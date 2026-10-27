@@ -94,6 +94,46 @@ export function classifyStair(g: { min: number[]; max: number[] }, own: SolidPro
   return { heldShare: n ? held / n : 1, samples, rise, run };
 }
 
+/**
+ * A short span inside a carved passage: a plank bridge or a short flight over a collapse BETWEEN two held flights in
+ * a cut stair tunnel is held by the flights it joins, not free-standing (the face is the tunnel, beyond the 1.2 m reach).
+ * Held when its run is at most SPAN_MAX, BOTH ends join a held flight or landing (plan gap <= SPAN_JOIN, heights
+ * overlapping within SPAN_JOIN) along either plan axis (a bridge may be wider than it is long), and the passage is carved round it: at >= 80% of the samples along the run there is
+ * rock overhead within PASSAGE_ROOF of the tread and rock on BOTH opposite sides (x or z) within PASSAGE_SIDE. A free-standing stair
+ * in the open never qualifies (no roof, no sides).
+ */
+export const SPAN_MAX = 8, SPAN_JOIN = 1, PASSAGE_ROOF = 16, PASSAGE_SIDE = 6;
+type Box = { min: number[]; max: number[] };
+export function carvedSpan(g: Box, own: SolidProbe, probe: SolidProbe, heldNeighbours: readonly Box[]): boolean {
+  const [x0, y0, z0] = g.min, [x1, y1, z1] = g.max;
+  const dx = x1! - x0!, dz = z1! - z0!;
+  if (Math.max(dx, dz) > SPAN_MAX || !probe.ceiling || !probe.wall) return false;
+  const alongX = dx >= dz;
+  const gap = (a: Box, b: Box, c: number) => Math.max(a.min[c]! - b.max[c]!, b.min[c]! - a.max[c]!, 0);
+  // each end: a thin slab at that end of the span, along x or along z; both ends of one axis must join a held piece
+  const joinedOn = (c: 0 | 2) => [0, 1].every((e) => {
+    const lo = [...g.min], hi = [...g.max];
+    if (e === 0) hi[c] = lo[c]! + 0.5; else lo[c] = hi[c]! - 0.5;
+    const end = { min: lo, max: hi };
+    // the piece lies BEYOND this end (not merely alongside the span)
+    const beyond = (nb: Box) => (e === 0 ? nb.min[c]! < g.min[c]! - 0.25 : nb.max[c]! > g.max[c]! + 0.25);
+    return heldNeighbours.some((nb) => beyond(nb) && gap(end, nb, 0) <= SPAN_JOIN && gap(end, nb, 2) <= SPAN_JOIN && gap(end, nb, 1) <= SPAN_JOIN);
+  });
+  if (!joinedOn(0) && !joinedOn(2)) return false;
+  let carved = 0, n = 0;
+  for (let i = 1; i <= 9; i++) {
+    const t = i / 10;
+    const cx = alongX ? x0! + dx * t : (x0! + x1!) / 2, cz = alongX ? (z0! + z1!) / 2 : z0! + dz * t;
+    const top = own.floor(cx, cz, y1! + 0.5, y0! - 0.5);
+    if (top == null) continue;
+    n++;
+    const roof = probe.ceiling(cx, cz, top + 0.5, top + PASSAGE_ROOF);
+    const y = top + 1, w = (ux: number, uz: number) => probe.wall!(cx, y, cz, ux, uz, PASSAGE_SIDE) != null;
+    if (roof != null && ((w(0, 1) && w(0, -1)) || (w(1, 0) && w(-1, 0)))) carved++;
+  }
+  return n > 0 && carved / n >= 0.8;
+}
+
 /** Places of a world whose brief makes them monument sites (butte, mesa, monument ...). */
 export function monumentPlaces(project: string): Set<string> {
   const out = new Set<string>();
@@ -140,6 +180,8 @@ export function approachScene(project: string, doc: SceneDoc, opts: { world?: st
   const probe: SolidProbe | null = fp && tris ? unionSolidProbe(fp, tris) : fp ?? tris;
   const monuments = opts.monument ? null : monumentPlaces(project);
   const rows: StairRow[] = [];
+  const boxes = new Map<string, Box>();
+  const own = new Map<string, SolidProbe>();
   for (const g of stairs) {
     // world bounds (g.min/max are the entity's own frame): from its world triangles
     const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
@@ -149,11 +191,24 @@ export function approachScene(project: string, doc: SceneDoc, opts: { world?: st
     const poi = (ents[g.id]?.tags as string[] | undefined)?.find((t) => t.startsWith("poi:"))?.slice(4) ?? poiOf(ents, g.id);
     const monument = opts.monument ? true : !!poi && monuments!.has(poi);
     if (!probe) { rows.push({ id: g.id, name: g.name, poi, monument, x: +wx.toFixed(1), z: +wz.toFixed(1), rise: 0, run: 0, heldShare: 1, status: "skipped", reason: "no world field and no other geometry", fault: false }); continue; }
-    const own = triangleSolidProbe(g.world, 0.5);
-    const c = classifyStair({ min: mn, max: mx }, own, probe);
+    boxes.set(g.id, { min: mn, max: mx });
+    own.set(g.id, triangleSolidProbe(g.world, 0.5));
+    const c = classifyStair({ min: mn, max: mx }, own.get(g.id)!, probe);
     const status: StairRow["status"] = c.skip ? "skipped" : c.heldShare < 0.5 ? "free-standing" : "cut-in";
     rows.push({ id: g.id, name: g.name, poi, monument, x: +wx.toFixed(1), z: +wz.toFixed(1), rise: +c.rise.toFixed(1), run: +c.run.toFixed(1),
       heldShare: +c.heldShare.toFixed(2), status, ...(c.skip ? { reason: c.skip } : {}), fault: status === "free-standing" && monument });
+  }
+  // a short span between held flights/landings inside a carved passage is held by them (second pass: needs every row)
+  if (probe) {
+    const held: Box[] = rows.filter((r) => r.status === "cut-in" && boxes.has(r.id)).map((r) => boxes.get(r.id)!);
+    for (const g of geo) if (isStairPart(g) && /landing/i.test(label(g))) {
+      const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+      for (let k = 0; k < g.world.length; k += 3) for (let c = 0; c < 3; c++) { mn[c] = Math.min(mn[c]!, g.world[k + c]!); mx[c] = Math.max(mx[c]!, g.world[k + c]!); }
+      held.push({ min: mn, max: mx });
+    }
+    for (const r of rows) if (r.status === "free-standing" && carvedSpan(boxes.get(r.id)!, own.get(r.id)!, probe, held.filter((b) => b !== boxes.get(r.id)))) {
+      r.status = "cut-in"; r.fault = false; r.reason = "span between held flights inside a carved passage";
+    }
   }
   return rows;
 }

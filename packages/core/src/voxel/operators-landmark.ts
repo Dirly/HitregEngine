@@ -10,10 +10,11 @@
 import { z } from "zod";
 import { registerOperator, type OperatorFieldReader, type OperatorOutput, type OperatorPiece } from "./operator-registry.js";
 import {
-  compileLandmarkSpec, landmarkBlendSchema, landmarkFootprint, landmarkGenerator, landmarkGround, landmarkOpeningSchema,
+  compileLandmarkSpec, landmarkAreaCells, landmarkBlendSchema, landmarkFootprint, landmarkGenerator, landmarkGround, landmarkOpeningSchema,
   landmarkSpecSchema, registerLandmarkGenerator, type CompiledLandmark, type LandmarkSpec,
 } from "./landmark-stamp.js";
 import { ledgeLandmarkGround, ledgeLandmarkVolume } from "./ledge-landmark.js";
+import { landmarkComponentSchema } from "../components/landmark.js";
 import { ledgesOperatorSchema, landmarkOptions, landmarkPrefabId, solveLedges } from "./operators-ledges.js";
 
 const xz = z.tuple([z.number().finite(), z.number().finite()]);
@@ -42,6 +43,7 @@ export const landmarkSourceSchema = z.union([
 ]);
 
 export const landmarkOperatorSchema = z.object({
+  kind: z.enum(["stamp", "built"]).default("stamp").describe("`stamp` (default): every part DC-baked at `voxel` (natural forms: rock, landforms, ruins melted into ground). `built`: man-made parts meshed DIRECTLY (landmark-built.ts: crisp edges, real UVs at the role tile = texture px / 40 texels per m, per-role materials, convex subs cut openings with reveals, collider from the same mesh); natural-role parts (rock/cliff/...) in the same spec are still DC-stamped into the same prefab (a mixed landmark: a built gate set into a rock face)."),
   at: xz.describe("World XZ of the spec's origin (its footprint centre)."),
   y: z.number().finite().optional().describe("World Y of spec y 0 (the foot). Omit: from `blend` (bury: lowest footprint ground - depth; pad: median; none: ground at `at`)."),
   yaw: z.number().default(0).describe("Degrees about +Y (spec +Z turns toward +X for positive yaw)."),
@@ -53,11 +55,12 @@ export const landmarkOperatorSchema = z.object({
   openings: z.array(landmarkOpeningSchema).max(16).default([]).describe("Named doorways/portals kept CLEAR (carved after every part) and noise-free; each is also a reach target."),
   targets: z.array(z.object({ name: z.string(), at: xyz.describe("Spec-local walkable point.") })).max(32).default([]).describe("Walkable points the BAKED collider must reach from the ground around (tools/landmark.mts reach loop). None and no openings = no reach loop."),
   seed: z.number().int().default(1).describe("Noise seed (combined with the world seed)."),
+  fog: landmarkComponentSchema.optional().describe("Read through the zone fog: the placed landmark gets a `landmark` component ({ fogReach, silhouette }) so it stands as a darker shape out to `fogReach` while the ground keeps the zone fog (docs/culling.md). Not part of the bake digest."),
 });
 export type LandmarkOperatorParams = z.infer<typeof landmarkOperatorSchema>;
 
 /** The salt the digest folds in: materials and voxel are part of the bake. */
-const saltOf = (p: LandmarkOperatorParams) => JSON.stringify({ m: Object.entries(p.materials).sort(), v: p.voxel });
+const saltOf = (p: LandmarkOperatorParams) => JSON.stringify({ m: Object.entries(p.materials).sort(), v: p.voxel, ...(p.kind === "built" ? { k: "built" } : {}) });
 
 /** The spec + placement a doc resolves to (generators run here). Throws for an un-inlined `file` source. */
 export function landmarkSpecOf(p: LandmarkOperatorParams, reader: OperatorFieldReader, ctx: { id: string }): { spec: LandmarkSpec; at: [number, number]; footY?: number; ground?: OperatorPiece | null; raw: boolean } | null {
@@ -79,12 +82,12 @@ export function compileLandmarkOperator(p: LandmarkOperatorParams, reader: Opera
   if (!s) return null;
   const compiled = compileLandmarkSpec(s.spec, {
     voxel: p.voxel, yaw: s.raw ? 0 : p.yaw, scale: s.raw ? 1 : p.scale, seed: (reader.seed * 7919 + p.seed * 104729) | 0,
-    openings: p.openings, salt: saltOf(p), skipThin: s.raw || opts.skipThin,
+    openings: p.openings, salt: saltOf(p), skipThin: s.raw || opts.skipThin || p.kind === "built",
   });
   return { compiled, at: s.at, footY: s.footY, ground: s.ground };
 }
 
-function compileLandmark(p: LandmarkOperatorParams, reader: OperatorFieldReader, ctx: { id: string }): OperatorOutput {
+export function compileLandmark(p: LandmarkOperatorParams, reader: OperatorFieldReader, ctx: { id: string }): OperatorOutput {
   const src = p.source as Record<string, unknown>;
   if ("blender" in src) {
     const res = src.resolved as { digest: string; min: number[]; max: number[]; footprint: [number, number][] } | undefined;
@@ -97,20 +100,21 @@ function compileLandmark(p: LandmarkOperatorParams, reader: OperatorFieldReader,
   const { cells } = landmarkFootprint(c.compiled, c.at);
   const radius = Math.max(Math.hypot(c.compiled.min[0], c.compiled.min[2]), Math.hypot(c.compiled.max[0], c.compiled.max[2]));
   return place(p, reader, ctx, cells, c.at, c.compiled.digest, radius, c.footY, c.ground, {
-    nodes: c.compiled.nodes.length, tiles: c.compiled.tiles.length, voxel: c.compiled.voxel, min: c.compiled.min, max: c.compiled.max,
+    kind: p.kind, nodes: c.compiled.nodes.length, tiles: c.compiled.tiles.length, voxel: c.compiled.voxel, min: c.compiled.min, max: c.compiled.max,
     roles: [...new Set(c.compiled.roles)], thinSamples: c.compiled.thin.samples, thinSpots: c.compiled.thin.spots.slice(0, 5),
   });
 }
 
 function place(p: LandmarkOperatorParams, reader: OperatorFieldReader, ctx: { id: string }, cells: [number, number][], at: [number, number], digest: string, radius: number,
   footOverride: number | undefined, groundOverride: OperatorPiece | null | undefined, extra: Record<string, unknown>): OperatorOutput {
+  if (p.blend.area) cells = landmarkAreaCells(p.blend.area, at, p.yaw, p.scale);
   const g = landmarkGround(cells, at, p.blend, reader, footOverride ?? p.y);
   const patch = groundOverride !== undefined ? groundOverride : g.patch;
   const prefab = landmarkPrefabId(ctx.id, digest);
   return {
     features: {
       ...(patch ? { heightPatches: [patch] } : {}),
-      landmarks: [{ id: "landmark", prefab, position: [at[0], g.footY, at[1]], radius: Math.round(radius * 100) / 100, digest }],
+      landmarks: [{ id: "landmark", prefab, position: [at[0], g.footY, at[1]], radius: Math.round(radius * 100) / 100, digest, ...(p.fog ? { fog: p.fog } : {}) }],
     },
     report: { prefab, footY: g.footY, ground: g.ground, footprintCells: cells.length, blend: p.blend.mode, ...extra },
   };
@@ -151,7 +155,7 @@ registerLandmarkGenerator("ledges", (args, reader, ctx) => {
 
 registerOperator<LandmarkOperatorParams>({
   op: "landmark",
-  description: "The general LANDMARK STAMP: any shape — a CSG spec (box/sphere/ellipsoid/cylinder/cone/capsule/torus/extrude/lathe/arch parts applied in order with add/sub/intersect + smooth blend, per-part roles and role noise), a Blender stamp (tools/mesh-dc) or a generator (`ledges`) — baked at a fine DC voxel (0.25-0.5 m; shells >= 3 voxels unless `thinOk`), one draw per material, own trimesh collider. Compiles to `landmarks` `op:<id>:landmark` + (bury/pad) one masked height patch `op:<id>:ground` >= 6 m wide. Bake: tools/landmark.mts.",
+  description: "The general LANDMARK STAMP (`kind: stamp`) or BUILT landmark (`kind: built`: man-made parts meshed directly with real UVs and per-role materials, natural roles still stamped): any shape — a CSG spec (box/sphere/ellipsoid/cylinder/cone/capsule/torus/extrude/lathe/arch parts applied in order with add/sub/intersect + smooth blend, per-part roles and role noise), a Blender stamp (tools/mesh-dc) or a generator (`ledges`) — baked at a fine DC voxel (0.25-0.5 m; shells >= 3 voxels unless `thinOk`), one draw per material, own trimesh collider. Compiles to `landmarks` `op:<id>:landmark` + (bury/pad) one masked height patch `op:<id>:ground` >= 6 m wide. Bake: tools/landmark.mts.",
   schema: landmarkOperatorSchema,
   compile: compileLandmark,
   bounds: landmarkBounds,

@@ -327,9 +327,15 @@ export function computeChunkStates(
   // key in reach and regex-parse each one back, on every cell crossing.)
   const out = new Map<string, ChunkRep>();
   const visit = (key: string, cx: number, cz: number): void => {
-    const ddx = cx - fcx;
-    const ddz = cz - fcz;
-    const d = Math.sqrt(ddx * ddx + ddz * ddz);
+    // Cell CENTRE to the focus corner (fcx,fcz is the cell corner nearest the focus), less half a
+    // cell, and 0 for the four cells around that corner (one of which holds the focus). Symmetric
+    // about the focus: measured to each cell's MIN corner (before 2026-10-22) the -x/-z side
+    // reached one cell less than the +x/+z side, so on a 48 m grid a fullRender ring of 3
+    // guaranteed full detail only 73 m out (104 m now, 32 cells instead of 29) and simulation 2
+    // only 25 m (73 m now, 16 cells instead of 13).
+    const ox = cx - fcx + 0.5;
+    const oz = cz - fcz + 0.5;
+    const d = Math.abs(ox) < 1 && Math.abs(oz) < 1 ? 0 : Math.sqrt(ox * ox + oz * oz) - 0.5;
     const prevLevel = REP_LEVEL[prev.get(key) as ChunkRep] ?? 0;
     const rising = levelByDistance(d, rings, 0);
     // rising/steady snaps up immediately; falling holds until beyond the pad

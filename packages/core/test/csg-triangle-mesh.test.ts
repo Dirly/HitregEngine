@@ -129,6 +129,17 @@ describe("closed triangle CSG solids", () => {
     expect(volumeDocSchema.parse(JSON.parse(JSON.stringify(volume.doc)))).toEqual(volume.doc);
   });
 
+  it("skips a hard sub mesh node only where it cannot change the field (plane-owner cuts)", () => {
+    // mesh-only document: a slab, a cube cut out of one end; the skip must give exactly max(d_slab, -d_cube)
+    const slab = cube([-4, -1, -1], [4, 0, 1]), hole = cube([2, -2, -2], [5, 2, 2]);
+    const volume = createVolume({ nodes: [{ shape: "mesh", mesh: slab }, { shape: "mesh", op: "sub", mesh: hole }] });
+    const a = compileTriangleMesh(slab), b = compileTriangleMesh(hole);
+    for (let i = 0; i < 400; i++) {
+      const x = -7 + (i * 0.731) % 14, y = -3 + (i * 0.377) % 6, z = -3 + (i * 0.519) % 6;
+      expect(volume.density(x, y, z)).toBeCloseTo(Math.max(a.distance(x, y, z), -b.distance(x, y, z)), 9);
+    }
+  });
+
   it("extracts the arch with its opening, closed topology, and measured extents", () => {
     const volume = createVolume({ voxelSize: 0.25, nodes: [{ shape: "mesh", mesh: arch() }] });
     const mesh = buildVolumeMesh(volume);

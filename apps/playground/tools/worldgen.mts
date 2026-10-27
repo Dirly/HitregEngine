@@ -34,9 +34,11 @@
  *   pnpm -F playground worldgen scatter-float <world> [--near x,z,r] [--list]  (fails if any plant or cover stands over air/an opening)
  *   pnpm -F playground worldgen lips <world> [--near x,z,r] [--list] [--json] [--allow ids]  (fails on sawtooth/wall/rim the 2 m lattice draws at patch edges and road cuts)
  *   pnpm -F playground worldgen rock-skins <world> [--near x,z,r | --rect x0,z0,x1,z1 | --stamp] [--list] (fails when a rock wears another place's stone or a cap the ground beside it does not)
+ *   pnpm -F playground worldgen rock-audit <world> --zone z [--near x,z,r | --rect | --corridor "x,z;..." --width w] [--every k] [--md f] (fails when a ground tile wins a face > 45 deg or a tile is outside the zone palette)
  *   pnpm -F playground worldgen water-edges <world> [--near x,z,r] [--stamp] [--no-scene]  (fails when a curtain stands off its lip/face or placed water ends in open air)
  *   pnpm -F playground worldgen float <world> [--near x,z,r | --rect x0,z0,x1,z1] [--json] [--out f]  (fails when any placed object or scatter rock is off its real support)
  *   pnpm -F playground worldgen seated <world> --slab x,z,hx,hz,yawDeg,baseY | --slabs f.json  (fails when a built slab hangs or the ground clips through it)
+ *   pnpm -F playground worldgen seated <world> --wall <opId> | --walls [--out f.json]  (fails when daylight shows under a wall segment)
  *   pnpm -F playground worldgen vegetation <world> [--region <id> --set <json|file> | --clear | --count] [--clearings <file>] [--remove-clearings <owner|id>] [--at x,z] [--dry-run]
  *       (what grows in a zone/town/place region, and clearings — docs/voxel-worlds.md section 31)
  *   pnpm -F playground worldgen stats  <world> [--cells 9]
@@ -92,13 +94,18 @@ import { commandScatterFloat } from "./worldgen-scatter-float.mts";
 import { commandLips, commandSeated, runLipsGate } from "./worldgen-lips.mts";
 import { commandFloat } from "./float.mts";
 import { commandRockSkins, writeRockSkinTemplate } from "./rock-skins.mts";
+import { commandPalette, commandRockAudit } from "./worldgen-rock-audit.mts";
 import { commandWaterEdges } from "./water-edges.mts";
+import { commandWaterLogic } from "./worldgen-water-logic.mts";
 import { riverWaterDoc } from "./_river-water.mts";
 import { commandTerracePlace, loadTerraceKit, removeTownTerraceWalls, townTerraceWalls, type TownRiserLink } from "./worldgen-terrace-walls.mts";
 import { commandBridgePlace } from "./worldgen-bridge-spans.mts";
 import { commandVegetation } from "./worldgen-vegetation.mts";
-import { commandFine, commandOp, commandOpPreview, fineStatusLine } from "./worldgen-operators.mts";
+import { commandRoad } from "./worldgen-road.mts";
+import { commandFine, commandOp, commandOpPreview, fineStatusLine, stampGateStage } from "./worldgen-operators.mts";
 import { findAsset } from "./_closure.mjs";
+import { briefStories, zonegenPopulated, zoneStoriesMissing } from "./_zone-sources.mts";
+import { readJsonTracked, updateJsonFile, writeJsonFile } from "./_scene-write.mts";
 
 // ---------------------------------------------------------------- cli plumbing
 
@@ -179,7 +186,7 @@ function loadRecipe(name = worldName): { recipe: WorldRecipe; file: string } {
   if (!file) {
     fail(`no world recipe "${name}" — run: worldgen init ${name}${project ? ` --project ${project}` : ""}`);
   }
-  const parsed = worldRecipeSchema.safeParse(JSON.parse(fs.readFileSync(file, "utf8")));
+  const parsed = worldRecipeSchema.safeParse(readJsonTracked(file)); // tracked: writeRecipe refuses if another tool wrote it since
   if (!parsed.success) fail(`world recipe ${file} is invalid:\n${parsed.error.message}`);
   return { recipe: parsed.data, file };
 }
@@ -208,9 +215,23 @@ function writeRecipe(recipe: WorldRecipe, file: string): void {
   // validate BEFORE writing: a stage must never leave a broken world on disk
   const parsed = worldRecipeSchema.safeParse(recipe);
   if (!parsed.success) fail(`refusing to write an invalid recipe:\n${parsed.error.message}`);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(parsed.data, null, 2)}\n`);
+  // under the file's lock, refused if another tool wrote the recipe after this one read it (tools/_scene-write.mts)
+  try { writeJsonFile(file, parsed.data, { label: `worldgen ${currentStage ?? "write"}` }); } catch (e) { fail((e as Error).message); }
   console.log(`wrote ${path.relative(process.cwd(), file)}`);
+}
+
+/**
+ * Host for a read-only whole-world gate: its --stamp writes ONLY the stage stamp into a fresh read of the recipe (stamped
+ * at load time), never the copy it loaded minutes ago — other jobs edit the world while a sweep runs (stampGateStage).
+ */
+function gateHost(stage: string): { argv: string[]; loadRecipe(): { recipe: WorldRecipe; file: string }; fail(m: string): never; writeRecipe(recipe: WorldRecipe, file: string): void } {
+  let loadedAt = new Date().toISOString();
+  return {
+    argv,
+    loadRecipe: () => { loadedAt = new Date().toISOString(); return loadRecipe(); },
+    fail,
+    writeRecipe: (_recipe, file) => { stampGateStage(file, stage, loadedAt); console.log(`stamped ${stage} (at ${loadedAt}, the time the sweep loaded the world) in ${path.relative(process.cwd(), file)}`); },
+  };
 }
 
 function fail(message: string): never {
@@ -297,6 +318,10 @@ const HELP = `worldgen — procedural world pipeline
                    erases it; a summit ON one gets no trail). The tread rides the ground (--tread-cut 1.5
                    --tread-fill 1) and must pass \`worldgen lips\`: over karst/DC steps it can't, the tread is cut
                    out (a scramble over natural rock, --scramble-margin 12; --no-lips skips the pass)
+  road   <world>   ONE carved+painted road along a drawn line, graded/painted like paths (the approach to a landmark no
+                   stage routes to): --id road-<name> --points "x,z;x,z;..." [--width 6 --max-grade 0.18 --max-cut 3
+                   --max-fill 0.8 --tread-cut m --tread-fill m --pin-start y --pin-end y --keep-landforms --dry-run --inverse f.json];
+                   --remove <id>. Never re-routed; ids road-* (stages own path-/trail-); idempotent; op --undo reverts
   pois   <world>   place landmark points on distinctive ground
   caves  <world>   dig cave systems into steep faces and MEASURE that a player fits
   canyons <world>  cut terraced gorges (--count 6; --zone badlands to keep them in one kind of place)
@@ -335,16 +360,17 @@ const HELP = `worldgen — procedural world pipeline
   scatter-float <world>  do plants float over terrain EDITS? solves real scatter cells and samples cover over every
                    cell a passage/tunnel/blob/height patch touches (or --near x,z,r), measures each against the
                    drawn mesh; exit 1 on a base > --tol 0.35 m over it or a footing over a drop (--list for all)
-  op     <world>   LANDFORM OPERATORS (features.operators: terrace, path, ...): --apply <file|id> compiles a doc into its
+  op     <world>   LANDFORM OPERATORS (features.operators: terrace, path, ledges, cave, landmark, wall, scree, paint; --kinds lists every registered operator + its params): --apply <file|id> compiles a doc into its
                    op:<id>:* pieces (inverse kept: <project>/authoring/terrain/undo/), --remove <id>, --undo <inverse.json>, --list, --check
   op-preview <world> --near x,z,r [--op <file|id>] [--out dir]: map PNG (height, contours, too-steep mask, footprint,
                    before|after) + a standalone three.js page of the area (before/after toggle, orbit + walk), in seconds
   fine   <world>   the 6 m gate: carves/patches/blobs finer than 6 m fail ("too fine for terrain: use a kit/hero piece or
-                   an operator"); [--near x,z,r] [--out f.json] [--list]; --record-legacy records the current ones as legacy
+                   an operator"); [--near x,z,r] [--out f.json] [--list] [--no-exceptions]; carves the world fine-exceptions
+                   file lists (coordinator rulings) are excepted; --record-legacy records the current ones as legacy
                    (every command: --recipe <file> works on a scratch copy)
   lips   <world>   the lip/sawtooth gate: every height patch and graded road measured on the 2 m lattice against the
                    world without them; exit 1 on teeth (--alias 0.5 m), walls (--max-slope 1.6) or one-sample rims
-                   (--lip 0.6 m). --near x,z,r, --list, --json, --allow id,id
+                   (--lip 0.75 m). --near x,z,r, --list, --json, --allow id,id
   float  <world>   THE float gate: every scene prop/fire/torch/lantern/structure (contact from the catalogue) and every
                    scatter rock in --near x,z,r | --rect x0,z0,x1,z1, seated on the REAL solid (field density: cuts,
                    carves, planar treads, buttes; + other objects' triangles, decks, colliders) by voxel/seat.ts;
@@ -354,12 +380,25 @@ const HELP = `worldgen — procedural world pipeline
                    the river surface and the rock face (top gap, face gap, floating, in rock, landing on a ledge), and every
                    placed water body's outline (buried / finished / open). --near x,z,r | --stamp. Scenes/dungeons:
                    tools/water-edges.mts scene <project> [--fix]. docs/voxel-worlds.md "Water edges".
+  water-logic <world>  do rivers, lakes and marsh tables agree? A river under the fen beside it with no declared weir,
+                   flat reaches with no flow, lakes with an inflow and no outlet, outlets over their lake, still sheets
+                   perched over lower ground or water. --near x,z,r | --rect | --stamp. Fix a fen river with
+                   river.weirs (docs/voxel-worlds.md "Weirs: rivers held at a fen's level").
   rock-skins <world>  is every rock the stone of its place, and every cap the ground band beside it? Recipe (each zone's
                    cliff has a rockSkins slice of its own tone) + scatter rocks in --near/--rect (or --stamp: whole world)
                    + scene rocks; exit 1 on a skin > --tone 9 (CIELAB a*b*) off its cliff, a cap on stone ground or a cap
                    other than the climate band's own surface (snow over the snow line). --json, --out f, --list.
+  rock-audit <world>  ONE palette per role per zone, each role on its own slopes: meshes the area as render does and reads
+                   every triangle by its FACE slope (0-20/20-45/45-70/>70 deg x height band): (a) ground tile winning a face
+                   > 45 deg, (b) cliff tile on < 20 deg, (c) a tile / rock slice / cap outside regions[].palette. --zone z
+                   [--near | --rect | --corridor "x,z;..." --width 120] [--every k] [--md report.md] [--out f.json].
+  palette <world>  --zone z [--set palette.json --inverse f | --undo f]: show or write the zone's ONE palette per role
+                   (regions[].palette: ground, cliff, cap, rockSmall, rockLarge, builtStone) that zone-textures, rock-skins
+                   install, place-build and op paint refuse to step outside.
   seated <world>   is a built slab sitting on the REAL ground (density; --drawn = the old lattice height)? --slab x,z,halfX,halfZ,yawDeg,baseY (repeat) or
                    --slabs file.json; exit 1 on a gap > --gap 0.25 m or ground through it > --clip 0.6 m
+                   --wall <opId> (repeat) | --walls: a baked wall operator against the drawn ground, per <= 4 m segment; exit 1 on
+                   daylight under any segment > --wall-gap 0.05 m or a stale bake. --list (every segment), --json, --out f
   terrace-place <world>  a terrace held up by REAL retaining walls (features.terraceWalls): --spec doc.json, or --id x
                    --footprint "x,z …" | --path "x,z …" (pad on the left) [--style masonry-common|masonry-stone|natural]
                    [--height m] [--top-y m] [--insert stair-turn@4:1 …] [--walls auto|0,2]; fits the pad patch, wall
@@ -1056,8 +1095,7 @@ function writeScene(recipe: WorldRecipe): void {
       },
     },
   };
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`);
+  writeJsonFile(file, doc, { label: "worldgen scene", allowRemovals: true }); // a new scene, or --force over the old one
   console.log(`wrote ${path.relative(process.cwd(), file)}`);
 }
 
@@ -4103,13 +4141,17 @@ function patchSceneCamps(
     console.warn(`  no scene ${path.relative(process.cwd(), file)} — camps written to the recipe only`);
     return;
   }
-  const doc = JSON.parse(fs.readFileSync(file, "utf8")) as {
+  // one read-modify-write under the scene's lock (tools/_scene-write.mts)
+  let wroteTemplate = false;
+  updateJsonFile(file, (fresh) => {
+  const doc = fresh as {
     entities: Record<string, Record<string, unknown>>;
   };
   // Only the ids THIS caller owns: a generated sweep must not delete the
   // camps a human painted, and vice versa.
+  const removed: string[] = [];
   for (const id of Object.keys(doc.entities)) {
-    if (id.startsWith(prefix)) delete doc.entities[id];
+    if (id.startsWith(prefix)) { delete doc.entities[id]; removed.push(id); }
   }
   for (const camp of camps) {
     const [x, z] = camp.center;
@@ -4125,8 +4167,9 @@ function patchSceneCamps(
     };
   }
 
-  const wroteTemplate = ensureMobTemplate(doc, recipe, field, camps, template);
-  fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`);
+  wroteTemplate = ensureMobTemplate(doc, recipe, field, camps, template);
+  return { doc, removed };
+  }, { label: "worldgen camps" });
   console.log(`  patched ${camps.length} spawnArea entities into ${path.relative(process.cwd(), file)}`);
   if (wroteTemplate) {
     console.log(`  wrote a placeholder "${template}" — a capsule with mob-brain, so the camps have something to spawn`);
@@ -5505,9 +5548,9 @@ function pathSurfaces(recipe: WorldRecipe): { surface: string; surfaceByBiome: R
 function roadFrom(
   id: string,
   route: readonly number[],
-  grid: WorldGridSample,
+  grid: Pick<WorldGridSample, "n" | "step" | "height" | "worldX" | "worldZ" | "nearest">,
   field: WorldField,
-  routeGrid: RouteGrid,
+  routeGrid: Pick<RouteGrid, "cost">,
   options: {
     width: number;
     maxGrade: number;
@@ -5534,6 +5577,12 @@ function roadFrom(
      * middle still smooths as usual.
      */
     lead?: { start?: readonly (readonly [number, number])[]; end?: readonly (readonly [number, number])[] };
+    /**
+     * Keep a control point at least every this many metres (absent = only where the line bends or the profile moves).
+     * The embankment targets (leftY/rightY) are sampled at the kept points only, so a long straight climb beside a
+     * rising wall interpolates them metres off the real ground and the band draws a rim (`worldgen road` sets 8).
+     */
+    maxSpacing?: number;
   },
 ): { roads: RoadDoc[]; bridges: BridgeDoc[] } {
   const n = grid.n;
@@ -5689,6 +5738,22 @@ function roadFrom(
         const t = (j - a) / (b - a), y = ys[a]! + (ys[b]! - ys[a]!) * t;
         if (y < ys[j]! - 0.3 && waterAt(pts[j]!) !== null) keep.push(j);
       }
+    }
+    if (options.maxSpacing) {
+      const spaced: number[] = [];
+      for (let k = 0; k < keep.length; k++) {
+        let last = keep[k]!;
+        spaced.push(last);
+        const next = keep[k + 1];
+        if (next === undefined) continue;
+        for (let j = last + 1; j < next; j++) {
+          if (Math.hypot(pts[j]![0] - pts[last]![0], pts[j]![1] - pts[last]![1]) >= options.maxSpacing && Math.hypot(pts[next]![0] - pts[j]![0], pts[next]![1] - pts[j]![1]) >= options.maxSpacing * 0.5) {
+            spaced.push(j);
+            last = j;
+          }
+        }
+      }
+      keep.splice(0, keep.length, ...spaced);
     }
     const leftY: number[] = [];
     const rightY: number[] = [];
@@ -6439,6 +6504,8 @@ interface PipelineStage {
   how: string;
   /** Done, and why not. Returning a string means "not done, here is what is missing". */
   check: (recipe: WorldRecipe) => string | null;
+  /** Not this world's job: a string ("n/a: ...") marks the row ok with that note (a zonegen world's own populations). */
+  na?: (recipe: WorldRecipe) => string | null;
   /** Stages that are allowed to be absent — a world with no canyons is a fine world. */
   optional?: boolean;
 }
@@ -6559,8 +6626,10 @@ function roadsUnderWater(recipe: WorldRecipe, prefix: string): number {
  * "Zone 7". They are in the same list, in dependency order, so `status` can say
  * a world is generated but not yet AUTHORED.
  */
-function pipelineStages(): PipelineStage[] {
+function pipelineStages(recipeFile?: string): PipelineStage[] {
   const has = (n: number): string | null => (n > 0 ? null : "nothing written");
+  // a zonegen-built world (tools/_zone-sources.mts): its populations and its zone stories live in the zonegen folders
+  const projectDir = recipeFile ? path.resolve(path.dirname(recipeFile), "..", "..") : null;
   return [
     { name: "init", after: [], by: "procedural", how: "worldgen init <world> --from <look>", check: () => null },
     {
@@ -6664,7 +6733,11 @@ function pipelineStages(): PipelineStage[] {
       },
     },
     { name: "caves", after: ["continents"], by: "procedural", how: "worldgen caves <world>", optional: true, check: (r) => has(r.features.tunnels.length) },
-    { name: "spawn", after: ["zones", "paths"], by: "procedural", how: "worldgen spawn <world> --scene <scene>", check: (r) => has(r.features.camps.length) },
+    {
+      name: "spawn", after: ["zones", "paths"], by: "procedural", how: "worldgen spawn <world> --scene <scene>", check: (r) => has(r.features.camps.length),
+      // worldgen spawn would pile generic camps onto the zones' installed zonegen populations
+      na: (r) => { const z = projectDir ? zonegenPopulated(projectDir, r.name) : []; return z.length ? `n/a: zonegen populate (${z.join(", ")})` : null; },
+    },
     {
       name: "zone-names",
       after: ["zones"],
@@ -6689,12 +6762,9 @@ function pipelineStages(): PipelineStage[] {
       name: "zone-stories",
       after: ["zone-names", "pois", "spawn"],
       by: "agent",
-      how: "write a story doc per zone, then: worldgen story <world> --zone <id> --story <name> --scene <scene>",
-      check: (r) => {
-        const wild = r.regions.filter((z) => !z.within);
-        const told = wild.filter((z) => z.story.trim().length > 0);
-        return told.length === wild.length ? null : `${wild.length - told.length} of ${wild.length} zones have no story`;
-      },
+      how: "write a story doc per zone, then: worldgen story <world> --zone <id> --story <name> --scene <scene>  (a zonegen world: its briefs tell them; zonegen stories <world> --project <p> copies them into the regions)",
+      // told by the recipe region's story or by the zone's zonegen brief (tools/_zone-sources.mts)
+      check: (r) => zoneStoriesMissing(r.regions, projectDir ? briefStories(projectDir, r.name) : new Map()),
     },
     { name: "map", after: ["paths", "trails", "zone-names"], by: "procedural", how: "worldgen map <world>", check: () => null },
     {
@@ -6724,6 +6794,24 @@ function pipelineStages(): PipelineStage[] {
       how: "worldgen water-edges <world> --stamp   (per area: --near x,z,r --list; dungeons: tools/water-edges.mts scene <project> --fix; docs/voxel-worlds.md \"Water edges\")",
       check: (r) => (r.pipeline?.["water-edges"] ? null : "never swept clean (worldgen water-edges <world> --stamp)"),
     },
+    {
+      // the water bodies agree: no river under the fen beside it without a declared weir, no flat reach with no flow,
+      // no lake that takes a river and lets none out, no still sheet perched over lower ground (worldgen-water-logic.mts)
+      name: "water-logic",
+      after: ["rivers", "terrace", "pois"],
+      by: "procedural",
+      how: "worldgen water-logic <world> --stamp   (per area: --near x,z,r --list; fen rivers: river.weirs, docs/voxel-worlds.md \"Weirs: rivers held at a fen's level\")",
+      check: (r) => (r.pipeline?.["water-logic"] ? null : "never swept clean (worldgen water-logic <world> --stamp)"),
+    },
+    {
+      // no voxel hangs in the air: solid pieces cut off from the ground mass (overhang noise on steep banks, carve
+      // slivers) smaller than recipe.floaters.keepVoxels are cleared as data (features.floaterClears; core floaters.ts)
+      name: "floaters",
+      after: ["rivers", "terrace", "paths", "trails", "pois", "caves"],
+      by: "procedural",
+      how: "tsx tools/voxel-floaters.mts <world> --world --apply --stamp   (per area: --river <id> | --box x0,z0,x1,z1; gate = without --apply)",
+      check: (r) => (r.pipeline?.["floaters"] ? null : "never swept clean (tools/voxel-floaters.mts <world> --world --apply --stamp)"),
+    },
   ];
 }
 
@@ -6745,13 +6833,15 @@ function pipelineStages(): PipelineStage[] {
  */
 function commandStatus(): void {
   const { recipe, file: recipeFile } = loadRecipe();
-  const stages = pipelineStages();
+  const stages = pipelineStages(recipeFile);
   const at = (name: string): number => {
     const stamp = recipe.pipeline[name];
     return stamp ? Date.parse(stamp) : NaN;
   };
   type Row = { stage: PipelineStage; state: "ok" | "STALE" | "MISSING"; why: string };
   const rows: Row[] = stages.map((stage) => {
+    const na = stage.na?.(recipe) ?? null;
+    if (na !== null) return { stage, state: "ok" as const, why: na };
     const missing = stage.check(recipe);
     const ran = at(stage.name);
     if (missing !== null) return { stage, state: "MISSING" as const, why: missing };
@@ -6778,7 +6868,7 @@ function commandStatus(): void {
   for (const row of rows) {
     const mark = row.state === "ok" ? "ok     " : row.state === "STALE" ? "STALE  " : "MISSING";
     const who = row.stage.by === "agent" ? " (agent)" : "";
-    const why = row.why && row.state !== "ok" ? ` — ${row.why}` : "";
+    const why = row.why && (row.state !== "ok" || row.why.startsWith("n/a")) ? ` — ${row.why}` : "";
     const opt = row.state === "MISSING" && row.stage.optional ? " (optional)" : "";
     console.log(`  ${mark} ${row.stage.name.padEnd(13)}${who.padEnd(9)}${why}${opt}`);
   }
@@ -6937,14 +7027,16 @@ function commandStory(): void {
         console.warn(`  no scene ${path.relative(process.cwd(), sceneFile)}`);
         return;
       }
-      const sceneDoc = JSON.parse(fs.readFileSync(sceneFile, "utf8")) as { entities: Record<string, { tags?: string[] }> };
       let removed = 0;
-      for (const [id, entity] of Object.entries(sceneDoc.entities)) {
-        if (!id.startsWith("story-") || !(entity.tags ?? []).includes(`zone:${zone.id}`)) continue;
-        delete sceneDoc.entities[id];
-        removed += 1;
-      }
-      fs.writeFileSync(sceneFile, `${JSON.stringify(sceneDoc, null, 2)}\n`);
+      updateJsonFile(sceneFile, (fresh) => {
+        const sceneDoc = fresh as { entities: Record<string, { tags?: string[] }> };
+        for (const [id, entity] of Object.entries(sceneDoc.entities)) {
+          if (!id.startsWith("story-") || !(entity.tags ?? []).includes(`zone:${zone.id}`)) continue;
+          delete sceneDoc.entities[id];
+          removed += 1;
+        }
+        return { doc: sceneDoc, removed };
+      }, { label: "worldgen story --clear" });
       console.log(`  removed ${removed} spawnArea entities from ${path.relative(process.cwd(), sceneFile)} (placeholder mobs left — they may be shared)`);
     }
     return;
@@ -9413,6 +9505,19 @@ function commandScene(): void {
   writeScene(recipe);
 }
 
+// `worldgen <command> --help`: that command's lines of HELP (no world needed), else the whole text
+if (argv.includes("--help") || argv.includes("-h")) {
+  const lines = HELP.split("\n");
+  const at = lines.findIndex((l) => l.startsWith(`  ${command} `) || l.startsWith(`  ${command}\t`));
+  if (at < 0) console.log(HELP);
+  else {
+    let end = at + 1;
+    while (end < lines.length && /^ {6,}/.test(lines[end]!)) end++;
+    console.log(lines.slice(at, end).join("\n"));
+  }
+  process.exit(0);
+}
+
 switch (command) {
   case "init":
     commandInit();
@@ -9449,6 +9554,25 @@ switch (command) {
     break;
   case "trails":
     commandTrails();
+    break;
+  case "road":
+    // one carved+painted road along a drawn line (an approach to a landmark): graded by roadFrom with every point
+    // held fixed, so nothing is re-routed and no other road is touched
+    commandRoad({
+      argv,
+      loadRecipe: () => loadRecipe(),
+      writeRecipe,
+      fail,
+      surfaces: (recipe) => pathSurfaces(recipe),
+      grade: (id, points, field, o) => {
+        // every point is a fixed lead: the stub grid only sets the simplify tolerance (0.25 cell = 1 m of plan drift)
+        const grid = { n: 1, step: 4, height: new Float32Array(1), worldX: () => 0, worldZ: () => 0, nearest: () => 0 };
+        return roadFrom(id, [], grid, field, { cost: new Float32Array(1) }, {
+          width: o.width, maxGrade: o.maxGrade, maxCut: o.maxCut, maxFill: o.maxFill, pinStart: o.pinStart, pinEnd: o.pinEnd,
+          surface: o.surface, surfaceByBiome: o.surfaceByBiome, smoothPasses: 0, finalClamp: "grade", lead: { start: points }, maxSpacing: o.spacing,
+        });
+      },
+    });
     break;
   case "continents":
     commandContinents();
@@ -9527,13 +9651,22 @@ switch (command) {
     commandSeated({ argv, loadRecipe: () => loadRecipe(), fail });
     break;
   case "float":
-    commandFloat({ argv, loadRecipe: () => loadRecipe(), fail, writeRecipe });
+    commandFloat(gateHost("float"));
     break;
   case "rock-skins":
-    commandRockSkins({ argv, loadRecipe: () => loadRecipe(), fail, writeRecipe });
+    commandRockSkins(gateHost("rock-skins"));
+    break;
+  case "rock-audit":
+    commandRockAudit({ argv, loadRecipe: () => loadRecipe(), fail, project });
+    break;
+  case "palette":
+    commandPalette({ argv, loadRecipe: () => loadRecipe(), fail });
+    break;
+  case "water-logic":
+    commandWaterLogic(gateHost("water-logic"));
     break;
   case "water-edges":
-    commandWaterEdges({ argv, loadRecipe: () => loadRecipe(), fail, writeRecipe });
+    commandWaterEdges(gateHost("water-edges"));
     break;
   case "op":
     commandOp({ argv, project, loadRecipe: () => loadRecipe(), writeRecipe, fail });

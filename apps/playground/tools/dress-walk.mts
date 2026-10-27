@@ -21,6 +21,7 @@
  * `upperOk` say which part failed).
  */
 import fs from "node:fs";
+import { readableReportFile } from "./_dress-report.mts";
 import path from "node:path";
 import type { SocketMap, DressingData } from "@hitreg/core";
 
@@ -140,7 +141,7 @@ function planOn(lv: SocketMap["levels"][number], from: P2, to: P2, radius: numbe
 export async function walkPlan(a: WalkArgs): Promise<WalkReport> {
   const t0 = Date.now();
   const server = await import("../../../packages/server/src/index.ts");
-  const content = server.loadContent(server.playgroundRoots(a.playground));
+  const content = server.loadContent(server.playgroundRoots(a.playground, a.scene)); // the scene's closure only, as serve.ts loads it
   const doc = content.scenes.get(a.scene) as unknown as SceneDoc | undefined;
   if (!doc) throw new Error(`no scene ${a.scene}`);
   // ---- where the plan is installed: its entities, the building frame, the props' footprints
@@ -151,7 +152,7 @@ export async function walkPlan(a: WalkArgs): Promise<WalkReport> {
   const host = doc.entities[group[0]]!.parent;
   if (!host) throw new Error(`${group[0]} has no parent: walk needs the plan applied with --parent <building interior>`);
   // map-local -> host frame: apply's --at/--yaw, recovered from one placement against the resolved plan report
-  const reportFile = path.join(a.projectDir, "authoring/dressing/plans", `${a.planId}.report.json`);
+  const reportFile = readableReportFile(path.join(a.projectDir, "authoring/dressing/plans", `${a.planId}.json`)) ?? "";
   const resolved = fs.existsSync(reportFile) ? (JSON.parse(fs.readFileSync(reportFile, "utf8")).placements as { id: string; position: P3; yaw: number }[]) : [];
   let at: P3 = [0, 0, 0], yaw0 = 0;
   for (const [id, e] of mine) {

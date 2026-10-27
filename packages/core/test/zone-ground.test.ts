@@ -13,9 +13,11 @@ import {
   surfaceBaseIndex,
   worldRecipeSchema,
   zoneGroundRoles,
+
   SPLAT_TOP_UNUSED,
   type VoxelMesh,
 } from "../src/index.js";
+import { createZoneMembership as membershipOf } from "../src/voxel/zone-ground.js";
 
 /**
  * Zone ground: a zone restyles roles (grass, ground, cliff, road, paving,
@@ -256,5 +258,58 @@ describe("indexed top-4 packing", () => {
     const merged = mergeVoxelMeshes(meshes.map((mesh) => ({ mesh, matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] })));
     expect(merged!.layerIndex!.length).toBe(merged!.vertexCount * 4);
     expectTriangleConsistent(merged!);
+  });
+});
+
+describe("nested region flat-cliff rule", () => {
+  it("a region nested in a palette zone sends its cliff weight on the flat to its own accent, like the zone", () => {
+    const recipe = {
+      seed: 1,
+      surfaces: [
+        { name: "grass", role: "grass" },
+        { name: "rock", role: "cliff" },
+        { name: "sand", role: "accent" },
+        { name: "zcliff" },
+        { name: "zaccent" },
+        { name: "gcliff" },
+        { name: "gaccent" },
+      ],
+      regions: [
+        { id: "zone", polygon: [[0, 0], [100, 0], [100, 100]] as [number, number][], ground: { cliff: "zcliff", accent: "zaccent" }, palette: { cliff: ["zcliff", "gcliff"] } },
+        { id: "gorge", within: "zone", polygon: [[10, 10], [20, 10], [20, 20]] as [number, number][], ground: { cliff: "gcliff", accent: "gaccent" } },
+        { id: "plain", polygon: [[200, 0], [300, 0], [300, 100]] as [number, number][], ground: { cliff: "zcliff", accent: "zaccent" } },
+      ],
+    };
+    const roles = zoneGroundRoles(recipe as never);
+    const by = Object.fromEntries(roles.zones.map((z) => [z.id, z]));
+    expect(by["zone"]!.flatCliff).toBe(4);
+    expect(by["gorge"]!.parent).toBe(0);
+    expect(by["gorge"]!.flatCliff).toBe(6);
+    expect(by["plain"]!.flatCliff).toBe(-1);
+  });
+});
+
+describe("per-region ground band", () => {
+  it("a region's groundBand narrows its own blend; others keep the world band", () => {
+    const sq = (x0: number, x1: number) => [[x0, -1000], [x1, -1000], [x1, 1000], [x0, 1000]] as [number, number][];
+    const recipe = {
+      seed: 3,
+      surfaces: [{ name: "grass", role: "grass" }, { name: "a" }, { name: "b" }],
+      zoneGround: { band: 150, jitter: 0 },
+      regions: [
+        { id: "wide", polygon: sq(-2000, 0), ground: { grass: "a" } },
+        { id: "narrow", polygon: sq(1000, 3000), ground: { grass: "b" }, groundBand: 20 },
+      ],
+    };
+    const roles = zoneGroundRoles(recipe as never);
+    const at = membershipOf(recipe as never, roles);
+    const out = new Float32Array(2);
+    at(-40, 0, out); // 40 m inside the wide zone: still blending over its 150 m band
+    expect(out[0]!).toBeGreaterThan(0.6);
+    expect(out[0]!).toBeLessThan(0.95);
+    at(1024, 0, out); // 24 m inside the narrow one: full
+    expect(out[1]!).toBeGreaterThan(0.99);
+    at(976, 0, out); // 24 m outside: nothing
+    expect(out[1]!).toBeLessThan(0.01);
   });
 });

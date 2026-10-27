@@ -1,0 +1,18 @@
+{
+  "id": "giant-delf",
+  "extends": "barrow-masonry",
+  "about": "A giants' delf cut square out of one grey stone: plain split-face walls (no library coursing, no pilasters, no niches, no wainscot), a cut floor, flat-headed giant doorways with a split-stone lintel block, a flat rock slab over the cut (the dungeon's own builder lays whole trunks under it on ledges). Giant scale: walls 1.2 m, doors 9 x 10.5.",
+  "construction": "masonry",
+  "height": 11,
+  "roles": { "wall": "split-face", "trim": "weathered", "floor": "cut-floor", "ceiling": "split-face", "pier": "split-face", "timber": "trunk", "panel": "trunk" },
+  "wall": { "thickness": 1.2, "part": null },
+  "floor": { "thickness": 0.8 },
+  "door": { "arch": "flat", "width": 9, "height": 10.5, "minSpring": 2.6, "ring": 1.1, "proj": 0.35, "voussoirs": 0, "jamb": 0.9, "impost": false },
+  "pilasters": { "every": 999, "minSpan": 9999 },
+  "niches": null,
+  "wainscot": null,
+  "ceiling": { "type": "flat", "thickness": 1.0, "ribs": false },
+  "columns": null,
+  "dais": null,
+  "stair": { "fillet": 2.4 }
+}

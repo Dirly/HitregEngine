@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   compileOperator, fringeShelves, LANDMARK_MIN_VOXELS, landmarkOptions, ledgeLandmarkVolume, ledgesOperatorSchema, operatorParams, rockCover, solveLedges,
   type OperatorFieldReader,
 } from "../src/index.js";
+
+// These synchronous geometry cases can occupy a worker for over a minute
+// together. Let Vitest receive its reporting acknowledgements between cases.
+afterEach(() => new Promise<void>((resolve) => setImmediate(resolve)));
 
 /** Flat ground at 100 for x < 0, a 1.2-grade face rising to a plateau at 160 for x > 0: a cliff to dig into. */
 const cliff: OperatorFieldReader = { height: (x) => 100 + Math.min(60, Math.max(0, 1.2 * x)), voxelSize: 2, seaLevel: 0, seed: 7 };
@@ -35,6 +39,13 @@ describe("cave operator", () => {
     }
   });
 
+  it("keeps the mouth flare above the sea when the mouth floor is above it and the ground outside is under it", () => {
+    // a sheer face out of the sea: sea bed at -16 for x < 0, the face rising to 120 for x > 0; the cave floor at 2.6 (a landing)
+    const seaCliff: OperatorFieldReader = { height: (x) => (x < 0 ? -16 : Math.min(120, -16 + 6 * x)), voxelSize: 2, seaLevel: 0, seed: 7 };
+    const { pieces } = compileOperator({ ...cave, entry: [-1, 0], y: 2.6, chamber: undefined }, seaCliff);
+    const flare = pieces.find((q) => q.feature.id === "op:den:mouth-flare")!.feature as unknown as { points: number[][]; radius: number };
+    expect(flare.points[0]![1]! - flare.radius).toBeGreaterThanOrEqual(0);
+  });
   it("is deterministic", () => {
     expect(JSON.stringify(compileOperator(cave, cliff).pieces)).toBe(JSON.stringify(compileOperator(cave, cliff).pieces));
   });
@@ -91,7 +102,7 @@ function reachAll(doc: Record<string, unknown>, reader: OperatorFieldReader, use
   return { anchors, reached: anchors.filter((a) => seen[cell(a[0]!, a[1]!)]).length, output, pieces };
 }
 
-describe("ledges operator", () => {
+describe("ledges operator", { timeout: 30_000 }, () => { // 2-4 s each alone: the default 5 s fails under a full-suite load
   // these checks walk the 2.5D height output; the landmark mode has its own block below
   const ledges = { id: "crag", op: "ledges", center: [0, 0], radius: 45, links: "cave", mode: "height" };
 
@@ -188,11 +199,12 @@ describe("ledges operator", () => {
   };
 
   it("staggers its ledges: they end, step and overlap across the face instead of one band spanning it", () => {
-    const staggered = spans({ ...ledges, links: "auto" });
+    // cave links: a ramp is cut along its shelf and splits that band's height on its own, which would hide the stagger
+    const staggered = spans({ ...ledges, links: "cave" });
     expect(staggered.length).toBeGreaterThanOrEqual(4);
     expect(Math.max(...staggered)).toBeLessThan(0.9);
     // teeth: with the stagger off the plain contour bands run the whole width
-    expect(Math.max(...spans({ ...ledges, links: "auto", staggerAmount: 0, pinch: 0 }))).toBeGreaterThanOrEqual(0.8);
+    expect(Math.max(...spans({ ...ledges, links: "cave", staggerAmount: 0, pinch: 0 }))).toBeGreaterThanOrEqual(0.8);
   });
 
   it("can leave a ledge reachable ONLY through its cave (the caves matter)", () => {

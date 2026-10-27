@@ -6,7 +6,13 @@ import {
   type EquipmentSlot,
   availableChoices,
   CHARACTER_EVENTS,
+  combatKey,
+  escortKey,
+  escortLength,
+  escortPoint,
+  escortRouteSchema,
   fillPlaces,
+  stepEscort,
   freshShopState,
   isDowned,
   isLootLocked,
@@ -33,6 +39,8 @@ import {
   type Dialogue,
   type DialogueAction,
   type DialogueFacts,
+  type EscortRoute,
+  type EscortState,
   type NpcMemory,
   type Places,
   type Quest,
@@ -46,7 +54,7 @@ import {
 } from "@hitreg/core";
 import { Script, type ScriptEventDecl } from "./script.js";
 import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } from "./character-store.js";
-import { worldFactsAt } from "./world-facts.js";
+import { worldFactsAt, worldTimeOf } from "./world-facts.js";
 import { presentFor, showIfPresent } from "./presence.js";
 
 /** What a choice's actions leave behind, applied all-or-nothing. */
@@ -84,6 +92,12 @@ interface Draft {
  */
 export class NpcScript extends Script {
   static override scriptName = "npc";
+  /** face: false turns nothing, and without a presence the object never hides: an NPC that is a thing stays still. */
+  static override stillWith = (params: Record<string, unknown>): boolean => {
+    const presence = params["presence"];
+    const empty = (v: unknown): boolean => !v || (typeof v === "object" && Object.keys(v).length === 0);
+    return params["face"] === false && empty(presence) && empty(params["escort"]);
+  };
   static override presentation = true;
   static override params = {
     name: { default: "", description: "display name (\"Wynna Coyle\"); empty = the entity's name" },
@@ -119,6 +133,13 @@ export class NpcScript extends Script {
         "a thing to READ (a sign, a slab, a book): opening it also emits player.read, which counts `read` objectives aimed at it. Its text is the dialogue's, tokens resolved the same way",
     },
     turn: { default: "", description: "entity turned to face the talker; empty = <this id>-visual when it exists (the body model)" },
+    escort: {
+      default: {} as Record<string, unknown>,
+      description:
+        "an NPC an `escort` quest step walks: { route: [[x, y, z], ...] ground points after its post, speed?: m/s (1.6), hold?: s at the end (8) } " +
+        "(spec questBlocks.action.escort; schema escortRouteSchema). The authority walks it while a claim (netState escort/<npcId>) is live and " +
+        "every client places it from that claim. Put it on a ROOT entity with no collider. {} = never walks",
+    },
   };
   static override events: ScriptEventDecl[] = [...npcEventDecls];
 
@@ -131,6 +152,8 @@ export class NpcScript extends Script {
   private tick = 0;
   private turnId = "";
   private restYaw: number | null = null;
+  /** The escort walk (param `escort`): its post, route and the authority's working state; shown = the distance drawn. */
+  private walk: { post: [number, number, number]; yaw: number; route: EscortRoute; length: number; local: EscortState | null; publish: number; shown: number } | null = null;
 
   override onStart(): void {
     this.store = sheetStoreOf(this.ctx);
@@ -143,6 +166,16 @@ export class NpcScript extends Script {
     if (this.param<boolean>("holstered")) this.object.userData["holstered"] = true;
     this.turnId = this.param<string>("turn") || (this.ctx.getEntity(`${this.entityId}-visual`) ? `${this.entityId}-visual` : "");
     if (self && !self.tags.includes("interactable")) console.warn(`[npc] ${this.entityId}: tag it "interactable" so npc-ui finds it`);
+    const escort = this.param<Record<string, unknown>>("escort");
+    if (escort && Object.keys(escort).length) {
+      const r = escortRouteSchema.safeParse(escort);
+      if (!r.success) console.warn(`[npc] ${this.entityId}: escort: ${r.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`);
+      else {
+        const p = this.object.position;
+        const post: [number, number, number] = [p.x, p.y, p.z];
+        this.walk = { post, yaw: this.object.rotation.y, route: r.data, length: escortLength(post, r.data.route), local: null, publish: 0, shown: 0 };
+      }
+    }
 
     const on = <T extends { actorId: string; npcId: string }>(name: string, fn: (p: T) => void): void => {
       this.ctx.events?.on(name, (payload, meta) => {
@@ -360,13 +393,13 @@ export class NpcScript extends Script {
       case "acceptQuest": {
         const q = this.quest(action.quest);
         if (!q) return `unknown quest "${action.quest}"`;
-        const r = acceptQuest(draft.journal, q);
+        const r = acceptQuest(draft.journal, q, true, worldTimeOf(this.store));
         return r.error ? `Quest: ${r.error}.` : { ...draft, journal: r.journal };
       }
       case "turnInQuest": {
         const q = this.quest(action.quest);
         if (!q) return `unknown quest "${action.quest}"`;
-        const r = turnInQuest(draft.journal, q);
+        const r = turnInQuest(draft.journal, q, worldTimeOf(this.store));
         if (r.error) return `Quest: ${r.error}.`;
         let sheet = draft.sheet;
         if (q.consume) {
@@ -474,8 +507,47 @@ export class NpcScript extends Script {
     this.store.set(`dialogue/${actorId}`, { ...conv, notice: cap, seq: conv.seq + 1 });
   }
 
+  /**
+   * Authority: one tick of an escort walk. The claim (escort/<this id>) is taken by the escorter's quest-log; from there this
+   * walks it (stepEscort), writes it four times a second and on every state change, and deletes it back at the post.
+   */
+  private escortTick(dt: number): void {
+    const w = this.walk!;
+    const key = escortKey(this.entityId);
+    const st = this.store.get(key) as EscortState | undefined;
+    if (!st) {
+      if (w.local || w.shown !== 0) this.placeEscort(0, false);
+      w.local = null;
+      return;
+    }
+    // a claim this tick did not write (a new one) replaces the working copy
+    const cur = w.local && w.local.by === st.by && w.local.quest === st.quest && w.local.objective === st.objective ? w.local : st;
+    const at = escortPoint(w.post, w.route.route, cur.d).at;
+    const body = this.ctx.getObject(cur.by);
+    const near = !!body && Math.hypot(body.position.x - at[0], body.position.z - at[2]) <= cur.radius;
+    const next = stepEscort(cur, { dt, length: w.length, speed: w.route.speed, hold: w.route.hold, near, dead: this.store.get(combatKey.dead(this.entityId)) === true });
+    w.local = next;
+    w.publish += dt;
+    if (!next) this.store.delete(key);
+    else if (next.state !== st.state || w.publish >= 0.25) {
+      w.publish = 0;
+      this.store.set(key, next);
+    }
+    this.placeEscort(next?.d ?? 0, next?.state === "return");
+  }
+
+  /** Stand the NPC `d` metres along its walk, facing the way it goes (back toward the post when returning; its post's yaw there). */
+  private placeEscort(d: number, back: boolean): void {
+    const w = this.walk!;
+    w.shown = d;
+    const p = escortPoint(w.post, w.route.route, d);
+    this.object.position.set(p.at[0], p.at[1], p.at[2]);
+    this.object.rotation.y = d <= 1e-3 || p.yaw === null ? w.yaw : back ? p.yaw + Math.PI : p.yaw;
+  }
+
   override onFixedUpdate(dt: number): void {
     if (!this.store.isAuthority()) return;
+    if (this.walk) this.escortTick(dt);
     this.tick += dt;
     if (this.tick < 0.5) return;
     const step = this.tick;
@@ -514,6 +586,15 @@ export class NpcScript extends Script {
 
   /** Presentation: hidden while a `presence` keeps it away; face the local player while they talk to this NPC. */
   override onLateUpdate(dt: number): void {
+    // a peer draws an escort from the replicated claim (4 updates a second): it chases the published distance
+    if (this.walk && !this.store.isAuthority()) {
+      const w = this.walk;
+      const st = this.store.get(escortKey(this.entityId)) as EscortState | undefined;
+      const want = st?.d ?? 0;
+      const step = w.route.speed * 1.5 * dt;
+      const d = Math.abs(want - w.shown) > 6 ? want : w.shown + Math.max(-step, Math.min(step, want - w.shown));
+      if (d !== w.shown || st) this.placeEscort(d, !st || st.state === "return");
+    }
     this.presenceScan -= dt;
     if (this.presenceScan <= 0) {
       this.presenceScan = 0.25;

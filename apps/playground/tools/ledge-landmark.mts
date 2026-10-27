@@ -1,7 +1,7 @@
 /**
  * `ledge-landmark` — bake a `ledges` operator's LANDMARK (mode "landmark"): the solids it compiled, dual-contoured at
- * the operator's fine voxel, merged into ONE GLB (the world's terrain-splat material: one draw) plus a prefab with a
- * trimesh collider. The world streams it through `features.landmarks` (packages/core voxel/ledge-landmark.ts).
+ * the operator's fine voxel, merged into ONE GLB (the world's terrain-splat material: one draw) plus a prefab, and its
+ * collider as one hidden trimesh per map cell it covers (tools/_landmark-colliders.mts). The world streams it through `features.landmarks` (packages/core voxel/ledge-landmark.ts).
  *
  *   node node_modules/tsx/dist/cli.mjs tools/ledge-landmark.mts <project> <world> <opId> [--recipe <file>]
  *        [--into <project>] [--tiles 0,3] [--dry-run] [--force] [--report <file.json>]
@@ -9,7 +9,8 @@
  * The solids are rebuilt from the INSTALLED operator doc (`worldgen op --apply` first): the same solve, the same
  * digest, so the prefab id the recipe names (`landmarks/<opId>-<digest>`) is the one written here. `--into` names the
  * project whose assets receive the bake (default <project>; a scratch recipe's lab project). `--tiles` bakes only
- * those tiles (a pipeline check on a small piece). Old bakes are kept: an undo names them again.
+ * those tiles (a pipeline check on a small piece). A full bake removes this op's superseded bakes (no iteration files;
+ * after an undo, re-run the bake: the same doc rebuilds the same digest).
  *
  * REACH (on by default; --no-fix-reach skips it): the COLLIDER is the truth. After the bake the tool walks the baked
  * trimesh from the hillside (tools/_collider-reach.mts, caves mouth to mouth); every core shelf it cannot reach gets a
@@ -38,8 +39,10 @@ import {
   type WorldRecipe,
 } from "@hitreg/core";
 import { closeReach, type ColliderMesh, type ReachRepair, type ReachSite } from "./_collider-reach.mts";
+import { pruneSupersededBakes, writeColliderTiles } from "./_landmark-colliders.mts";
 import { operatorReader, sideDir } from "./worldgen-operators.mts";
 import { mergeMeshes as mergeAll, openEdges, writeVolumeGlb } from "./_volume-glb.mts";
+import { readJsonTracked, writeJsonFile } from "./_scene-write.mts";
 // @ts-expect-error plain JS tool module
 import { decimateRough } from "../../../tools/mesh-dc/decimate.mjs";
 
@@ -53,7 +56,7 @@ if (!project || !world || !opId) {
   process.exit(1);
 }
 const recipeFile = flag("recipe") ?? join("projects", project, "assets", "worlds", `${world}.json`);
-const recipe = worldRecipeSchema.parse(JSON.parse(readFileSync(recipeFile, "utf8")));
+const recipe = worldRecipeSchema.parse(readJsonTracked(recipeFile));
 const doc = (recipe.features.operators ?? []).find((o) => o.id === opId) as Record<string, unknown> | undefined;
 if (!doc || doc.op !== "ledges") throw new Error(`no installed ledges operator "${opId}" in ${recipeFile} (worldgen op --apply first)`);
 const params = ledgesOperatorSchema.parse(operatorParams(doc));
@@ -62,7 +65,7 @@ if (params.mode !== "landmark") throw new Error(`"${opId}" is mode ${params.mode
 const fixReach = !has("no-fix-reach");
 const t0 = performance.now();
 
-interface Baked { recipe: WorldRecipe; prefabId: string; digest: string; lmReport: Record<string, unknown>; tiles: number; parts: number; merged: VoxelMesh; cells: number; seconds: number; stoneName: string; coverName: string; mesh: ColliderMesh; site: ReachSite }
+interface Baked { recipe: WorldRecipe; prefabId: string; digest: string; lmReport: Record<string, unknown>; tiles: number; parts: number; merged: VoxelMesh; cells: number; seconds: number; stoneName: string; coverName: string; mesh: ColliderMesh; site: ReachSite; place: { position: [number, number, number]; radius: number } }
 
 /** Solve + solids + DC bake of the operator as installed in `rec`, merged, trimmed and decimated (nothing written). */
 function bake(rec: WorldRecipe, inLoop = false): Baked {
@@ -157,6 +160,7 @@ function bake(rec: WorldRecipe, inLoop = false): Baked {
   return {
     recipe: rec, prefabId, digest: lm.digest, lmReport: lm.report as unknown as Record<string, unknown>, tiles: lm.tiles.length, parts: parts.length, merged, cells, seconds, stoneName, coverName: names[coverIndex]!,
     mesh: { positions: merged.positions, indices: merged.indices, offset: [ox, 0, oz] },
+    place: { position: lm.origin, radius: lm.radius },
     site: { center: [cx, cz], radius, ground: (x, z) => field.height(x, z), anchors: r.shelfAnchors, caves: solve.grid.caves.map((cv) => cv.floor as [number, number, number][]) },
   };
 }
@@ -197,7 +201,7 @@ if (inverse.length) {
   const inv = join(sideDir(recipeFile), "undo", `${recipe.name}.reach-${opId}.${new Date().toISOString().replace(/[:.]/g, "-")}.inverse.json`);
   mkdirSync(dirname(inv), { recursive: true });
   writeFileSync(inv, `${JSON.stringify({ world: recipe.name, what: `reach-${opId}`, edits: inverse }, null, 1)}\n`);
-  writeFileSync(recipeFile, `${JSON.stringify(worldRecipeSchema.parse(current), null, 2)}\n`);
+  writeJsonFile(recipeFile, worldRecipeSchema.parse(current), { label: "ledge-landmark" }); // refused if another tool wrote since the read
   console.log(`wrote ${recipeFile} (${added.length} reach repair(s) on ${opId}); inverse: ${inv} (worldgen op ${recipe.name} --undo <it>)`);
 }
 
@@ -220,10 +224,19 @@ const prefab = {
       components: {
         transform: {},
         mesh: { source: { kind: "asset", assetId: `landmarks/${name}.glb` }, material: flag("material") ?? recipe.material ?? "terrain/mmo", static: true, castShadow: true, receiveShadow: true },
-        collider: { shape: "trimesh" },
       },
     },
   },
 };
+// the collider: one hidden trimesh per map cell the landmark covers (tools/_landmark-colliders.mts), so every cell
+// streams its own piece and a body far from the origin cell still stands on it
+const colliderTiles = writeColliderTiles(into, prefabId, [merged], b.place, recipe.cellSize);
+console.log(`collider: ${colliderTiles.triangles} tris in ${colliderTiles.cells.length} cell tile(s) [${colliderTiles.cells.join(" ")}]`);
 writeFileSync(prefabFile, JSON.stringify(prefab, null, 2) + "\n");
 console.log(`wrote ${glb} (${(statSync(glb).size / 1024).toFixed(0)} KB) and ${prefabFile}`);
+if (!flag("tiles")) {
+  // no iteration files: this op's older bakes go (never another op's, never a prefab the recipe names)
+  const named = [recipe, current].map((r) => (r.features.landmarks ?? []).find((l) => l.id === `op:${opId}:landmark`)?.prefab).filter((v): v is string => !!v);
+  const pruned = pruneSupersededBakes(into, opId!, [prefabId, ...named]);
+  if (pruned.length) console.log(`removed ${pruned.length} superseded bake file(s) of ${opId}`);
+}

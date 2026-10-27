@@ -1,6 +1,8 @@
 import { assetFileUrl, setAssetScopeOwner } from "./asset-url.js";
 import { type AssetLibrary } from "@hitreg/core";
 import { loadVolumes, loadWorldRecipes } from "./voxel-world.js";
+import { batchedAssetReader } from "./asset-reads.js";
+import { subscribeAssetScope } from "./asset-changes.js";
 
 /**
  * assets/ is the project content folder. In dev everything is fetched FRESH
@@ -30,6 +32,7 @@ export async function loadAssets(
   );
   const scopeHeader = response.headers.get("x-hitreg-scope");
   projectScope = scopeHeader && scopeHeader !== "*" ? new Set(scopeHeader.split(",")) : null;
+  subscribeAssetScope(projectScope);
   // the header lists the owning project first; every later read resolves in its closure
   setAssetScopeOwner(projectScope ? scopeHeader!.split(",")[0]! : null);
   if (projectScope) console.info(`[assets] loading projects: ${[...projectScope].join(", ")}`);
@@ -38,26 +41,7 @@ export async function loadAssets(
   // A merged project library can contain thousands of prefabs. Starting all
   // fetches together exhausts browser request resources and silently drops
   // later kinds (including materials). Share one bounded queue across kinds.
-  let activeReads = 0;
-  const pendingReads: Array<() => void> = [];
-  const readJson = (kind: string, file: string): Promise<unknown> =>
-    new Promise((resolve, reject) => {
-      const run = () => {
-        activeReads++;
-        void fetch(fileUrl(kind, file))
-          .then((response) => {
-            if (!response.ok) throw new Error(`HTTP ${response.status}: ${kind}/${file}`);
-            return response.json() as Promise<unknown>;
-          })
-          .then(resolve, reject)
-          .finally(() => {
-            activeReads--;
-            pendingReads.shift()?.();
-          });
-      };
-      if (activeReads < 16) run();
-      else pendingReads.push(run);
-    });
+  const readJson = batchedAssetReader();
 
   // Every JSON asset fetch is independent, so issue them all at once instead of
   // one blocking round-trip at a time — on a large project this is the
@@ -65,8 +49,8 @@ export async function loadAssets(
   // on every unavoidable reload). Registration order within a kind is
   // irrelevant (each keys by id), so await the whole batch, then add.
   const jsonKinds: { kind: string; type?: string; onlyJson?: boolean }[] = [
-    { kind: "prefabs" },
-    { kind: "materials", type: "material" },
+    { kind: "prefabs", onlyJson: true },
+    { kind: "materials", type: "material", onlyJson: true },
     { kind: "terrain", type: "terrain-heightfield", onlyJson: true },
     { kind: "spritesheets", type: "spritesheet", onlyJson: true },
     { kind: "vfx", type: "vfx", onlyJson: true },

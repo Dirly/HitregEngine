@@ -3,6 +3,7 @@
 You write the shared specification every later agent working on {zone} reads first.
 
 **Read**
+- `docs/world-standards/adventure-design.md`: the fantasy discovery, investigation and payoff bar for places.
 - `{cast}`: this zone's row (premise, faction, minor spill, level, palette, starter). It is decided; build on it.
 - `{adjacency}`: this zone's towns (ids, tiers) and neighbours, and which borders have paths or passes.
 - `{links}`: how its towns relate to towns elsewhere.
@@ -13,6 +14,9 @@ You write the shared specification every later agent working on {zone} reads fir
 
 **Judgment**
 - History explains the threat: what this place was, what changed, why the towns are still here.
+- Choose an adventure roster, not a list of medieval trades. Ruins, lairs, caves, towers, crypts, caches and
+  dangerous wonders give players reasons to explore. Believable work and daily life support those destinations.
+  A corpse, ordinary pests or a grim name alone cannot rescue a dull work yard; judge P1/P4 before construction.
 - Each town has a reason to exist and a way to survive; wealth follows from it, not from tier.
 - Traversal is what the ground really does: name the roads and passes, what blocks the way, what a detour costs.
 - The budget is a promise the later lints hold you to. Fewer, denser places beat many thin ones; leave `expansion` for exploration finds.
@@ -20,8 +24,8 @@ You write the shared specification every later agent working on {zone} reads fir
 - **Design the places before any quest** (`places`, `placeSchema`). The owner's test is whether a place feels
   hand-made and alive, never whether a quest works. Per place: what a passer-by sees in one line, the landmark and
   where it is seen from, the linked sub-sites, the set piece it is remembered for, the one thing no other place in
-  the zone has, its mood (ground, plants, water, air), who holds it and who you meet there. Every landmark owns its
-  own dungeon; every large place is several sub-sites round one landmark (the Barrens oasis: a lake and a cave
+  the zone has, its mood (ground, plants, water, air), who holds it and who you meet there. A dungeon belongs to
+  its own place when the adventure calls for one; every large place is several sub-sites round one landmark (the Barrens oasis: a lake and a cave
   system), never one camp. Read `docs/world-standards/sites.md` and `dungeons.md` first.
 - Design for the creature even when its body is not built yet: a ratkin warren has spoil heaps, gnawed timber and
   tunnels sized for them; a giant's place has giant-scale furniture and doors. Bodies arrive later; places do not

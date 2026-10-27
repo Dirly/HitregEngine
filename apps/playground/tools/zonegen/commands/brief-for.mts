@@ -18,6 +18,21 @@ import { questBlocks } from "@hitreg/core";
 import { exists, makePaths, readJson, type Ctx } from "../lib.mts";
 import { zoneBriefSchema } from "../schemas.mts";
 import { rel, townNames } from "./_shared.mts";
+import { questObjectsText } from "./quest-objects.mts";
+import { questDecls } from "../../_dress-quest.mts";
+
+/** The quest objects a dresser of `location` must include (zonegen quest-objects), for the {questObjects} brief var. */
+function questObjectsFor(projectDir: string, world: string, location: string): string {
+  if (!location) return "";
+  const zones = [...new Set(questDecls(projectDir).filter((d) => d.location === location).map((d) => d.zone))];
+  const sceneFile = path.join(projectDir, "assets", "scenes", `${world}.scene.json`);
+  const scene = exists(sceneFile) ? (readJson(sceneFile) as { entities: Record<string, { tags?: string[] }> }) : null;
+  const body = zones.length ? zones.map((z) => questObjectsText(projectDir, z, scene, location)).join("\n") : `(the quest plans declare no objects at ${location})`;
+  return (
+    `${body}\nEach declared object is one plan item with \`quest.entity\`: \`{ "id": "<id>", "prop": "<a catalogued prop from the menu>", "place": {...}, "quest": { "entity": "<id>" } }\`` +
+    " (an object in no plan is a check warning; one already in another plan stays there)."
+  );
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const briefsDir = path.join(here, "..", "briefs");
@@ -29,6 +44,18 @@ const BUILDING_STAGES = ["dress-building"];
 function blockFields(name: string): string {
   const shape = (questBlocks.get("condition", name)?.schema as { shape?: Record<string, { description?: string }> } | undefined)?.shape ?? {};
   return Object.entries(shape).map(([k, v]) => `${k}${v.description ? ` (${v.description.split(/\.\s|:\s/)[0]})` : ""}`).join("; ") || "(none registered)";
+}
+
+/** The socket map a building was measured as: `<town>-<building>` (town-builder sockets), else the first map whose id
+ * starts with it (a lot variant such as `reeve-house-b`), else the bare building id. */
+function defaultBuildingMap(projectDir: string, town: string, building: string): string {
+  const dir = path.join(projectDir, "authoring", "dressing", "sockets");
+  const want = `${town}-${building}`;
+  if (fs.existsSync(path.join(dir, `${want}.json`))) return want;
+  const hit = fs.existsSync(dir)
+    ? fs.readdirSync(dir).find((f) => f.startsWith(`${want}-`) && f.endsWith(".json") && !f.endsWith(".steps.json"))
+    : undefined;
+  return hit ? hit.slice(0, -".json".length) : building;
 }
 
 /** The area role site-sockets measured the map as ("(site camp, ..." in its source line). */
@@ -98,12 +125,13 @@ export async function run(ctx: Ctx): Promise<number> {
     clock: blockFields("clock"),
     town: ctx.opt("town"),
     building: ctx.opt("building"),
-    map: ctx.opt("map", ctx.opt("building")),
+    map: ctx.opt("map", defaultBuildingMap(p.projectDir, ctx.opt("town"), ctx.opt("building"))),
     plan: stage === "dress-site" ? `${ctx.opt("poi")}--${ctx.opt("area")}` : `${ctx.opt("town")}--${ctx.opt("building")}`,
     poi: ctx.opt("poi"),
     area: ctx.opt("area"),
     siteMap: `${ctx.opt("poi")}-${ctx.opt("area")}`,
     role: siteRole(p.projectDir, `${ctx.opt("poi")}-${ctx.opt("area")}`),
+    questObjects: stage === "dress-site" || BUILDING_STAGES.includes(stage) ? questObjectsFor(p.projectDir, world, stage === "dress-site" ? ctx.opt("poi") : ctx.opt("town")) : "",
   };
   const text = fs.readFileSync(path.join(briefsDir, `${stage}.md`), "utf8").replace(/\{(\w+)\}/g, (m, k: string) => vars[k] ?? m);
   console.log(text.trimEnd());

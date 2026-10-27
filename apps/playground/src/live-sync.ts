@@ -10,6 +10,8 @@ import type { EditingPrefab, Observable, Selection } from "@hitreg/editor";
 import type { ChunkManager } from "./chunk-manager.js";
 import type { SubsceneManager } from "./subscene-manager.js";
 import { applyWorldRecipeEdit } from "./voxel-world.js";
+import { loadedProjectScope } from "./asset-loader.js";
+import { acceptsAssetChange, coalesceAssetChanges, type AssetChange } from "./asset-changes.js";
 
 export interface LiveSyncDeps {
   assets: AssetLibrary;
@@ -48,6 +50,7 @@ export interface LiveSync {
 
 /** file changes (AI edits, text editors) apply in place. */
 export function installLiveSync(deps: LiveSyncDeps): LiveSync {
+  const notifyAssetsChanged = coalesceAssetChanges(() => deps.assetsVersion.set(deps.assetsVersion.get() + 1));
   let deferred: { file: string; content: string } | null = null;
   const sync: LiveSync = {
     flushDeferred() {
@@ -73,13 +76,22 @@ export function installLiveSync(deps: LiveSyncDeps): LiveSync {
     setLastWrittenScene,
     getLastWrittenPrefab,
   } = deps;
-  import.meta.hot.on("hitreg:asset-changed", (payload: { file: string; content: string | null }) => onChange(payload));
+  import.meta.hot.on("hitreg:asset-changed", (payload: AssetChange) => onChange(payload));
   return sync;
 
-  function onChange(payload: { file: string; content: string | null }): void {
+  function onChange(payload: AssetChange): void {
+    if (!acceptsAssetChange(payload, loadedProjectScope())) return;
     {
       const { file, content } = payload;
-      if (!content) return;
+      if (!content) {
+        // An out-of-scope scene is discoverable without receiving/parsing its
+        // potentially multi-megabyte document in every connected editor.
+        if (file.startsWith("scenes/")) {
+          const name = file.slice("scenes/".length).replace(/\.scene\.json$/, "");
+          if (!sceneList.get().includes(name)) sceneList.set([...sceneList.get(), name].sort());
+        }
+        return;
+      }
       try {
         if (file.startsWith("scenes/")) {
           const name = file.slice("scenes/".length).replace(/\.scene\.json$/, "");
@@ -132,36 +144,41 @@ export function installLiveSync(deps: LiveSyncDeps): LiveSync {
           const id = file.slice("materials/".length).replace(/\.json$/, "");
           const data = JSON.parse(content);
           const asset = { id, type: "material", name: id, data };
-          const isNew = !assets.getDataAsset(id);
+          const previous = assets.getDataAsset(id);
+          const isNew = !previous;
           if (isNew) assets.addDataAsset(asset);
           else assets.updateDataAsset(asset);
+          if (previous && JSON.stringify(previous.data) === JSON.stringify(assets.getDataAsset(id)!.data)) return;
           // A plain property tweak on an already-instanced material patches the
           // live THREE.Material and refreshes just its swatch — no scene
           // rebuild. Shader-class/texture changes (and brand-new materials not
           // yet in the scene) decline and take the full rebuild below.
           if (isNew || !patchMaterialLive(id, data)) {
-            assetsVersion.set(assetsVersion.get() + 1);
+            notifyAssetsChanged();
           }
         } else if (file.startsWith("terrain/")) {
           const id = file.slice("terrain/".length).replace(/\.json$/, "");
           const asset = { id, type: "terrain-heightfield", name: id, data: JSON.parse(content) };
-          if (assets.getDataAsset(id)) assets.updateDataAsset(asset);
+          const previous = assets.getDataAsset(id);
+          if (previous) assets.updateDataAsset(asset);
           else assets.addDataAsset(asset);
-          assetsVersion.set(assetsVersion.get() + 1);
+          if (!previous || JSON.stringify(previous.data) !== JSON.stringify(assets.getDataAsset(id)!.data)) notifyAssetsChanged();
         } else if (file.startsWith("spritesheets/")) {
           const id = file.slice("spritesheets/".length).replace(/\.json$/, "");
           const asset = { id, type: "spritesheet", name: id, data: JSON.parse(content) };
-          if (assets.getDataAsset(id)) assets.updateDataAsset(asset);
+          const previous = assets.getDataAsset(id);
+          if (previous) assets.updateDataAsset(asset);
           else assets.addDataAsset(asset);
-          assetsVersion.set(assetsVersion.get() + 1); // re-resolves every consumer
+          if (!previous || JSON.stringify(previous.data) !== JSON.stringify(assets.getDataAsset(id)!.data)) notifyAssetsChanged();
         } else if (file.startsWith("prefabs/")) {
           const id = file.slice("prefabs/".length).replace(/\.json$/, "");
           // isolation editing writes this file itself — skip our own echo
           if (id === editingPrefab.get() && content === getLastWrittenPrefab()) return;
           const doc = JSON.parse(content);
-          if (assets.getPrefab(id)) assets.updatePrefab(id, doc);
+          const previous = assets.getPrefab(id);
+          if (previous) assets.updatePrefab(id, doc);
           else assets.addPrefab(id, doc);
-          assetsVersion.set(assetsVersion.get() + 1);
+          if (!previous || JSON.stringify(previous) !== JSON.stringify(assets.getPrefab(id))) notifyAssetsChanged();
         } else if (/^(items|progression|creation|quests|dialogues|shops|places)\//.test(file)) {
           // Item definitions and levelling rules are read live by the
           // character scripts (ctx.getDataAsset on every reducer call), so
@@ -191,7 +208,7 @@ export function installLiveSync(deps: LiveSyncDeps): LiveSync {
           const id = file.slice("worlds/".length).replace(/\.json$/, "");
           if (applyWorldRecipeEdit(id, content)) {
             chunkManager.reloadAll();
-            assetsVersion.set(assetsVersion.get() + 1);
+            notifyAssetsChanged();
           }
         } else if (file.startsWith("chunks/")) {
           // hot-swap a loaded chunk in place (or pick up a brand-new cell)

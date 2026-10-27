@@ -34,6 +34,11 @@ import "./operators-path.js";
 import "./operators-cave.js";
 import "./operators-ledges.js";
 import "./operators-landmark.js";
+import "./operators-paint.js";
+import "./operators-scree.js";
+import "./operators-riverbank.js";
+import "./operators-wall.js";
+import "./operators-cliff-path.js";
 
 export * from "./operator-registry.js";
 
@@ -70,13 +75,31 @@ export function operatorPieces(recipe: WorldRecipe, id: string): { kind: Feature
   return out;
 }
 
-/** The recipe with an operator's compiled pieces lifted off: the ground its `compile` must read. */
-export function withoutOperatorPieces(recipe: WorldRecipe, id: string): WorldRecipe {
-  const prefix = operatorPrefix(id);
+/**
+ * The operators whose output an operator's `compile` must NOT see: itself and every operator AFTER it in
+ * `features.operators` order. Operators compose in recipe order — each reads the ground the operators before it made —
+ * so two that overlap (a landmark's ground blend under a path ribbon) converge: re-applying in recipe order is a fixed
+ * point, and `--check` compares each one against the ground it was really built on. (Reading every OTHER operator's
+ * output made overlapping pairs mutually STALE forever: re-applying either moved the ground under the other.) An id
+ * not in the list (a doc about to be appended) excludes only itself.
+ */
+export function operatorsFrom(recipe: WorldRecipe, id: string): string[] {
+  const ids = (recipe.features.operators ?? []).map((o) => o.id);
+  const at = ids.indexOf(id);
+  return at < 0 ? [id] : ids.slice(at);
+}
+
+/**
+ * The recipe with an operator's compiled pieces lifted off — and those of every operator after it in recipe order
+ * (`operatorsFrom`): the ground its `compile` must read. `{ only: true }` lifts this operator's pieces alone.
+ */
+export function withoutOperatorPieces(recipe: WorldRecipe, id: string, options: { only?: boolean } = {}): WorldRecipe {
+  const prefixes = (options.only ? [id] : operatorsFrom(recipe, id)).map(operatorPrefix);
+  const hit = (fid: string | undefined) => typeof fid === "string" && prefixes.some((p) => fid.startsWith(p));
   const features = { ...recipe.features } as Record<string, unknown>;
   for (const kind of FEATURE_KINDS) {
     const list = features[kind] as { id: string }[] | undefined;
-    if (kind !== "operators" && list?.some((f) => f.id?.startsWith(prefix))) features[kind] = list.filter((f) => !f.id?.startsWith(prefix));
+    if (kind !== "operators" && list?.some((f) => hit(f.id))) features[kind] = list.filter((f) => !hit(f.id));
   }
   return { ...recipe, features: features as WorldRecipe["features"] };
 }
@@ -128,8 +151,8 @@ export function featureMinDimension(kind: string, f: Record<string, unknown>): {
   return { min: Infinity, what: kind };
 }
 
-/** Prefixes of derived pieces owned by a system that keeps them legal by construction (kit walls, bridges, operators). */
-export const FINE_EXEMPT_PREFIXES = ["op:", "tw-", "bs-"] as const;
+/** Prefixes of derived pieces owned by a system that keeps them legal by construction (kit walls, bridges, operators, lift shafts: place-build lift carves a straight box round its deck and proves it with a ride gate). */
+export const FINE_EXEMPT_PREFIXES = ["op:", "tw-", "bs-", "lift-"] as const;
 
 export interface FineReport {
   ok: boolean;
@@ -137,6 +160,8 @@ export interface FineReport {
   faults: FineCarve[];
   /** Violations on the recorded legacy list (counted, not failed). */
   legacy: FineCarve[];
+  /** Violations a coordinator ruling excepts (the world's fine-exceptions file; counted, not failed). */
+  excepted: FineCarve[];
   /** Fine pieces owned by exempt systems (`tw-` wall cuts, `bs-` bridge cuts). */
   exempt: number;
 }
@@ -145,11 +170,13 @@ export interface FineReport {
  * THE 6 M RULE. The terrain lattice is 2 m, so a terrain carve or patch whose smallest dimension is under 6 m
  * (three steps) cannot be drawn — it becomes lumpy treads, bulging walls and kerbs over the walk line. Such shapes are
  * a kit / hero piece or an operator's job. `legacy` = ids recorded before the rule (they pass, and are counted);
+ * `excepted` = kind/id keys a coordinator ruling lists (`<world>.fine-exceptions.json`, the file the per-job gate reads);
  * `near` = only features whose footprint centre lies within that disc.
  */
-export function fineCarves(recipe: WorldRecipe, options: { legacy?: Iterable<string>; near?: [number, number, number] } = {}): FineReport {
+export function fineCarves(recipe: WorldRecipe, options: { legacy?: Iterable<string>; excepted?: Iterable<string>; near?: [number, number, number] } = {}): FineReport {
   const legacy = new Set(options.legacy ?? []);
-  const report: FineReport = { ok: true, faults: [], legacy: [], exempt: 0 };
+  const excepted = new Set(options.excepted ?? []);
+  const report: FineReport = { ok: true, faults: [], legacy: [], excepted: [], exempt: 0 };
   const near = options.near;
   for (const kind of ["passages", "heightPatches", "blobs"] as const) {
     for (const f of (recipe.features[kind] ?? []) as unknown as Record<string, unknown>[]) {
@@ -163,6 +190,7 @@ export function fineCarves(recipe: WorldRecipe, options: { legacy?: Iterable<str
       if (FINE_EXEMPT_PREFIXES.some((p) => id.startsWith(p))) { report.exempt += 1; continue; }
       const row: FineCarve = { kind, id, min: Math.round(min * 100) / 100, what };
       if (legacy.has(`${kind}/${id}`) || legacy.has(id)) report.legacy.push(row);
+      else if (excepted.has(`${kind}/${id}`)) report.excepted.push(row);
       else report.faults.push(row);
     }
   }
@@ -262,10 +290,29 @@ function piecesDigest(pieces: { kind: string; feature: Record<string, unknown> }
 
 export type OperatorState = "ok" | "EDITED" | "MISSING" | "STALE" | "UNCOMPILED";
 
+/** Earlier operators (recipe order) whose bounds overlap this one's: what it was composed on. */
+export function operatorDependencies(recipe: WorldRecipe, id: string): string[] {
+  const docs = (recipe.features.operators ?? []) as OperatorDoc[];
+  const at = docs.findIndex((d) => d.id === id);
+  if (at <= 0) return [];
+  const boundsOf = (d: OperatorDoc) => {
+    const op = getOperator(d.op);
+    try { return op ? op.bounds(op.schema.parse(operatorParams(d))) : null; } catch { return null; }
+  };
+  const mine = boundsOf(docs[at]!);
+  if (!mine) return [];
+  return docs.slice(0, at).filter((d) => {
+    const b = boundsOf(d);
+    return b && b.x0 < mine.x1 && b.x1 > mine.x0 && b.z0 < mine.z1 && b.z1 > mine.z0;
+  }).map((d) => d.id);
+}
+
 /**
  * State of every installed operator: EDITED = a piece no longer matches what was compiled (hand edit), MISSING = a
  * piece is gone, STALE = the ground under it moved (re-apply), UNCOMPILED = a doc never applied. `readerFor` builds
- * the ground without that operator's pieces (pass it only when STALE matters — it builds a field).
+ * the ground without that operator's pieces AND those of every operator after it (`withoutOperatorPieces`, recipe
+ * order; pass it only when STALE matters — it builds a field). A STALE operator that overlaps earlier ones names them:
+ * re-apply in recipe order (`worldgen op --apply` re-applies the later overlapping ones itself).
  */
 export function checkOperators(recipe: WorldRecipe, readerFor?: (id: string) => OperatorFieldReader): { id: string; op: string; state: OperatorState; why: string }[] {
   return (recipe.features.operators ?? []).map((doc) => {
@@ -283,7 +330,8 @@ export function checkOperators(recipe: WorldRecipe, readerFor?: (id: string) => 
     if (readerFor) {
       const op = getOperator(d.op);
       if (op && groundFingerprint(readerFor(d.id), op.bounds(op.schema.parse(operatorParams(d)))) !== d.compiled.ground) {
-        return { id: d.id, op: d.op, state: "STALE" as const, why: "the ground under it moved: re-apply" };
+        const deps = operatorDependencies(recipe, d.id);
+        return { id: d.id, op: d.op, state: "STALE" as const, why: deps.length ? `the ground under it moved (composed on ${deps.join(", ")}): re-apply in recipe order` : "the ground under it moved: re-apply" };
       }
     }
     return { id: d.id, op: d.op, state: "ok" as const, why: "" };

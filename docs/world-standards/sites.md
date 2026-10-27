@@ -12,4 +12,4 @@ Outdoor places (camps, ruins, caves, estates, shores). Each micro-domain is a sk
 | dungeon doors | `portals` | `portal-cover`, `portal-trip`, `portal-play` |
 | creatures | `encounter-standards` | `zonegen populate`, `site-packs.json` |
 
-The place schema's `size` classes are drafts; their numbers are OPEN (`README.md` "Not encoded yet").
+Size tiers are data: `tools/poi-review/size-tiers.mjs` (owner ruling 2026-10-03). Encoded: `zonegen reserve` `under-tier`, `zonegen poi-brief`, `job.mjs measure` / install gate 12. Final reviews: gate 13 (reviewer id, every Q/S rubric line).

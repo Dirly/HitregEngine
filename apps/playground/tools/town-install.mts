@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { ComponentRegistry, applyOps, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
+import { applyOpsToSceneFile } from "./_scene-write.mts";
 
 const argv = process.argv.slice(2);
 const opt = (name: string, fallback: string): string => {
@@ -66,12 +67,12 @@ for (const [district, d] of Object.entries(manifest.districts)) {
     } as never,
   });
 }
-const result = applyOps(scene, ops, registry);
+let result = applyOps(scene, ops, registry);
 if (argv.includes("--dry")) {
   console.log(`would apply ${ops.length} ops`);
   process.exit(0);
 }
-fs.writeFileSync(sceneFile, `${JSON.stringify(result.doc, null, 2)}\n`);
+result = applyOpsToSceneFile(sceneFile, ops, (d, o) => applyOps(d, o, registry), { label: "town-install" }); // fresh read under the scene lock (tools/_scene-write.mts)
 fs.writeFileSync(path.join(projectDir, "authoring/towns", `${townName}-install-ops.json`), `${JSON.stringify({ ops, inverse: result.inverse }, null, 1)}\n`);
 for (const [district, d] of Object.entries(manifest.districts)) console.log(`  ${district}: ${d.buildings.length} buildings, ${d.tris} tris, ${d.materials} materials at [${d.anchor}]`);
 console.log(`installed into ${path.relative(process.cwd(), sceneFile)} (${ops.length} ops; inverse saved)`);

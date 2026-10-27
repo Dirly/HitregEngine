@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ValidationResult } from "./components/registry.js";
+import { STAFF_TELEPORT_EVENT, staffTeleportSchema } from "./staff.js";
 
 /** Event names are lowercase dotted/kebab identifiers: "trigger.enter", "wave-cleared". */
 const EVENT_NAME = /^[a-z][a-z0-9-.]*$/;
@@ -119,6 +120,8 @@ export function registerCoreEvents(registry: EventRegistry): void {
   registry.register(PLAYER_LOGOUT_EVENT, z.object({
     cancel: z.boolean().default(false).describe("False starts a 20-second camp; true cancels it. The authority chooses the sending peer, requires stillness and no combat/loot lock, saves before acknowledging logout. Closing the connection uses the 60-second disconnect grace instead."),
   }), { replicate: "to-authority" });
+  // a staff peer's /teleport on a dedicated server (staff.ts); the server refuses it from a player
+  registry.register(STAFF_TELEPORT_EVENT, staffTeleportSchema, { replicate: "to-authority" });
   registry.register("entity.spawned", z.object({ entityId: z.string() }));
   registry.register("entity.destroyed", z.object({ entityId: z.string() }));
   registry.register("collision", z.object({ a: z.string(), b: z.string() }));

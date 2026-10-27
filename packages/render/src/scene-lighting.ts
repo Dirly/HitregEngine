@@ -206,6 +206,12 @@ export interface LiveSkyOptions {
     mistThickness?: number;
     /** 0..1 how far `mistTop`/`mistThickness` replace the scene's absolute mist top (eased across a border). */
     mistLocal?: number;
+    /** The zone's dusk/dawn cloud-burn colour (replaces the day/night `clouds.sun` colour by `sunsetAmount`). */
+    sunset?: string;
+    /** 0..1 how far `sunset` replaces the day/night cloud-burn colour (eased across a border). */
+    sunsetAmount?: number;
+    /** Multiplies the day/night `clouds.sunAmount` (capped at 1). */
+    cloudGlow?: number;
   } | null;
   /**
    * How much DAYLIGHT there is here, 0..1 — what a day/night script already
@@ -313,6 +319,8 @@ export class SceneLighting {
     /** Coverage, the sun-side cloud glow and the sun disc as asked for, before `overcast` closed the sky. */
     cloudCoverage: null as number | null,
     cloudSunAmount: null as number | null,
+    /** The dawn/dusk cloud-burn colour as asked for, before a zone mood's `sunset` replaced it. */
+    cloudSun: null as THREE.Color | null,
     sunDisc: null as number | null,
     /** Cloud colours as the day/night script asked for them, before weather darkened them. */
     top: null as THREE.Color | null,
@@ -349,6 +357,9 @@ export class SceneLighting {
     shade: new THREE.Color(1, 1, 1),
     fogDensity: 1,
     mist: 1,
+    sunset: null as THREE.Color | null,
+    sunsetAmount: 0,
+    cloudGlow: 1,
   };
   private readonly moodScratch = new THREE.Color();
   private readonly weather = { gloom: 0, tint: new THREE.Color("#808080"), tintAmount: 0, cloudDark: 0, flash: 0, overcast: 0 };
@@ -539,7 +550,7 @@ export class SceneLighting {
       if (c.light !== undefined) req.cloudLight = Math.max(0, c.light);
       if (c.color !== undefined) (req.cloudColor ??= new THREE.Color()).set(c.color);
       if (c.shadow !== undefined) (req.cloudShadow ??= new THREE.Color()).set(c.shadow);
-      if (c.sun !== undefined) dome.cloudSun.value.set(c.sun);
+      if (c.sun !== undefined) (req.cloudSun ??= new THREE.Color()).set(c.sun);
       if (c.sunAmount !== undefined) req.cloudSunAmount = Math.min(1, Math.max(0, c.sunAmount));
       if (c.speed) dome.cloudSpeed.value.set(c.speed[0], c.speed[1]);
       if (c.scale !== undefined) dome.cloudScale.value = Math.max(0.05, c.scale);
@@ -623,7 +634,14 @@ export class SceneLighting {
         cloudShadow.speed.value.copy(dome.cloudSpeed.value);
         cloudShadow.strength.value = CLOUD_SHADOW_STRENGTH * open * Math.min(1, req.daylight * 1.5);
       }
-      dome.cloudSunAmount.value = (req.cloudSunAmount ?? sky?.clouds?.sunAmount ?? 0) * open;
+      // a zone mood's dusk: its own burn colour in place of the global one, and its glow scale
+      const glow = Math.min(1, (req.cloudSunAmount ?? sky?.clouds?.sunAmount ?? 0) * this.mood.cloudGlow);
+      dome.cloudSunAmount.value = glow * open;
+      if (req.cloudSun || this.mood.sunset) {
+        this.cloudScratch.copy(req.cloudSun ?? this.moodScratch.set(sky?.clouds?.sun ?? "#ffb27a"));
+        if (this.mood.sunset) this.cloudScratch.lerp(this.mood.sunset, this.mood.sunsetAmount);
+        dome.cloudSun.value.copy(this.cloudScratch);
+      }
       dome.sunIntensity.value = (req.sunDisc ?? sky?.sun?.intensity ?? 0) * open * open;
     }
     if (req.hemisphere !== null && this.hemisphere) this.hemisphere.intensity = req.hemisphere * dim * fillLift;
@@ -722,6 +740,9 @@ export class SceneLighting {
     m.shade.set(next?.shade ?? "#ffffff");
     m.fogDensity = Math.max(0, next?.fogDensity ?? 1);
     m.mist = Math.max(0, next?.mist ?? 1);
+    m.sunset = next?.sunset ? (m.sunset ?? new THREE.Color()).set(next.sunset) : null;
+    m.sunsetAmount = Math.min(1, Math.max(0, next?.sunsetAmount ?? (next?.sunset ? 1 : 0)));
+    m.cloudGlow = Math.max(0, next?.cloudGlow ?? 1);
     this.fog.setMistScale(m.mist);
     this.fog.setMistLocal(next?.mistTop ?? 0, next?.mistThickness ?? 0, next?.mistLocal ?? 0);
     const sky = this.baseSky;

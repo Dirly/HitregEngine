@@ -26,6 +26,9 @@ import {
   BADGE_NETSTATE,
   CAMP_SECONDS,
   PLAYER_LOGOUT_EVENT,
+  STAFF_TELEPORT_EVENT,
+  staffTeleportRefusal,
+  type StaffTeleportRequest,
   bagKeeper,
   CAST_NETSTATE,
   corpseClaimed,
@@ -57,6 +60,7 @@ import {
 } from "@hitreg/core";
 import type { HeadlessWorld } from "./world.js";
 import type { TerrainStreamer } from "./terrain.js";
+import { groundVerdict } from "./ground-recovery.js";
 import { sightRadius } from "./sight.js";
 import type { CommitInput, PlayerSave } from "./cluster/player-store.js";
 
@@ -490,7 +494,12 @@ export class GameServer {
     this.candidates = [];
     for (const [id, e] of this.world.entities) {
       const netObj = e.components["netObject"] as NetObjectData | undefined;
-      const implicit = e.components["script"] !== undefined && e.components["rigidbody"] !== undefined;
+      const script = e.components["script"] as { name?: string } | undefined;
+      // a clock-driven script (a lift) runs identically everywhere: replicating it would take its body off clients
+      const implicit =
+        script !== undefined &&
+        e.components["rigidbody"] !== undefined &&
+        (this.world.scriptRegistry.get(script.name ?? "") as { clockDriven?: boolean } | undefined)?.clockDriven !== true;
       if (!netObj && !implicit) continue;
       if (netObj?.authority === "owner") continue;
       this.candidates.push(id);
@@ -598,6 +607,7 @@ export class GameServer {
       if ((payload as { cancel: boolean }).cancel) this.cancelCamp(meta.from, "Camp cancelled.");
       else this.startCamp(meta.from);
     }));
+    this.unsubs.push(this.world.eventBus.on(STAFF_TELEPORT_EVENT, (payload, meta) => this.requestTeleport(payload as StaffTeleportRequest, meta?.from)));
     // a `hello` is the join signal: RoomHost has no roster hook, so the
     // roster is diffed each tick (same as net-presence.ts)
 
@@ -644,6 +654,22 @@ export class GameServer {
     }
     return foci;
   }
+  /** Every player body's (x, z), for the runtime's mob sleep; one reused array. */
+  private playerFoci(): Array<[number, number]> | null {
+    let n = 0;
+    for (const player of this.players.values()) {
+      const p = this.world.positionOf(player.bodyId);
+      if (!p) continue;
+      const slot = this.mobFoci[n] ?? (this.mobFoci[n] = [0, 0]);
+      slot[0] = p[0];
+      slot[1] = p[2];
+      n++;
+    }
+    this.mobFoci.length = n;
+    // no player at all: unknown, not "everyone far" — an empty server keeps its old behaviour (dormancy pauses packs)
+    return n > 0 ? this.mobFoci : null;
+  }
+  private readonly mobFoci: Array<[number, number]> = [];
   private dynamicRoots: string[] = [];
   private dynamicRootsVersion = -1;
 
@@ -706,6 +732,109 @@ export class GameServer {
   /** performance.now() of the last drop, or of the last slow tick (the "server was late" window). */
   private lostAt = -Infinity;
 
+  /**
+   * Bodies under the earth (ground-recovery.ts): a player standing in a cell this server never loaded gets it loaded
+   * now; a body inside the rock under the surface with nothing below it fell through, and is lifted onto the first
+   * collider over its column and logged with coordinates (`groundRecoveries` keeps the same records for tools).
+   */
+  readonly groundRecoveries: Array<{ peer: string; at: [number, number, number]; to: [number, number, number]; depth: number; tick: number }> = [];
+  private recoverGround(): void {
+    const terrain = this.terrain!;
+    const sim = this.world.sim;
+    if (!sim.raycast) return;
+    const cs = terrain.resolved.streamer.cellSize;
+    for (const player of this.players.values()) {
+      if (player.disconnectedAt !== null) continue;
+      const p = this.world.positionOf(player.bodyId);
+      if (!p) continue;
+      const [x, y, z] = p;
+      const cx = Math.floor(x / cs), cz = Math.floor(z / cs);
+      const cellResident = !terrain.inWorld(cx, cz) || terrain.has(cx, cz);
+      const surface = terrain.groundHeight(x, z);
+      const deep = cellResident && surface - y > 2.5;
+      const below = deep ? sim.raycast([x, y, z], [0, -1, 0], 6, { solid: true, exclude: [player.bodyId] }) : null;
+      const verdict = groundVerdict({
+        position: [x, y, z],
+        surface,
+        floorNear: deep ? terrain.groundNear(x, z, y) : surface,
+        colliderBelow: below ? below.distance : null,
+        cellResident,
+      });
+      if (verdict.kind === "uncovered") {
+        console.warn(`[server:ground] ${player.peerId} stands in a cell that is not resident at (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}) — loading it inline`);
+        terrain.ensureAround(x, z, 0);
+        sim.ensureStaticsAround(x, z);
+        continue;
+      }
+      if (verdict.kind !== "fell") continue;
+      // the first collider over the column from high above (a shelf, a deck, a bridge), else the field surface
+      const top = sim.raycast([x, surface + 60, z], [0, -1, 0], 60 + (surface - y) - 1, { solid: true, exclude: [player.bodyId] });
+      const to: [number, number, number] = [x, (top ? top.point[1] : surface) + 1.2, z];
+      console.warn(`[server:ground] ${player.peerId} fell through the ground at (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}), ${verdict.depth.toFixed(1)} m under the surface ${surface.toFixed(1)} — lifted to y ${to[1].toFixed(1)}`);
+      this.groundRecoveries.push({ peer: player.peerId, at: [x, y, z], to, depth: verdict.depth, tick: this.world.tick });
+      if (this.groundRecoveries.length > 64) this.groundRecoveries.shift();
+      sim.setPosition(player.bodyId, to);
+      sim.setLinvel(player.bodyId, [0, 0, 0]);
+    }
+  }
+
+  /** Staff teleports waiting for their landing cells (bodyId → destination and the tick the request came in). */
+  private readonly teleports = new Map<string, { x: number; z: number; y?: number; since: number }>();
+  /** Every teleport landed, kept for tools and tests (the last 64). */
+  readonly teleportsLanded: Array<{ bodyId: string; to: [number, number, number]; waitedTicks: number; tick: number }> = [];
+
+  /**
+   * The console's `/teleport` from a staff peer (core `staffTeleportRefusal`): queued, then landed by
+   * {@link landTeleports} once the destination's cells are in — the same wait a joining or portal-arriving body gets,
+   * so a body never drops into ground that is not there yet. A refusal goes back as `character.refused`.
+   */
+  private requestTeleport(p: StaffTeleportRequest, from: string | undefined): void {
+    const refuse = (error: string): void => {
+      this.world.eventBus.emit("character.refused", { actorId: p.actorId, request: "teleport", error });
+    };
+    const refusal = staffTeleportRefusal(this.world.netState, from, p.actorId);
+    if (refusal) return refuse(refusal);
+    if (!this.world.positionOf(p.actorId)) return refuse("That body is not on this server.");
+    if (this.terrain) {
+      const cs = this.terrain.resolved.streamer.cellSize;
+      if (!this.terrain.inWorld(Math.floor(p.x / cs), Math.floor(p.z / cs))) return refuse("That is outside the world.");
+    }
+    this.teleports.set(p.actorId, { x: p.x, z: p.z, ...(p.y !== undefined ? { y: p.y } : {}), since: this.world.tick });
+    console.log(`[server:teleport] ${from ?? "local"} -> ${p.actorId} to (${p.x.toFixed(1)}, ${p.z.toFixed(1)})`);
+    this.landTeleports();
+  }
+
+  /** Land each queued teleport whose cells are resident (or have waited JOIN_GROUND_WAIT_TICKS: then inline). */
+  private landTeleports(): void {
+    const sim = this.world.sim;
+    for (const [bodyId, t] of [...this.teleports]) {
+      if (!this.world.positionOf(bodyId)) {
+        this.teleports.delete(bodyId);
+        continue;
+      }
+      if (this.terrain) {
+        const ready = this.terrain.prefetch(t.x, t.z, this.terrain.resolved.streamer.cellSize);
+        if (!ready && this.world.tick - t.since < GameServer.JOIN_GROUND_WAIT_TICKS) continue;
+        this.terrain.ensureAround(t.x, t.z, 1);
+      }
+      sim.ensureStaticsAround(t.x, t.z);
+      let y = t.y;
+      if (y === undefined) {
+        const surface = this.terrain ? this.terrain.groundHeight(t.x, t.z) : (this.world.positionOf(bodyId)![1] ?? 0);
+        // the first collider over the column from high above (a deck, a bridge, a roof), else the field surface
+        const top = sim.raycast ? sim.raycast([t.x, surface + 60, t.z], [0, -1, 0], 120, { solid: true, exclude: [bodyId] }) : null;
+        y = (top ? top.point[1] : surface) + 1.2;
+      }
+      const to: [number, number, number] = [t.x, y, t.z];
+      sim.setPosition(bodyId, to);
+      sim.setLinvel(bodyId, [0, 0, 0]);
+      this.teleports.delete(bodyId);
+      this.teleportsLanded.push({ bodyId, to, waitedTicks: this.world.tick - t.since, tick: this.world.tick });
+      if (this.teleportsLanded.length > 64) this.teleportsLanded.shift();
+      console.log(`[server:teleport] ${bodyId} landed at (${to.map((n) => n.toFixed(1)).join(", ")}) after ${this.world.tick - t.since} ticks`);
+    }
+  }
+
   /** One authoritative tick: roster → terrain → sim + scripts → replication. */
   tick(): void {
     if (this.closed) return;
@@ -729,7 +858,11 @@ export class GameServer {
       profiler?.end();
     }
     const tTerrain = performance.now();
+    // the runtime's mob distance sleep (MobSleepRule): the same rule the local play host applies
+    this.world.scripts.setPlayerFoci(this.playerFoci());
     this.world.step();
+    if (this.terrain && tick % 15 === 0) this.recoverGround();
+    if (this.teleports.size > 0) this.landTeleports();
     this.updateCamps();
     const tStep = performance.now();
     this.host.setTick(this.world.tick);
@@ -1946,6 +2079,9 @@ export class GameServer {
       // client it STOPPED: with one sample its interpolator would keep
       // extrapolating the last step), and not due a refresh: nothing to say
       if (last && last.ver === s.ver && last.settled && tick < last.refreshAt) continue;
+      // an asleep mob (ScriptRuntime MobSleepRule: no player within 160 m) does not change until it wakes, and the
+      // wake changes it: skip its refresh too, so a sleeping crowd costs the wire nothing
+      if (last && last.ver === s.ver && last.settled && this.world.scripts.mobBand(r.id) === "asleep") continue;
       // left out for at least one of its own sends, and moving again: hold first
       const resumed = !!last && last.ver !== s.ver && tick - last.at > this.snapshotEvery * every;
       updates[r.id] = updateOf(s, resumed);

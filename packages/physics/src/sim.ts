@@ -174,6 +174,17 @@ export class PhysicsSim {
   private pendingCollisionEnds: Array<[string, string]> = [];
   /** Entity ids whose collider was created as a sensor (isTrigger). */
   private readonly sensors = new Set<string>();
+  /**
+   * Kinematic bodies driven by {@link setKinematicTarget} (lifts, moving platforms), each with its position after
+   * the last step: what {@link carryRiders} measures the step's travel from.
+   */
+  private readonly carriers = new Map<string, Vec3>();
+  private readonly carryScratch: RAPIER.Collider[] = [];
+  private readonly carried = new Set<number>();
+  /** Dynamic riders given their carrier's velocity for the step in progress: [body, vx, vy, vz]. */
+  private readonly lent: Array<[RAPIER.RigidBody, number, number, number]> = [];
+  /** Carriers whose pending kinematic target a query refresh must not consume: [body, now x,y,z, target x,y,z]. */
+  private readonly heldTargets: Array<[RAPIER.RigidBody, number, number, number, number, number, number]> = [];
   private readonly options: PhysicsSimOptions;
   private disposed = false;
   private readonly warned = new Set<string>();
@@ -1028,10 +1039,92 @@ export class PhysicsSim {
 
   step(dt: number): void {
     this.ragdolls.tick(dt);
+    if (this.carriers.size > 0) this.carryRiders(dt);
     this.world.timestep = dt;
     this.world.step(this.events);
     this.drainEvents();
     this.queriesDirty = false;
+    // hand the carrier's velocity back: what a script reads stays relative to the deck it stands on
+    for (const [rider, vx, vy, vz] of this.lent) {
+      const v = rider.linvel();
+      rider.setLinvel({ x: v.x - vx, y: v.y - vy, z: v.z - vz }, false);
+    }
+    this.lent.length = 0;
+    for (const [id, last] of this.carriers) {
+      const body = this.moving.get(id);
+      if (!body) {
+        this.carriers.delete(id);
+        continue;
+      }
+      const t = body.translation();
+      last[0] = t.x;
+      last[1] = t.y;
+      last[2] = t.z;
+    }
+  }
+
+  /**
+   * Carry everything STANDING on a moving kinematic carrier (a lift cradle, a platform) with it this step. A
+   * dynamic rider is LENT the carrier's velocity for the step (added before the solver, taken back after it), so
+   * the contact sees the two moving together and the velocity a script reads stays ground-relative: a controller
+   * on a descending lift reads vy ≈ 0 and "grounded", exactly as on a floor, instead of free-falling after the deck
+   * every tick and landing again. A kinematic character is moved by the carrier's travel (no solver involved).
+   *
+   * Standing = a dynamic body whose contact with the carrier has an upward normal (a body brushing the cradle's
+   * side from a landing is not dragged along), or a character controller whose last {@link moveCharacter} found
+   * the carrier as its floor. Travel is measured from the carrier's position after the previous step, so a target
+   * a zero-dt query refresh already applied (see syncQueries) is still carried. A jump of more than
+   * {@link CARRY_TELEPORT} metres is a teleport and carries nothing.
+   */
+  private carryRiders(dt: number): void {
+    this.carried.clear();
+    for (const [id, last] of this.carriers) {
+      const body = this.moving.get(id);
+      if (!body) continue;
+      const n = body.nextTranslation();
+      const dx = n.x - last[0];
+      const dy = n.y - last[1];
+      const dz = n.z - last[2];
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < 1e-12 || d2 > CARRY_TELEPORT * CARRY_TELEPORT) continue;
+      for (let c = 0; c < body.numColliders(); c++) {
+        const col = body.collider(c);
+        const others = this.carryScratch;
+        others.length = 0;
+        // collect first: a narrow-phase read inside another's callback is not allowed
+        this.world.contactPairsWith(col, (other) => others.push(other));
+        for (const other of others) {
+          const rider = other.parent();
+          if (!rider || !rider.isDynamic() || this.carried.has(rider.handle)) continue;
+          let up = false;
+          this.world.contactPair(col, other, (m, flipped) => {
+            if (m.numContacts() > 0 && m.normal().y * (flipped ? -1 : 1) > CARRY_NORMAL_Y) up = true;
+          });
+          if (!up) continue;
+          this.carried.add(rider.handle);
+          const vx = dx / dt;
+          const vy = dy / dt;
+          const vz = dz / dt;
+          const v = rider.linvel();
+          rider.setLinvel({ x: v.x + vx, y: v.y + vy, z: v.z + vz }, true);
+          this.lent.push([rider, vx, vy, vz]);
+        }
+        others.length = 0;
+      }
+      for (const [cid, entry] of this.characters) {
+        if (entry.ground !== id) continue;
+        const rider = this.bodies.get(cid);
+        if (!rider || this.carried.has(rider.handle)) continue;
+        this.carried.add(rider.handle);
+        if (rider.bodyType() === RAPIER.RigidBodyType.KinematicPositionBased) {
+          const t = rider.nextTranslation();
+          rider.setNextKinematicTranslation({ x: t.x + dx, y: t.y + dy, z: t.z + dz });
+        } else if (!rider.isDynamic()) {
+          const t = rider.translation();
+          rider.setTranslation({ x: t.x + dx, y: t.y + dy, z: t.z + dz }, true);
+        }
+      }
+    }
   }
 
   private drainEvents(): void {
@@ -1072,10 +1165,29 @@ export class PhysicsSim {
   private syncQueries(): void {
     if (!this.queriesDirty) return;
     this.queriesDirty = false;
+    // A collider streamed in AFTER a script armed a target (a terrain cell cooked mid-tick, then a player's ground
+    // probe) would still fire this sync with the target outstanding: the deck would jump to it in zero time and reach
+    // the real step standing still, so its riders lose contact and fall (kirk-stair lift 2026-10-22: every ~10 ticks
+    // while the server streamed the shaft's cells). Keep every carrier's pending target across the refresh.
+    const held = this.heldTargets;
+    held.length = 0;
+    for (const id of this.carriers.keys()) {
+      const body = this.moving.get(id);
+      if (!body) continue;
+      const t = body.translation(), n = body.nextTranslation();
+      if (t.x === n.x && t.y === n.y && t.z === n.z) continue;
+      held.push([body, t.x, t.y, t.z, n.x, n.y, n.z]);
+      body.setNextKinematicTranslation({ x: t.x, y: t.y, z: t.z }); // stand still through the refresh
+    }
     const dt = this.world.timestep;
     this.world.timestep = 0;
     this.world.step(this.events);
     this.world.timestep = dt;
+    for (const [body, tx, ty, tz, nx, ny, nz] of held) {
+      body.setTranslation({ x: tx, y: ty, z: tz }, false);
+      body.setNextKinematicTranslation({ x: nx, y: ny, z: nz });
+    }
+    held.length = 0;
     this.drainEvents();
   }
 
@@ -1141,7 +1253,14 @@ export class PhysicsSim {
     // flush any pending query refresh BEFORE arming the target: a lazy sync
     // fired later would consume it (see syncQueries)
     this.syncQueries();
-    this.moving.get(id)?.setNextKinematicTranslation({ x: p[0], y: p[1], z: p[2] });
+    const body = this.moving.get(id);
+    if (!body) return;
+    // a body driven by targets carries what stands on it (carryRiders); characters move themselves
+    if (!this.carriers.has(id) && !this.characters.has(id)) {
+      const t = body.translation();
+      this.carriers.set(id, [t.x, t.y, t.z]);
+    }
+    body.setNextKinematicTranslation({ x: p[0], y: p[1], z: p[2] });
   }
 
   /** Teleport a body (respawns): position set, velocities zeroed. */
@@ -1151,6 +1270,13 @@ export class PhysicsSim {
     body.setTranslation({ x: p[0], y: p[1], z: p[2] }, true);
     body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    // a teleported carrier carries nothing across the jump
+    const last = this.carriers.get(id);
+    if (last) {
+      last[0] = p[0];
+      last[1] = p[1];
+      last[2] = p[2];
+    }
   }
 
   // =========================================================================
@@ -1553,6 +1679,7 @@ export class PhysicsSim {
     result.hitWall = false;
     result.hitCeiling = false;
     result.collisions.length = 0;
+    let ground: string | null = null;
 
     // freshly streamed floor must exist before the character is asked to walk
     // on it, and this also guarantees no lazy sync eats the target set below
@@ -1612,10 +1739,13 @@ export class PhysicsSim {
         const d = c.normal1.x * ux + c.normal1.y * uy + c.normal1.z * uz;
         if (d <= -0.5) result.hitCeiling = true;
         else if (blocked && d < entry.climbCos) result.hitWall = true;
+        if (d >= entry.climbCos && c.collider) ground = this.colliderToEntity.get(c.collider.handle) ?? ground;
       }
       result.collisions.sort(); // deterministic across peers — see compareHits
     }
 
+    // the floor it stands on carries it next step when that floor is a moving carrier (carryRiders)
+    entry.ground = result.grounded ? ground : null;
     const t = body.translation();
     const nx = t.x + mv.x;
     const ny = t.y + mv.y;
@@ -1725,7 +1855,14 @@ interface CharacterEntry {
   /** cos(maxSlopeClimbAngle), precomputed for the per-collision wall test. */
   climbCos: number;
   up: Vec3;
+  /** Entity the last move stood on (a carrier moves it with itself), or null. */
+  ground?: string | null;
 }
+
+/** Contact normal (carrier → rider) at least this upright counts as standing ON the carrier. */
+const CARRY_NORMAL_Y = 0.6;
+/** A carrier travelling further than this in one step was teleported: riders stay put. */
+const CARRY_TELEPORT = 5;
 
 /** A static collider registered for proximity streaming (PhysicsSim.updateStatics). */
 interface StreamedStatic {

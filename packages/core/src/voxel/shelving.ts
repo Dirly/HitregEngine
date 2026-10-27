@@ -688,11 +688,15 @@ export function solveShelves(area: ShelfArea, reader: OperatorFieldReader, o: Sh
   for (let attempt = 0; attempt < 3 && run.unlinkedIds.length; attempt++) {
     const bd = borders(run.sizes), N = run.sizes.length;
     const into = new Map<number, number>();
+    // the first-solve bands each component's cells came from: a fold may only go to a neighbour within one band of all
+    // of them (choosing among those, rather than picking the best neighbour and dropping the fold when it is two bands off)
+    const lo = new Array<number>(N).fill(Infinity), hi = new Array<number>(N).fill(-Infinity);
+    for (let i = 0; i < n; i++) { const k = comp[i]!; if (k >= 0) { lo[k] = Math.min(lo[k]!, Kfirst[i]!); hi[k] = Math.max(hi[k]!, Kfirst[i]!); } }
     for (const u of run.unlinkedIds) {
       let best = -1, bestScore = -1;
       for (const [key, len] of bd) {
         const a = Math.floor(key / N), bb = key % N, v = a === u ? bb : bb === u ? a : -1;
-        if (v < 0) continue;
+        if (v < 0 || hi[u]! - run.compLevel[v]! > 1 || run.compLevel[v]! - lo[u]! > 1) continue;
         const score = len + (run.find(v) === run.mainRoot ? 1e6 : 0);
         if (score > bestScore) { bestScore = score; best = v; }
       }

@@ -1,6 +1,6 @@
 ---
 name: zone-mood
-description: Set or change the air and light of a zone or a place (recipe regions[].mood — sky, haze, light, shade, fog, mist, saturation, contrast, temperature) and keep it inside the house band with `zone-mood.mjs lint` / `install`, so moods differ by colour tone and never by brightness. Use in a zone's look phase, when a zone or place reads too dark or washed out, when the `mood` row fails, or before proposing any mood edit.
+description: Set or change the air and light of a zone or a place (recipe regions[].mood — sky, haze, light, shade, fog, mist, saturation, contrast, temperature, sunset, cloudGlow) and keep it inside the house band with `zone-mood.mjs lint` / `install`, so moods differ by colour tone and never by brightness. Use in a zone's look phase, when a zone or place reads too dark or washed out, when the `mood` row fails, or before proposing any mood edit.
 ---
 
 # zone-mood
@@ -32,5 +32,7 @@ mood equals `before` (apply) or `after` (revert), so it is its own inverse. Neve
   a nested region without a mood wears its zone's. Nested places are the likeliest to fail the band: lint them too.
 - Mist that should sit in a zone's pools and hollows at ANY altitude (swamp, bog) is `mistTop`/`mistThickness`
   (metres above the local low ground), not a bigger `mist`: the scene's absolute mist top misses high ground.
+- The dusk/dawn cloud burn is red-pink everywhere unless a zone says otherwise: a cold or grim zone sets `sunset`
+  (its own burn hue, e.g. steel blue) and may mute it with `cloudGlow` (multiplier); judge it in a dusk shot, not at noon.
 - A place mood also sets its vegetation and role tiles (`terrain-edits`); a read that depends on dark or pale ground
   needs that tile in the palette.

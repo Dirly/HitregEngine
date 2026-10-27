@@ -76,8 +76,9 @@ out without anyone typing sockets. Tile weights are observed counts.
 | Path | What |
 | --- | --- |
 | `models/wfc/<kit>/<part>.gltf` | the part with UVs remapped onto the kit atlas, self-contained, `TEXCOORD_1` = the UV rotation centre |
+| `models/wfc/<kit>/<part>.collider.gltf` | the part COLLIDER from its geometry (`collider.mjs`): triangles voxelised (0.1 m, 0.05 m up), closed by 0.2 m (a panel or plank fuses solid; an opening wider than 0.4 m stays open: doorways, ladder notches, rail gates) and merged into boxes, one welded trimesh. A deck is a slab at deck height on its posts, never a block to the water. `<kitDir>/colliders.json` may set a part `"mesh"` (its own mesh), `"none"` or `{ "close": m }`; ceiling parts default to `"mesh"` |
 | `textures/atlas/<atlas>-<n>.png` + `<atlas>.atlas.json` | the atlas page(s), their island layout, and every module on the page |
-| `prefabs/wfc/<kit>/<tile>.json` | one prefab per learned tile: empty anchor root, one child per part (`floor`, `wall-px`, `door-nz`, `fill`…), `renderMode: "instanced"`, box colliders from the part bounds |
+| `prefabs/wfc/<kit>/<tile>.json` | one prefab per learned tile: empty anchor root, one child per part (`floor`, `wall-px`, `door-nz`, `fill`…), `renderMode: "instanced"`, and per part a hidden child (`<child>-collider`) carrying the part collider as a trimesh |
 | `wfc/<kit>.tileset.json` | the learned tileset — readable, hand-editable (weights, extra pairs) |
 | `wfc/<kit>.kit.json` | the import report: roles, slots, placements, which node matched how, every warning |
 

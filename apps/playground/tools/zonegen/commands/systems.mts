@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { applyOps, ComponentRegistry, registerChunkComponents, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
 import { exists, readJson, writeJson, type Ctx } from "../lib.mts";
+import { applyOpsToSceneFile } from "../../_scene-write.mts";
 
 interface SystemsDoc { from: string; entities: string[]; add?: Record<string, SceneDoc["entities"][string]> }
 interface Plan { error: string; from: string; scene: string; sceneFile: string; missing: string[]; subtree: string[]; source: SceneDoc | null; live: SceneDoc | null; inline: Record<string, SceneDoc["entities"][string]> }
@@ -79,8 +80,7 @@ export async function run(ctx: Ctx): Promise<number> {
   const reg = new ComponentRegistry();
   registerCoreComponents(reg);
   registerChunkComponents(reg);
-  const res = applyOps(p.live!, ops, reg);
-  fs.writeFileSync(p.sceneFile, JSON.stringify(res.doc, null, 2) + "\n");
+  const res = applyOpsToSceneFile(p.sceneFile, ops, (d, o) => applyOps(d, o, reg), { label: "zonegen systems" }); // fresh read under the scene lock (tools/_scene-write.mts)
   writeJson(path.join(ctx.paths.worldDir, `systems-inverse-${scene}.json`), res.inverse);
   console.log(`systems: installed; inverse at ${path.relative(ctx.paths.projectDir, path.join(ctx.paths.worldDir, `systems-inverse-${scene}.json`))}`);
   return 0;

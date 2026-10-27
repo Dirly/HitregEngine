@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   defaultSeatContact,
   fieldSolidProbe,
+  ROCK_EMBED,
+  ROCK_EMBED_MIN,
+  flatSafeSink,
   seatObject,
   triangleSolidProbe,
   unionSolidProbe,
@@ -28,6 +31,16 @@ describe("seatObject", () => {
     expect(r.gap).toBeCloseTo(0.4, 1);
     expect(r.y).toBeCloseTo(-0.03, 2);
   });
+  it("base: a box's inner floor or a barrel's bottom never lands on the floor's plane (one mesh owns each plane)", () => {
+    // box-small-a: inner floor 4.4 cm up; sunk the default 3 cm it sat 1.4 cm over the floor (the zfight gate's 2 cm)
+    const box = seatObject(probe, { x: 2, z: 2, y: 0.4, halfX: 0.3, halfZ: 0.3, height: 0.5, flats: [0.044] }, "base");
+    expect(Math.abs(0.044 + (box.y ?? 0))).toBeGreaterThanOrEqual(0.025);
+    expect(box.y).toBeCloseTo(-0.019, 2);
+    // a barrel's bottom 1.5 cm up goes under the floor instead: pressed 4 cm
+    expect(seatObject(probe, { x: 2, z: 2, y: 0.4, halfX: 0.3, halfZ: 0.3, height: 0.7, flats: [0.014, 0.015] }, "base").y).toBeCloseTo(-0.04, 2);
+    expect(flatSafeSink(0.03, [], 0.025)).toBe(0.03);
+    expect(flatSafeSink(0.03, [0.2], 0.025)).toBe(0.03);
+  });
   it("base: seated within 5 cm is ok", () => {
     expect(seatObject(probe, { x: 2, z: 2, y: 0.02, halfX: 0.5, halfZ: 0.5, height: 1 }, "base").status).toBe("ok");
   });
@@ -35,16 +48,37 @@ describe("seatObject", () => {
     const r = seatObject(probe, { x: 9.8, z: 2, y: 6, halfX: 0.6, halfZ: 0.6, height: 1 }, "base", { reachDown: 8 });
     expect(r.status).toBe("unsupported");
   });
-  it("embed: a rock straddling the 6 m edge is unsupported (drop it), one on the flat is sunk a fifth", () => {
+  it("embed: a rock straddling the 6 m edge is unsupported (drop it), one on the flat is sunk ROCK_EMBED (15%)", () => {
     expect(seatObject(probe, { x: 10, z: 2, y: 5.5, halfX: 1, halfZ: 1, height: 1.5 }, "embed", { reachDown: 8 }).status).toBe("unsupported");
     const flat = seatObject(probe, { x: 3, z: 3, y: 0.5, halfX: 1, halfZ: 1, height: 1.5 }, "embed");
     expect(flat.status).toBe("off");
-    expect(flat.y).toBeCloseTo(-0.3, 2);
+    expect(flat.y).toBeCloseTo(-ROCK_EMBED * 1.5, 2);
     expect(seatObject(probe, { x: 3, z: 3, y: -0.3, halfX: 1, halfZ: 1, height: 1.5 }, "embed").status).toBe("ok");
+  });
+  it("embed means EMBEDDED: a rock merely touching the ground is off; one 10% in is ok; the fix sinks it 15%", () => {
+    const touching = seatObject(probe, { x: 3, z: 3, y: 0.02, halfX: 0.5, halfZ: 0.5, height: 1 }, "embed");
+    expect(touching.status).toBe("off");
+    expect(touching.gap).toBeGreaterThan(0.05); // short of the 10% by ~0.12 m
+    expect(touching.reason).toMatch(/embedded 0% of its height \(< 10%\)/);
+    expect(touching.y).toBeCloseTo(-ROCK_EMBED, 2);
+    expect(seatObject(probe, { x: 3, z: 3, y: -ROCK_EMBED_MIN * 1.2 - 0.01, halfX: 0.5, halfZ: 1, height: 1.2 }, "embed").status).toBe("ok");
+    expect(seatObject(probe, { x: 3, z: 3, y: -0.05, halfX: 0.5, halfZ: 0.5, height: 1 }, "embed").status).toBe("off");
+  });
+  it("embed on a slope sinks deeper than on the flat: the bottom follows the ground", () => {
+    const slope = fieldSolidProbe({ voxelSize: 1, height: (x) => x * 0.58, density: (x, y) => y - x * 0.58 });
+    const fp = { x: 5, z: 0, halfX: 0.6, halfZ: 0.6, height: 1 };
+    const r = seatObject(slope, { ...fp, y: 5 * 0.58 }, "embed");
+    expect(r.status).toBe("off");
+    const lowest = (5 - 0.6 * 0.85) * 0.58;
+    const sunk = lowest - r.y!;
+    expect(sunk).toBeGreaterThan(ROCK_EMBED + 0.05); // more than the flat 15%
+    expect(sunk).toBeLessThan(0.45 + 1e-6);
+    // and once re-seated it is ok
+    expect(seatObject(slope, { ...fp, y: r.y! }, "embed").status).toBe("ok");
   });
   it("embed with align: a rock tilted to a smooth 30° slope is ok; the same rock over the edge is not", () => {
     const slope = fieldSolidProbe({ voxelSize: 1, height: (x) => x * 0.58, density: (x, y) => y - x * 0.58 });
-    expect(seatObject(slope, { x: 5, z: 0, y: 5 * 0.58 - 0.1, halfX: 0.6, halfZ: 0.6, height: 1, align: 0.85 }, "embed").status).toBe("ok");
+    expect(seatObject(slope, { x: 5, z: 0, y: 5 * 0.58 - 0.2, halfX: 0.6, halfZ: 0.6, height: 1, align: 0.85 }, "embed").status).toBe("ok");
     expect(seatObject(slope, { x: 5, z: 0, y: 5 * 0.58 - 0.1, halfX: 0.6, halfZ: 0.6, height: 1, align: 0 }, "embed").status).toBe("off");
     expect(seatObject(probe, { x: 10.2, z: 2, y: 5.9, halfX: 0.6, halfZ: 0.6, height: 1, align: 0.85 }, "embed", { reachDown: 8 }).status).toBe("unsupported");
   });

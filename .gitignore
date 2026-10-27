@@ -8,6 +8,7 @@ coverage/
 # secrets / local env — never commit
 .env
 .env.*
+!deploy/.env.example
 
 # local-only Claude Code state and third-party tooling
 .claude/settings.local.json
@@ -52,6 +53,7 @@ tools/*
 !tools/statue-maker/
 !tools/poi-review/
 !tools/dungeon-pipeline/
+!tools/place-build/
 !tools/dungeon-room-kit/
 tools/dungeon-room-kit/**/__pycache__/
 tools/dungeon-room-kit/examples/kit-out/

@@ -13,6 +13,7 @@ describe("decalSchema", () => {
       direction: [0, 0, -1],
       opacity: 1,
       color: "#ffffff",
+      maxAngle: 60,
     });
     // Optional fields stay absent — an unset fade must never become 0.
     expect(decal).not.toHaveProperty("fadeDepth");
@@ -37,6 +38,7 @@ describe("decalSchema", () => {
       opacity: 0.8,
       color: "#88aa66",
       fadeDepth: 0.1,
+      maxAngle: 75,
       sortOffset: 2,
     };
     expect(decalSchema.parse(authored)).toEqual(authored);

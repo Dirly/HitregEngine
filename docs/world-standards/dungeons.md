@@ -31,3 +31,10 @@ peak relief, `grow` on). Natural walls and ceilings ROUGH; built masonry, timber
 
 Walk lanes and doorways are protected, and every noised wall/roof role keeps the default floor band (no noise from
 0.2 m under to 0.6 m over each floor). Rerun walk/doorway gates and the dress maps after any table change.
+
+- **Variety (2026-10-20):** at least one non-humanoid lair dungeon per zone where the bestiary allows (wasp nest, ant
+- **Water (2026-10-25):** dungeon water happens at ONE STILL LEVEL, the lowest point of the dungeon: one surface height,
+  no dry floor under it, nothing moving (no falls, cascades, curtains, channels, weeping holes; a wet wall is a decal,
+  a fall is mist/vfx). The `water` gate (`oneWaterLevel`, `lowest`, `static`) cannot be excepted. The Weep Hole's
+  plunge pot under an inner fall is the case that did not work.
+  hive, spider nest, rat-and-croc sewer); lairs get their own plan-shape language, never a barrow re-skinned.

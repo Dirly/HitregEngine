@@ -180,7 +180,8 @@ export function resolvePortalArrival(
     const pose = anchorPose(entities, arrive.anchor);
     if (pose) {
       const base: Vec3 = [pose.position[0], pose.position[1] + PORTAL_LANDING_LIFT, pose.position[2]];
-      const position = portalArrivalSpot(base, pose.yaw, portalAnchorOf(entities, arrive.anchor).corridor, occupied);
+      const a = portalAnchorOf(entities, arrive.anchor);
+      const position = portalArrivalSpot(base, pose.yaw, a.corridor, occupied, a.queue);
       return { position, yaw: pose.yaw, next, anchor: arrive.anchor };
     }
   }
@@ -201,6 +202,16 @@ export const portalAnchorSchema = z
         "Width in metres of the passage the anchor stands in (0 = open ground). Set it on an anchor inside a narrow passage: " +
           "arrivals that find the anchor taken line up along its FORWARD line (1.1 m apart, never sideways into a wall) instead of " +
           "a ring of up to 2.2 m around it, and portal installers size the return portal's trigger volume from it.",
+      ),
+    queue: z
+      .array(z.number().nullable())
+      .max(16)
+      .optional()
+      .describe(
+        "Measured overflow spots (written by `portal-cover --fit`, never by hand): entry i is the floor height, in metres relative " +
+          "to the anchor, of the i-th spot an arrival is put on when the anchor is taken (corridor: the forward line, 1.1 m apart; " +
+          "open ground: the two rings). null or past the end = that spot has no floor, is in rock or inside a portal's box, and is " +
+          "never used. Absent = unmeasured: every spot at the anchor's own height (a sloped passage puts them in the rock or in the air).",
       ),
   })
   .describe(
@@ -278,9 +289,32 @@ const ARRIVAL_CLEARANCE = 0.9;
  * line — never sideways into a wall — else two rings of 1.2 and 2.2 m.
  * Falls back to the anchor when everything is taken.
  */
-export function portalArrivalSpot(base: Vec3, yaw: number, corridor: number, occupied: readonly (readonly [number, number, number])[]): Vec3 {
+export function portalArrivalSpot(
+  base: Vec3,
+  yaw: number,
+  corridor: number,
+  occupied: readonly (readonly [number, number, number])[],
+  queue?: readonly (number | null)[],
+): Vec3 {
   const free = (p: Vec3) => occupied.every((o) => Math.hypot(o[0] - p[0], o[2] - p[2]) >= ARRIVAL_CLEARANCE || Math.abs(o[1] - p[1]) > 2.5);
   if (free(base)) return base;
+  const candidates = portalArrivalCandidates(base, yaw, corridor);
+  if (!queue) return candidates.find(free) ?? base;
+  // measured (portalAnchor.queue): only the spots with floor, each at its own floor height
+  const usable: Vec3[] = [];
+  candidates.forEach((c, i) => {
+    const dy = queue[i];
+    if (typeof dy === "number") usable.push([c[0], base[1] + dy, c[2]]);
+  });
+  return usable.find(free) ?? base;
+}
+
+/**
+ * The overflow spots of an anchor in the order they are tried, all at the anchor's height (`portalAnchor.queue` gives
+ * each its measured floor): corridor > 0 = 8 points 1.1 m apart along the forward line; open ground = rings of 6 at
+ * 1.2 m and 10 at 2.2 m.
+ */
+export function portalArrivalCandidates(base: Vec3, yaw: number, corridor: number): Vec3[] {
   const fx = Math.sin(yaw);
   const fz = Math.cos(yaw);
   const candidates: Vec3[] = [];
@@ -297,7 +331,7 @@ export function portalArrivalSpot(base: Vec3, yaw: number, corridor: number, occ
       }
     }
   }
-  return candidates.find(free) ?? base;
+  return candidates;
 }
 
 // -- walk-through trigger volumes ------------------------------------------------------------

@@ -19,7 +19,9 @@
  *
  * Per quest, in `requires` order: reach the giver, accept through its dialogue (the tool searches the dialogue
  * graph for the choice carrying `acceptQuest`), complete each objective, hand in to `turnIn`, and assert the
- * journal went active -> ready -> complete and the rewards (xp, coins, items) arrived.
+ * journal went active -> ready -> complete and the rewards (xp, coins, items) arrived. A `repeat` quest then proves its
+ * wait: refused right after completing, the clock stepped past `after` through the day-night script's /time, offered
+ * again (or refused at its `limit`) — and is played a SECOND time (a row with run: 2) at the end of the order.
  *
  *   default   teleports to each target (proves state machine, ids, items, dialogue actions)
  *   --walk    every site out in the world (visit area, kill camp, an NPC off the road/town network) is walked BACK
@@ -34,6 +36,8 @@
  * then made to hold; a step with `after` is attempted before its predecessors (no progress allowed); `interact` and
  * `perform` also prove a too-far request is refused; a `presence` source is proven absent (talk refused) outside its
  * condition, present inside it, and kept through a conversation while the condition lapses.
+ * An `auto` source with a character `level` in its `when` is first refused in its area below that level, then the body
+ * EARNS the level through the authority's character.xp event (never a sheet write) and must be offered it.
  *
  * Objective evidence: `proven` (done through the real system: a conversation, standing in the area, a kill by the
  * player's own cast requests, an item handed over by a dialogue), `simulated` (kill: an authority-side
@@ -95,8 +99,19 @@ import {
   questSource,
   questState,
   questSchema,
+  choiceFlag,
+  escortKey,
+  escortLength,
+  escortRouteSchema,
+  objectiveChoice,
+  objectiveLocked,
+  tidePhase,
+  type EscortState,
   sanctuariesFromPois,
+  WORLD_DAY_KEY,
   WORLD_HOUR_KEY,
+  questOfferProblem,
+  worldTime,
   WORLD_WEATHER_KEY,
   SANCTUARIES_KEY,
   testCondition,
@@ -118,7 +133,8 @@ import {
 import { QuestLog } from "@hitreg/scripting";
 import { jumpArc } from "@hitreg/scripting";
 import { DEFAULT_CHARACTER } from "@hitreg/physics";
-import { walkOut, walkPoints, type ClimbLimits, type P2, type P3, type WalkDeps, type WalkResult } from "./_quest-walk.mts";
+import { conditionLeaves, drivableParts, ownCorpses, requiredLevel, weatherHolds, weatherModeFor } from "./_quest-conditions.mts";
+import { portalApproaches, walkOut, walkPoints, type ClimbLimits, type P2, type P3, type WalkDeps, type WalkResult } from "./_quest-walk.mts";
 
 // ---- args ---------------------------------------------------------------------------------------------------
 const argv = process.argv.slice(2);
@@ -146,7 +162,9 @@ const log = (s: string): void => console.log(s);
 // ---- boot: serve() minus sockets — one host per scene a quest goes to ----------------------------------------------
 // The world scene boots first; an instance (a dungeon behind a `portal`) boots the first time a step happens there
 // and stays up for the run, the way a layer outlives a dungeon run. Exactly one host ticks: the one the body is in.
-const content = loadContent(playgroundRoots(playground));
+// Roots are the SCENE's project closure, never every project folder: a lab or proof copy (cindermoot-lab, …) sorts
+// before the world's project and would answer asset lookups with stale copies (a quest offer "missing" from a dialogue).
+const content = loadContent(playgroundRoots(playground, sceneName || undefined));
 const PEER = "quest-player";
 const BODY = `player:${PEER}`;
 /**
@@ -286,9 +304,9 @@ tick(60);
 // the project's player template fills the bags with every starting weapon; a quest test needs ROOM for what it collects.
 // Worn gear stays; everything merely carried is dropped before the first quest (authority-side sheet write).
 {
-  const sh = net.get(`character/${BODY}`) as { items?: Record<string, { itemId: string; qty: number; equipped?: boolean; slot?: string }> } | undefined;
+  const sh = net.get(`character/${BODY}`) as { items?: Record<string, { itemId: string; qty: number; container?: string; equipped?: boolean; slot?: string }> } | undefined;
   if (sh?.items) {
-    const kept = Object.fromEntries(Object.entries(sh.items).filter(([, it]) => it.equipped || it.slot));
+    const kept = Object.fromEntries(Object.entries(sh.items).filter(([, it]) => !it.container || it.equipped || it.slot));
     const dropped = Object.keys(sh.items).length - Object.keys(kept).length;
     if (dropped > 0) { net.set(`character/${BODY}`, { ...sh, items: kept }); tick(2); log(`  bags: dropped ${dropped} carried starting item(s) to make room`); }
   }
@@ -471,7 +489,29 @@ function recoverIfDead(): boolean {
   if (!dead(BODY)) return false;
   for (let i = 0; i < 60 * 20 && dead(BODY); i++) tick();
   tick(30);
+  reclaimCorpses();
   return true;
+}
+/** Corpse runs made (deaths whose corpse the body walked back to and emptied). */
+let corpseRuns = 0;
+/**
+ * The corpse run a player makes after a death: back to each corpse of its own and take everything (its money and
+ * bags). Without it a death mid-quest costs the whole purse and reads as a short reward.
+ */
+function reclaimCorpses(): void {
+  const back = pos();
+  let went = false;
+  for (const key of ownCorpses([...net.keys("lootbag/")].map((k) => [k, net.get(k)] as [string, unknown]), BODY)) {
+    const b = net.get(key) as { at: P3 } | undefined;
+    if (!b) continue;
+    teleport([b.at[0], b.at[1] + 1.2, b.at[2]]);
+    went = true;
+    sendEvent("inventory.loot", { actorId: BODY, bagId: key.slice("lootbag/".length), all: true });
+    tick(10);
+    if (net.get(key) === undefined) corpseRuns++;
+    else log(`    corpse ${key} not emptied on the corpse run (no room in the bags?)`);
+  }
+  if (went) teleport(back);
 }
 
 // ---- conversations ---------------------------------------------------------------------------------------------------
@@ -629,6 +669,8 @@ function doKill(q: Quest, o: Quest["objectives"][number]): Omit<ObjectiveRow, "i
   const notes: string[] = [];
   let real = 0;
   let simulated = 0;
+  /** Kills the player's strikes fought down but the window ran out on: finished by authority damage, still proven. */
+  let finished = 0;
   let killRestored = 0;
   const kills0 = kills.length;
   const anchor = (q.area?.center ?? [pos()[0], pos()[2]]) as P2;
@@ -645,6 +687,18 @@ function doKill(q: Quest, o: Quest["objectives"][number]): Omit<ObjectiveRow, "i
       tick(40);
       candidates = liveTargets(o.target);
       if (candidates.length === 0) { waitFor(() => liveTargets(o.target).length > 0, 25); candidates = liveTargets(o.target); }
+    }
+    if (candidates.length === 0) {
+      // a named rare exists only when a spawn area's placeholder ROLLS it (a chance, a lockout): this gate proves the
+      // kill counts, not the odds, so the roll is skipped and the rare's own template is spawned where it was authored
+      for (const a of spawnAreas.areas.values()) {
+        const r = (a.data.rares ?? []).find((x) => killMatch(`${a.id}#${x.template}#1`, o.target));
+        const at = r ? (doc!.entities[r.template]?.components["transform"] as { position?: P3 } | undefined)?.position : undefined;
+        if (!r || !at) continue;
+        const rec = npcs.spawn(r.template, at, { id: `${a.id}#${r.template}#qp`, params: { spawnArea: a.id } });
+        if (rec) { notes.push(`spawned the rare ${r.id ?? r.template} (roll skipped)`); tick(20); break; }
+      }
+      candidates = liveTargets(o.target);
     }
     if (candidates.length === 0) {
       // an authored creature (a boss, a named one) sleeps while no player is near (NpcManager dormancy): go to it to wake it
@@ -674,6 +728,7 @@ function doKill(q: Quest, o: Quest["objectives"][number]): Omit<ObjectiveRow, "i
     const bags0 = bagTotals();
     // 90 s, extended (up to 5 min) while the victim is still losing health: a boss is a long fight, not a stalemate
     let hpMark = Number(net.get(`combat/${victim}.hp`));
+    const hpStart = hpMark;
     let limit = 60 * 90;
     for (let t = 0; t < limit && !won(); t++) {
       if (t > 0 && t % (60 * 30) === 0) {
@@ -709,17 +764,32 @@ function doKill(q: Quest, o: Quest["objectives"][number]): Omit<ObjectiveRow, "i
         const bp = pos();
         notes.push(`${victim} still at ${Math.round(Number(net.get(`combat/${victim}.hp`)))}/${Math.round(Number(net.get(`combat/${victim}.maxHp`)))} hp after the fight (${vp2 ? `${d2(bp, vp2).toFixed(1)} m away, dy ${(vp2[1] - bp[1]).toFixed(1)}` : "gone"})`);
       }
-      // the narrowest authority-side kill: one combat.damage from the player (what a landed hit becomes)
-      const at = world.positionOf(victim)!;
-      world.eventBus.emit("combat.damage", { targetId: victim, sourceId: BODY, amount: 1e6, control: 0, point: at });
-      tick(20);
-      if (kills.some((k) => k.victimId === victim && k.killerId === BODY)) { simulated++; notes.push(`${victim}: authority combat.damage after the cast-request fight did not finish it`); }
+      // this gate proves logic, not balance: the narrowest authority-side kill, combat.damage FROM the player (what a
+      // landed hit becomes), so the quest-log credits the test body. A downed or dead body deals nothing (combat-actor
+      // refuses it), so it is stood up first; a few tries cover a boss whose phase shrugs one blow.
+      const hpLeft = Number(net.get(`combat/${victim}.hp`));
+      for (let tryN = 0; tryN < 3 && !won() && !dead(victim) && world.entities.has(victim); tryN++) {
+        recoverIfDead();
+        const bodyMax = Number(net.get(`combat/${BODY}.maxHp`));
+        if (Number.isFinite(bodyMax)) net.set(`combat/${BODY}.hp`, bodyMax);
+        const at = world.positionOf(victim)!;
+        world.eventBus.emit("combat.damage", { targetId: victim, sourceId: BODY, amount: 1e6, control: 0, point: at });
+        tick(20);
+      }
+      const credited = won();
+      const fought = Number.isFinite(hpStart) && Number.isFinite(hpLeft) && hpLeft < hpStart;
+      if (credited && fought) {
+        finished++;
+        notes.push(`BALANCE NOTE: the player's own strikes took ${victim} from ${Math.round(hpStart)} to ${Math.round(hpLeft)} hp in ${Math.round(limit / 60)} s; the tool finished the last ${Math.round(hpLeft)} hp by authority combat.damage credited to the player`);
+        takeLootBags();
+      } else if (credited) { simulated++; notes.push(`${victim}: killed by authority combat.damage — the player's strikes never took any of its health`); }
+      else notes.push(`${victim}: authority combat.damage from the player did not ${dead(victim) || !world.entities.has(victim) ? "credit the player with the kill" : `finish it (still ${Math.round(Number(net.get(`combat/${victim}.hp`)))} hp)`}`);
     }
     tick(15);
   }
   const ok = waitFor(() => objectiveDone(q, o), 1);
-  real = kills.slice(kills0).filter((k) => k.killerId === BODY && killMatch(k.victimId, o.target)).length - simulated; // a cone can drop two
-  const how = `${real} kill(s) by the player's own strike requests${simulated ? `, ${simulated} by authority combat.damage` : ""}${notes.length ? `; ${notes.join("; ")}` : ""}${killRestored ? `; BALANCE NOTE: the tool restored ${Math.round(killRestored)} hp during the fight` : ""}`;
+  real = kills.slice(kills0).filter((k) => k.killerId === BODY && killMatch(k.victimId, o.target)).length - simulated - finished; // a cone can drop two
+  const how = `${real} kill(s) by the player's own strike requests${finished ? `, ${finished} fought down by them and finished by authority damage (logic, not balance)` : ""}${simulated ? `, ${simulated} by authority combat.damage` : ""}${notes.length ? `; ${notes.join("; ")}` : ""}${killRestored ? `; BALANCE NOTE: the tool restored ${Math.round(killRestored)} hp during the fight` : ""}`;
   if (!ok) return { result: "failed", how, reason: `objective at ${progressOf(q, o.id)}/${o.required} after ${real + simulated} kill(s)` };
   return { result: simulated ? "simulated" : "proven", how: simulated ? `kill: simulated — ${how}` : how };
 }
@@ -787,8 +857,9 @@ function doCollect(q: Quest, o: Quest["objectives"][number], source: string): Om
     }
     if (waitFor(() => objectiveDone(q, o), 1)) return { result: "proven", how: o.target + " handed over by " + n.id + " (" + path.join(" -> ") + ")" };
   }
-  // (2) a creature whose template (a combat-actor, or a prefab body's loot override) drops it: kill those until enough have dropped
-  const dropper = dropperOf(o.target);
+  // (2) a drop from the slain (the step's own `from`: a per-character quest drop), else a creature whose template (a
+  // combat-actor, or a prefab body's loot override) drops it: kill those until enough have dropped
+  const dropper = (o as { from?: string }).from || dropperOf(o.target);
   if (dropper) {
     // drops are a chance per kill: doKill allows four kills per item wanted and stops when THIS objective is done
     const r = doKill(q, { ...o, target: dropper } as Quest["objectives"][number]);
@@ -800,7 +871,7 @@ function doCollect(q: Quest, o: Quest["objectives"][number], source: string): Om
   toolGranted[o.target] = (toolGranted[o.target] ?? 0) + need;
   world.eventBus.emit("inventory.give", { actorId: BODY, itemId: o.target, qty: need });
   const ok = waitFor(() => objectiveDone(q, o), 1.5);
-  return ok ? { result: "simulated", how: `collect: granted ${need} ${o.target} by inventory.give (no source named in the quest data${tried.length ? `; sources tried: ${tried.join(" | ")}` : ""})` } : { result: "failed", how: "", reason: `granting ${need} ${o.target} did not advance the objective (bags full?)` };
+  return ok ? { result: "simulated", how: `collect: granted ${need} ${o.target} by inventory.give (no source named in the quest data${tried.length ? `; sources tried: ${tried.join(" | ")}` : ""})` } : { result: "failed", how: "", reason: `granting ${need} ${o.target} did not advance the objective (bags full? ${Object.values(sheet()?.items ?? {}).filter((it) => it.container).length} stacks carried, ${(sheet() as { coins?: number } | undefined)?.coins ?? 0} copper)${tried.length ? `; sources tried: ${tried.join(" | ")}` : ""}` };
 }
 
 
@@ -834,6 +905,7 @@ function worldNow(): WorldFacts {
   const p = pos();
   return {
     hour: typeof net.get(WORLD_HOUR_KEY) === "number" ? (net.get(WORLD_HOUR_KEY) as number) : null,
+    day: typeof net.get(WORLD_DAY_KEY) === "number" ? (net.get(WORLD_DAY_KEY) as number) : null,
     weather: w && typeof w.precipitation === "number" ? { precipitation: w.precipitation, storm: w.storm ?? 0 } : null,
     biome: terrain ? terrain.resolved.field.biome(p[0], p[2]).id : null,
   };
@@ -849,20 +921,42 @@ function reachEntity(id: string, purpose: string, q: Quest, within = INTERACT_RA
   return `could not stand within ${within} m of ${id}`;
 }
 
+/**
+ * Use an interactable THE WAY THE CLIENT DOES (npc-ui `act`): an entity running the `npc` builtin is clicked into a
+ * conversation (npc.talk, then npc.leave so the next use opens it afresh); anything else sends player.interact. Never
+ * a synthetic player.interact at an `npc` entity: no real player can send one, so a pass would prove nothing.
+ */
+function useEntity(id: string): string {
+  if (npcInfo(id)) {
+    sendEvent("npc.talk", { actorId: BODY, npcId: id });
+    tick(4);
+    if (conversation()?.npc === id) { sendEvent("npc.leave", { actorId: BODY, npcId: id }); tick(3); }
+    return "npc.talk";
+  }
+  sendEvent(QUEST_EVENTS.interact, { actorId: BODY, entityId: id });
+  return "player.interact";
+}
+/** Stand where the client would let this player use `id` (an `npc`'s own talking radius, else INTERACT_RANGE). */
+function reachUse(id: string, purpose: string, q: Quest): string | null {
+  const n = npcInfo(id);
+  if (n?.presence) driveCondition(n.presence, true);
+  return n ? reachNpc(n, purpose, q.id) : reachEntity(id, purpose, q);
+}
+
 function doInteract(q: Quest, o: Objective): Res {
   const at = entityAt(o.target);
   if (!at) return { result: "failed", how: "", reason: `interact target "${o.target}" is not in the scene` };
   const p0 = progressOf(q, o.id);
   teleport(standPoint(at, 12));
-  sendEvent(QUEST_EVENTS.interact, { actorId: BODY, entityId: o.target });
+  const verb = useEntity(o.target);
   tick(30);
-  if (progressOf(q, o.id) > p0) return { result: "failed", how: "", reason: `a player.interact from ${d2(pos(), at).toFixed(0)} m counted — the range check is missing` };
-  const fail = reachEntity(o.target, `interact ${o.target}`, q);
+  if (progressOf(q, o.id) > p0) return { result: "failed", how: "", reason: `a ${verb} from ${d2(pos(), at).toFixed(0)} m counted — the range check is missing` };
+  const fail = reachUse(o.target, `interact ${o.target}`, q);
   if (fail) return { result: "failed", how: "", reason: fail };
-  for (let i = 0; i < o.required * 2 && !objectiveDone(q, o); i++) { sendEvent(QUEST_EVENTS.interact, { actorId: BODY, entityId: o.target }); tick(20); }
+  for (let i = 0; i < o.required * 2 && !objectiveDone(q, o); i++) { useEntity(o.target); tick(20); }
   return waitFor(() => objectiveDone(q, o), 1.5)
-    ? { result: "proven", how: `player.interact at ${o.target} (a request from 12 m was refused)` }
-    : { result: "failed", how: "", reason: `interacting with ${o.target} did not advance the objective` };
+    ? { result: "proven", how: `${verb} at ${o.target} (a request from 12 m was refused)` }
+    : { result: "failed", how: "", reason: `using ${o.target} (${verb}, as the client does) did not advance the objective` };
 }
 
 function doDeliver(q: Quest, o: Objective & { kind: "deliver" }): Res {
@@ -889,15 +983,15 @@ function doDeliver(q: Quest, o: Objective & { kind: "deliver" }): Res {
   const got = owned(o.item);
   if (got < need) { toolGranted[o.item] = (toolGranted[o.item] ?? 0) + need - got; world.eventBus.emit("inventory.give", { actorId: BODY, itemId: o.item, qty: need - got }); tick(10); }
   if (owned(o.item) < need) return { result: "failed", how: "", reason: `could not carry ${need} ${o.item} to the hand-in${bought ? ` (${bought})` : ""}; inventory.give did not land either (bags full?)` };
-  const fail = reachEntity(o.target, `deliver to ${o.target}`, q);
+  const fail = reachUse(o.target, `deliver to ${o.target}`, q);
   if (fail) return { result: "failed", how: "", reason: fail };
   const before = owned(o.item);
-  sendEvent(QUEST_EVENTS.interact, { actorId: BODY, entityId: o.target });
+  const verb = useEntity(o.target);
   const ok = waitFor(() => objectiveDone(q, o), 1.5);
   const taken = before - owned(o.item);
-  if (!ok) return { result: "failed", how: "", reason: `interacting at ${o.target} with ${before} ${o.item} did not advance the objective` };
+  if (!ok) return { result: "failed", how: "", reason: `using ${o.target} (${verb}, as the client does) with ${before} ${o.item} did not advance the objective` };
   if (taken < need) return { result: "failed", how: "", reason: `the objective advanced but only ${taken}/${need} ${o.item} left the bags` };
-  const how = `${taken} ${o.item} taken from the bags at ${o.target}${lootGains[o.item] ? ` (it dropped from the player's own kill earlier in this run: ${lootGains[o.item]} looted)` : ""}`;
+  const how = `${taken} ${o.item} taken from the bags at ${o.target} (${verb})${lootGains[o.item] ? ` (it dropped from the player's own kill earlier in this run: ${lootGains[o.item]} looted)` : ""}`;
   if (got >= need) return { result: "proven", how: bought && had < need ? `${bought}; ${how}` : how };
   return { result: "simulated", how: `deliver: ${how}; ${need - got} granted by inventory.give first (${bought || "no NPC in the scene hands it over"})` };
 }
@@ -946,9 +1040,20 @@ function doEndure(q: Quest, o: Objective & { kind: "endure" }): Res {
   let fought = 0;
   /** Health the tool gave back: this gate proves the step's logic (area, window, seconds), not combat balance. */
   let restored = 0;
+  // a weather `when` that holds as the step begins is KEPT held for the whole stand (the run that proves the gate starts
+  // with it broken and leaves it so): a lapse is re-driven through the Weather builtin, and the row says how long it held
+  const wx = o.when?.weather;
+  const wxNow = (): boolean => !!wx && weatherHolds(wx, net.get(WORLD_WEATHER_KEY) as { precipitation?: number; storm?: number } | undefined);
+  const keepWx = wxNow();
+  let wxHeld = 0;
+  let wxLapses = 0;
   const holdGround = (seconds: number, until?: () => boolean): boolean => {
     for (let t = 0; t < Math.round(seconds * 60); t++) {
       if (until?.()) return true;
+      if (keepWx) {
+        if (wxNow()) wxHeld++;
+        else if (t % 30 === 0) { wxLapses++; CONDITIONS["weather"]!.set!(o.when!, true); }
+      }
       if (t % 30 === 0 && !dead(BODY)) {
         const hpNow = Number(net.get(`combat/${BODY}.hp`));
         const hpMax = Number(net.get(`combat/${BODY}.maxHp`) ?? hpNow);
@@ -991,10 +1096,52 @@ function doEndure(q: Quest, o: Objective & { kind: "endure" }): Res {
   if (!ok) {
     const p = pos();
     const hour = net.get(WORLD_HOUR_KEY);
-    return { result: "failed", how: "", reason: `standing ${o.seconds + 2} s inside ${area.label} did not complete it (now ${Math.round(Math.hypot(p[0] - area.center[0], p[2] - area.center[1]))} m from its centre, hp ${net.get(`combat/${BODY}.hp`)}${dead(BODY) ? ", DEAD" : ""}, hour ${typeof hour === "number" ? hour.toFixed(1) : hour}, deaths during the wait: ${deaths - deaths0})` };
+    return { result: "failed", how: "", reason: `standing ${o.seconds + 2} s inside ${area.label} did not complete it (now ${Math.round(Math.hypot(p[0] - area.center[0], p[2] - area.center[1]))} m from its centre, hp ${net.get(`combat/${BODY}.hp`)}${dead(BODY) ? ", DEAD" : ""}, hour ${typeof hour === "number" ? hour.toFixed(1) : hour}${wx ? `, weather ${JSON.stringify(net.get(WORLD_WEATHER_KEY) ?? null)} vs when ${JSON.stringify(wx)}, held ${(wxHeld / 60).toFixed(0)} s` : ""}, deaths during the wait: ${deaths - deaths0})` };
   }
   if (took < o.seconds - 0.6) return { result: "failed", how: "", reason: `completed ${took.toFixed(1)} s after coming back: leaving did not start the count over` };
-  return { result: "proven", how: `stood ${took.toFixed(1)} s in ${area.label} after leaving midway reset the count${fought ? `; struck back ${fought} time(s)` : ""}${restored ? `; BALANCE NOTE: the tool restored ${Math.round(restored)} hp, a level-${sheet()?.level ?? "?"} body standing here unaided would have died` : ""}${deaths > deaths0 ? `; died ${deaths - deaths0} time(s) holding it before the try that succeeded` : ""}` };
+  const wxNote = keepWx ? `; weather ${Object.keys(wx!).join("+")} held ${(wxHeld / 60).toFixed(0)} s${wxLapses ? ` (re-driven ${wxLapses} time(s) after a lapse)` : ""}` : "";
+  return { result: "proven", how: `stood ${took.toFixed(1)} s in ${area.label} after leaving midway reset the count${wxNote}${fought ? `; struck back ${fought} time(s)` : ""}${restored ? `; BALANCE NOTE: the tool restored ${Math.round(restored)} hp, a level-${sheet()?.level ?? "?"} body standing here unaided would have died` : ""}${deaths > deaths0 ? `; died ${deaths - deaths0} time(s) holding it before the try that succeeded` : ""}` };
+}
+
+/** The escort walk an npc declares (its `escort` param), or null. */
+function escortWalk(id: string): { route: P3[]; speed: number; hold: number } | null {
+  const s = world.expanded.entities[id]?.components["script"] as { name?: string; params?: { escort?: unknown } } | undefined;
+  const r = s?.name === "npc" ? escortRouteSchema.safeParse(s.params?.escort ?? {}) : null;
+  return r?.success ? { route: r.data.route as P3[], speed: r.data.speed, hold: r.data.hold } : null;
+}
+
+/**
+ * escort: the claim is taken by standing beside the NPC; it walks only with the body beside it; left behind longer than
+ * `grace` it FAILS without progress and walks back (proven first); then walked beside all the way, the step completes.
+ */
+function doEscort(q: Quest, o: Objective & { kind: "escort" }): Res {
+  const walk = escortWalk(o.target);
+  if (!walk) return { result: "failed", how: "", reason: `escort target "${o.target}" is not an npc with an \`escort\` route param` };
+  const claim = (): EscortState | undefined => net.get(escortKey(o.target)) as EscortState | undefined;
+  if (!waitFor(() => !claim(), 90)) return { result: "failed", how: "", reason: `${o.target} is held by another escort (${claim()?.by}) that never ended` };
+  const post = entityAt(o.target);
+  if (!post) return { result: "failed", how: "", reason: `entity "${o.target}" is not in the scene` };
+  const length = escortLength(post, walk.route);
+  const beside = (): P3 => { const at = entityAt(o.target) ?? post; return groundAt(at[0] + 2, at[2]); };
+  const back = walk.hold + length / walk.speed + 5;
+  // 1. left behind: it must fail, not progress, and walk back to its post
+  recoverIfDead();
+  teleport(beside());
+  if (!waitFor(() => claim()?.by === BODY, 3)) return { result: "failed", how: "", reason: `standing beside ${o.target} with the step open did not claim it` };
+  for (let i = 0; i < 4; i++) teleport(beside());
+  const d1 = claim()?.d ?? 0;
+  if (d1 <= 0) return { result: "failed", how: "", reason: `${o.target} did not walk with the body beside it (claim ${JSON.stringify(claim())})` };
+  teleport(groundAt(post[0] + o.radius + 40, post[2]));
+  if (!waitFor(() => claim()?.state !== "walk", o.grace + 3)) return { result: "failed", how: "", reason: `left ${o.radius + 40} m behind for ${o.grace + 3} s, the escort did not fail` };
+  if (objectiveDone(q, o)) return { result: "failed", how: "", reason: "completed although the escort failed" };
+  if (!waitFor(() => !claim(), back)) return { result: "failed", how: "", reason: `after failing, ${o.target} never got back to its post (claim ${JSON.stringify(claim())})` };
+  // 2. walked beside it all the way
+  recoverIfDead();
+  const t0 = world.timeMs;
+  const limit = (length / walk.speed) * 1.5 + 15;
+  while (!objectiveDone(q, o) && (world.timeMs - t0) / 1000 < limit) { recoverIfDead(); teleport(beside()); }
+  if (!objectiveDone(q, o)) return { result: "failed", how: "", reason: `walked beside ${o.target} for ${limit.toFixed(0)} s and it did not arrive (claim ${JSON.stringify(claim())})` };
+  return { result: "proven", how: `walked ${length.toFixed(0)} m beside ${o.target} in ${((world.timeMs - t0) / 1000).toFixed(0)} s; left behind first, it failed (no progress) and walked back to its post` };
 }
 
 const DRIVERS: Record<string, (q: Quest, o: Objective) => Res> = {
@@ -1007,6 +1154,7 @@ const DRIVERS: Record<string, (q: Quest, o: Objective) => Res> = {
   deliver: (q, o) => doDeliver(q, o as Objective & { kind: "deliver" }),
   perform: (q, o) => doPerform(q, o as Objective & { kind: "perform" }),
   endure: (q, o) => doEndure(q, o as Objective & { kind: "endure" }),
+  escort: (q, o) => doEscort(q, o as Objective & { kind: "escort" }),
 };
 
 /** Condition proofs: `set` makes a WORLD condition hold or break; character conditions are checked, not forced. */
@@ -1018,7 +1166,11 @@ const CONDITIONS: Record<string, { set?: (c: DialogueCondition, hold: boolean) =
       const hour = hold ? (w.from + len / 2) % 24 : (w.to + (24 - len) / 2) % 24;
       // through the day-night script's own /time command, then frozen: the authority's clock republishes its OWN hour
       // every few seconds, so a bare netState write lasts long enough for a talk but not for a 90 s endure step
-      const set = world.scripts.runConsoleCommand("time", [String(hour)]);
+      // always FORWARD (+h): an absolute /time inside the same day can move the world clock BACK, and a repeat quest's
+      // second run then sits inside its own wait ("auto source never started it" at night)
+      const nowT = worldTime(worldNow());
+      const ahead = nowT === null ? null : (((hour - (nowT % 24)) % 24) + 24) % 24;
+      const set = ahead === null ? world.scripts.runConsoleCommand("time", [String(hour)]) : ahead < 0.01 ? { ok: true } : world.scripts.runConsoleCommand("time", [`+${ahead.toFixed(3)}`]);
       if (set?.ok) world.scripts.runConsoleCommand("time", ["freeze"]);
       else net.set(WORLD_HOUR_KEY, hour);
       tick(2);
@@ -1034,24 +1186,36 @@ const CONDITIONS: Record<string, { set?: (c: DialogueCondition, hold: boolean) =
       const storm = hold ? Math.max(w.storm ?? 0, cur["storm"] ?? 0) : w.storm ? 0 : (cur["storm"] ?? 0);
       // through the weather script's own command, which PINS the front: a bare netState write is overwritten the next
       // time the authority's weather rolls (a presence that needs rain was gone again by the delivery step)
-      const mode = p >= 0.55 || storm > 0.3 ? "storm" : p >= 0.25 ? "light" : p > 0.05 ? "drizzle" : "clear";
+      // the mildest /weather mode whose held plateau meets the condition (or, to break it, the first that fails it):
+      // the Weather builtin's pinned fronts, by their plateau precipitation and storm (a "light" front is storm 0.1, so a
+      // storm >= 0.3 condition needs "storm")
+      const mode = weatherModeFor(w, hold) ?? (p >= 0.55 || storm > 0.3 ? "storm" : p >= 0.25 ? "light" : p > 0.05 ? "drizzle" : "clear");
       const set = world.scripts.runConsoleCommand("weather", [mode]);
+      const meets = (): boolean => weatherHolds(w, net.get(WORLD_WEATHER_KEY) as { precipitation?: number; storm?: number } | undefined) === hold;
       tick(30);
-      const now = net.get(WORLD_WEATHER_KEY) as { precipitation?: number } | undefined;
-      const got = now?.precipitation ?? -1;
-      if (!set?.ok || (hold ? got < lo || got > hi : got >= lo && got <= hi)) {
+      for (let i = 0; i < 60 * 10 && set?.ok && !meets(); i++) tick();
+      if (!set?.ok || !meets()) {
         net.set(WORLD_WEATHER_KEY, { wind: 0, windAngle: 0, strike: 0, until: 1e12, ...cur, precipitation: p, storm });
         tick(2);
       }
     },
   },
+  tide: {
+    set: (c, hold) => {
+      // the first world time ahead at least half an hour into (or out of) the window, through /time like `clock`
+      const want = c.tide!;
+      const now = worldTime(worldNow()) ?? 0;
+      let t = now + 0.25;
+      for (let k = 0; k < 100 && !((tidePhase(t) === want) === hold && (tidePhase(t - 0.5) === want) === hold); k++) t += 0.25;
+      const hour = ((t % 24) + 24) % 24;
+      const set = world.scripts.runConsoleCommand("time", [String(hour)]);
+      if (set?.ok) world.scripts.runConsoleCommand("time", ["freeze"]);
+      else { net.set(WORLD_HOUR_KEY, hour); net.set(WORLD_DAY_KEY, Math.floor(t / 24)); }
+      tick(2);
+    },
+  },
   quest: {}, flag: {}, level: {}, item: {}, coins: {},
 };
-/** The plain conditions inside a condition: an `all` wrapper is opened (recursively), anything else is one leaf. */
-function conditionLeaves(c: DialogueCondition): DialogueCondition[] {
-  const all = (c as { all?: DialogueCondition[] }).all;
-  return Array.isArray(all) ? all.flatMap(conditionLeaves) : [c];
-}
 /** Make every drivable world part of a condition hold (or not hold). Returns how many parts were driven. */
 function driveCondition(c: DialogueCondition, hold: boolean): number {
   let n = 0;
@@ -1112,16 +1276,16 @@ function blockProblems(q: Quest): string[] {
 function runObjective(q: Quest, o: Objective): Res {
   const driver = DRIVERS[o.kind];
   if (!driver) return { result: "failed", how: "", reason: `no quest-play proof for action block "${o.kind}"` };
-  const drivable = o.when ? Object.keys(o.when).filter((k) => CONDITIONS[k]?.set) : [];
+  const drivable = drivableParts(o.when, (k) => !!CONDITIONS[k]?.set);
   const notes: string[] = [];
   if (o.when && drivable.length && REPEATABLE.has(o.kind)) {
-    for (const k of drivable) CONDITIONS[k]!.set!(o.when, false);
+    driveCondition(o.when, false);
     const p0 = progressOf(q, o.id);
     driver(q, o);
     if (progressOf(q, o.id) > p0) return { result: "failed", how: "", reason: `progressed while its \`when\` (${drivable.join(", ")}) did not hold — the gate is missing` };
     notes.push(`no progress while ${drivable.join("+")} did not hold`);
   }
-  for (const k of drivable) CONDITIONS[k]!.set!(o.when!, true);
+  if (drivable.length) driveCondition(o.when!, true);
   const res = driver(q, o);
   if (res.result === "failed") return res;
   if (o.when?.weather?.biomes?.length) {
@@ -1131,6 +1295,12 @@ function runObjective(q: Quest, o: Objective): Res {
   }
   for (const t of o.then) {
     const flags = (net.get(`npc/${BODY}`) as NpcMemory | undefined)?.flags ?? {};
+    if (t.do === "choose") {
+      const flag = choiceFlag(t.choice, t.option);
+      if (flags[flag] !== true) return { result: "failed", how: res.how, reason: `then choose: the flag "${flag}" was not set` };
+      notes.push(`then choose ${flag}`);
+      continue;
+    }
     const set = flags[t.flag] === true;
     if (t.do === "setFlag" ? !set : set) return { result: "failed", how: res.how, reason: `then ${t.do} "${t.flag}" did not happen` };
     notes.push(`then ${t.do} ${t.flag}`);
@@ -1198,38 +1368,45 @@ function usePortal(id: string, approach: P3 | null): { travel: PortalTravel | nu
   obj.updateWorldMatrix(true, false);
   const c = obj.localToWorld(new THREE.Vector3(...vol.offset));
   const centre: P3 = [c.x, c.y, c.z];
-  // where to come from: the given approach (the anchor the body landed on), else the portal's own way-back anchor,
-  // else 4 m out along the portal's facing
-  let from = approach;
-  if (!from && p.returnAnchor && world.entities.has(p.returnAnchor)) from = world.positionOf(p.returnAnchor);
-  if (!from) { const f = obj.localToWorld(new THREE.Vector3(vol.offset[0], vol.offset[1], vol.offset[2] + 4)); from = [f.x, f.y, f.z]; }
-  // a landed body position is known floor: stand exactly there (a ring probe can pick a lintel above a passage)
-  teleport(approach ?? standPoints(from, 0.4)[0]!);
-  // the portal refuses a body still locked by a fight ("You cannot leave in the middle of a fight"): wait it out, as a
-  // player does, before walking in
-  let waited = 0;
-  for (; waited < 60 * 60 && !server.canTransfer(PEER); waited++) tick();
-  const start = pos();
-  const dx = centre[0] - start[0];
-  const dz = centre[2] - start[2];
-  const d = Math.hypot(dx, dz) || 1;
-  const reachOut = Math.max(vol.half[0], vol.half[2]) * 2 + 1;
-  const target: P2 = [centre[0] + (dx / d) * reachOut, centre[2] + (dz / d) * reachOut];
-  const startedAt = pos();
-  for (let i = 0; i < 60 * 20 && !current.travels.length; i++) {
-    const q = pos();
-    const tx = target[0] - q[0];
-    const tz = target[1] - q[2];
-    const td = Math.hypot(tx, tz);
-    if (td < 0.3) break;
-    stepWith([(tx / td) * RUN * 0.6, (tz / td) * RUN * 0.6], false);
+  // where to come from: the given approach (the anchor the body landed on) or the portal's own way-back anchor when
+  // either is near the trigger, else 4 m out along the portal's facing (then behind it). A far arrival (an instance's
+  // exit can be 200 m from where the body landed) is reached the way an instance's targets are: by teleport to the
+  // portal's approach, then the last metres walked in.
+  const facing = [4, -4].map((dz) => { const f = obj.localToWorld(new THREE.Vector3(vol.offset[0], vol.offset[1], vol.offset[2] + dz)); return [f.x, f.y, f.z] as P3; });
+  const way = p.returnAnchor && world.entities.has(p.returnAnchor) ? world.positionOf(p.returnAnchor) : null;
+  const tries: string[] = [];
+  let travel: PortalTravel | null = null;
+  for (const a of portalApproaches(centre, vol.half, [approach, way], facing)) {
+    recoverIfDead();
+    // a landed body position is known floor: stand exactly there (a ring probe can pick a lintel above a passage)
+    teleport(a.known ? a.at : standPoints(a.at, 0.4)[0]!);
+    // the portal refuses a body still locked by a fight ("You cannot leave in the middle of a fight"): wait it out, as
+    // a player does, before walking in
+    let waited = 0;
+    for (; waited < 60 * 60 && !server.canTransfer(PEER); waited++) tick();
+    current.refusals.length = 0;
+    const start = pos();
+    const dx = centre[0] - start[0];
+    const dz = centre[2] - start[2];
+    const d = Math.hypot(dx, dz) || 1;
+    const reachOut = Math.max(vol.half[0], vol.half[2]) * 2 + 1;
+    const target: P2 = [centre[0] + (dx / d) * reachOut, centre[2] + (dz / d) * reachOut];
+    for (let i = 0; i < 60 * 20 && !current.travels.length; i++) {
+      const q = pos();
+      const tx = target[0] - q[0];
+      const tz = target[1] - q[2];
+      const td = Math.hypot(tx, tz);
+      if (td < 0.3) break;
+      stepWith([(tx / td) * RUN * 0.6, (tz / td) * RUN * 0.6], false);
+    }
+    sendMove([0, 0]);
+    travel = current.travels.shift() ?? null;
+    const far = approach && !a.known && d2(approach, centre) > 20 ? `teleported from the arrival ${d2(approach, centre).toFixed(0)} m away to the portal's approach, then ` : "";
+    if (travel) return { travel, how: `${far}walked ${d.toFixed(1)} m from [${start.map((v) => v.toFixed(1)).join(", ")}] into the ${id} trigger${waited > 30 ? ` after waiting ${(waited / 60).toFixed(1)} s for the fight's transfer lock to lapse` : ""}` };
+    const walked = Math.hypot(pos()[0] - start[0], pos()[2] - start[2]);
+    tries.push(`walked ${walked.toFixed(1)} m toward ${id} (from [${start.map((v) => v.toFixed(1)).join(", ")}] to [${pos().map((v) => v.toFixed(1)).join(", ")}], portal centre [${centre.map((v) => v.toFixed(1)).join(", ")}]${dead(BODY) ? ", the body is DEAD" : ""}, hp ${net.get(`combat/${BODY}.hp`)}) and it sent nobody${current.refusals.length ? ` (refused: "${current.refusals.at(-1)}")` : ""}`);
   }
-  sendMove([0, 0]);
-  const travel = current.travels.shift() ?? null;
-  const walked = Math.hypot(pos()[0] - startedAt[0], pos()[2] - startedAt[2]);
-  return travel
-    ? { travel, how: `walked ${d.toFixed(1)} m from [${startedAt.map((v) => v.toFixed(1)).join(", ")}] into the ${id} trigger${waited > 30 ? ` after waiting ${(waited / 60).toFixed(1)} s for the fight's transfer lock to lapse` : ""}` }
-    : { travel, how: "", reason: `walked ${walked.toFixed(1)} m toward ${id} (from [${startedAt.map((v) => v.toFixed(1)).join(", ")}] to [${pos().map((v) => v.toFixed(1)).join(", ")}], portal centre [${centre.map((v) => v.toFixed(1)).join(", ")}]${dead(BODY) ? ", the body is DEAD" : ""}, hp ${net.get(`combat/${BODY}.hp`)}) and it sent nobody${current.refusals.length ? ` (refused: "${current.refusals.at(-1)}")` : ""}` };
+  return { travel: null, how: "", reason: tries.join(" | ") || `${id} has no approach` };
 }
 /** serve()'s portal transfer, in process: record, commit, hand off, bye, load + join at the destination. */
 async function transfer(travel: PortalTravel, portal: string, mode: string, how: string): Promise<TripRow> {
@@ -1274,11 +1451,11 @@ async function transfer(travel: PortalTravel, portal: string, mode: string, how:
  * boot-time bag clear — and the trip row says how many.
  */
 function makeRoom(): number {
-  const sh = net.get(`character/${BODY}`) as { items?: Record<string, { itemId: string; qty: number; equipped?: boolean; slot?: string }> } | undefined;
+  const sh = net.get(`character/${BODY}`) as { items?: Record<string, { itemId: string; qty: number; container?: string; equipped?: boolean; slot?: string }> } | undefined;
   if (!sh?.items) return 0;
   // items an unfinished quest names (a collect, a delivery, a condition, a reward still to come) stay
   const named = JSON.stringify([...quests.values()].filter((q) => statusOf(q) !== "complete"));
-  const kept = Object.fromEntries(Object.entries(sh.items).filter(([, it]) => it.equipped || it.slot || named.includes(`"${it.itemId}"`)));
+  const kept = Object.fromEntries(Object.entries(sh.items).filter(([, it]) => !it.container || it.equipped || it.slot || named.includes(`"${it.itemId}"`)));
   const dropped = Object.keys(sh.items).length - Object.keys(kept).length;
   if (dropped > 0) { net.set(`character/${BODY}`, { ...sh, items: kept }); tick(2); }
   return dropped;
@@ -1387,21 +1564,37 @@ interface QuestRow {
   digest?: string; kept?: boolean; provenAt?: string;
   objectives: ObjectiveRow[]; rewards?: { expected: { xp: number; coins: number; items: Array<{ itemId: string; qty: number }> }; received: { xp: number; coins: number; items: Record<string, number> }; ok: boolean };
   problems: string[]; seconds: number; walk?: "pass" | "fail" | "in-town";
+  /** A `repeat` quest: its first run proves the wait (refused, the clock stepped past `after`, offered); this is run 2. */
+  repeat?: string; run?: number;
 }
 const rows: QuestRow[] = [];
 
-for (const id of order) {
+/** Repeat quests whose wait was proven: played a second time (run 2) at the end of the order. */
+const secondRun = new Set<string>();
+for (const [index, id] of order.entries()) {
   const tq = Date.now();
+  const run2 = secondRun.has(id) && order.indexOf(id) !== index;
   const q = quests.get(id);
   if (!q) {
     rows.push({ id, title: "", status: "fail", giver: "", turnIn: "", requires: [], transitions: [], objectives: [], problems: [problemsAtLoad[id] ?? `quest "${id}" does not exist`], seconds: 0 });
     continue;
   }
   log(`\n${q.id} — ${q.title}`);
-  const row: QuestRow = { id: q.id, title: q.title, status: "fail", giver: q.giver, turnIn: q.turnIn, requires: q.requires, transitions: [], objectives: [], problems: [], seconds: 0, digest: digests.get(q.id), provenAt: new Date().toISOString() };
+  // between quests a player sells or drops the loot of earlier fights: carried stacks no unfinished quest names go, so a
+  // drop from the slain, a hand-in reward or a corpse run has room (a long run otherwise fills the bags with creature loot)
+  {
+    const n = makeRoom();
+    if (n) log(`  bags: dropped ${n} carried loot stack(s) no unfinished quest names`);
+  }
+  const row: QuestRow = { id: q.id, title: q.title, status: "fail", giver: q.giver, turnIn: q.turnIn, requires: q.requires, transitions: [], objectives: [], problems: [], seconds: 0, digest: digests.get(q.id), provenAt: new Date().toISOString(), ...(run2 ? { run: 2 } : {}) };
+  /** The journal's path is judged from this run's own transitions (run 2 starts from "complete"). */
+  // an auto source re-taken by the quest-log during the repeat proof went active before this row began: that
+  // transition is this run's
+  const t0Run = Math.max(0, (transitions.get(q.id) ?? []).length - (run2 && (transitions.get(q.id) ?? []).at(-1)?.status === "active" ? 1 : 0));
+  const accepted = (): boolean => (run2 ? statusOf(q) === "active" || statusOf(q) === "ready" : statusOf(q) !== undefined);
   rows.push(row);
   const finish = (): void => {
-    row.transitions = transitions.get(q.id) ?? [];
+    row.transitions = (transitions.get(q.id) ?? []).slice(t0Run);
     row.seconds = +((Date.now() - tq) / 1000).toFixed(1);
     log(`  => ${row.status.toUpperCase()}${row.problems.length ? `: ${row.problems.join(" | ")}` : ""}`);
   };
@@ -1447,7 +1640,7 @@ for (const id of order) {
     if (o.kind === "collect" && content.assets.getDataAsset(o.target)?.type !== "item") row.problems.push(`objective ${o.id}: collect target "${o.target}" is not an item`);
     if (o.kind === "kill") {
       const anyEntity = [...world.entities.keys()].some((e) => killMatch(e, o.target));
-      const anyArea = [...spawnAreas.areas.values()].some((a) => a.data.spawns.some((s) => killMatch(`${a.id}#${s.template}#1`, o.target)));
+      const anyArea = [...spawnAreas.areas.values()].some((a) => [...a.data.spawns, ...(a.data.rares ?? [])].some((s) => killMatch(`${a.id}#${s.template}#1`, o.target)));
       if (!anyEntity && !anyArea) row.problems.push(`objective ${o.id}: kill target "${o.target}" matches no entity and no spawn-area template`);
     }
   }
@@ -1480,10 +1673,12 @@ for (const id of order) {
       drive(true);
       log(`  presence: absent outside its condition, present inside it, held through a conversation`);
     }
-    const r = converse(giver, (a) => a.do === "acceptQuest" && a.quest === q.id, () => statusOf(q) !== undefined);
+    const r = converse(giver, (a) => a.do === "acceptQuest" && a.quest === q.id, accepted);
     if (!r.ok) { row.problems.push(`accept: ${r.reason}`); row.accept = { how: "failed", path: r.path }; finish(); continue; }
     row.accept = { how: `dialogue ${giver.dialogueId}`, path: r.path };
     log(`  accepted via ${r.path.join(" -> ")}`);
+  } else if (run2 && autoStart.has(q.id)) {
+    row.problems.push("a repeat quest granted only by autoStart: nothing offers it again (give it a source that does)"); finish(); continue;
   } else if (autoStart.has(q.id)) {
     waitFor(() => statusOf(q) !== undefined, 2);
     if (statusOf(q) === undefined) { row.problems.push("autoStart quest is not in the fresh journal"); finish(); continue; }
@@ -1493,9 +1688,23 @@ for (const id of order) {
     const s = src as Extract<typeof src, { kind: "auto" }>;
     if (s.when) driveCondition(s.when, true);
     if (s.area) teleport(groundAt(s.area.center[0], s.area.center[1]));
-    waitFor(() => statusOf(q) !== undefined, 2);
-    if (statusOf(q) === undefined) { row.problems.push(`auto source never started it (when ${JSON.stringify(s.when ?? {})}${s.area ? `, area ${s.area.label}` : ""})`); finish(); continue; }
-    row.accept = { how: `quest-log autoOffer (auto source${s.when ? `, when ${[...conditionBlockNames(s.when)].join("+")}` : ""}${s.area ? `, area ${s.area.label}` : ""})`, path: [] };
+    // a character level in `when` is not forced: the body EARNS it, through the character.xp event quest rewards and
+    // kills raise (the authority's own path); first it stands in the area below that level and must not be offered it
+    const needLevel = requiredLevel(s.when as Record<string, unknown> | undefined);
+    let levelNote = "";
+    if (needLevel > (sheet()?.level ?? 1)) {
+      waitFor(accepted, 1);
+      if (accepted()) row.problems.push(`auto source started it at level ${sheet()?.level ?? 1}, below its when {level:${needLevel}} — the level gate is missing`);
+      const from = sheet()?.level ?? 1;
+      for (let i = 0; i < 40 && (sheet()?.level ?? 1) < needLevel; i++) {
+        world.eventBus.emit("character.xp", { actorId: BODY, amount: Math.max(50, Math.ceil((sheet()?.xp ?? 0) * 0.25)) });
+        tick(2);
+      }
+      levelNote = `; level ${from} -> ${sheet()?.level ?? "?"} by character.xp (not offered at ${from})`;
+    }
+    waitFor(accepted, 2);
+    if (!accepted()) { row.problems.push(`auto source never started it (when ${JSON.stringify(s.when ?? {})}${s.area ? `, area ${s.area.label}` : ""}; body level ${sheet()?.level ?? "?"} at [${pos().map((v) => v.toFixed(0)).join(", ")}])`); finish(); continue; }
+    row.accept = { how: `quest-log autoOffer (auto source${s.when ? `, when ${[...conditionBlockNames(s.when)].join("+")}` : ""}${s.area ? `, area ${s.area.label}` : ""}${levelNote})`, path: [] };
   }
   const xp0 = sheet()?.xp ?? 0;
   const coins0 = sheet()?.coins ?? 0;
@@ -1512,7 +1721,10 @@ for (const id of order) {
     if (o.after.every((id) => { const dep = q.objectives.find((x) => x.id === id); return !dep || objectiveDone(q, dep); })) continue;
     const p0 = progressOf(q, o.id);
     DRIVERS[o.kind]?.(q, o);
-    if (progressOf(q, o.id) > p0) row.problems.push(`objective ${o.id} progressed before its \`after\` (${o.after.join(", ")}) — order is not enforced`);
+    // the drive itself may settle what the step waits on (a target inside the place its `visit` names): order kept, not broken
+    const depsNow = o.after.every((id) => { const dep = q.objectives.find((x) => x.id === id); return !dep || objectiveDone(q, dep); });
+    if (progressOf(q, o.id) > p0 && !depsNow) row.problems.push(`objective ${o.id} progressed before its \`after\` (${o.after.join(", ")}) — order is not enforced`);
+    else if (progressOf(q, o.id) > p0) log(`  order: ${o.id} progressed only once ${o.after.join(", ")} settled during the drive`);
     else log(`  order: ${o.id} did not progress before ${o.after.join(", ")}`);
   }
   /** Rows of steps done in an instance: proven only once the body is back out (patched after the return trip). */
@@ -1537,8 +1749,26 @@ for (const id of order) {
         arrivedAt = inn.at ?? null;
       }
     }
+    // an option of a choice already taken: locked — doing it (where that repeats safely) must not progress
+    if (objectiveLocked(q, questState(journal(), q.id)?.progress ?? {}, o)) {
+      const c = objectiveChoice(o)!;
+      let how = `locked: choice ${c.choice} already taken`;
+      let failed = "";
+      if (REPEATABLE.has(o.kind) && (!o.scene || o.scene === sceneName)) {
+        const p0 = progressOf(q, o.id);
+        DRIVERS[o.kind]?.(q, o);
+        if (progressOf(q, o.id) > p0) failed = `progressed although another option of ${c.choice} was taken`;
+        else how += "; doing it did not progress";
+      }
+      row.objectives.push({ id: o.id, kind: o.kind, target: o.target, required: o.required, progress: progressOf(q, o.id), result: failed ? "failed" : "proven", how: failed ? "" : how, ...(failed ? { reason: failed } : {}) });
+      log(`  ${(failed ? "failed" : "proven").padEnd(9)} ${o.kind} ${o.target} — ${failed || how}`);
+      if (failed) break;
+      continue;
+    }
     const base = { id: o.id, kind: o.kind, target: o.kind === "visit" || o.kind === "endure" ? (objectiveArea(q, o)?.label ?? "") : o.kind === "deliver" ? `${o.item} -> ${o.target}` : o.kind === "perform" ? `${o.action}${o.target ? ` @ ${o.target}` : ""}` : o.target, required: o.required };
     let res: Omit<ObjectiveRow, "id" | "kind" | "target" | "required" | "progress">;
+    // a drop from the slain can land during any fight of the quest: keep room in the bags before every step
+    makeRoom();
     if (o.kind === "collect") {
       const gaveByDialogue = (carriedBefore[o.target] ?? 0) < o.required && owned(o.target) >= o.required && !!giver && dialogueHas(giver.dialogue, (a) => a.do === "give" && a.item === o.target);
       res = doCollect(q, o, gaveByDialogue ? "dialogue" : `${carriedBefore[o.target]} in the starting kit`);
@@ -1601,12 +1831,17 @@ for (const id of order) {
   tick(30);
 
   // -- rewards and the journal's path ---------------------------------------------------------------------------------------------
+  // a death the drivers did not stand up from themselves still left a corpse with the purse in it: the run back to it
+  // comes before the purse is counted
+  const runs0 = corpseRuns;
+  if (!dead(BODY)) reclaimCorpses();
+  if (corpseRuns > runs0) log(`  corpse run: ${corpseRuns - runs0} corpse(s) of the body's emptied before the reward check`);
   const received = { xp: (sheet()?.xp ?? 0) - xp0, coins: (sheet()?.coins ?? 0) - coins0 + (coinsPaid - paid0), items: {} as Record<string, number> };
   for (const r of q.rewardItems) received.items[r.itemId] = owned(r.itemId) - (items0[r.itemId] ?? 0);
   const rewardsOk = received.xp >= q.rewardXp && received.coins >= q.rewardCoins && q.rewardItems.every((r) => (received.items[r.itemId] ?? 0) >= r.qty);
   row.rewards = { expected: { xp: q.rewardXp, coins: q.rewardCoins, items: q.rewardItems }, received, ok: rewardsOk };
   if (!rewardsOk) row.problems.push(`rewards short: got xp ${received.xp}/${q.rewardXp}, coins ${received.coins}/${q.rewardCoins}, items ${JSON.stringify(received.items)}`);
-  const seen = (transitions.get(q.id) ?? []).map((t) => t.status);
+  const seen = (transitions.get(q.id) ?? []).slice(t0Run).map((t) => t.status);
   const want = q.turnIn ? ["active", "ready", "complete"] : ["active", "complete"];
   const missing = want.filter((s) => !seen.includes(s));
   // a quest whose objectives were already met at acceptance goes straight to ready inside one tick — the authority
@@ -1622,7 +1857,45 @@ for (const id of order) {
   const anySim = row.objectives.some((o) => o.result === "simulated");
   const hard = row.problems.filter((p) => !p.startsWith("journal skipped"));
   row.status = !complete || hard.length ? "fail" : anySim || row.problems.length ? "partial" : "pass";
+  // repeat: refused right after, offered again once the world clock (day-night's own /time) has passed `after`, then run 2
+  if (q.repeat && !run2 && row.status !== "fail") {
+    const r = proveRepeatWait(q);
+    row.repeat = r.how;
+    if (r.problem) { row.problems.push(`repeat: ${r.problem}`); row.status = "fail"; }
+    else if (r.again) { secondRun.add(q.id); order.push(q.id); }
+  }
   finish();
+}
+
+/**
+ * A completed `repeat` quest: not on offer now; the clock is stepped (the day-night script's /time +h, which also
+ * counts world/day) just past `after`; on offer again unless `limit` is reached. The offer is judged by the same
+ * questOfferProblem the npc builtin's `available` and the quest-log's autoOffer call, on the replicated journal.
+ */
+function proveRepeatWait(q: Quest): { how: string; problem?: string; again: boolean } {
+  const rep = q.repeat!;
+  const now = (): number | null => worldTime(worldNow());
+  const t0 = now();
+  if (t0 === null) return { how: "", problem: "no world clock in the scene (no day-night): a repeat is never offered again", again: false };
+  const before = questOfferProblem(journal(), q, t0);
+  if (before === null) return { how: "", problem: "offered again the moment it completed", again: false };
+  const hour = t0 % 24;
+  const step = rep.after === "day" ? 24 - hour + 0.5 : rep.after + 0.25;
+  const set = world.scripts.runConsoleCommand("time", [`+${step}`]);
+  if (!set?.ok) return { how: "", problem: "the scene's day-night has no /time command to step the clock", again: false };
+  world.scripts.runConsoleCommand("time", ["freeze"]);
+  tick(4);
+  const t1 = now();
+  // an auto source is taken up by the quest-log the moment it holds again (the body still stands in its area): the
+  // journal going back to active within the step IS the offer, not "already accepted"
+  const retaken = statusOf(q) === "active" || statusOf(q) === "ready";
+  const after = retaken ? null : questOfferProblem(journal(), q, t1);
+  const done = questState(journal(), q.id)?.completions ?? 1;
+  const capped = rep.limit !== undefined && done >= rep.limit;
+  const how = `refused at world time ${t0.toFixed(1)} h ("${before}"), clock stepped +${step.toFixed(2)} h to ${t1?.toFixed(1)} h (day ${net.get(WORLD_DAY_KEY) ?? 0}): ${after ?? (retaken ? "offered again and taken up at once by the quest-log (auto source)" : "offered again")}`;
+  log(`  repeat: ${how}`);
+  if (capped) return after === null ? { how, problem: `offered again after ${done} completions (limit ${rep.limit})`, again: false } : { how, again: false };
+  return after === null ? { how, again: true } : { how, problem: `still refused after the wait: ${after}`, again: false };
 }
 
 // ---- report ---------------------------------------------------------------------------------------------------------------

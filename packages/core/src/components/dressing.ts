@@ -155,12 +155,32 @@ export const dressingSchema = z
           "back face (wall props). `top`: centre of the top face (ceiling props and anything hung from a `hang` socket). Omitted = the mount's own " +
           "default (wall -> back, ceiling -> top, everything else -> foot). Intake fixes the pivot so this is true.",
       ),
+    footing: z
+      .number()
+      .min(0)
+      .max(6)
+      .optional()
+      .describe(
+        "Metres of the mesh BELOW the origin plane that are footing meant to be buried (a kit building shell: floor top at y=0, footing " +
+          "running down to -footing so it seats on a slope). The origin counts as `foot` when the bounds start that far below it; place-build " +
+          "seats the shell at its footing and may bury it. Omitted = none (the bounds start at the origin).",
+      ),
     against: z
       .enum(["free", "wall", "either"])
       .default("either")
       .describe(
         "floor only. `wall`: its back must stand against a wall (wardrobe, shelf, bed head); placing it in open floor is refused. `free`: stands in " +
           "the open (a table, a brazier). `either`: both are fine (a barrel, a crate).",
+      ),
+    mountOffset: z
+      .number()
+      .min(0)
+      .max(0.2)
+      .optional()
+      .describe(
+        "Metres `dress apply` holds the prop off what it mounts on, so no face of it lies in the plane of the wall, floor or board (z-fight): a wall " +
+          "prop off its wall, a thin floor covering (rug) or thin surface item (papers) above its floor or board. Omitted: 0.005 for a wall prop " +
+          "thicker than 3 cm, 0.021 for a thinner wall/floor/surface prop (its face clears the 2 cm z-fight gate), 0 for everything else.",
       ),
     wallHeight: z
       .tuple([z.number().min(0), z.number().min(0)])
@@ -267,6 +287,33 @@ export const dressingSchema = z
           "centre of a room that keeps its middle clear (every dungeon room). Everything else fills walls and corners first. A plan may also mark " +
           "one item `setPiece`. Omitted = false.",
       ),
+    tags: z
+      .array(z.string().min(1))
+      .optional()
+      .describe(
+        "WHAT IT IS, for the rules `dress check` enforces by kind (DRESSING_TAGS): `altar` (a chapel's altar: against the back wall/apse, facing the nave), " +
+          "`pew` (chapel seating in rows facing the altar), `lectern` (a reading stand or podium; never a table), `book` (lies flat on a table, see `pose`), " +
+          "`candelabra` (a standing one never stands beside a table), `chandelier` (the one light at a tall room's ceiling centre), `sign` (exterior only: " +
+          "hangs above a door on a `door-sign` anchor, never inside a room), `grave` / `headstone` / `cross` / `tomb` (a grave marker: placed `auto` with `prefer` row it stands in a graveyard's rows, 2-2.5 m apart, stones 1.2-1.8 m apart, all facing the yard's entry and filling the yard; `graveyard-rows` / `graveyard-sparse` check a room of 4+). Omitted = none.",
+      ),
+    neverInDoorLine: z
+      .boolean()
+      .optional()
+      .describe(
+        "floor only: never stands in a DOOR LINE, a doorway's or entry lane's clear width carried 3 m into the room (a lectern or podium planted in front " +
+          "of a door reads wrong). `dress check` refuses it there (`door-line`) and auto places skip those spots. Omitted = false.",
+      ),
+    pose: z
+      .object({
+        surface: z.enum(["flat", "upright"]).optional().describe("On a table, desk, chest or any surface that is not a shelf board. `flat` lays a model that stands upright on its side (a book lies down)."),
+        shelf: z.enum(["flat", "upright"]).optional().describe("On a shelf board (a host whose `use` has shelf and not table). `upright` keeps the model as it stands."),
+      })
+      .optional()
+      .describe(
+        "surface props: how it lies on each kind of socket host. The resolver turns an upright model (taller than its thinnest horizontal side) 90 degrees about " +
+          "its long horizontal axis and lifts it by half its thickness when the wanted pose is `flat`; `upright` (or omitted) keeps it as modelled. Books: " +
+          "{ surface: \"flat\", shelf: \"upright\" }: a book standing up on a table is a `book-upright` violation.",
+      ),
     loose: z
       .boolean()
       .optional()
@@ -299,6 +346,9 @@ export const dressingSchema = z
 
 export type DressingData = z.infer<typeof dressingSchema>;
 export type DressingInput = z.input<typeof dressingSchema>;
+
+/** The identity tags the dressing rules read (`tags`). Others are allowed and ignored by the checks. */
+export const DRESSING_TAGS = ["altar", "pew", "lectern", "book", "candelabra", "chandelier", "sign", "grave", "headstone", "cross", "tomb"] as const;
 
 /** The origin a prop has when `origin` is omitted. */
 export function dressingOrigin(d: Pick<DressingData, "mount" | "origin">): "foot" | "back" | "top" {

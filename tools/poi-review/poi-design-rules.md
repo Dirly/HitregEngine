@@ -2,6 +2,8 @@
 
 Use these HitReg authoring targets to choose a site before shaping it. They are sizing variants, not automatic generation quotas. The user can request another scale. Measure the playable space, not the bounding box of the terrain edit.
 
+**The numbers are in [size-tiers.mjs](size-tiers.mjs)** (footprint, measured usable area, linked features, creature groups, approaches; enforced by `zonegen reserve`, `poi-brief` and install gate 12). The table below is the experience each tier is for; where it speaks of a Silkroot multiple, the tier table wins.
+
 | Tier | Usable-area scale | Intended experience | Terrain work |
 | --- | --- | --- | --- |
 | Pinpoint | Object or compact discovery footprint; no grove-size quota | Cached crate, camp on the hill, Seven Whispers, a single interaction | Prefer natural ground; footing adjustments only. A heightmap is usually unnecessary. |

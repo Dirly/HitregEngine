@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import type { GLTF } from "three/addons/loaders/GLTFLoader.js";
+import type { GLTF, GLTFLoaderPlugin, GLTFParser } from "three/addons/loaders/GLTFLoader.js";
 
 /**
  * Cross-file sharing for models exported without the kit tools' naming.
@@ -41,6 +41,78 @@ function hashBytes(bytes: Uint8Array): string {
     b = Math.imul(b + v, 0x85ebca6b) ^ (b >>> 13);
   }
   return `${(a >>> 0).toString(36)}${(b >>> 0).toString(36)}${bytes.length.toString(36)}`;
+}
+
+function hashText(text: string): string {
+  let a = 0x811c9dc5;
+  let b = 0x9e3779b9;
+  for (let i = 0; i < text.length; i++) {
+    const v = text.charCodeAt(i);
+    a = Math.imul(a ^ v, 0x01000193);
+    b = Math.imul(b + v, 0x85ebca6b) ^ (b >>> 13);
+  }
+  return `${(a >>> 0).toString(36)}${(b >>> 0).toString(36)}${text.length.toString(36)}`;
+}
+
+const decodedImages = new Map<string, Promise<ImageBitmap>>();
+export const imageDecodeStats = { requested: 0, decoded: 0, reused: 0, fallback: 0, rgbaBytes: 0 };
+
+/** Share immutable decoded pixels BEFORE each model allocates its own large bitmap. */
+export function shareDecodedImages(parser: GLTFParser): GLTFLoaderPlugin {
+  const original = parser.loadImageSource;
+  if (typeof original !== "function") return { name: "HITREG_shared_images" };
+  parser.loadImageSource = async function (index, loader) {
+    imageDecodeStats.requested++;
+    const bitmapLoader = loader as THREE.ImageBitmapLoader;
+    const image = parser.json.images?.[index] as { uri?: string; bufferView?: number; mimeType?: string } | undefined;
+    // Compressed/custom loaders retain their own decoding contracts.
+    if (bitmapLoader.isImageBitmapLoader !== true || !image) {
+      imageDecodeStats.fallback++;
+      return original.call(this, index, loader);
+    }
+    let content: string;
+    if (image.uri?.startsWith("data:")) content = hashText(image.uri);
+    else if (image.bufferView !== undefined) {
+      const bytes = await parser.getDependency("bufferView", image.bufferView) as ArrayBuffer;
+      content = hashBytes(new Uint8Array(bytes));
+    } else return original.call(this, index, loader);
+    const options = bitmapLoader.options;
+    const key = `${image.mimeType ?? ""}:${content}:${JSON.stringify([
+      options.imageOrientation ?? "none", options.premultiplyAlpha ?? "none",
+      options.resizeWidth, options.resizeHeight, options.resizeQuality,
+    ])}`;
+    // Delegate texture creation, extras, samplers, colour space and UV
+    // transforms to GLTFLoader unchanged. Only its image decoder is shared;
+    // every file still gets its own Texture until the later material pass.
+    const sharedLoader = Object.create(bitmapLoader) as THREE.ImageBitmapLoader;
+    sharedLoader.load = (url, onLoad, onProgress, onError): void => {
+      let pending = decodedImages.get(key);
+      if (!pending) {
+        imageDecodeStats.decoded++;
+        pending = new Promise<ImageBitmap>((resolve, reject) => bitmapLoader.load(url, (bitmap) => {
+          imageDecodeStats.rgbaBytes += bitmap.width * bitmap.height * 4;
+          resolve(bitmap);
+        }, onProgress, reject));
+        decodedImages.set(key, pending);
+        void pending.catch(() => { if (decodedImages.get(key) === pending) decodedImages.delete(key); });
+      } else imageDecodeStats.reused++;
+      void pending.then(onLoad, onError);
+    };
+    return original.call(this, index, sharedLoader);
+  };
+  return { name: "HITREG_shared_images" };
+}
+
+/** The renderable result, without the loader's encoded files and dependency caches. */
+export type LoadedModel = Omit<GLTF, "parser">;
+
+export function retainModel(gltf: GLTF): LoadedModel {
+  // GLTFParser owns the source JSON (including base64 images/buffers), copied
+  // bufferViews, and the original textures replaced by sharing. Keeping it in
+  // the session's model cache retains all of those after loading. Scene meshes
+  // and animation tracks already own the buffers they actually use.
+  const { parser: _parser, ...model } = gltf;
+  return model;
 }
 
 function samplerKey(t: THREE.Texture): string {
@@ -85,8 +157,8 @@ export async function nameEmbeddedTextures(gltf: GLTF, scope: string): Promise<n
       if (image.bufferView !== undefined) {
         const buffer = (await parser.getDependency("bufferView", image.bufferView)) as ArrayBuffer;
         key = hashBytes(new Uint8Array(buffer));
-      } else if (image.uri && !image.uri.startsWith("data:")) {
-        key = `uri:${image.uri}`;
+      } else if (image.uri) {
+        key = image.uri.startsWith("data:") ? `data:${hashText(image.uri)}` : `uri:${image.uri}`;
       }
       if (!key) continue;
       const texture = (await parser.getDependency("texture", i)) as THREE.Texture | null;

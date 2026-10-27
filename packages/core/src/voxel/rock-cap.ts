@@ -17,7 +17,8 @@ import { surfaceRoleIndex, zoneGroundRoles } from "./zone-ground.js";
  * the table, the legacy per-rule bases.
  *
  * CAP: the cap follows the ground's bands (`groundBand`), first match wins:
- * 1. stone ground (half or more cliff/rock under the rock): bare;
+ * 1. stone ground (half or more cliff/rock under the rock), or no `capLedge` (2 m) of up-facing ground under it (a
+ *    rock set into a wall, a shelf too narrow to hold soil): bare;
  * 2. a CLIMATE band — a surface no zone restyles (snow over the snow line): worn if cap-worthy, else bare.
  *    Neither the zone nor the rule overrides it (no sand tops above the snow line);
  * 3. the ZONE: the nearest region on the chain place -> zone -> parent that declares `rockCap`;
@@ -87,7 +88,8 @@ export interface RockSkinProbe {
    */
   bankStoneAt(x: number, z: number): { surface: number; share: number; weights: ReadonlyMap<number, number> };
   skinAt(rule: ScatterDoc, x: number, y: number, z: number): RockSkinPick;
-  groundBand(x: number, y: number, z: number): GroundBand;
+  /** `ledge` (m, default 2): a rock in a wall or on a narrower shelf reads `bare` (the rule's `capLedge`). */
+  groundBand(x: number, y: number, z: number, ledge?: number): GroundBand;
   /** Palette indices that count as stone (never a cap). */
   readonly stone: ReadonlySet<number>;
 }
@@ -206,7 +208,29 @@ export function createRockSkinProbe(field: WorldField): RockSkinProbe {
     return { base: map["*"] ?? rule.rockBase ?? 0, surface: name, from: map["*"] !== undefined || rule.rockBase !== undefined ? "rule" : "fallback" };
   };
   const round = (v: number) => Math.round(v * 1000) / 1000;
-  const groundBand = (x: number, y: number, z: number): GroundBand => {
+  /**
+   * Is there `ledge` metres of up-facing ground under (x, y, z)? The surface (air above, rock below) is looked for in
+   * the column within ledge/2 of y, then at ledge/2 out in four directions within the same rise (45 deg) of it.
+   * A rock set into a wall finds no surface in its own column (all air or all rock); one on a shelf narrower than
+   * `ledge` loses a neighbour over the brink. Measured on the field the mesh is made from, at 0.25 m.
+   */
+  const onLedge = (x: number, y: number, z: number, ledge: number): boolean => {
+    const r = ledge / 2;
+    const surfaceNear = (px: number, pz: number, y0: number): number | null => {
+      let prev = field.density(px, y0 + r, pz);
+      for (let t = r - 0.25; t >= -r - 1e-6; t -= 0.25) {
+        const d = field.density(px, y0 + t, pz);
+        if (prev > 0 && d <= 0) return y0 + t;
+        prev = d;
+      }
+      return null;
+    };
+    const top = surfaceNear(x, z, y);
+    if (top === null) return false;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) if (surfaceNear(x + dx * r, z + dz * r, top) === null) return false;
+    return true;
+  };
+  const groundBand = (x: number, y: number, z: number, ledge = 2): GroundBand => {
     // ONE biome evaluation for the weights and the tint, facing up (the cap is what lies on top)
     field.surfaceAt(x, y, z, 0.98, scratch, 0);
     const tint: [number, number, number] = [round(scratch[count]!), round(scratch[count + 1]!), round(scratch[count + 2]!)];
@@ -221,6 +245,8 @@ export function createRockSkinProbe(field: WorldField): RockSkinProbe {
     const share = bw / total, bareShare = bare / total;
     const out = { surface: best, share: round(share), bare: round(bareShare), worthy: best >= 0 && worthy.has(best), tint };
     if (bareShare >= 0.5 || best < 0) return { band: "bare", ...out };
+    // a wall or a ledge narrower than `ledge`: stone, whatever the flat-ground biome there would grow
+    if (ledge > 0 && !onLedge(x, y, z, ledge)) return { band: "bare", ...out };
     if (climate.has(best)) return { band: "climate", ...out };
     return { band: "zone", ...out };
   };
@@ -275,7 +301,7 @@ export function createRockCapResolver(field: WorldField): RockCapResolver {
   return (rule, x, y, z) => {
     if (!rule.cap) return rule.rockBase !== undefined || rule.rockBaseByCliff ? { layer: 0, amount: 0, base: probe.skinAt(rule, x, y, z).base } : undefined;
     const base = probe.skinAt(rule, x, y, z).base;
-    const ground = probe.groundBand(x, y, z);
+    const ground = probe.groundBand(x, y, z, rule.capLedge ?? 2);
     const tint = ground.tint;
     const bare: RockCap = { layer: 0, amount: 0, base };
     // a material-only layer (moss) carries its own colour: the ground's biome tint is not applied to it

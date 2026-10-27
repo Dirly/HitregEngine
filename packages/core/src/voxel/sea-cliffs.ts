@@ -147,6 +147,10 @@ export const seaCliffSchema = z
         irregular: z.number().min(0).max(0.5).default(0.3).describe("How far each face stands in or out of the regular prism, as a fraction of the radius."),
         arch: z.number().min(0).max(1).default(0.35).describe("Share of stacks near the wall (18-70 m off it) joined to it by a fin with an arch through it."),
         shape: seaStackShapeSchema.optional(),
+        omit: z
+          .array(z.tuple([z.number(), z.number()]))
+          .optional()
+          .describe("World [x, z] points kept clear of stacks (a view corridor, a cove mouth): a stack whose top reaches one (centre within its radius + 4 m) is not raised. Other stacks keep their sites, sizes and seeds."),
         seed: z.number().int().default(911),
       })
       .prefault({})
@@ -563,7 +567,8 @@ export function createSeaCliffs(docs: readonly SeaCliffDoc[], ctx: SeaCliffConte
       if (w > 0.6) {
         const q = planQ(k, cx, cz, w);
         const r = st.radius[0] + (st.radius[1] - st.radius[0]) * (hash3i(I, K, 10, ss) / U32);
-        if (-q >= st.offshore[0] + r && -q <= st.offshore[1]) {
+        const omitted = st.omit?.some(([ox, oz]) => Math.hypot(ox - cx, oz - cz) <= r + 4) ?? false;
+        if (!omitted && -q >= st.offshore[0] + r && -q <= st.offshore[1]) {
           const sides = Math.round(st.sides[0] + (st.sides[1] - st.sides[0]) * (hash3i(I, K, 11, ss) / U32));
           const rot = (hash3i(I, K, 12, ss) / U32) * Math.PI * 2;
           const tS = smoothstep(0.1, 1, w);

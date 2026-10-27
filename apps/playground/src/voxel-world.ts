@@ -6,6 +6,7 @@ import {
   registerVoxelWorld,
   registerVolume,
   registerVolumeDoc,
+  registerVolumeLoader,
   isVolumeInUse,
   invalidateVolume,
   primeVoxelMesh,
@@ -25,6 +26,7 @@ import {
 } from "@hitreg/core";
 import type { ChunkProvider } from "./chunk-manager.js";
 import type { VoxelWorkerRequest, VoxelWorkerResponse } from "./voxel-worker.js";
+import { contentKey } from "./voxel-disk-cache.js";
 
 /**
  * Wiring for procedural (marching-cubes) worlds.
@@ -204,6 +206,8 @@ interface VoxelWorkerPool {
  * having to know what a Worker is.
  */
 let activePool: VoxelWorkerPool | null = null;
+/** Session counters for the dev probe; disk records do not occupy the live heap. */
+export const voxelDiskCacheStats = { hits: 0, misses: 0 };
 
 /**
  * What that pool — and every cell already streamed from it — was built for.
@@ -312,11 +316,12 @@ function createVoxelWorkerPool(
   }
   const queue: Job[] = [];
   const busy = new Set<number>();
+  const ready = new Set<number>();
   let seq = 0;
 
   const pump = (): void => {
     for (let i = 0; i < workers.length && queue.length > 0; i++) {
-      if (busy.has(i)) continue;
+      if (busy.has(i) || !ready.has(i)) continue;
       // highest priority, oldest first within a priority
       let bestAt = 0;
       for (let j = 1; j < queue.length; j++) {
@@ -346,12 +351,22 @@ function createVoxelWorkerPool(
       pump();
     });
 
+  // Hash once, before distributing the recipe to workers. Neither an edited
+  // recipe, different scatter availability, nor changed mesher code may hit
+  // an earlier world's cache. Without the dev bridge, just cook normally.
+  const cacheKey = fetch("/__hitreg/voxel-code-key").then(async (response) => {
+    if (!response.ok) return undefined;
+    const { key } = await response.json() as { key: string };
+    return contentKey({ key, world: world.data.world, recipe: world.field.recipe, options: plain, present: present.sort() });
+  }).catch(() => undefined);
   try {
     for (let i = 0; i < VOXEL_WORKERS; i++) {
       const worker = new Worker(new URL("./voxel-worker.js", import.meta.url), { type: "module" });
       worker.onmessage = (event: MessageEvent<VoxelWorkerResponse>) => {
         const message = event.data;
-        if (message.kind === "ready") return;
+        if (message.kind === "ready") { ready.add(i); pump(); return; }
+        if (message.cacheHit === true) voxelDiskCacheStats.hits++;
+        else if (message.cacheHit === false) voxelDiskCacheStats.misses++;
         const entry = pending.get(message.id);
         const slot = slotOf.get(message.id);
         if (slot !== undefined) {
@@ -398,13 +413,14 @@ function createVoxelWorkerPool(
         if (slot >= 0) busy.delete(slot);
         pump();
       };
-      worker.postMessage({
+      void cacheKey.then((key) => worker.postMessage({
         kind: "init",
         recipe: world.field.recipe,
         world: world.data.world,
         options: plain,
         presentAssets: present,
-      } satisfies VoxelWorkerRequest);
+        cacheKey: key,
+      } satisfies VoxelWorkerRequest));
       workers.push(worker);
     }
   } catch (error) {
@@ -554,7 +570,12 @@ export async function loadVolumes(
     files.map(async (file) => {
       const id = file.replace(/\.json$/, "");
       try {
-        registerVolumeDoc(id, await readJson("volumes", file));
+        // Most volumes belong to dependent dungeons, while this tab streams
+        // an outdoor world. Keep compact encoded data, not millions of boxed
+        // triangle coordinates. A scene can still resolve any volume
+        // synchronously on first use (including prefab editing and portals).
+        const encoded = JSON.stringify(await readJson("volumes", file));
+        registerVolumeLoader(id, () => JSON.parse(encoded));
         loaded.push(id);
       } catch (error) {
         console.warn(`[csg] volume "${id}" is unreadable:`, error);

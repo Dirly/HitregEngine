@@ -22,6 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ComponentRegistry, applyOps, createWorldField, fieldSolidProbe, registerCoreComponents, worldRecipeSchema, type Op, type SceneDoc } from "@hitreg/core";
 import { checkTownLights, loadStreetLighting, planTownLights, streetLightingFile, townWealth, type Lantern, type LightKind, type TownLightInput } from "./town-lights-rule.mts";
+import { applyOpsToSceneFile } from "./_scene-write.mts";
 
 type XZ = [number, number];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -179,8 +180,8 @@ for (const l of planned.lanterns) {
 }
 const registry = new ComponentRegistry();
 registerCoreComponents(registry);
-const result = applyOps(scene, ops, registry);
-fs.writeFileSync(sceneFile, `${JSON.stringify(result.doc, null, 2)}\n`);
+let result = applyOps(scene, ops, registry);
+result = applyOpsToSceneFile(sceneFile, ops, (d, o) => applyOps(d, o, registry), { label: "town-lights" }); // fresh read under the scene lock (tools/_scene-write.mts)
 fs.writeFileSync(path.join(towns, `${townName}-lights-ops.json`), `${JSON.stringify({ ops, inverse: result.inverse }, null, 1)}\n`);
 console.log(`installed into ${path.relative(process.cwd(), sceneFile)} (${ops.length} ops; inverse saved to authoring/towns/${townName}-lights-ops.json)`);
 process.exit(check(result.doc as SceneDoc));

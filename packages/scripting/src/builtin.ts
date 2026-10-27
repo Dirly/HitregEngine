@@ -1,6 +1,6 @@
 import type * as THREE from "three";
 import type { EventRegistry } from "@hitreg/core";
-import { WORLD_HOUR_KEY, WORLD_WEATHER_KEY } from "@hitreg/core";
+import { WORLD_DAY_KEY, WORLD_HOUR_KEY, WORLD_WEATHER_KEY } from "@hitreg/core";
 import {
   Script,
   type BiomeAt,
@@ -48,6 +48,7 @@ import {
   playbackRate,
   swimAim,
   swimStateFor,
+  DryWaterMemo,
   swimVy,
   swimming,
   type ActionFit,
@@ -66,6 +67,7 @@ import {
   type LoopMode,
 } from "./easing.js";
 import { FootfallTracker } from "./footfalls.js";
+import { LiftScript } from "./lift.js";
 import { AmbientParticles } from "./ambient-particles.js";
 import { advanceVelocity, isClipAdvance } from "./advance.js";
 
@@ -2062,8 +2064,11 @@ class ThirdPersonController extends Script {
     if (!this.ctx.waterAt || !this.param<boolean>("swim")) return null;
     const at = (this.scratch ??= this.object.position.clone());
     this.object.getWorldPosition(at);
-    return this.ctx.waterAt(at.x, at.y - this.footDrop(), at.z);
+    const footY = at.y - this.footDrop();
+    // a procedural world's sea test is a whole ground evaluation: reuse a clearly-dry answer (DryWaterMemo)
+    return this.waterMemo.sample(at.x, footY, at.z, this.ctx.waterAt);
   }
+  private readonly waterMemo = new DryWaterMemo<WaterAt>();
 
   /**
    * How far this body's feet are below its origin.
@@ -2998,7 +3003,10 @@ function describeSeconds(total: number): string {
  * new environment texture (the IBL is refreshed IN PLACE, `envRefreshHours`
  * apart). The authored sky/sun/ambient are the DAY look; night is derived
  * from the params. Multiplayer: the authority owns the clock and publishes
- * it to netState every `syncSeconds`; peers ease toward it.
+ * it to netState every `syncSeconds`; peers ease toward it. It also counts
+ * whole days (netState world/day, published with the hour at every midnight):
+ * the clock only runs forward, so `day * 24 + hour` is the world time quest
+ * `repeat` waits are measured in.
  */
 class DayNight extends Script {
   static override scriptName = "day-night";
@@ -3007,8 +3015,8 @@ class DayNight extends Script {
     startHour: { default: 9, min: 0, max: 24, description: "Clock at scene start: 6 = sunrise, 12 = noon, 18 = sunset. The live displayed hour is published on this entity's object.userData.dayNightHour (including offline play); multiplayer authority also replicates netState world/hour." },
     tilt: { default: 30, min: 0, max: 80, description: "Degrees the sun's arc leans away from straight overhead (toward -Z), so noon shadows still fall somewhere." },
     dawnColor: { default: "#ff9d5c", description: "Sun colour at the horizon; blends into the sun light's authored colour by mid-morning." },
-    sunsetColor: { default: "#e2593a", description: "Colour the cloud burns on the sun's side of the sky at the exact horizon — deeper and redder than dawnColor, which it eases into as the sun climbs." },
-    cloudGlow: { default: 1, min: 0, max: 1, description: "How hard the sun-facing clouds glow at dawn and dusk. 0 leaves the deck evenly lit, which is the look before this existed." },
+    sunsetColor: { default: "#e2593a", description: "Colour the cloud burns on the sun's side of the sky at the exact horizon — deeper and redder than dawnColor, which it eases into as the sun climbs. A zone mood's `sunset` replaces it inside that zone (zone-mood builtin)." },
+    cloudGlow: { default: 1, min: 0, max: 1, description: "How hard the sun-facing clouds glow at dawn and dusk. 0 leaves the deck evenly lit, which is the look before this existed. A zone mood's `cloudGlow` multiplies it inside that zone." },
     nightCloud: { default: "#2a3350", description: "Cloud colour at full night — moonlit blue-grey. Cloud is the LAST thing to go black: a night sky reads as overcast because the cloud is still faintly visible against the stars." },
     moonColor: { default: "#93a9d6", description: "Moonlight colour — the same directional light, re-aimed for the night." },
     moonIntensity: { default: 0.25, min: 0, max: 5, description: "Moonlight intensity at its peak. The sun light's authored intensity is the noon value." },
@@ -3026,7 +3034,7 @@ class DayNight extends Script {
     {
       name: "time",
       args: "[hour | dawn | noon | dusk | night | midnight | +n | -n | freeze | resume]",
-      description: "Set or report the clock. Bare /time says what time it is.",
+      description: "Set or report the clock. Bare /time says what time it is. An hour earlier than now is that hour tomorrow (world/day advances; the clock never runs back).",
       authority: true,
     },
     {
@@ -3037,6 +3045,8 @@ class DayNight extends Script {
     },
   ];
   private hour = 9;
+  /** Whole days run (authority): bumped at each midnight, by the clock or by /time. */
+  private day = 0;
   /** Console: the clock is held still. The sky still updates — sun, fog, stars. */
   private frozen = false;
   /** Console: multiplies the authored day length's rate. */
@@ -3044,7 +3054,8 @@ class DayNight extends Script {
   private base: LiveSkyBase | null = null;
   private targetHour: number | null = null;
   private lastEnvBucket = -1;
-  private sinceSync = 0;
+  /** Infinity: the authority publishes the clock on its first tick, not one `syncSeconds` later. */
+  private sinceSync = Infinity;
   private unsubscribe: (() => void) | null = null;
 
   /**
@@ -3073,6 +3084,8 @@ class DayNight extends Script {
     this.hour = ((this.param<number>("startHour") % 24) + 24) % 24;
     this.base = this.ctx.getSky?.() ?? null;
     const net = this.ctx.netState;
+    const publishedDay = net?.get(WORLD_DAY_KEY);
+    if (typeof publishedDay === "number") this.day = publishedDay;
     if (net && !net.isAuthority()) {
       const published = net.get(NET_HOUR_KEY);
       if (typeof published === "number") this.hour = published;
@@ -3090,14 +3103,22 @@ class DayNight extends Script {
 
   override onFixedUpdate(dt: number): void {
     const dayLength = Math.max(1, this.param<number>("dayLength"));
-    if (!this.frozen) this.hour = (this.hour + ((dt * this.timescale) / dayLength) * 24) % 24;
     const net = this.ctx.netState;
+    const authority = !net || net.isAuthority();
+    if (!this.frozen) {
+      const raw = this.hour + ((dt * this.timescale) / dayLength) * 24;
+      if (authority && raw >= 24) this.day += Math.floor(raw / 24);
+      this.hour = raw % 24;
+      // a new day goes out with its hour at once: world time never steps back between two syncs
+      if (raw >= 24 && net?.isAuthority()) this.sinceSync = Infinity;
+    }
     if (net) {
       if (net.isAuthority()) {
         this.sinceSync += dt;
         if (this.sinceSync >= this.param<number>("syncSeconds")) {
           this.sinceSync = 0;
           net.set(NET_HOUR_KEY, this.hour);
+          if (net.get(WORLD_DAY_KEY) !== this.day) net.set(WORLD_DAY_KEY, this.day);
         }
       } else if (this.targetHour !== null) {
         // ease onto the host's clock along the short way round the day
@@ -3139,7 +3160,8 @@ class DayNight extends Script {
     }
     const named: Record<string, number> = { dawn: 6, sunrise: 6.2, morning: 9, noon: 12, afternoon: 15, dusk: 18, sunset: 18.4, evening: 20, night: 22, midnight: 0 };
     let hour: number;
-    if (arg in named) hour = named[arg]!;
+    // an hour set outright that is earlier than now is that hour TOMORROW: the world clock only runs forward
+    if (arg in named) hour = named[arg]! < this.hour ? named[arg]! + 24 : named[arg]!;
     else if (/^[+-]/.test(arg)) {
       const delta = Number(arg);
       if (!Number.isFinite(delta)) throw new Error(`/time ${arg}: not a number of hours`);
@@ -3152,9 +3174,12 @@ class DayNight extends Script {
         throw new Error(`/time ${arg}: give an hour (0-24), a time (21:30), a shift (+2) or one of ${Object.keys(named).join(", ")}`);
       }
       hour = parsed;
+      if (hour < this.hour) hour += 24;
     }
+    this.day = Math.max(0, this.day + Math.floor(hour / 24));
     this.hour = ((hour % 24) + 24) % 24;
     this.ctx.netState?.set(NET_HOUR_KEY, this.hour);
+    this.ctx.netState?.set(WORLD_DAY_KEY, this.day);
     this.targetHour = null; // a peer easing toward the old published hour must stop
     this.apply(false);
     return this.clockLine();
@@ -3309,6 +3334,10 @@ interface MoodVec {
   mistTop: number;
   mistThick: number;
   mistLocal: number;
+  /** The dusk/dawn cloud-burn colour, how far it replaces the global one (0..1), and the glow multiplier. */
+  sunset: Rgb;
+  sunsetAmt: number;
+  cloudGlow: number;
 }
 
 const NEUTRAL_MOOD: MoodVec = {
@@ -3327,6 +3356,9 @@ const NEUTRAL_MOOD: MoodVec = {
   mistTop: 4,
   mistThick: 0,
   mistLocal: 0,
+  sunset: [0.89, 0.35, 0.23],
+  sunsetAmt: 0,
+  cloudGlow: 1,
 };
 
 function moodVec(mood: NonNullable<RegionAt["mood"]> | undefined, strength: number): MoodVec {
@@ -3351,6 +3383,10 @@ function moodVec(mood: NonNullable<RegionAt["mood"]> | undefined, strength: numb
     mistTop: mood.mistTop ?? NEUTRAL_MOOD.mistTop,
     mistThick: mood.mistThickness ?? 0,
     mistLocal: mood.mistTop !== undefined && k > 0 ? 1 : 0,
+    // the dusk burn is a hue, like sky/haze: strength scales how far it replaces the global one
+    sunset: mood.sunset ? hexToRgb(mood.sunset) : NEUTRAL_MOOD.sunset,
+    sunsetAmt: mood.sunset ? Math.min(1, k) : 0,
+    cloudGlow: lerp(1, mood.cloudGlow ?? 1),
   };
 }
 
@@ -3358,7 +3394,8 @@ function moodVec(mood: NonNullable<RegionAt["mood"]> | undefined, strength: numb
  * Each zone's own air and light: reads the recipe's `regions[].mood` under
  * the local player (`ctx.regionAt`) and eases the scene toward it — tinted
  * sky and haze, sun colour and strength, shadow colour, fog density, and a
- * lean on the scene's colour grade. A layer between the `day-night` script
+ * lean on the scene's colour grade, and the colour and strength of the dusk/dawn
+ * cloud burn (`sunset`, `cloudGlow`). A layer between the `day-night` script
  * (which it never touches) and the weather (which still darkens on top), so
  * the three run together without knowing about each other.
  *
@@ -3426,11 +3463,16 @@ class ZoneMood extends Script {
       mistTop: n(a.mistTop, b.mistTop),
       mistThick: n(a.mistThick, b.mistThick),
       mistLocal: n(a.mistLocal, b.mistLocal),
+      // a colour fading OUT keeps its hue while its amount falls; one fading in takes the new hue at once
+      sunset: a.sunsetAmt > 0 && b.sunsetAmt > 0 ? r(a.sunset, b.sunset) : b.sunsetAmt > 0 ? b.sunset : a.sunset,
+      sunsetAmt: n(a.sunsetAmt, b.sunsetAmt),
+      cloudGlow: n(a.cloudGlow, b.cloudGlow),
     };
     const gap = Math.abs(this.current.skyAmt - b.skyAmt) + Math.abs(this.current.hazeAmt - b.hazeAmt) + Math.abs(this.current.lightScale - b.lightScale) +
       Math.abs(this.current.fogDensity - b.fogDensity) + Math.abs(this.current.mist - b.mist) + Math.abs(this.current.saturation - b.saturation) + Math.abs(this.current.light[0] - b.light[0]) +
       Math.abs(this.current.shade[2] - b.shade[2]) + Math.abs(this.current.temperature - b.temperature) +
-      Math.abs(this.current.mistLocal - b.mistLocal) + Math.abs(this.current.mistTop - b.mistTop) * 0.1;
+      Math.abs(this.current.mistLocal - b.mistLocal) + Math.abs(this.current.mistTop - b.mistTop) * 0.1 +
+      Math.abs(this.current.sunsetAmt - b.sunsetAmt) + Math.abs(this.current.sunset[2] - b.sunset[2]) + Math.abs(this.current.cloudGlow - b.cloudGlow);
     if (gap < 1e-3) {
       this.current = b;
       this.settled = true;
@@ -3518,6 +3560,8 @@ class ZoneMood extends Script {
         ...(m.mistLocal > 0 && !Number.isNaN(this.low)
           ? { mistTop: this.low + m.mistTop, ...(m.mistThick > 0 ? { mistThickness: m.mistThick } : {}), mistLocal: m.mistLocal }
           : {}),
+        ...(m.sunsetAmt > 0 ? { sunset: rgbToHex(m.sunset), sunsetAmount: m.sunsetAmt } : {}),
+        cloudGlow: m.cloudGlow,
       },
     });
     this.ctx.setPostFx?.({ grade: { saturation: m.saturation, contrast: m.contrast, temperature: m.temperature } });
@@ -4748,6 +4792,8 @@ export function registerBuiltinScripts(
   add(PlayerController);
   add(Collectible);
   add(PlatformMover);
+  // a winch lift down a cliff: a kinematic deck on the shared clock that carries its riders
+  add(LiftScript);
   add(Door);
   add(FaceTarget);
   add(Tweener);

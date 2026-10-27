@@ -44,6 +44,12 @@ whether to resume it by id. Record what every agent used in the ledger: the next
 
 ### 1. Zone design (places before quests)
 
+Read `docs/world-standards/adventure-design.md` before choosing the place roster.
+Start with fantasy discoveries and their playable payoffs, then fit ordinary
+life around them. A list of medieval trades with danger added is not a zone's
+adventure plan. During the design review, answer P1 and P4 for the premise as
+well as its physical execution; reject a dull destination before building it.
+
 `zonegen status <world> --project <p> --zone <z> --next` names the first row. The zone master runs the planning rows in
 order with `zonegen brief-for <stage>`. What changed after the first zone:
 
@@ -55,11 +61,13 @@ order with `zonegen brief-for <stage>`. What changed after the first zone:
   (`zones/<z>/reports/sites.png`, `--focus x,z,r` for a close-up). The zone master picks places from this list and
   the picture before writing the brief, and each place records its pick (`site`). The gate fails while a climbing
   path leads nowhere, a large landform is empty, the largest empty disc of land exceeds its limit, or the zone has
-  too few places per km2 (thresholds in `tools/zonegen/commands/_site-finder.mts`); re-run it after reserve, and the
+  its places claim too little (or too much) of its land, by size tier (thresholds in
+  `tools/zonegen/commands/_site-finder.mts`); re-run it after reserve, and the
   freeze requires it.
 - **The brief designs the PLACES** (`places` in the zone brief, `placeSchema`): per place a one-line read, a
   landmark, linked features, a set piece, the one thing unique in the zone, a mood, a holder, named people and
-  creatures, and its OWN dungeon when it is a landmark. The brief lint refuses a large place with fewer than three
+  creatures, and its OWN dungeon when the adventure calls for one. Landmark size alone does not require an instance.
+  The brief lint refuses a large place with fewer than three
   features, fewer large places or dungeons than the budget promises, and two places sharing a set piece, a landmark
   or a unique thing.
 - **Quests attach to places.** Each place is a quest location of the same id and size; its sub-sites and dungeon
@@ -83,7 +91,7 @@ Before anything is built, so no builder falls back to a kit default (a missing t
 - Town style: pick or write one style file (`MMO/WFC/styles/<name>.json`, `MMO/WFC/STYLE-MAKING.md`) and run
   `style_make.py`. A style the zone needs and no file has is made here, not by the town master.
 - **Zone mood** (the air and light; skill `zone-mood`, gate `zone-mood.mjs lint`): recipe `regions[].mood` (`regionMoodSchema` in packages/core/src/voxel/regions.ts:
-  sky, haze, amount, light, lightScale, shade, fogDensity, mist, saturation, contrast, temperature), played by the
+  sky, haze, amount, light, lightScale, shade, fogDensity, mist, saturation, contrast, temperature, sunset, cloudGlow), played by the
   `zone-mood` builtin, which eases it in over the day/night cycle when the player crosses a border. The house look is
   dark and foreboding; a zone's mood shifts that tone (cold pine shore, sickly bog), it never brightens it into a
   postcard. Neighbouring zones' moods must differ visibly; borders blend over `blendSeconds`.
@@ -103,6 +111,11 @@ Before anything is built, so no builder falls back to a kit default (a missing t
   docs/zone-pipeline.md says what populate sizes with it.
 
 ### 3. Places
+
+Small and medium places (camps, crofts, shrines, graveyards, landings, work yards, dens, watch ruins, halt yards,
+cuttings) are built by the PLACE BUILDER from an archetype: `place-build all <world> --zone z --location id`
+(`docs/place-builder.md`); the agent picks the archetype and overrides, the tool builds and gates. Hero places keep an
+Opus owner.
 
 One owner per town (town-planner, building-constructor, town-npcs skills), per signature place (poi-creator skill,
 `zonegen poi-brief`; ground through `terrain-edits`) and per dungeon (hitreg-dungeon-authoring + dungeon-standards,

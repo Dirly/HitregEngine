@@ -103,3 +103,51 @@ describe("projected decal emission", () => {
     } finally { load.mockRestore(); }
   });
 });
+
+describe("decal receives only its own surface", () => {
+  async function wallWithBeam(extra: Partial<DecalData> = {}) {
+    const root = new THREE.Group();
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(3, 3, 0.5), new THREE.MeshBasicMaterial());
+    wall.position.z = -0.25; // front face at z = 0
+    wall.userData["entityId"] = "wall";
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.3, 3, 0.2), new THREE.MeshBasicMaterial());
+    beam.position.z = 0.1; // stands 0.2 m proud of the wall, across the decal
+    beam.userData["entityId"] = "beam";
+    root.add(wall, beam);
+    const group = new THREE.Group();
+    group.position.z = 0.02;
+    root.add(group);
+    flushDecals(root, [{ id: "relief", group, data: {
+      texture: "relief", size: [1.5, 1.5], depth: 0.6, rotation: 0,
+      direction: [0, 0, -1], opacity: 1, color: "#ffffff", ...extra,
+    } }], { resolveTexture: () => "test-relief.png" });
+    root.updateMatrixWorld(true);
+    const mesh = group.children[0] as THREE.Mesh;
+    const pos = mesh.geometry.getAttribute("position");
+    const zs: number[] = [];
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) zs.push(v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld).z);
+    return zs;
+  }
+
+  it("does not wrap a beam standing in front of the wall", async () => {
+    const zs = await wallWithBeam();
+    expect(zs.length).toBeGreaterThan(0);
+    // wall face only: nothing on the beam's face (z 0.2) or its flanks (0 < z < 0.2)
+    for (const z of zs) expect(Math.abs(z)).toBeLessThan(1e-4);
+  });
+
+  it("paints nothing when every face is turned past maxAngle", async () => {
+    const root = new THREE.Group();
+    const slab = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial());
+    slab.rotation.y = THREE.MathUtils.degToRad(75); // turned 75 deg from the projection axis
+    root.add(slab);
+    const group = new THREE.Group();
+    root.add(group);
+    flushDecals(root, [{ id: "stain", group, data: {
+      texture: "stain", size: [1, 1], depth: 1, rotation: 0,
+      direction: [0, 0, -1], opacity: 1, color: "#ffffff",
+    } }], { resolveTexture: () => "test-stain.png" });
+    expect(group.children.length).toBe(0);
+  });
+});

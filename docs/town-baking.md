@@ -23,6 +23,17 @@ stable asset/entity identities where possible so NPCs, doors and scripts keep
 their references. Install scene changes through `applyOps` and retain inverse
 ops plus the previous derived assets for rollback.
 
+Material variation follows construction: columns and supports, horizontal runners,
+coping, foundations, wall faces and paving may each use their own coherent stone
+or texture. Keep a continuous architectural part consistent. Do not alternate
+unrelated masonry tiles across one wall to hide repetition or satisfy numeric
+material-count/area targets; those targets cannot approve the architectural result.
+The art gate now checks emitted source roles against the delivered bake by default:
+continuous parts stay coherent, and wall faces are distinguished from supports,
+trim, arches and paving. Raw texture-count and repetition limits are review
+diagnostics. Missing or unclassified source roles remain explicit review gaps;
+these checks do not replace looking at the assembled architecture.
+
 ## Choose units by what can be visible together
 
 | Content | Default runtime unit |

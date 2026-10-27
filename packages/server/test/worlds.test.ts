@@ -25,6 +25,25 @@ beforeAll(async () => {
 afterAll(async () => { await alpha?.close(); await beta?.close(); });
 
 describe("world-bound characters", () => {
+  it("returns the selected world's saved worn equipment without exposing carried inventory", async () => {
+    const session = await register("GearPreview");
+    const character = (await call(alpha, "/characters", session.session, { name: "Garrick" })).json.character;
+    const other = (await call(beta, "/characters", session.session, { name: "Gerva" })).json.character;
+    const sheet = createSheet();
+    sheet.items = { worn: { itemId: "vanguard-chest", qty: 1 }, carried: { itemId: "secret-gem", qty: 1, container: "pockets", x: 0, y: 0 } };
+    sheet.equipment = { chest: "worn" };
+    sheet.build = { archetype: "brawn", traits: [], appearance: { sex: "female" } };
+    const saves = new PlayerStore(data, "shared-game");
+    await saves.commit(character.saveId, { sheet, scene: "empty", position: null, yaw: 0 });
+    const roster = (await call(alpha, "/characters", session.session)).json;
+    expect(roster.characters).toHaveLength(1);
+    expect(roster.characters[0]).toMatchObject({ id: character.id, build: sheet.build, equipment: { chest: "vanguard-chest" } });
+    expect(JSON.stringify(roster)).not.toContain("secret-gem");
+    expect((await call(beta, "/characters", session.session)).json.characters[0]).toMatchObject({ id: other.id, equipment: {} });
+    sheet.equipment = {};
+    await saves.commit(character.saveId, { sheet, scene: "empty", position: null, yaw: 0 });
+    expect((await call(alpha, "/characters", session.session)).json.characters[0].equipment).toEqual({});
+  });
   it("refuses a stale account write instead of replacing a newer world roster", async () => {
     const session = await register("StaleWriter");
     const expected = (await accounts.get(session.account.id))!;

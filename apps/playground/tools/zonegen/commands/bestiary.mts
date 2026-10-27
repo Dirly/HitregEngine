@@ -24,6 +24,12 @@ function lintCatalogue(ctx: Ctx, cat: Bestiary, f: Finding[]): void {
     if (c.body.status === "needs-install" && !c.body.source) warn(f, "install-source", `${c.id}: body needs-install but names no source`, c.id);
     for (const t of c.themes) if (t.status === "needs-install" && !t.source) warn(f, "install-source", `${c.id}/${t.id}: needs-install but names no source`, c.id);
     for (const t of c.themes) if (t.status === "ready" && !assetExists(ctx, t.atlas)) err(f, "atlas-missing", `${c.id}/${t.id}: theme says ready but the atlas "${t.atlas}" is not under assets/ in the project or its dependsOn closure`, c.id);
+    // populate places a body for every creature that has one (resolveBody): a non-human with no prefab at all is the one
+    // case that still becomes a capsule, so name it here, where the art is planned (owner ruling 2026-10-20, "even the ants")
+    if (c.family !== "human") {
+      const ids = [c.template, ...c.themes.flatMap((t) => [`mobs/${c.id}-${t.id}`, `mobs/${c.family}-${t.id}`]), `mobs/${c.family}`].filter(Boolean);
+      if (!ids.some((id) => assetExists(ctx, `prefabs/${id}.json`))) warn(f, "no-body-prefab", `${c.id}: no mob prefab (template or mobs/<family>-<theme>): populate places it as a CAPSULE until one exists (body ${c.body.status})`, c.id);
+    }
   }
   const byId = new Map(cat.creatures.map((c) => [c.id, c]));
   for (const fa of cat.factions) {
