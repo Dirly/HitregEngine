@@ -7,7 +7,33 @@ this before choosing how a visual feature will be built. A particular model or
 one tool's implementation does not limit this direction to that model or tool.
 An explicit art direction in the user's brief takes precedence.
 
+## Ant and wasp nests
+
+Ants and wasps are non-sapient swarm animals in this game (owner direction,
+2026-10-28). Author nest matter and traces of instinctive animal behavior:
+excavated soil, irregular burrows, chewed paper envelopes and combs, brood,
+pupal skins, loose food deposits and refuse. Natural hexagonal cells and
+species-appropriate fungal substrate are valid. Furniture, craft stations,
+vessels, racks, lamps, ceremonial forms, glyphs and deliberately framed gates
+are not. An insect silhouette or organic material does not make a human-made
+object appropriate. Keep existing creature models and useful natural materials;
+do not invent an insect civilization to supply a town-style prop list.
+
 ## Divide the work before modeling
+
+Start new prop designs with generated or supplied concept art (owner direction,
+2026-10-28). Keep the chosen reference with the owning collection and compare
+the textured model against it before installation. Concept art guides silhouette,
+palette and painted surfaces; it does not justify rebuilding existing books,
+candles, skulls or other suitable library assets. Reuse those parts and preserve
+their materials and behavior. Routine repairs can use the existing asset as their
+reference rather than generating a new design.
+
+Use the concept to model structural depth as well as silhouette. Texture-led
+does not mean stacked plain boxes: where the reference has proud columns around
+an inset panel, give those supports and reveals real depth, then align the
+painted artwork to them. Keep engraving and small wear painted. Review the clay
+view for those deliberate structural forms before accepting the textured result.
 
 Geometry establishes silhouette, volume, meaningful depth, openings, supports,
 moving parts and playable space. Textures establish surface identity and most

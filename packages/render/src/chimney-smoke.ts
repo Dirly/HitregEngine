@@ -29,8 +29,9 @@ type N = any;
  *
  * Detection ({@link findChimneys}) runs once per loaded building model: a
  * chimney top is a small, roughly square, flat upward face high on the model
- * with nothing above it and at least one side dropping away below it. That
- * rules out pillar tops under a roof, ridge caps (long and thin) and
+ * with nothing above it and every side dropping away below it. That
+ * rules out pillar tops under a roof, ridge caps (long and thin), a keystone or
+ * corbel proud of a wall (the wall stands behind it) and
  * battlements or post rows (they come in rows of equal caps). The tops are stored on the
  * cached model; every placed copy registers them with {@link ChimneySmoke}.
  *
@@ -148,11 +149,13 @@ export function findChimneys(root: THREE.Object3D, skip?: (material: THREE.Mater
     const row = candidates.some((q) => q !== p && Math.abs(q.y - p.y) < 0.3 &&
       Math.hypot((q.x0 + q.x1) / 2 - x, (q.z0 + q.z1) / 2 - z) < 2.5 && Math.hypot((q.x0 + q.x1) / 2 - x, (q.z0 + q.z1) / 2 - z) > 0.6);
     if (row) continue;
-    // and it stands out of something: at least one side drops away below it
+    // and it stands free: EVERY side drops away below it. One side was enough until 2026-10-28, when the bank's
+    // grand-door keystone (a squarish block proud of the wall, sky above, the street dropping away in front) smoked;
+    // a stack has the roof or the air on all four sides, a keystone, a corbel or a sill has its wall behind it
     const reach = Math.max(p.x1 - p.x0, p.z1 - p.z0) / 2 + 0.4;
-    let drops = false;
+    let drops = true;
     for (const [dx, dz] of [[reach, 0], [-reach, 0], [0, reach], [0, -reach]] as const) {
-      if (highestAt(x + dx, z + dz) < p.y - 0.3) drops = true;
+      if (!(highestAt(x + dx, z + dz) < p.y - 0.3)) drops = false;
     }
     if (!drops) continue;
     // a stack seen twice (a cap and its rim): keep the higher

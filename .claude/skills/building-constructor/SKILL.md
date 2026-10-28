@@ -25,6 +25,12 @@ generator (`MMO/WFC/Generated/make_*.py`) add the piece, then rebuild every test
      Change the size or features.
    - A review failure: a missing rule or piece. Fix the rule or kit, never the building.
 4. **Look** at `out/<name>/<name>_sheet.png` (Read the image) for every building against the review checklist.
+   A style run (`py wfc/style_make.py styles/<name>.json`) is green ONLY when it prints no `VERIFY FAILED` line and
+   ends without `NOT GREEN` (exit 0): a kit verify that is `False` anywhere (`report.json: verify_ok`, `verify_failed`)
+   is reported as failed, by name, in the hand-off — never as "all checks pass" (s2-fix 2026-10-28; today
+   `vault_verify.txt` fails its texel-density check and every style run says so).
+   Before an export goes anywhere: `npx tsx tools/town-kit-check.mts seams|smoke <glb>` from `Engine/apps/playground`
+   on every exported building (KIT-RULES 37 + 37.1: wall tile, dressings, proud fixtures, placeholder tiles, stacks).
 5. **Deliver**: load the collections from `out/requests.blend` (or the town .blend) into Derek's Blender under a clear
    collection name (`bpy.data.libraries.load`, link the collection, offset clear of existing work), and summarise what was
    chosen (door, fireplace, vaults, dome, atrium) per building.
