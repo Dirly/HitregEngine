@@ -165,6 +165,9 @@ export function readJsonTracked<T = any>(file: string): T {
  * did not, the item-count guard runs against the file on disk (a drop must be declared: `removed` or allowRemovals).
  */
 export function writeJsonFile(file: string, doc: unknown, opts: WriteOptions & { removed?: readonly string[] | number } = {}): void {
+  // a first file in a fresh project (worldgen init into projects/<new>/assets/worlds/): the lock lives beside the file,
+  // so the folder has to exist before the lock is taken
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   withFileLock(file, () => {
     const exists = fs.existsSync(file), text = exists ? fs.readFileSync(file, "utf8") : null;
     const seen = readDigests.get(keyOf(file));

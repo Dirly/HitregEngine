@@ -56,7 +56,8 @@ const PLAYGROUND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 // ---------------------------------------------------------------- triangle soup + GLB reading
 
 /** Triangles as a flat array, 9 floats each (ax,ay,az,bx,...), plus a per-triangle roof-material flag. */
-export interface TriSoup { pos: Float32Array; roof: Uint8Array; /** per triangle: index into `names` (the GLB node, else mesh, name) */ node?: Uint16Array; names?: string[] }
+export interface TriSoup { pos: Float32Array; roof: Uint8Array; /** per triangle: index into `names` (the GLB node, else mesh, name) */ node?: Uint16Array; names?: string[];
+  /** per triangle: index into `mats` (town-kit-check: seams by material per face) */ mat?: Uint16Array; /** material name + its base-colour image name, as "<material>|<image>" */ mats?: string[] }
 
 const COMP: Record<number, any> = { 5120: Int8Array, 5121: Uint8Array, 5122: Int16Array, 5123: Uint16Array, 5125: Uint32Array, 5126: Float32Array };
 const NCOMP: Record<string, number> = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
@@ -94,6 +95,11 @@ const nodeMatrix = (n: any): M4 => {
 /** Every triangle of a GLB's default scene in model space (node transforms applied), with roof flags by material name. */
 export function glbTriangles(file: string, transform?: (x: number, y: number, z: number) => [number, number, number], keep?: (t: number[]) => boolean): TriSoup {
   const g = readGlbFile(file), json = g.json, out: number[] = [], roof: number[] = [], nodeOf: number[] = [], names: string[] = [], nameIx = new Map<string, number>();
+  const matOf: number[] = [];
+  const mats: string[] = (json.materials ?? []).map((m: any) => {
+    const ti = m.pbrMetallicRoughness?.baseColorTexture?.index, img = ti != null ? json.images?.[json.textures?.[ti]?.source] : null;
+    return `${m.name ?? ""}|${img?.name ?? (img?.uri ? String(img.uri).split("/").pop() : "")}`;
+  });
   const walk = (i: number, parent: M4) => {
     const node = json.nodes[i], m = mul(parent, nodeMatrix(node));
     const nm = String(node.name ?? json.meshes?.[node.mesh]?.name ?? `node${i}`); let ni = nameIx.get(nm); if (ni === undefined) { ni = names.length; names.push(nm); nameIx.set(nm, ni); }
@@ -110,14 +116,14 @@ export function glbTriangles(file: string, transform?: (x: number, y: number, z:
           tri[v * 3] = wx; tri[v * 3 + 1] = wy; tri[v * 3 + 2] = wz;
         }
         if (keep && !keep(tri)) continue;
-        out.push(...tri); roof.push(isRoof); nodeOf.push(ni);
+        out.push(...tri); roof.push(isRoof); nodeOf.push(ni); matOf.push(prim.material ?? 0xffff);
       }
     }
     for (const c of node.children ?? []) walk(c, m);
   };
   const I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
   for (const r of json.scenes[json.scene ?? 0].nodes) walk(r, I);
-  return { pos: Float32Array.from(out), roof: Uint8Array.from(roof), node: Uint16Array.from(nodeOf), names };
+  return { pos: Float32Array.from(out), roof: Uint8Array.from(roof), node: Uint16Array.from(nodeOf), names, mat: Uint16Array.from(matOf), mats };
 }
 
 // ---------------------------------------------------------------- geometry queries

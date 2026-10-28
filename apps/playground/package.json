@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "test": "tsx --test test/*.test.ts",
-    "typecheck": "tsc --noEmit && node tools/typecheck-projects.mjs",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tools.json && node tools/typecheck-projects.mjs",
     "build:game": "node tools/publish.mjs",
     "preview:game": "vite preview --port 4180 --strictPort --outDir",
     "typecheck:projects": "node tools/typecheck-projects.mjs",
@@ -41,6 +41,7 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22.10.0",
     "@types/three": "^0.185.1",
     "playwright": "1.47.2",
     "sharp": "0.34.3",

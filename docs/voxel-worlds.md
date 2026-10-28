@@ -3268,6 +3268,93 @@ stage ran. A path id is `path-<a>-<b>` where both halves are themselves
 hyphenated town ids, so splitting one apart is guesswork; asking the geometry is
 not.
 
+### The coast plan: some cliffs, some beach, decided per segment
+
+Added 2026-10-28, for the firstshore one-zone proof (the first stage of the
+post-mortem order: read the continent as a map before anything is drawn).
+Derek: *"like Cliffs of Moher, not all the shore should be cliffs, some cliffs
+some beach etc… mix and match."* Until now three things decided the shore and
+none of them spoke to the others: `terrain.coast` noise ruggedness (section 23,
+~17 % steep wherever the fBm said so), opt-in `terrain.seaCliffs` stretches drawn
+by hand, and the beach biome's height window. Nothing decided per stretch of
+shore what kind of coast it is and nothing checked the mix, so a coast read all
+cliff or all beach.
+
+**`worldgen coast`** (after `continents`, before `rivers`; `tools/worldgen-coast.mts`)
+is that decision as data:
+
+- **Segment.** The shoreline of each landmass (the field's shore distance 0,
+  marching squares on an 8 m grid, resampled to 24 m) is cut at the inflections
+  of its smoothed curvature (headland / bay: whether the chord of the smoothed
+  coast lies seaward of the point) and wherever the exposure flips, then pieces
+  under 120 m are merged into a neighbour and pieces over 420 m split. Exposure
+  is the wind frame plus the fetch: `terrain.dunes.angle` is where the wind blows
+  TO; a point is exposed when its outward normal faces within 60 degrees of
+  where the wind comes FROM and the open sea along that normal runs over 1.5 km
+  before land or the world limit. Each segment records its fetch, facing, the
+  mean ground gradient 40–120 m inland, whether it is a bay, and whether a river
+  mouth or marsh table meets the sea there.
+- **Type.** One of `sheer-cliff`, `rocky-shore`, `shingle`, `sand-beach`,
+  `cove`, `mudflat` per segment, from the zone's `regions[].coast` rules
+  (`allowed`, `shares`, `tolerance`, `maxRun`; no zones yet = the defaults,
+  one group per loop). The hard rules: beaches and coves only on sheltered
+  segments, a cove only on a short (≤ 320 m) concave one, mudflat only where a
+  river mouth or marsh meets the sea, a cliff only on an exposed or
+  steep-backed (≥ 0.15) segment. Inside those, a seeded greedy pass scores each
+  segment per type (exposure, slope behind, headland or bay), weighted by how
+  far the type is under its target share, never forming a run of one type over
+  `maxRun`; then a repair pass gives every zone a cliff and a beach when it can
+  and a balance pass flips segments toward the targets. Targets are the shares
+  renormalised over the types that have an eligible segment and capped at the
+  eligible length — a zone with no sheltered shore is not failed for the beach
+  it could not have had.
+- **Write it so the existing field solves it.** Each run of cliff segments is
+  ONE `terrain.seaCliffs` stretch (`coast-<loop>-<n>`, `along` = the shoreline,
+  height from the slope behind, `inland` from the run length) with the new
+  opt-in **`endFade`**: `reach`/`fade` then measure ACROSS the polyline and the
+  wall ends over `endFade` metres past the polyline's ends, so a cliff run stops
+  where its neighbour starts instead of holding `reach` (300 m) along the
+  coast past it — the first thing the plan found wrong with the stretches it
+  reuses. Everything else is `features.coastSegments`, which the field reads
+  through `coast-plan.ts` as a pure function of (x, z) on an 8 m lattice: the
+  `terrain.coast` ruggedness forced per type (rocky-shore 1, shingle 0.5, beach
+  / cove / mudflat 0; a cliff segment leaves the noise alone, its wall is the
+  stretch), the coastal biomes' height window scaled (sand-beach ×1.8, cove
+  ×1.5, rocky ×0.35 — a biome whose window straddles sea level in a band under
+  40 m), and on a mudflat the palette's `ground` role (mud) painted at the
+  waterline in place of sand. Segments blend by distance where they meet.
+- **The map.** `worldgen map` strokes every segment in its type's colour,
+  numbers it, and prints a legend top-left with the count per type (the `--base`
+  in-game picture is unchanged). Derek reads this before anything is placed.
+- **The gate** (`worldgen coast --check`, the `coast` row of `status`): share
+  per type within the zone's tolerance of its target, no run of one type over
+  `maxRun` (600 m), beaches and coves only sheltered, a sheer-cliff and a beach
+  per coastal zone, every cliff segment names a stretch that exists and no
+  `coast-*` stretch is an orphan. Exit 1 with the rule named.
+
+Two invariants hold by construction. The plan never moves the coastline: the
+ruggedness it feeds is the same monotonic `dh -> dh * k` remap as section 23,
+the beach scale only moves a biome window and the mud is splat; a test samples
+`shoreDistance` and the sign of the ground against the plain world. And a
+recipe without segments is byte-for-byte what it was. `worldgen continents`
+drops the plan and its `coast-*` stretches (the shoreline they were traced on is
+gone), so `coast` reads MISSING rather than STALE-but-drawn.
+
+**A landmark on a cliff top (2026-10-28).** A planned sheer-cliff top is
+36 m deep and undulates 1.6 m: no 120 x 120 m pad fits on it.
+`worldgen coast-top <world> --segment <cs-id> --edge <m>` makes that
+segment's stretch keep a LEVEL top `edge` metres inland of the lip
+(undulation 0.5), records `coastSegments[].topEdge` so a re-run of
+`coast` keeps it, and measures the largest flat square on the field before
+and after (`--measure` only reports); `coast --check` rule `flat-top`
+measures it again (3/4 of the asked edge, or 120 m). Roads onto it:
+`worldgen paths --to "x,z=name"` makes the site a road end; the site itself
+sits inside the stretch's route keep-out (clearance 90 m from the wall line
++ the road's reach), so the road ends at the nearest routable cell within
+`--to-snap 90` m and says so; and the path gets `keepLandforms` because a
+plain road is an obstacle the profile fades out round (firstshore: the
+headland fell into a 50 m pit beside the first road, `lips` 757 walls).
+
 ### Rivers arrived at the coast dry
 
 Added 2026-09-20, found by measuring the regenerated world rather than looking

@@ -97,6 +97,16 @@ export const seaCliffSchema = z
       .describe("[x, z] polyline drawn along the coast: the stretch is everything within `reach` metres of it. The usual way to pick one stretch of a zone's coast."),
     reach: z.number().positive().default(340).describe("Metres from `along` (or outside the region) the profile holds in full. Cover the top's inland join (`edge` + `inland`) and the stacks offshore."),
     fade: z.number().positive().default(220).describe("Metres over which the stretch hands back to the ordinary coast: along the coast the wall lowers to a bluff over this run and ends."),
+    endFade: z
+      .number()
+      .positive()
+      .optional()
+      .describe(
+        "OPT-IN, with `along`: the stretch ends WHERE THE POLYLINE ENDS. `reach`/`fade` then measure the distance ACROSS the " +
+          "polyline (inland and offshore) and the wall lowers to nothing over this many metres BEYOND each end, so a planned cliff " +
+          "segment (`worldgen coast`) stops at its neighbour instead of holding `reach` metres along the coast past it. Absent = the " +
+          "stretch is everything within `reach` of the polyline in every direction, as before.",
+      ),
     height: pair("[min, max] metres of the cliff top over sea level, wandering along the coast (the Cliffs of Moher run 120-214 m).").default([70, 150]),
     heightScale: z.number().positive().default(800).describe("Metres per cycle of the cliff-top height wander."),
     edge: z.number().min(16).default(36).describe("Metres the flat top runs inland from the lip before it starts to join the natural land."),
@@ -313,6 +323,29 @@ function distToPolyline(points: readonly (readonly [number, number])[], x: numbe
   return best;
 }
 
+/**
+ * Distance to an OPEN polyline split into the part ACROSS it and the part BEYOND its ends: when the nearest point is
+ * an endpoint reached by overshooting the end segment, `beyond` is the overshoot along that segment's direction and
+ * `across` the lateral remainder; anywhere the nearest point is interior, `beyond` is 0 and `across` the distance.
+ */
+export function polylineEnds(points: readonly (readonly [number, number])[], x: number, z: number): { across: number; beyond: number } {
+  const n = points.length;
+  if (n === 1) return { across: Math.hypot(x - points[0]![0], z - points[0]![1]), beyond: 0 };
+  let best = Infinity, bestI = 0, bestT = 0;
+  for (let i = 0; i + 1 < n; i++) {
+    const a = points[i]!, b = points[i + 1]!;
+    const dx = b[0] - a[0], dz = b[1] - a[1], len = dx * dx + dz * dz;
+    const tu = len < 1e-9 ? 0 : ((x - a[0]) * dx + (z - a[1]) * dz) / len;
+    const t = Math.max(0, Math.min(1, tu));
+    const d = Math.hypot(x - (a[0] + dx * t), z - (a[1] + dz * t));
+    if (d < best) { best = d; bestI = i; bestT = tu; }
+  }
+  let beyond = 0;
+  if (bestI === 0 && bestT < 0) beyond = -bestT * Math.hypot(points[1]![0] - points[0]![0], points[1]![1] - points[0]![1]);
+  else if (bestI === n - 2 && bestT > 1) beyond = (bestT - 1) * Math.hypot(points[n - 1]![0] - points[n - 2]![0], points[n - 1]![1] - points[n - 2]![1]);
+  return { across: Math.sqrt(Math.max(0, best * best - beyond * beyond)), beyond };
+}
+
 function insidePolygon(poly: readonly (readonly [number, number])[], x: number, z: number): boolean {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -343,7 +376,7 @@ export function createSeaCliffs(docs: readonly SeaCliffDoc[], ctx: SeaCliffConte
     const pts = doc.along ?? region ?? [];
     let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
     for (const [px, pz] of pts) { x0 = Math.min(x0, px); z0 = Math.min(z0, pz); x1 = Math.max(x1, px); z1 = Math.max(z1, pz); }
-    const pad = doc.reach + doc.fade + 8;
+    const pad = Math.max(doc.reach + doc.fade, doc.endFade ?? 0) + 8;
     const bbox: [number, number, number, number] = pts.length ? [x0 - pad, z0 - pad, x1 + pad, z1 + pad] : [0, 0, -1, -1];
     const seed = (ctx.seed + doc.seed * 7919 + i * 104729) | 0;
     const near = ctx.obstacles.filter((o) => o.points.some(([px, pz]) => px > bbox[0] - o.radius - doc.clearance[1] && px < bbox[2] + o.radius + doc.clearance[1] && pz > bbox[1] - o.radius - doc.clearance[1] && pz < bbox[3] + o.radius + doc.clearance[1]));
@@ -383,7 +416,13 @@ export function createSeaCliffs(docs: readonly SeaCliffDoc[], ctx: SeaCliffConte
       const d = s.doc;
       if (x < s.bbox[0] || x > s.bbox[2] || z < s.bbox[1] || z > s.bbox[3]) return;
       let w = 1;
-      if (d.along) w *= 1 - smoothstep(d.reach, d.reach + d.fade, distToPolyline(d.along, x, z));
+      if (d.along) {
+        if (d.endFade !== undefined) {
+          // across the polyline: reach/fade; beyond its ends: the end fade (polylineEnds splits the distance)
+          const e = polylineEnds(d.along, x, z);
+          w *= (1 - smoothstep(d.reach, d.reach + d.fade, e.across)) * (1 - smoothstep(0, d.endFade, e.beyond));
+        } else w *= 1 - smoothstep(d.reach, d.reach + d.fade, distToPolyline(d.along, x, z));
+      }
       if (s.region && w > 0) {
         const sd = (insidePolygon(s.region, x, z) ? 1 : -1) * distToPolyline(s.region, x, z, true);
         w *= smoothstep(-(d.reach + d.fade), -d.reach, sd);

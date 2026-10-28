@@ -32,6 +32,7 @@ import type { HermiteSource } from "./dual-contouring.js";
 import { createPlanarCliffs, createPlanarSetup, planarBlock, planarHermite, planarPoint, type PlanarBlock, type PlanarPoint, type PlanarSetup, type PlanarLipHit, type PlanarFeatureSource } from "./planar-cliffs.js";
 import { createSeaCliffs, type SeaCliffs } from "./sea-cliffs.js";
 import { createButtes, type Buttes } from "./buttes.js";
+import { createCoastPlan, type CoastPlan, type CoastSample } from "./coast-plan.js";
 import { clamp, fbm2, fbm3, hashUnit, perlin2, ridgedMultifractal2, smoothstep, type FbmSpec } from "./noise.js";
 import { PolygonIndex, type OutlineSpec } from "./polygon-index.js";
 import { createZoneMembership, surfaceRoleIndex, zoneGroundRoles } from "./zone-ground.js";
@@ -809,6 +810,8 @@ export interface WorldField {
   featureClearance(x: number, z: number, cover?: boolean): number;
   /** The world's sea-cliff stretches (`terrain.seaCliffs`): stacks and surf points for tools and the chunk's surf emitters. Null without. */
   seaCliffs(): SeaCliffs | null;
+  /** The coast plan (`features.coastSegments`): per-segment type, ruggedness and beach scale, for tools and the map. Null without. */
+  coastPlan(): CoastPlan | null;
   /** The world's butte fields (`terrain.buttes`), for tools. Null without. */
   buttes(): Buttes | null;
   /**
@@ -1057,6 +1060,13 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const hasShoreProfile = hasBounds && landFloor > 0;
   /** Sea cliffs need the shore profile: their wall is drawn on its shoreline distance. */
   const hasSeaCliffs = seaDocs.length > 0 && hasShoreProfile;
+  // The coast PLAN (features.coastSegments, ./coast-plan.ts): per-segment coast ruggedness, the beach window scale and
+  // the mudflat paint, a pure function of (x, z). Built on first use; absent = nothing changes, byte for byte.
+  const coastDocs = recipe.features.coastSegments ?? [];
+  const hasCoastPlan = coastDocs.length > 0;
+  let coastPlan: CoastPlan | null = null;
+  const coastPlanOf = (): CoastPlan => (coastPlan ??= createCoastPlan(coastDocs));
+  const coastScratch: CoastSample = { w: 0, ruggedHold: 0, rugged: 0, beach: 1, mud: 0 };
   const worldLimit = recipe.bounds?.limit ?? Infinity;
   const limitFalloff = recipe.bounds?.limitFalloff ?? 600;
   /** One warp per landmass, separately seeded so two coasts aren't the same shape. */
@@ -1960,6 +1970,13 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const ROLE_ROAD = surfaceRoleIndex("road");
   const ROLE_PAVING = surfaceRoleIndex("paving");
   const ROLE_CLIFF = surfaceRoleIndex("cliff");
+  const ROLE_GROUND = surfaceRoleIndex("ground");
+  /** The surface a coast-plan mudflat paints at the waterline: `mud` when the palette has one, else its first `ground`-role surface. */
+  const coastMudSurface = (() => {
+    const byName = recipe.surfaces.findIndex((s) => s.name === "mud");
+    return byName >= 0 ? byName : recipe.surfaces.findIndex((s) => s.role === "ground");
+  })();
+  const hasCoastMud = hasCoastPlan && coastMudSurface >= 0 && coastDocs.some((d) => d.type === "mudflat");
 
   // --------------------------------------------------------------- patches
   interface PatchRuntime {
@@ -2496,7 +2513,12 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const dh = h - recipe.seaLevel;
     const a = Math.abs(dh);
     if (a >= coast.band) return h;
-    const rugged = smoothstep(coast.start, coast.end, fbm2(coastSpec, x, z, seed) * 0.5 + 0.5);
+    let rugged = smoothstep(coast.start, coast.end, fbm2(coastSpec, x, z, seed) * 0.5 + 0.5);
+    // the coast plan's ruggedness where a segment holds (a sheer-cliff segment leaves the noise alone: its wall is
+    // the stretch's); the remap below stays `dh * k`, k >= 1, so the plan cannot move the coastline either
+    if (hasCoastPlan && coastPlanOf().sample(x, z, coastScratch) > 0 && coastScratch.ruggedHold > 0) {
+      rugged += (coastScratch.rugged - rugged) * coastScratch.w * coastScratch.ruggedHold;
+    }
     if (rugged <= 0.001) return h;
     const k = 1 + coast.cliff * rugged * (1 - smoothstep(0, coast.band, a));
     return recipe.seaLevel + dh * k;
@@ -3469,6 +3491,23 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   }
 
   /** Membership of every biome rule at a point. Shared by `biome` and `splatAt`. Reads `zoneScratch`. */
+  /** Biome rules whose height window straddles sea level in a narrow band (the beach): the coast plan scales their window. */
+  const biomeCoastal = recipe.biomes.map((b) => !!b.height && b.height[0] < recipe.seaLevel && b.height[1] > recipe.seaLevel && b.height[1] - b.height[0] <= 40);
+  const coastWindowScratch: [number, number] = [0, 0];
+  /** The coast plan's beach-window scale at the column being evaluated (1 = none); set by the callers of `memberships`. */
+  let coastBeach = 1;
+  function coastWindow(range: readonly [number, number]): readonly [number, number] {
+    const s = recipe.seaLevel;
+    coastWindowScratch[0] = s + (range[0] - s) * coastBeach;
+    coastWindowScratch[1] = s + (range[1] - s) * coastBeach;
+    return coastWindowScratch;
+  }
+  function coastBeachAt(x: number, z: number, y: number): number {
+    if (!hasCoastPlan || Math.abs(y - recipe.seaLevel) > 16) return 1;
+    if (coastPlanOf().sample(x, z, coastScratch) <= 0) return 1;
+    return 1 + (coastScratch.beach - 1) * coastScratch.w;
+  }
+
   function memberships(
     groundY: number,
     temperature: number,
@@ -3486,7 +3525,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         for (let k = 0; k < gate.length; k++) zw += zoneScratch[gate[k]!]!;
         m *= zw;
       }
-      if (m > 0 && rule.height) m *= window(groundY, rule.height, rule.heightBlend);
+      if (m > 0 && rule.height) m *= window(groundY, coastBeach !== 1 && biomeCoastal[i] ? coastWindow(rule.height) : rule.height, rule.heightBlend);
       if (m > 0 && rule.temperature) m *= window(temperature, rule.temperature, rule.blend);
       if (m > 0 && rule.moisture) m *= window(moisture, rule.moisture, rule.blend);
       if (m > 0 && rule.slope) m *= window(steep, rule.slope, rule.blend);
@@ -3733,6 +3772,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // ground this is) and BEFORE feature paint (a road's dirt is a road, not
     // the zone's open ground — paint re-aims through its own role)
     if (hasZoneGround) remapNaturalRoles(x, z, out, offset, steep);
+    // a mudflat segment of the coast plan: the `ground` role (mud) at the waterline in place of the beach's sand
+    if (hasCoastMud && Math.abs(y - recipe.seaLevel) < 4 && coastPlanOf().sample(x, z, coastScratch) > 0 && coastScratch.mud > 0) {
+      const w = coastScratch.mud * coastScratch.w * (1 - smoothstep(1.5, 4, Math.abs(y - recipe.seaLevel))) * (1 - smoothstep(PAINT_STEEP_START, PAINT_STEEP_END, steep));
+      if (w > 0) paintToward(x, z, out, offset, coastMudSurface, w, ROLE_GROUND);
+    }
     // a sea-cliff stretch's turf surface on its flat tops (the cliff top and the stacks)
     if (hasSeaTurf && seaTurfAt(x, z) > 0 && seaTurfSurface[turfHit.k]! >= 0) {
       const w = turfHit.w * (1 - smoothstep(PAINT_STEEP_START, PAINT_STEEP_END, steep));
@@ -3773,6 +3817,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const { temperature, moisture, heightOffset } = climateAt(x, z, g);
     const zone = zoneName();
     const weights = new Float32Array(biomeCount);
+    coastBeach = coastBeachAt(x, z, g);
     memberships(g + heightOffset, temperature, moisture, steep, weights);
     // the strongest LABELLING rule, not the strongest rule: a cover-only rule
     // such as `crag` paints bare rock on steep ground in every biome, and if it
@@ -3812,6 +3857,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   function splatAt(x: number, y: number, z: number, normalY: number, out: Float32Array, offset: number): void {
     const steep = seaRock(x, y, z, steepnessFromNormalY(normalY));
     const { temperature, moisture, heightOffset } = climateAt(x, z, y);
+    coastBeach = coastBeachAt(x, z, y);
     memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
     blendSurface(scratchMembership, steep, out, offset);
     decorate(x, y, z, steep, scratchMembership, out, offset);
@@ -3843,6 +3889,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   function tintAt(x: number, y: number, z: number, normalY: number, out: Float32Array, offset: number): void {
     const steep = seaRock(x, y, z, steepnessFromNormalY(normalY));
     const { temperature, moisture, heightOffset } = climateAt(x, z, y);
+    coastBeach = coastBeachAt(x, z, y);
     memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
     blendTint(out, offset);
   }
@@ -3865,6 +3912,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   ): void {
     const steep = seaRock(x, y, z, steepnessFromNormalY(normalY));
     const { temperature, moisture, heightOffset } = climateAt(x, z, y);
+    coastBeach = coastBeachAt(x, z, y);
     memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
     blendSurface(scratchMembership, steep, out, offset);
     decorate(x, y, z, steep, scratchMembership, out, offset);
@@ -6440,6 +6488,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     carveSpan,
     featureClearance,
     seaCliffs: () => (hasSeaCliffs ? seaOf() : null),
+    coastPlan: () => (hasCoastPlan ? coastPlanOf() : null),
     buttes: () => (hasButtes ? buttesOf() : null),
     waterY,
     waterSurface,

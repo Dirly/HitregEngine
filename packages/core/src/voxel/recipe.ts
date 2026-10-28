@@ -8,6 +8,7 @@ import { terraceWallSchema } from "./terrace-walls.js";
 import { bridgeSpanSchema } from "./bridge-spans.js";
 import { planarCliffsSchema } from "./planar-cliffs.js";
 import { seaCliffsSchema } from "./sea-cliffs.js";
+import { coastSegmentsSchema } from "./coast-plan.js";
 import { buttesSchema } from "./buttes.js";
 import { operatorDocSchema } from "./operator-registry.js";
 import { ribbonSchema } from "./ribbon.js";
@@ -2388,6 +2389,7 @@ export const worldRecipeSchema = z.object({
     .object({
       rivers: z.array(riverSchema).default([]),
       canyons: z.array(canyonSchema).default([]).describe("Terraced gorges. Written by `worldgen canyons`."),
+      coastSegments: coastSegmentsSchema.optional(),
       ridges: z
         .array(ridgeSchema)
         .default([])

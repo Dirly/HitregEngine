@@ -220,14 +220,14 @@ export function extractChannels(grid: HydroGrid, hydro: HydroResult, threshold: 
   const traceUp = (start: number, joins: number): void => {
     const cells: number[] = [];
     let cur = start;
-    while (cur >= 0 && isRiver(cur) && owner[cur] < 0) {
+    while (cur >= 0 && isRiver(cur) && owner[cur]! < 0) {
       cells.push(cur);
       const ups = contributors[cur];
       if (!ups || ups.length === 0) break;
       let best = -1;
       let bestAcc = -1;
       for (const u of ups) {
-        if (owner[u] >= 0) continue;
+        if (owner[u]! >= 0) continue;
         if (accumulation[u]! > bestAcc) {
           bestAcc = accumulation[u]!;
           best = u;
@@ -262,13 +262,13 @@ export function extractChannels(grid: HydroGrid, hydro: HydroResult, threshold: 
     progress = false;
     const heads: number[] = [];
     for (let i = 0; i < total; i++) {
-      if (!isRiver(i) || owner[i] >= 0) continue;
+      if (!isRiver(i) || owner[i]! >= 0) continue;
       const d = downstream[i]!;
-      if (d >= 0 && owner[d] >= 0) heads.push(i);
+      if (d >= 0 && owner[d]! >= 0) heads.push(i);
     }
     heads.sort((a, b) => accumulation[b]! - accumulation[a]!);
     for (const h of heads) {
-      if (owner[h] >= 0) continue;
+      if (owner[h]! >= 0) continue;
       const before = channels.length;
       traceUp(h, owner[downstream[h]!]!);
       if (channels.length > before) progress = true;

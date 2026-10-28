@@ -1,0 +1,14 @@
+{
+  // The authoring tools (`tools/*.mts`, the zonegen commands) and the node tests (`test/*.test.ts`) are outside the
+  // app's `"include": ["src"]`, so `tsc --noEmit` on tsconfig.json reported nothing about them: a tool could import a
+  // name a module never exported and `pnpm typecheck` stayed green (found 2026-10-28 building worldgen coast).
+  // `pnpm -F playground typecheck` runs this one too.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client", "node"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "include": ["tools/worldgen-coast.mts", "test/worldgen-coast.test.ts", "tools/_stage-stamp.mts", "test/stage-stamp.test.ts"]
+}

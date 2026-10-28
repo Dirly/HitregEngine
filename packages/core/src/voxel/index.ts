@@ -80,6 +80,21 @@ export { dualContour, type DualContourOptions, type HermiteSource } from "./dual
 export { planarCliffsSchema, planarZoneSchema, planarFallsSchema, createPlanarCliffs, planarReach, wallsDensity, type PlanarCliffs, type PlanarCliffsDoc, type PlanarZoneDoc, type PlanarFallsDoc } from "./planar-cliffs.js";
 export { seaCliffSchema, seaCliffsSchema, seaStackShapeSchema, createSeaCliffs, type SeaCliffDoc, type SeaCliffs, type SeaStack, type SeaStackShapeDoc } from "./sea-cliffs.js";
 export { butteFieldSchema, buttesSchema, createButtes, type ButteFieldDoc, type Buttes } from "./buttes.js";
+export {
+  COAST_TYPES,
+  COAST_TYPE_FIELD,
+  COAST_DEFAULT_SHARES,
+  coastTypeSchema,
+  regionCoastSchema,
+  coastSegmentSchema,
+  coastSegmentsSchema,
+  createCoastPlan,
+  type CoastType,
+  type RegionCoastDoc,
+  type CoastSegmentDoc,
+  type CoastPlan,
+  type CoastSample,
+} from "./coast-plan.js";
 export { csgTriangleMeshSchema, compileTriangleMesh, type CsgTriangleMesh, type CompiledTriangleMesh } from "./triangle-mesh.js";
 
 export {

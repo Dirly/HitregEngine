@@ -61,10 +61,12 @@ import {
   fbm2,
   smoothstep,
   storySchema,
+  planarCliffsSchema,
   auditRegions,
   regionAt,
   recipeSplatIndexed,
   BORDER_CLASSES,
+  COAST_TYPES,
   type RegionDoc,
   type WorldField,
   type WorldRecipe,
@@ -99,6 +101,7 @@ import { commandRockSkins, writeRockSkinTemplate } from "./rock-skins.mts";
 import { commandPalette, commandRockAudit } from "./worldgen-rock-audit.mts";
 import { commandWaterEdges } from "./water-edges.mts";
 import { commandWaterLogic } from "./worldgen-water-logic.mts";
+import { COAST_COLOURS, coastStageCheck, commandCoast, commandCoastTop } from "./worldgen-coast.mts";
 import { riverWaterDoc } from "./_river-water.mts";
 import { commandTerracePlace, loadTerraceKit, removeTownTerraceWalls, townTerraceWalls, type TownRiserLink } from "./worldgen-terrace-walls.mts";
 import { commandBridgePlace } from "./worldgen-bridge-spans.mts";
@@ -253,12 +256,35 @@ const HELP = `worldgen — procedural world pipeline
                    materials — and starts only seed, landmasses, features and zones fresh)
   scene  <world>   write the world's scene (sun, sky, ocean, voxelWorld, spawn on land) for an existing
                    recipe, as init --scene does; refuses to replace an existing scene without --force
+  climate <world>  which zone KINDS the world may draw and how big a climate cell is: --anchors forest,grassland,moor
+                   keeps only those (init --from borrows all of the source's), --size N / --border N; a cell bigger
+                   than the land puts ONE anchor over it
+  zone-name <world> --zone <id> --name "<name>" [--landmarks a,b,c] [--hub x,z] [--border coast[:loop]]: name a zone (or
+                   town zone) from its landmarks and drop its draft tag — the zone-names / town-names rows, through the
+                   tool; --border coast gives a one-landmass zone the coast plan's shoreline as its border
+  planar-cliffs <world> --from <recipe file | world> | --off: copy another world's terrain.planarCliffs (the DC cliff
+                   profile mesher "auto" needs; per-anchor zone styles kept only for anchors this world has)
   continents <world> re-lay the landmasses (--count 1 --islands 2 --radius 2200 --gap 900 --lobes 2
                    --limit auto --land-floor 4 --variation 0.55 --ocean -45); lobes stop a landmass being a disc
+  coast  <world>   the COAST PLAN (after continents, before rivers): trace each landmass's shoreline, cut it into
+                   segments at headland/bay inflections and where the exposure to the wind (terrain.dunes.angle, fetch
+                   --fetch 1500 m) flips, type each from the zone's regions[].coast rules (sheer-cliff, rocky-shore,
+                   shingle, sand-beach, cove, mudflat; cliffs on exposed steep-backed headlands, beaches and coves in
+                   sheltered bays, mudflat only at a river mouth or marsh) and write terrain.seaCliffs coast-* stretches
+                   + features.coastSegments for the existing field to solve (never moves the coastline). --check = the
+                   gate (shares +- tolerance, max run 600 m, beaches sheltered, a cliff and a beach per zone, every cliff
+                   has its stretch); --step 8 --spacing 24 --min-segment 120 --max-segment 420 --wind <rad> --json.
+                   \`worldgen map\` draws it with a legend; \`continents\` drops it
+  coast-top <world> --segment <cs-id> --edge <m> [--undulation 0.5] [--measure]: a LEVEL cliff top for a landmark —
+                   the segment's stretch keeps its top level that far inland of the lip; the flat square is measured
+                   before and after and by \`coast --check\`; its own stamp (nothing goes STALE), so run it before
+                   rivers/towns/paths, or re-run whichever of them lies within the stretch's reach
   rivers <world>   HYDROLOGY: fill depressions, accumulate rain, trace the channel network,
                    fill the LAKES (--lakes 16; --dry-zones badlands keeps none in those anchors) and the hollows on the network; rivers are AUTHORED
                    (write { points, width } into features.rivers — the field solves the bed) unless
-                   --trace carves the traced network (--catchment 0.12 km² --step 16 --wet-grade Infinity: every reach wet, steep ones as cascading pools)
+                   --trace carves the traced network (--catchment 0.12 km² --step 16 --wet-grade Infinity: every reach wet, steep ones as cascading pools);
+                   --endorheic <ids|dry> declares lakes no river reaches as sinks (tag; kept across re-runs) — the status
+                   row fails on a lake that neither drains nor is declared
   descend <world>  --from x,z: follow the water downhill from a point to the sea, a lake or a pit,
                    and print the valley-floor polyline as --points (--simplify 30 m)
   landform-calm <world>  write features.landformCalm: a disc over every town (pad + terraces), place region,
@@ -280,7 +306,8 @@ const HELP = `worldgen — procedural world pipeline
   towns  <world>   dry, off-the-beach sites near water, spread across the landmasses and BUCKETED BY SIZE:
                    a capital on the coast of EVERY continent (--capitals left out = 4 with one per continent as the floor;
                    an explicit --capitals N is exact, 0 = none; --tier <name> sites every new town at that size;
-                   --count is never exceeded, pins included), --capital-shore 500,
+                   --count is never exceeded, pins included; --at x,z [--at-radius 150] sites ONE town of --tier
+                   (default town) on the best buildable cell near a point — a cove the coast plan marked), --capital-shore 500,
                    --continent-km2 1.5), then cities/towns/villages/hamlets down the ladder, best site first
                    (--city-share .12 --town-share .28 --village-share .35 --hamlet-share .25,
                    --capital-radius 78 --city-radius 60 …; a town with "keep: true" in the recipe, a "pinned" tag or
@@ -313,7 +340,11 @@ const HELP = `worldgen — procedural world pipeline
                    --max-cross 1.0 keeps them off hillsides steeper than 45° — the cut bank would be a wall;
                    --turn-weight 24 --max-turn 1 give them a turning radius, --smooth-passes 2 rounds the corners;
                    --surface dirt, gravel across every snow biome — --surface-by-biome alpine=gravel,… to say which;
-                   --scramble: tread that fails the lip gate comes out as a scramble, as trails do, --scramble-margin 12)
+                   --scramble: tread that fails the lip gate comes out as a scramble, as trails do, --scramble-margin 12;
+                   --to "x,z=name;x,z=name" adds destinations that are not towns — planned POI sites — as road ends,
+                   ids path-<town>-site-<name>; a site inside a keep-out gets its road end at the nearest routable cell
+                   within --to-snap 90 m; --extra 0 keeps the network a tree; a path onto a sea-cliff top or butte
+                   apron gets keepLandforms (it is no obstacle to the landform), --keep-landforms: every path)
   trails <world>   footpaths from the path network up to the peaks (--to peak,cave; --turn-weight 20 --max-turn 1;
                    a summit no 88 % scramble can reach gets a trail to the highest walkable point below it).
                    Never through a butte monument's, a sea stack's or a sea-cliff wall's clearance (a road there
@@ -605,6 +636,7 @@ function borrowLookCleanly(recipe: WorldRecipe, src: string, own: (id: string) =
   const t = recipe.terrain as { seaCliffs?: unknown[]; buttes?: unknown[]; planarCliffs?: { zones?: unknown[] } };
   if (t.seaCliffs?.length) { notes.push(`dropped ${t.seaCliffs.length} sea-cliff stretch(es) drawn for ${src}'s coast`); delete t.seaCliffs; }
   if (t.buttes?.length) { notes.push(`dropped ${t.buttes.length} butte field(s) placed on ${src}'s map`); delete t.buttes; }
+  if (recipe.features.coastSegments?.length) { notes.push(`dropped ${recipe.features.coastSegments.length} coast-plan segment(s) traced on ${src}'s shore`); delete recipe.features.coastSegments; }
   if (t.planarCliffs?.zones?.length) { notes.push(`dropped ${t.planarCliffs.zones.length} per-region cliff style(s) (regions start fresh)`); t.planarCliffs.zones = []; }
   for (const n of notes) console.log(`  ${n}`);
 }
@@ -1010,7 +1042,9 @@ function writeScene(recipe: WorldRecipe): void {
         name: "World",
         parent: null,
         tags: ["world"],
-        components: { voxelWorld: { world: recipe.name } },
+        // "auto": dual contouring where terrain.planarCliffs reaches a cell (sheer coast walls, terraced crags), marching
+        // cubes elsewhere — Derek's mesher for every world since Skelmorrow; on a world without planarCliffs it is MC
+        components: { voxelWorld: { world: recipe.name, mesher: "auto" } },
       },
       sky: {
         name: "Sky",
@@ -1302,6 +1336,8 @@ function commandRivers(): void {
   // hand-placed lakes (carve: true — a tarn an author dug to head a river) are the author's like hand rivers: kept and
   // written back; the traced ones (carve: false) are this stage's and re-found every run
   const handLakes = recipe.features.lakes.filter((l) => l.carve !== false);
+  // a lake declared a sink (tag `endorheic`) stays declared across re-runs: the declaration is the author's, the lake is re-found
+  const wasEndorheic = new Set(recipe.features.lakes.filter((l) => l.tags.includes("endorheic")).map((l) => l.id));
   recipe.features.lakes = [];
   // landform-* fills (mesas, plateaus) are not this stage's: kept, and sampled as ground
   const keptFills = recipe.features.fills.filter((f) => f.id.startsWith("landform-"));
@@ -2062,6 +2098,16 @@ function commandRivers(): void {
   }
   recipe.features.rivers = [...rivers, ...handRivers];
   recipe.features.lakes = [...lakes, ...handLakes.filter((h) => !lakes.some((l) => l.id === h.id))];
+  // every lake drains or is DECLARED: `--endorheic lake-2,lake-3` (or `dry` = every lake no river reaches) tags them
+  // `endorheic`; the status `rivers` row fails on a lake that neither drains nor is declared (skelmorrow post-mortem)
+  const declare = stringOption("endorheic", "");
+  const declared = new Set(declare.split(",").map((s) => s.trim()).filter(Boolean));
+  for (const l of recipe.features.lakes) {
+    const named = declare === "dry" ? !lakeReached(recipe, l) : declared.has(l.id);
+    if ((named || wasEndorheic.has(l.id)) && !l.tags.includes("endorheic")) l.tags.push("endorheic");
+  }
+  const undeclared = lakesUndeclared(recipe);
+  if (undeclared.length > 0) console.log(`  ! ${undeclared.length} lake(s) no river reaches and not declared endorheic: ${undeclared.join(", ")} — worldgen rivers --endorheic <ids|dry>`);
   recipe.features.fills = [...keptFills, ...fills];
   recipe.features.pois = [...recipe.features.pois, ...falls];
   if (handRivers.length > 0) console.log(`  ${handRivers.length} hand-written rivers kept (the field solves their beds)`);
@@ -3185,6 +3231,21 @@ function commandTowns(): void {
       const want = minSeparation * ((t.radius + tier.radius) / (radius * 2));
       return Math.hypot(t.center[0] - site.x, t.center[1] - site.z) > want;
     });
+
+  // ---- --at x,z: ONE town where the plan says (a cove the coast plan marked, a site-finder pick), on the best
+  // buildable cell within --at-radius; its tier is --tier (default "town"). Counted against --count like a pin.
+  const at = stringOption("at", "");
+  if (at) {
+    const [ax, az] = at.split(",").map(Number);
+    if (!Number.isFinite(ax) || !Number.isFinite(az)) fail("--at wants x,z");
+    const atRadius = option("at-radius", 150);
+    const tier = tiers.find((t) => t.name === (forcedTier || "town"))!;
+    const near = scored.filter((s) => Math.hypot(s.x - ax, s.z - az) <= atRadius).sort((a, b) => Math.hypot(a.x - ax, a.z - az) - Math.hypot(b.x - ax, b.z - az))[0];
+    if (!near) fail(`--at ${at}: no buildable site within ${atRadius} m (too steep, too high, under ${recipe.seaLevel + 3} m, within 70 m of the shore, or bog)`);
+    if (!clearOf(near, tier)) fail(`--at ${at}: a pinned town already stands there`);
+    console.log(`  --at ${at}: ${Math.hypot(near.x - ax, near.z - az).toFixed(0)} m from the asked point`);
+    place(near, tier);
+  }
 
   // ---- the capitals: one per continent, on that continent's own coast
   const capitalTier = tiers[0]!;
@@ -5964,9 +6025,22 @@ function nearestRiverAt(
 function commandPaths(): void {
   const { recipe, file } = loadRecipe();
   const towns = settlementTowns(recipe.features.towns);
-  if (towns.length < 2) fail("need at least two towns — run: worldgen towns <world>");
   const nested = recipe.features.towns.length - towns.length;
   if (nested > 0) console.log(`  ${nested} pad(s) sit inside another town — terrain, not destinations; not roaded`);
+  // --to "x,z=name;x,z=name": DESTINATIONS that are not towns (a planned POI site, a landmark) join the network as
+  // road ends of their own — routed, graded and painted like a town link, ids `path-<town>-site-<name>`. They are
+  // never written as towns; the recipe's own town list is what the status row reads.
+  const to = stringOption("to", "");
+  if (to) {
+    for (const [k, part] of to.split(";").map((s) => s.trim()).filter(Boolean).entries()) {
+      const [xy, name] = part.split("=");
+      const [x, z] = (xy ?? "").split(",").map(Number);
+      if (!Number.isFinite(x) || !Number.isFinite(z)) fail(`--to: "${part}" is not x,z[=name]`);
+      towns.push({ id: `site-${(name ?? String(k + 1)).trim()}`, tier: "hamlet", center: [x, z], radius: 12, falloff: 10, flatten: 0, gates: [], terraces: [], tags: ["site"] } as TownDoc);
+    }
+    console.log(`  ${to.split(";").length} destination(s) beyond the towns: ${towns.filter((t) => t.tags.includes("site")).map((t) => `${t.id} [${t.center.join(", ")}]`).join(", ")}`);
+  }
+  if (towns.length < 2) fail("need at least two towns (or one town and --to) — run: worldgen towns <world>");
   // This stage owns `path-*` and nothing else. It used to keep only `trail-*`,
   // which quietly deleted every road a town builder had written — the lanes,
   // the foundations and the gate approach of a baked WFC town, gone on the
@@ -5985,9 +6059,45 @@ function commandPaths(): void {
   const extent = extentFor(recipe);
   const grid = sampleWorldGrid(field, extent, option("step", 16));
   const routeGrid = routeGridFor(field, recipe, grid, { sealGatedTowns: true });
+  // a --to destination inside a keep-out (a headland top within the sea-cliff clearance band, a stack) is unreachable
+  // by definition: the road ends at the nearest routable cell within --to-snap m (default the clearance band, 90) and
+  // the place's own approach covers the rest. Says how far it moved; fails past the snap.
+  const toSnap = option("to-snap", 90);
+  for (const site of towns.filter((t) => t.tags.includes("site"))) {
+    const i0 = grid.nearest(site.center[0], site.center[1]);
+    if (Number.isFinite(routeGrid.cost[i0]!)) continue;
+    const ix = i0 % routeGrid.n, iz = (i0 / routeGrid.n) | 0;
+    let best: { d: number; x: number; z: number } | null = null;
+    const r = Math.ceil(toSnap / grid.step);
+    for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
+      const jx = ix + dx, jz = iz + dz;
+      if (jx < 0 || jz < 0 || jx >= routeGrid.n || jz >= routeGrid.n || !Number.isFinite(routeGrid.cost[jz * routeGrid.n + jx]!)) continue;
+      const x = grid.worldX(jx), z = grid.worldZ(jz);
+      const d = Math.hypot(x - site.center[0], z - site.center[1]);
+      if (d <= toSnap && (!best || d < best.d)) best = { d, x, z };
+    }
+    if (!best) fail(`${site.id} [${site.center.join(", ")}] sits in a route keep-out with no routable cell within ${toSnap} m (--to-snap): move the site or raise --to-snap`);
+    console.log(`  ${site.id}: inside a keep-out (sea-cliff clearance / stack); the road ends ${Math.round(best.d)} m away at [${Math.round(best.x)}, ${Math.round(best.z)}]`);
+    site.center = [round(best.x), round(best.z)];
+  }
   const maxGrade = option("max-grade", 0.18);
   const bridges: BridgeDoc[] = [];
   const paint = pathSurfaces(recipe);
+  // A path that reaches onto a sea-cliff top or a butte apron KEEPS the landform (RoadDoc.keepLandforms): a plain road
+  // is an obstacle the profile fades out round, so the 120 m headland the road climbed fell into a pit beside it
+  // (fowlers-drop 2026-10-21 for place-build tracks; firstshore 2026-10-28 for paths). --keep-landforms: every path.
+  const keepAll = argv.includes("--keep-landforms");
+  const seaForms = field.seaCliffs();
+  const seaCol = seaForms?.newColumn();
+  const butteForms = field.buttes();
+  const butteClear = Math.max(0, ...(recipe.terrain.buttes ?? []).map((b) => b.clearance[1]));
+  const onLandform = (pts: readonly (readonly number[])[]): boolean =>
+    pts.some(([x, z]) => {
+      if (seaForms && seaCol && seaForms.column(x!, z!, seaCol) > 0.5) return true;
+      if (butteForms) for (const m of butteForms.monumentsIn(x! - 300, z! - 300, x! + 300, z! + 300)) if (Math.hypot(x! - m.x, z! - m.z) < m.radius + butteClear + 20) return true;
+      return false;
+    });
+  const kept: string[] = [];
   if (paint.surfaceByBiome) console.log(`  surface ${paint.surface}; ${Object.entries(paint.surfaceByBiome).map(([b, sf]) => `${sf} across ${b}`).join(", ")}`);
 
   // Towns on different islands cannot be joined by a road, and a spanning tree
@@ -6083,6 +6193,7 @@ function commandPaths(): void {
       surfaceByBiome: paint.surfaceByBiome,
       lead: { start: start.lead, end: [...end.lead].reverse() },
     });
+    for (const r of built.roads) if (keepAll || onLandform(r.points)) { r.keepLandforms = true; kept.push(r.id); }
     paths.push(...built.roads);
     bridges.push(...built.bridges);
     if (start.gate) served.add(`${towns[a]!.id}/${start.gate.id}`);
@@ -6132,6 +6243,7 @@ function commandPaths(): void {
     recipe.bridgeMaterial = id;
   }
   writeRecipe(recipe, file);
+  if (kept.length) console.log(`  keepLandforms on ${kept.length} path(s) that reach onto a sea cliff / butte: ${kept.join(", ")}`);
   console.log(`cut ${paths.length} path pieces, ${bridges.length} bridges`);
   console.log(`  ${auditWorld(recipe, createWorldField(recipe)).summary}`);
 }
@@ -6560,6 +6672,17 @@ function perchedRiverMetres(recipe: WorldRecipe): { metres: number; rivers: stri
  * (head on its mouth), a split-fall branch and a hand-written river (no bedY in
  * the recipe) are exempt — a hand river may run coast to coast.
  */
+/** Does a river point lie within the lake's outline band (radius + bank + a grid cell)? Recipe geometry, no field. */
+function lakeReached(recipe: WorldRecipe, lake: LakeDoc): boolean {
+  const reach = lake.radius + lake.bank + 16;
+  return recipe.features.rivers.some((r) => r.points.some((p) => Math.hypot(p[0] - lake.center[0], p[1] - lake.center[1]) <= reach));
+}
+
+/** Lakes that neither drain (a river reaches them) nor are declared endorheic: the `rivers` row fails on them. */
+function lakesUndeclared(recipe: WorldRecipe): string[] {
+  return recipe.features.lakes.filter((l) => !l.tags.includes("endorheic") && !lakeReached(recipe, l)).map((l) => l.id);
+}
+
 function riversNotFromLakes(recipe: WorldRecipe): string[] {
   const field = statusField(recipe);
   const sample = { y: 0, flowX: 0, flowZ: 0, kind: "lake" as "lake" | "river", floor: 0 };
@@ -6641,18 +6764,22 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
       how: "worldgen continents <world> --count 5 --islands 3 --limit 10500",
       check: (r) => (r.bounds?.continents?.length ? null : "no landmasses: the world is endless noise"),
     },
+    // the coast PLAN: every shoreline segment typed (cliff / beach / cove ...) and the mix gated — tools/worldgen-coast.mts
+    { name: "coast", after: ["continents"], by: "procedural", how: "worldgen coast <world>", check: (r) => coastStageCheck(r) },
     // landform key (image generator draws classes, the tool computes metres) — tools/worldgen-landforms.mts
     { name: "landforms", after: ["continents"], by: "procedural", how: "worldgen landforms apply <world> --key <png>  (after: landforms base, landforms request)", optional: true, check: (r) => landformsStageCheck(r, findRecipeFile(r.name)) },
     { name: "canyons", after: ["continents"], by: "procedural", how: "worldgen canyons <world>", optional: true, check: (r) => has(r.features.canyons.filter((c) => c.id.startsWith("canyon-")).length) },
     {
       name: "rivers",
-      after: ["continents", "landforms", "canyons"],
+      after: ["continents", "coast", "landforms", "canyons"],
       by: "procedural",
       how: "worldgen rivers <world> --trace --catchment 0.6 --lakes 14",
       check: (r) => {
         if (r.features.rivers.length === 0 && r.features.lakes.length === 0) return "no rivers and no lakes";
         const headless = riversNotFromLakes(r);
         if (headless.length > 0) return `${headless.length} river(s) do not start at a lake (${headless.slice(0, 5).join(", ")}): re-run rivers`;
+        const undeclared = lakesUndeclared(r);
+        if (undeclared.length > 0) return `${undeclared.length} lake(s) neither drain nor are declared endorheic (${undeclared.slice(0, 5).join(", ")}): worldgen rivers --endorheic <ids|dry>`;
         const perched = perchedRiverMetres(r);
         return perched.metres > 100
           ? `${Math.round(perched.metres)} m of river perched over its valley (${perched.rivers.slice(0, 5).join(", ")}): re-trace`
@@ -7209,6 +7336,106 @@ function spanningEdges(towns: TownDoc[], extra: number): { a: number; b: number;
  * ocean, and neither is a map anyone wants. `--gap` is the water between
  * their coasts, so the sailing distance is authored rather than discovered.
  */
+/**
+ * `worldgen climate <world> --anchors a,b,c [--size N] [--border N]` — which zone KINDS this world may draw, and how big
+ * a climate cell is. `init --from <look>` borrows every anchor of the source (tundra to jungle); a small world wants a
+ * few temperate ones and a cell bigger than the land, so ONE anchor covers it. Biome rules and planar-cliff zone
+ * styles that name a dropped anchor are left in place: they never fire. Schema-validated like every write.
+ */
+function commandClimate(): void {
+  const { recipe, file } = loadRecipe();
+  const zones = recipe.climate.zones;
+  if (!zones) fail("this world has a noise climate (no climate.zones): nothing to pick anchors from");
+  const keep = stringOption("anchors", "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (keep.length > 0) {
+    const missing = keep.filter((id) => !zones.anchors.some((a) => a.id === id));
+    if (missing.length > 0) fail(`unknown anchor(s) ${missing.join(", ")}; this world has ${zones.anchors.map((a) => a.id).join(", ")}`);
+    const before = zones.anchors.length;
+    zones.anchors = zones.anchors.filter((a) => keep.includes(a.id));
+    console.log(`  anchors: ${zones.anchors.map((a) => a.id).join(", ")} (${before - zones.anchors.length} dropped)`);
+  }
+  if (flag("size")) zones.size = option("size", zones.size);
+  if (flag("border")) zones.border = option("border", zones.border);
+  if (keep.length === 0 && !flag("size") && !flag("border")) fail("nothing to change: --anchors a,b,c, --size N and/or --border N");
+  writeRecipe(recipe, file);
+  const land = recipe.bounds?.continents.map((c) => c.radius + c.falloff * (1 - (recipe.bounds?.shelf ?? 0.58))) ?? [];
+  console.log(`  climate cells ${zones.size} m (border ${zones.border} m)${land.length ? `; the largest landmass is ~${Math.round(Math.max(...land) * 2)} m across` : ""}`);
+}
+
+/**
+ * `worldgen zone-name <world> --zone <id> --name "<name>" [--landmarks a,b,c] [--hub x,z]` — the zone-names / town-names
+ * agent rows done through the tool: name a region from its landmarks, record what its border follows, drop the
+ * `draft` tag. Ids never change (chat and placement key on them). Schema-validated like every write.
+ */
+function commandZoneName(): void {
+  const { recipe, file } = loadRecipe();
+  const id = stringOption("zone", "");
+  const region = recipe.regions.find((r) => r.id === id);
+  if (!region) fail(`--zone <id>: this world has ${recipe.regions.map((r) => r.id).join(", ") || "no zones"}`);
+  const name = stringOption("name", "");
+  if (name) region.name = name;
+  const landmarks = stringOption("landmarks", "");
+  if (landmarks) region.landmarks = landmarks.split(",").map((s) => s.trim()).filter(Boolean);
+  const hub = stringOption("hub", "");
+  if (hub) {
+    const [x, z] = hub.split(",").map(Number);
+    if (!Number.isFinite(x) || !Number.isFinite(z)) fail("--hub wants x,z");
+    region.hub = [x, z];
+  }
+  // --border coast[:<loop>]: a zone that IS a landmass takes the coast plan's shoreline as its border (simplified to
+  // ~40 m, pushed 60 m seaward so every beach and cove is inside), the one border that is on a barrier everywhere
+  const border = stringOption("border", "");
+  if (border) {
+    const m = /^coast(?::(\d+))?$/.exec(border);
+    if (!m) fail("--border wants coast or coast:<loop>");
+    const loop = Number(m[1] ?? 0);
+    const segs = (recipe.features.coastSegments ?? []).filter((s) => s.loop === loop);
+    if (segs.length === 0) fail(`no coast plan for loop ${loop}: run worldgen coast first`);
+    const field = createWorldField(recipe);
+    const ring: [number, number][] = [];
+    for (const s of segs) for (const p of s.points.slice(0, -1)) ring.push(p);
+    const pushed = ring.map(([x, z]): [number, number] => {
+      const e = 6;
+      const gx = field.shoreDistance(x + e, z) - field.shoreDistance(x - e, z), gz = field.shoreDistance(x, z + e) - field.shoreDistance(x, z - e);
+      const g = Math.hypot(gx, gz) || 1;
+      return [round(x - (gx / g) * 60), round(z - (gz / g) * 60)];
+    });
+    region.polygon = simplifyLoop(pushed, 40, 200);
+    console.log(`  border: the coast of loop ${loop}, ${region.polygon.length} vertices 60 m off the shoreline`);
+  }
+  if (!name && !landmarks && !hub && !border) fail("nothing to change: --name, --landmarks, --hub and/or --border");
+  region.tags = region.tags.filter((t) => t !== "draft");
+  writeRecipe(recipe, file);
+  console.log(`  ${region.id}: "${region.name}", landmarks ${region.landmarks.join(", ") || "(none)"}${region.hub ? `, hub [${region.hub.join(", ")}]` : ""}`);
+}
+
+/**
+ * `worldgen planar-cliffs <world> --from <recipe file | world> | --off` — copy another world's `terrain.planarCliffs`
+ * (the DC cliff profile: strata, terrace steps, falls) onto this one, keeping only the per-anchor `zones[]` styles whose
+ * anchor this world's climate has. With `voxelWorld.mesher: "auto"` the planar profile is what makes a cell DC; without
+ * it `auto` is marching cubes everywhere and the cliffs are soft.
+ */
+function commandPlanarCliffs(): void {
+  const { recipe, file } = loadRecipe();
+  if (flag("off")) {
+    delete recipe.terrain.planarCliffs;
+    writeRecipe(recipe, file);
+    console.log("  terrain.planarCliffs removed: marching cubes everywhere");
+    return;
+  }
+  const from = stringOption("from", "");
+  if (!from) fail("--from <recipe file | world name> (its terrain.planarCliffs is copied) or --off");
+  const src = fs.existsSync(from) ? (JSON.parse(fs.readFileSync(from, "utf8")) as { terrain?: { planarCliffs?: unknown } }) : loadRecipe(from).recipe;
+  const pc = src.terrain?.planarCliffs as { zones?: { anchor: string }[] } | undefined;
+  if (!pc) fail(`${from} has no terrain.planarCliffs`);
+  const anchors = new Set(recipe.climate.zones?.anchors.map((a) => a.id) ?? []);
+  const zones = (pc.zones ?? []).filter((z) => anchors.has(z.anchor));
+  recipe.terrain.planarCliffs = planarCliffsSchema.parse({ ...pc, zones });
+  writeRecipe(recipe, file);
+  const dropped = (pc.zones ?? []).length - zones.length;
+  console.log(`  terrain.planarCliffs: profile ${recipe.terrain.planarCliffs.profile}, ${zones.length} zone style(s) kept (${zones.map((z) => z.anchor).join(", ") || "none"})${dropped ? `, ${dropped} dropped (anchors this world does not have)` : ""}`);
+}
+
 function commandContinents(countOverride?: number): void {
   const { recipe, file } = loadRecipe();
   const count = Math.max(1, Math.round(countOverride ?? option("count", 1)));
@@ -7286,6 +7513,14 @@ function commandContinents(countOverride?: number): void {
   const limit = option("limit", Math.ceil((reach + 500) / 100) * 100);
 
   recipe.bounds = { continents, oceanFloor, landFloor, shelf: recipe.bounds?.shelf ?? 0.58, limit, limitFalloff: recipe.bounds?.limitFalloff ?? 600 };
+  // the coast plan was traced on the old shoreline: drop it (its stretches too) so `coast` reads MISSING, not STALE-but-drawn
+  const planned = recipe.features.coastSegments?.length ?? 0;
+  if (planned) {
+    delete recipe.features.coastSegments;
+    recipe.terrain.seaCliffs = (recipe.terrain.seaCliffs ?? []).filter((s) => !(s.id ?? "").startsWith("coast-"));
+    if (recipe.terrain.seaCliffs.length === 0) delete recipe.terrain.seaCliffs;
+    console.log(`  dropped the coast plan (${planned} segments and its coast-* stretches): re-run worldgen coast`);
+  }
   writeRecipe(recipe, file);
 
   const land = continents.reduce((a, c) => a + Math.PI * c.radius * c.radius + c.lobes.reduce((b, l) => b + Math.PI * l[2] * l[2] * 0.5, 0), 0) / 1e6;
@@ -8539,6 +8774,25 @@ function commandMap(): void {
     drawText(pixels, size, label.x, label.y, label.text, [255, 255, 255], label.scale);
   }
 
+  // The coast plan: every shoreline segment in its type's colour, numbered, with a legend in the top-left corner
+  // (the plan Derek reads before anything is placed; tools/worldgen-coast.mts)
+  const coastSegments = recipe.features.coastSegments ?? [];
+  if (coastSegments.length > 0) {
+    for (const seg of coastSegments) stroke(seg.points, COAST_COLOURS[seg.type], 2);
+    for (const seg of coastSegments) {
+      const mid = seg.points[Math.floor(seg.points.length / 2)]!;
+      const [px, py] = toPixel(mid[0], mid[1]);
+      const label = seg.id.replace(/^cs-\d+-/, "");
+      drawText(pixels, size, px + 4, py - 3, label, [255, 255, 255], 1);
+    }
+    const lx = 6;
+    let ly = 6;
+    for (const type of COAST_TYPES) {
+      for (let dy = 0; dy < 7; dy++) for (let dx = 0; dx < 10; dx++) plot(lx + dx, ly + dy, COAST_COLOURS[type]);
+      drawText(pixels, size, lx + 13, ly, `${type.toUpperCase()} ${coastSegments.filter((s) => s.type === type).length}`, [255, 255, 255], 1);
+      ly += 10;
+    }
+  }
   // Barriers: every OPEN run of a border in RED (a swap there shows two
   // worlds), every pass a white diamond with its number. A world is ready
   // for hosting when no red is left on any border.
@@ -8582,6 +8836,7 @@ function commandMap(): void {
   console.log(`wrote ${path.relative(process.cwd(), out)}  (${size}x${size}, ${extent * 2} world units across, ${step.toFixed(1)} m/px)`);
   console.log("  blue = rivers/lakes, brown = canyons, tan = town paths, thin tan = peak trails, red = towns, yellow = peaks, cyan = waterfalls, red ring = world limit");
   if (recipe.regions.length > 0) console.log(`  barriers: ${openRunCount} OPEN border run(s) in red (must be 0 before hosting), ${passes.length} pass(es) as white diamonds (${passNo} numbered, the rest town gates), ridges pale grey`);
+  if (coastSegments.length > 0) console.log(`  coast plan: ${coastSegments.length} segments along the shore, numbered — ${COAST_TYPES.map((t) => `${t} rgb(${COAST_COLOURS[t].join(",")})`).join(", ")} (legend top-left)`);
   if (byZone) console.log(`  zones: ${anchors.map((a, i) => `${a.id} rgb(${anchorColour[i]!.join(",")})`).join(", ")}`);
   if (recipe.regions.length > 0) {
     console.log("  regions (white borders; name @ pixel x,y of the hub or centroid):");
@@ -9667,6 +9922,21 @@ switch (command) {
   case "continents":
     commandContinents();
     break;
+  case "coast":
+    commandCoast({ argv, loadRecipe: () => loadRecipe(), writeRecipe, fail });
+    break;
+  case "coast-top":
+    commandCoastTop({ argv, loadRecipe: () => loadRecipe(), writeRecipe, fail });
+    break;
+  case "climate":
+    commandClimate();
+    break;
+  case "planar-cliffs":
+    commandPlanarCliffs();
+    break;
+  case "zone-name":
+    commandZoneName();
+    break;
   case "pois":
     commandPois();
     break;
@@ -9792,6 +10062,8 @@ switch (command) {
     else if (!fresh && continents > 0) console.log("(--continents ignored: the recipe exists — run `worldgen continents` to re-lay it, then `all` again)");
     // canyons BEFORE rivers: the hydrology then drains through the gorges it
     // finds; cut after, a canyon floor under a lake outline flooded 90 m deep
+    // the coast plan before the hydrology: a river mouth lands on a typed shore, and the plan is what the map shows first
+    runStage("coast", () => commandCoast({ argv, loadRecipe: () => loadRecipe(), writeRecipe, fail }));
     runStage("canyons", commandCanyons);
     runStage("rivers", commandRivers);
     runStage("towns", commandTowns);

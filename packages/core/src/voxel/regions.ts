@@ -2,6 +2,7 @@ import { z } from "zod";
 import { pointInPolygon, polygonArea, polygonEdgeDistance } from "../scatter.js";
 import { SURFACE_ROLES } from "./roles.js";
 import { regionVegetationSchema } from "./vegetation.js";
+import { regionCoastSchema } from "./coast-plan.js";
 
 /**
  * Regions — the zones players and servers know by name.
@@ -284,6 +285,7 @@ export const regionSchema = z.object({
     .array(z.string())
     .default([])
     .describe('"town" marks a town zone (hub = the town centre, landmarks[0] = its town id); "safe" makes the whole zone a sanctuary; "draft" = placeholder from worldgen zones.'),
+  coast: regionCoastSchema.optional(),
 });
 
 export type RegionDoc = z.infer<typeof regionSchema>;
