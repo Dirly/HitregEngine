@@ -259,6 +259,10 @@ export const placeSchema = z.object({
     })
     .optional()
     .describe("This place's OWN dungeon. One door; never shared with another place."),
+  concept: z
+    .array(z.string().min(1))
+    .default([])
+    .describe("Concept frames drawn from this place's read BEFORE any grey box (apps/playground/tools/image-request.mjs gen; one far frame: the silhouette from its approach, one near: the set piece or the door). Paths relative to the zone folder (concept/<place>-far.png) or to apps/playground. The place owner's design.json concept[] (job.mjs gate 16) starts from these; the brief lint refuses a listed frame that does not exist and warns on a medium/large place or a dungeon's place with none."),
   site: z
     .object({
       candidate: z.string().default("").describe("The `zonegen sites` candidate id it was picked from (s07); ids change when the finder re-runs, `at` is what counts."),
@@ -328,6 +332,17 @@ export const zoneBriefSchema = z
       })
       .default({ maxRepeatPerZone: 2, maxRepeatNeighbourhood: 3, nearDuplicate: 0.8, minNoKillShare: 0.4, minNonNpcSources: 2, minWorldGated: 2, minDistinctActions: 6, maxKillCollectShare: 0.3, maxLeadsPerQuest: 3, minGroups: 4, maxMainHostileShare: 0.5, minHostileGroups: 3, minKillGroups: 3, maxInteractShare: 0.3, minFieldShare: 0.7 })
       .describe("Sameness thresholds the quest lint WARNS against (for now). A zone argues for an exception here, in data."),
+    scope: z
+      .object({
+        kind: z
+          .enum(["full", "proof"])
+          .default("full")
+          .describe("full: the zone is planned whole and zonegen sites judges its density (AREA_CLAIM), empty land and empty landforms as errors. proof: the OWNER cut this round to a few places (a one-zone proof); those three checks print as warnings marked [proof scope] and the brief lint warns, so the gap stays visible. Path, hostile-on-road and reserve checks are unchanged."),
+        towns: z.array(z.string().min(1)).default([]).describe("proof only: the town ids this round plans (the town gate requires plans for these; the others stay sited and named and the gate warns). Empty = every town."),
+        ruling: z.string().default("").describe("proof only: the owner's ruling that cut the scope, quoted with its date (Derek 2026-10-28: stop after 1 town and 1 POI and one dungeon entrance). An agent never sets proof on its own judgment."),
+      })
+      .default({ kind: "full", towns: [], ruling: "" })
+      .describe("How much of the zone this planning round designs. Default full."),
     places: z
       .array(placeSchema)
       .default([])
@@ -337,6 +352,7 @@ export const zoneBriefSchema = z
     unique(b.towns, (t) => t.id, ctx, "towns");
     unique(b.places, (p) => p.id, ctx, "places");
     if (!b.towns.some((t) => t.id === b.hub)) ctx.addIssue({ code: "custom", path: ["hub"], message: "the hub must be one of `towns`" });
+    if (b.scope.kind === "proof" && !/\d{4}-\d{2}-\d{2}/.test(b.scope.ruling)) ctx.addIssue({ code: "custom", path: ["scope", "ruling"], message: "a proof scope quotes the owner's ruling with its date (YYYY-MM-DD)" });
   })
   .describe("The shared specification every agent working on this zone reads first.");
 export type ZoneBrief = z.infer<typeof zoneBriefSchema>;

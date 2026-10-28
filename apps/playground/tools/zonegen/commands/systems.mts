@@ -5,7 +5,7 @@
  * no combat effects, no bridge from a mob's attack request to a real hit, no sound. Those are the PROJECT's own
  * entities, so the engine cannot write them. The project declares them once:
  *
- *   authoring/zonegen/scene-systems.json   { "from": "<scene id that has them>", "entities": ["<root entity id>", ...] }
+ *   authoring/zonegen/scene-systems.json   { "from": "<scene id that has them, in the project or its dependsOn closure>", "entities": ["<root entity id>", ...] }
  *
  * An entity no scene of the project holds as a root (e.g. `zone-mood`, a child of the worldgen `sky`) is written inline:
  *
@@ -20,12 +20,16 @@ import path from "node:path";
 import { applyOps, ComponentRegistry, registerChunkComponents, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
 import { exists, readJson, writeJson, type Ctx } from "../lib.mts";
 import { applyOpsToSceneFile } from "../../_scene-write.mts";
+import { findAsset } from "../../_closure.mjs";
 
 interface SystemsDoc { from: string; entities: string[]; add?: Record<string, SceneDoc["entities"][string]> }
 interface Plan { error: string; from: string; scene: string; sceneFile: string; missing: string[]; subtree: string[]; source: SceneDoc | null; live: SceneDoc | null; inline: Record<string, SceneDoc["entities"][string]> }
 
 const configFile = (ctx: Ctx): string => path.join(ctx.paths.root, "scene-systems.json");
 const sceneFile = (ctx: Ctx, id: string): string => path.join(ctx.paths.projectDir, "assets", "scenes", `${id}.scene.json`);
+/** The SOURCE scene resolves across the project's dependsOn closure: a fresh world has no scene of its own with the
+ * game systems; they live in the shared game (foundation), as the game loads them. */
+const sourceFile = (ctx: Ctx, id: string): string => findAsset(path.basename(ctx.paths.projectDir), `scenes/${id}.scene.json`) ?? sceneFile(ctx, id);
 
 function plan(ctx: Ctx, scene: string): Plan {
   const out: Plan = { error: "", from: "", scene, sceneFile: sceneFile(ctx, scene), missing: [], subtree: [], source: null, live: null, inline: {} };
@@ -33,9 +37,9 @@ function plan(ctx: Ctx, scene: string): Plan {
   const cfg = readJson(configFile(ctx)) as SystemsDoc;
   if (typeof cfg.from !== "string" || !Array.isArray(cfg.entities) || cfg.entities.length === 0) return { ...out, error: "scene-systems.json needs { from, entities: [..] }" };
   out.from = cfg.from;
-  if (!exists(sceneFile(ctx, cfg.from))) return { ...out, error: `scene-systems.json names scene "${cfg.from}", which does not exist` };
+  if (!exists(sourceFile(ctx, cfg.from))) return { ...out, error: `scene-systems.json names scene "${cfg.from}", which is in neither the project nor its dependsOn closure` };
   if (!exists(out.sceneFile)) return { ...out, error: `no scene ${scene} (npx tsx tools/worldgen.mts scene ${ctx.world} --project ${ctx.project})` };
-  const source = readJson(sceneFile(ctx, cfg.from)) as SceneDoc;
+  const source = readJson(sourceFile(ctx, cfg.from)) as SceneDoc;
   const live = readJson(out.sceneFile) as SceneDoc;
   out.source = source;
   out.live = live;

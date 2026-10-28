@@ -511,7 +511,9 @@ export async function run(ctx: Ctx): Promise<number> {
     over("side and link quests", count("side") + count("link"), b.sideQuests);
     over("discovery quests", count("discovery"), b.discoveryQuests);
     over("dungeons", g.dungeons.length, b.dungeons);
-    const sized = (s: string): number => g.locations.filter((l) => l.kind !== "town" && l.size === s).length;
+    // a sub-site of a signature place (`place` set: its camp, pool, hold, dungeon door) is built inside that place and
+    // costs nothing of its own: the place is budgeted by its size
+    const sized = (s: string): number => g.locations.filter((l) => l.kind !== "town" && !l.place && l.size === s).length;
     // a pinpoint is half a small POI: two pinpoints (a stone, a grave) cost one small site
     const pins = sized("pinpoint");
     if (sized("small") + Math.ceil(pins / 2) > b.pois.small)

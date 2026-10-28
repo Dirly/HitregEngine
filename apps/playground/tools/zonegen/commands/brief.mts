@@ -4,6 +4,8 @@
  * The brief's towns are exactly the zone's towns in the recipe (tiers included); the hub is one of them and, in a
  * starter zone, not a capital; its level is the cast row's; it names every neighbour; its budget is not empty.
  */
+import fs from "node:fs";
+import path from "node:path";
 import { finish, load, loadRecipe, type Ctx, type Finding } from "../lib.mts";
 import { castSchema, zoneBriefSchema } from "../schemas.mts";
 import { err, neighboursOf, readAdjacency, requireZone, warn, zoneTowns } from "./_shared.mts";
@@ -44,6 +46,7 @@ export async function run(ctx: Ctx): Promise<number> {
     const b = brief.budget;
     const total = b.arcs + b.sideQuests + b.discoveryQuests + b.pois.small + b.pois.medium + b.pois.large + b.dungeons;
     if (total === 0) err(f, "empty-budget", "the budget is all zeros: nothing to build");
+    if (brief.scope.kind === "proof") warn(f, "proof-scope", "a PROOF round (" + brief.scope.ruling + "): zonegen sites reports density, empty land and empty landforms as warnings until the brief returns to full scope");
     if (b.arcs === 0 && b.sideQuests === 0) warn(f, "no-quests", "no arcs and no side quests");
     // owner ruling 2026-10-06: a zone carries 3 to 5 dungeons (every landmark owns one; capitals and starter towns get one nearby)
     const hasCapital = brief.towns.some((t) => t.tier === "capital");
@@ -51,12 +54,37 @@ export async function run(ctx: Ctx): Promise<number> {
     else if (b.dungeons < 3) warn(f, "few-dungeons", `the budget plans ${b.dungeons} dungeon(s); a zone carries 3 to 5`);
     if (b.dungeons > 5) warn(f, "many-dungeons", `the budget plans ${b.dungeons} dungeons; a zone carries 3 to 5`);
 
+    // the owner's dated bans on premises (2026-10-28 z1: a wreck-stripping boat town and a beached-fleet ring reached Derek
+    // although he had banned ships as architecture or place ideas on 2026-10-18 — the ruling lived in memory, not in a
+    // file a lint reads). `authoring/zonegen/rulings.json` { banned: [{ id, ruling, words: [regex] }] } is that file: every
+    // word is matched (whole word, any case) in the premise, history, threat, tone, town roles and every place's design text.
+    const rulingsFile = path.join(p.projectDir, "authoring", "zonegen", "rulings.json");
+    if (fs.existsSync(rulingsFile)) {
+      let rulings: { banned?: { id: string; ruling: string; words: string[] }[] } = {};
+      try { rulings = JSON.parse(fs.readFileSync(rulingsFile, "utf8")); } catch (e) { err(f, "rulings-unreadable", `${rulingsFile}: ${(e as Error).message}`); }
+      const texts: [string, string][] = [["premise", brief.premise], ["history", brief.history], ["threat", brief.threat], ["tone", brief.tone],
+        ...brief.towns.map((t): [string, string] => [`${t.id}.role`, t.role]),
+        ...brief.places.flatMap((x): [string, string][] => [[`${x.id}.name`, x.name], [`${x.id}.read`, x.read], [`${x.id}.landmark`, x.landmark], [`${x.id}.setPiece`, x.setPiece], [`${x.id}.unique`, x.unique],
+          ...x.features.map((ft, i): [string, string] => [`${x.id}.features[${i}]`, ft]), ...(x.dungeon ? [[`${x.id}.dungeon`, `${x.dungeon.name} ${x.dungeon.promise}`] as [string, string]] : [])])];
+      for (const ban of rulings.banned ?? []) {
+        const re = new RegExp(`\\b(${ban.words.join("|")})\\b`, "i");
+        for (const [where, text] of texts) {
+          const m = text ? re.exec(text) : null;
+          if (m) err(f, "banned-premise", `${where}: "${m[0]}" — ${ban.id}: ${ban.ruling}`, where);
+        }
+      }
+    }
+
     // signature places: designed before quests (docs/zone-creation.md). Zones planned before places existed only warn.
     const places = brief.places;
     if (!places.length) warn(f, "no-places", "no signature places: design the zone's places (read, landmark, set piece, unique) before its quests");
     else {
       const large = places.filter((x) => x.size === "large");
       if (large.length < b.pois.large) err(f, "large-places", `the budget promises ${b.pois.large} large site(s) and ${large.length} place(s) are large`);
+      for (const x of places) {
+        for (const c of x.concept) if (![path.join(path.dirname(p.brief(zone)), c), path.resolve(c)].some((q) => fs.existsSync(q))) err(f, "concept-missing", `${x.id}: concept frame ${c} does not exist (zone folder or apps/playground)`, x.id);
+        if (!x.concept.length && (x.size === "medium" || x.size === "large" || x.dungeon)) warn(f, "no-concept", `${x.id} (${x.size}${x.dungeon ? ", owns a dungeon" : ""}) has no concept frame: draw one far and one near before any grey box (image-request.mjs gen)`, x.id);
+      }
       for (const x of large) if (x.features.length < 3) err(f, "thin-large", `${x.id} is large with ${x.features.length} feature(s): a large place is three or more linked sub-sites`, x.id);
       for (const x of places) if (x.size !== "pinpoint" && x.holder && !x.named.length) warn(f, "no-named", `${x.id} is held by ${x.holder} and names nobody to meet or farm`, x.id);
       // places come from the ground (`zonegen sites`, run before the brief), not from text

@@ -4,6 +4,8 @@
  * Neighbours must differ on purpose: no shared main faction or palette across a border, minorities only from a real
  * neighbour, no faction ruling more than its share of the map, no cliff in level across a border a player can walk.
  */
+import fs from "node:fs";
+import path from "node:path";
 import { finish, load, type Ctx, type Finding } from "../lib.mts";
 import { bestiarySchema, castSchema, factionMembers, type Creature } from "../schemas.mts";
 import { borderOf, buildingSetKnown, buildingSets, levelFit, err, jaccard, levelStep, readAdjacency, tokens, warn } from "./_shared.mts";
@@ -84,7 +86,14 @@ export async function run(ctx: Ctx): Promise<number> {
     for (const r of cast.rows) share.set(r.faction, (share.get(r.faction) ?? 0) + 1);
     for (const [fa, count] of share) if (count > allowed) err(f, "faction-share", `${fa} is the main faction of ${count} of ${n} zones (cap max(2, ceil(${cast.rules.maxFactionShare} x ${n} zones)) = ${allowed})`, fa);
 
-    warn(f, "palette-unverified", `palette ids (${[...new Set(cast.rows.map((r) => r.palette))].join(", ")}) are unverified: the project keeps no palette list, so only "neighbours differ" is checked`);
+    // the project's ground palettes are its palette list (authoring/zonegen/palettes/<id>.json, written by the look phase;
+    // 2026-10-28 z1b: the lint warned "unverified" with wrackmoor.json sitting there): a cast palette with no file is an
+    // error once any palette exists; with none yet the look phase has not run and the ids stay unverified
+    const palDir = path.join(p.projectDir, "authoring", "zonegen", "palettes");
+    const palettes = fs.existsSync(palDir) ? fs.readdirSync(palDir).filter((x) => x.endsWith(".json")).map((x) => x.slice(0, -5)) : [];
+    const castPalettes = [...new Set(cast.rows.map((r) => r.palette))];
+    if (!palettes.length) warn(f, "palette-unverified", `palette ids (${castPalettes.join(", ")}) are unverified: no ground palettes yet under authoring/zonegen/palettes (the look phase writes them), so only "neighbours differ" is checked`);
+    else for (const id of castPalettes) if (!palettes.includes(id)) err(f, "unknown-palette", `palette ${id} has no authoring/zonegen/palettes/${id}.json (have: ${palettes.join(", ")})`, id);
     if (!sets.length) warn(f, "building-set-unverified", "no WFC kits under assets/wfc: building sets are unverified");
     if (!cast.rows.some((r) => r.starter)) err(f, "no-starter", "no zone is a starter zone: new characters have nowhere to begin");
 

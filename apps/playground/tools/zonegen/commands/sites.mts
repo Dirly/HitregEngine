@@ -187,13 +187,20 @@ export async function run(ctx: Ctx): Promise<number> {
     }
     if (x.kind === "wasted-climb") warn(f, "wasted-climb", x.message, x.road);
   }
-  for (const x of claimFaults(report.claim)) err(f, x.code, x.message);
+  // a PROOF round (brief scope, owner ruling) designs a few places on purpose: density, empty land and empty landforms
+  // are reported as warnings marked [proof scope], never dropped
+  const briefRaw = exists(p.brief(zone)) ? (readJson(p.brief(zone)) as { scope?: { kind?: string; ruling?: string } }) : null;
+  const proof = briefRaw?.scope?.kind === "proof" && /\d{4}-\d{2}-\d{2}/.test(briefRaw.scope.ruling ?? "");
+  const density = (code: string, message: string, ref?: string): void => (proof ? warn(f, code, "[proof scope] " + message, ref) : err(f, code, message, ref));
+  if (proof) console.log("  proof scope (brief): density / empty-land / empty-landform are warnings: " + briefRaw!.scope!.ruling);
+  for (const x of claimFaults(report.claim)) density(x.code, x.message);
   if (report.largestEmpty && report.largestEmpty.radius > EMPTY_MAX)
-    err(f, "empty-land", `nothing within ${report.largestEmpty.radius} m of [${report.largestEmpty.at.join(", ")}] (${report.largestEmpty.landform}); at most ${EMPTY_MAX} m`);
+    density("empty-land", `nothing within ${report.largestEmpty.radius} m of [${report.largestEmpty.at.join(", ")}] (${report.largestEmpty.landform}); at most ${EMPTY_MAX} m`);
   for (const l of report.landforms) {
     if (l.covered >= LANDFORM_COVER) continue;
     const msg = `${l.kind} landform of ${l.areaHa} ha at [${l.at.join(", ")}]${l.relief > 0 ? ` (${l.relief} m over its foot)` : ""}: only ${Math.round(l.covered * 100)}% within reach of a place`;
-    (l.kind === "plateau" || l.areaHa >= 3 * LANDFORM_HA ? err : warn)(f, "empty-landform", msg, l.id);
+    if (l.kind === "plateau" || l.areaHa >= 3 * LANDFORM_HA) density("empty-landform", msg, l.id);
+    else warn(f, "empty-landform", msg, l.id);
   }
   // hostile places off town-to-town roads (a lookout over one is allowed: location `overlooksRoad`)
   for (const h of report.hostileOnRoad) if (!h.lookout && content.some((c) => c.id === h.place && c.zone === zone)) err(f, "hostile-on-road", h.message, h.place);
@@ -209,6 +216,7 @@ export async function run(ctx: Ctx): Promise<number> {
     zone,
     at: new Date().toISOString(),
     step: report.step,
+    scope: proof ? "proof" : "full",
     density: { landKm2: report.landKm2, places: report.places, claim: report.claim, gate: AREA_CLAIM, largestEmpty: report.largestEmpty, emptyMax: EMPTY_MAX },
     empties: report.empties,
     landforms: report.landforms,

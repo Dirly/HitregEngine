@@ -69,6 +69,16 @@ export async function run(ctx: Ctx): Promise<number> {
 
     for (const l of g.locations) if (l.kind !== "town" && !res.reservations.some((r) => r.location === l.id)) err(f, "unreserved", `location ${l.id} has no reservation`, l.id);
 
+    // a SUB-SITE (location `place` = a brief place: its camp, pool, hold, dungeon door) lies INSIDE that place's
+    // reservation and shares its ways in: the roads and rivers the place names may cross the sub-site too
+    const parentRes = (r: { location: string }): (typeof res.reservations)[number] | undefined => {
+      const pl = locations.get(r.location)?.place;
+      return pl ? res.reservations.find((x) => x.location === pl) : undefined;
+    };
+    const namedWays = (r: (typeof res.reservations)[number]): string[] => {
+      const up = parentRes(r);
+      return [r.approach, ...r.approaches, ...(up ? [up.approach, ...up.approaches] : [])].map((a) => a.from);
+    };
     for (const r of res.reservations) {
       const ref = r.location;
       const loc = locations.get(r.location);
@@ -89,13 +99,13 @@ export async function run(ctx: Ctx): Promise<number> {
       for (const road of roads) {
         if (builtBy(road.id)) continue; // a track a site's own build laid is not a planning clash
         const d = distToPolyline(x, z, road.points);
-        if (d < r.radius + road.width / 2 && ![r.approach, ...r.approaches].some((a) => a.from === road.id)) err(f, "on-road", `${ref}: sits on ${road.id} (${Math.round(d)} m from it) without naming it as its approach`, ref);
+        if (d < r.radius + road.width / 2 && !namedWays(r).includes(road.id)) err(f, "on-road", `${ref}: sits on ${road.id} (${Math.round(d)} m from it) without naming it as its approach`, ref);
       }
       for (const river of rivers) {
         // a dry painted line (water: false) is how site builds paint ground and clear trees: not a river to plan around
         if ((river as { water?: boolean }).water === false || builtBy(river.id)) continue;
         const d = distToPolyline(x, z, river.points);
-        if (d < r.radius + river.width / 2 && ![r.approach, ...r.approaches].some((a) => a.from === river.id)) err(f, "on-river", `${ref}: sits on river ${river.id} (${Math.round(d)} m)`, ref);
+        if (d < r.radius + river.width / 2 && !namedWays(r).includes(river.id)) err(f, "on-river", `${ref}: sits on river ${river.id} (${Math.round(d)} m)`, ref);
       }
       if (loc.kind !== "town") {
         const size = placeSize.get(r.location) ?? loc.size;
@@ -164,6 +174,11 @@ export async function run(ctx: Ctx): Promise<number> {
         const a = list[i]!;
         const b = list[j]!;
         const d = Math.hypot(a.center[0] - b.center[0], a.center[1] - b.center[1]);
+        const [outer, inner] = parentRes(b) === a ? [a, b] : parentRes(a) === b ? [b, a] : [null, null];
+        if (outer && inner) {
+          if (d + inner.radius > outer.radius) err(f, "outside-place", `${inner.location} is a sub-site of ${outer.location} and reaches ${Math.round(d + inner.radius - outer.radius)} m outside it`, `${outer.location}|${inner.location}`);
+          continue;
+        }
         if (d < a.radius + b.radius) err(f, "overlap", `${a.location} and ${b.location} overlap (${Math.round(d)} m apart, radii ${a.radius}+${b.radius})`, `${a.location}|${b.location}`);
         else if (a.interior === "embedded" && b.interior === "embedded") {
           const ra = Math.max(a.radius, a.terrainRadius);

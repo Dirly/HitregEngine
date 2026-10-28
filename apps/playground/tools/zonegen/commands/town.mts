@@ -115,7 +115,13 @@ export async function run(ctx: Ctx): Promise<number> {
   const brief = load(p.brief(ctx.zone), zoneBriefSchema, f, "zone brief");
   if (brief) {
     const names = townNames(p, ctx.world);
+    // a PROOF round (brief scope, owner ruling) plans only the towns it names; the rest stay sited and named
+    const planned = brief.scope.kind === "proof" && brief.scope.towns.length ? new Set(brief.scope.towns) : null;
     for (const t of brief.towns) {
+      if (planned && !planned.has(t.id)) {
+        warn(f, "proof-scope", `${t.id} (${t.name}) is not planned this round: [proof scope] ${brief.scope.ruling}`, t.id);
+        continue;
+      }
       const name = names.get(t.id);
       if (!name) {
         err(f, "no-town-doc", `${t.id}: no town doc (authoring/towns/<name>.json with "town": "${t.id}", "world": "${ctx.world}") — the town has no name to plan under`, t.id);
