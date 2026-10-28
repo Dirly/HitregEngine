@@ -19,6 +19,16 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {propPolicy} from './_prop-curation.mts';
+
+/** Gate newly added/swapped prefab references, without disturbing existing placements. */
+export function assertBuilderProps(file:string,ops:readonly any[]){
+ let root=path.dirname(path.resolve(file));
+ while(root!==path.dirname(root)&&!fs.existsSync(path.join(root,'project.json')))root=path.dirname(root);
+ if(!fs.existsSync(path.join(root,'project.json')))return;
+ const ids=ops.flatMap(op=>{const id=op.op==='add-entity'?op.entity?.components?.prefab?.prefabId:op.op==='set-component'&&op.component==='prefab'?op.data?.prefabId:undefined;return typeof id==='string'?[id]:[];});
+ if(!ids.length)return;const policy=propPolicy(path.dirname(root),path.basename(root));for(const id of ids)policy.assertAllowed(id);
+}
 
 export interface LockInfo { pid: number; host: string; label: string; at: string }
 export interface WriteOptions {
@@ -186,6 +196,7 @@ export function removalsOf(ops: readonly any[], doc?: { entities: Record<string,
  * order onto the FRESH file under its lock. Returns the final doc and the combined inverse (last batch's undo first).
  */
 export function applyBatchesToSceneFile<Op = any>(file: string, batches: readonly (readonly Op[])[], apply: (doc: any, ops: Op[]) => { doc: any; inverse: Op[] }, opts: WriteOptions = {}): { doc: any; inverse: Op[] } {
+  assertBuilderProps(file,batches.flat());
   let out!: { doc: any; inverse: Op[] };
   updateJsonFile(file, (fresh) => {
     if (!fresh) throw new Error(`scene-write: no scene at ${file}`);
@@ -199,6 +210,7 @@ export function applyBatchesToSceneFile<Op = any>(file: string, batches: readonl
 
 /** Apply an ops batch to a scene file under its lock: fresh read, `apply`, guard (removals = the batch's own), write. */
 export function applyOpsToSceneFile<R extends { doc: any; inverse?: unknown }>(file: string, ops: readonly any[], apply: (doc: any, ops: any[]) => R, opts: WriteOptions = {}): R {
+  assertBuilderProps(file,ops);
   let res!: R;
   updateJsonFile(file, (fresh) => {
     if (!fresh) throw new Error(`scene-write: no scene at ${file}`);

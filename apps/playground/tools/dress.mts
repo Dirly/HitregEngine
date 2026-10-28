@@ -119,6 +119,7 @@ import { dressPoiId, poiJobIds, retagOps } from "./_dress-poi.mts";
 import { questAddOp, questDecls, questFindings, placesFor, planTown } from "./_dress-quest.mts";
 import { questPlacements } from "@hitreg/core";
 import { closure, findAsset, PROJECTS } from "./_closure.mjs";
+import {propPolicy} from './_prop-curation.mts';
 import { worldRecipeSchema, clearingSchema, needsClearedCover, discCleared, type ClearingDoc } from "@hitreg/core";
 
 /** A prefab file through the project's dependsOn closure (a world's props live in world-kit); own path when none. */
@@ -201,6 +202,7 @@ function loadPlan(file: string): { plan: DressingPlan; raw: string } {
 
 /** Prop declarations and sets, cached, with every file read recorded for the staleness hash. */
 function sources(proj: string) {
+  const builderPolicy=propPolicy(PROJECTS,proj);
   const overlay = opt("props");
   const used = new Map<string, string>();
   const problems: string[] = [];
@@ -209,6 +211,8 @@ function sources(proj: string) {
   let successors: Map<string, string> | undefined; // a set authored with a superseded piece places its successor
   const successor = (id: string): string => (successors ??= supersededIds((closure(proj) as string[]).map((p) => path.join(PROJECTS, p)))).get(id) ?? id;
   const prop = (id: string): DressingData | undefined => {
+    const excluded=builderPolicy.excluded(id);
+    if(excluded){problems.push(`${id}: OWNER EXCLUDED by ${excluded.project} (${excluded.id})${excluded.note?': '+excluded.note:''}`);used.set(`curation:${id}`,JSON.stringify(excluded));return undefined;}
     if (props.has(id)) return props.get(id);
     let decl: DressingData | undefined;
     const files = [...(overlay ? [path.resolve(overlay, `${id}.json`)] : []), prefabAt(proj, id)];

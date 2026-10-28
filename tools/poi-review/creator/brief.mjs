@@ -30,6 +30,7 @@ export function prepareCreatorJob(input) {
   const prompt = [
     `Own the complete POI ${brief.name} (${brief.id}) in project ${brief.project}.`,
     'Read tools/poi-review/creator/SKILL.md in the active Engine checkout, then brief.json in this job directory.',
+    'Read docs/art-direction.md: texture-led PSX is the default across this whole layout and all its assets. Geometry supplies silhouette, usable space and functional depth; plan painted surface identity and ornament with it. Review a representative textured sample before repetition, using each subsystem\'s supported texture route. Honour the requested plan/build scope.',
     `Requested adventure: ${brief.adventureSize}; hostility: ${brief.hostility}; work mode: ${brief.mode}.`,
     ...(brief.parent ? [`Part of ${brief.parent}: this job is that place's entrance, sized as a pinpoint child; the size gate judges ${brief.parent}'s tier over ${brief.parent} plus its children (job.mjs measure).`] : []),
     `Size targets (tools/poi-review/size-tiers.mjs; install REFUSES below them, measured by job.mjs measure): ${tierTargetsText(brief.adventureSize)} Record measurements.measuredCombinedUsableAreaM2 (measured, not estimated), measurements.features[] { id, kind, linkedTo[] } and measurements.approaches[] in handoff.json.`,

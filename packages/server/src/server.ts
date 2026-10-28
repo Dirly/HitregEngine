@@ -541,6 +541,15 @@ export class GameServer {
     this.world = opts.world;
     this.transport = opts.transport;
     this.terrain = opts.terrain ?? null;
+    if (this.terrain) {
+      // every resident server cell is simulation tier; past the world limit there is no ground to hold anyone on
+      const terrain = this.terrain;
+      this.world.groundSimulated = (x, z) => {
+        const size = terrain.resolved.streamer.cellSize;
+        const cx = Math.floor(x / size), cz = Math.floor(z / size);
+        return !terrain.inWorld(cx, cz) || terrain.has(cx, cz);
+      };
+    }
     this.snapshotEvery = opts.snapshotEvery ?? 3;
     this.terrainEvery = opts.terrainEvery ?? 10;
     this.graceTicks = Math.round((opts.reconnectGraceSeconds ?? 60) / this.world.fixedDt);

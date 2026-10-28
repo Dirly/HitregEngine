@@ -34,7 +34,8 @@
  * world-matrix work (updateMatrix / updateMatrixWorld calls per frame by branch, ms per top-level branch), the
  * profiler's top scopes for the window, and JS heap allocation / GC count (precise memory info). It resets the profiler.
  * --arms "<label>=<js>~<label>=<js>" (no spaces: heavy-lock wrappers re-split on them): in-session A/B arms (instead of --ab); each <js> runs in the page before its run
- * with `h` = window.__hitreg. --stand-only: settle and take the standing breakdown only, no drive. --shot: a
+ * with `h` = window.__hitreg. --stand-only: settle and take the standing breakdown only, no drive. --cpu-profile: a CDP
+ * sampling profile over --cpu-ms (3000) standing, by self / inclusive function and by file (decomposes render/draw). --shot: a
  * picture of each arm's standing view, editor overlay hidden (<out>/<scene>-<line>-<arm>.png).
  *
  * Heavy job: run it under the machine's heavy lock and alone (frame numbers are worthless beside other browsers).
@@ -65,6 +66,11 @@ const ARMS_SPEC = arg("--arms");
 const STAND_ONLY = argv.includes("--stand-only");
 /** --shot: a picture of the standing view per arm (editor overlay hidden): <out>/<scene>-<line>-<arm>.png */
 const SHOT = argv.includes("--shot");
+/** --cpu-profile: a CDP sampling profile (100 µs) over 3 s standing after the breakdown, aggregated by self time per
+ *  function, inclusive time per function and self time per source file — what decomposes a scope the engine profiler
+ *  cannot (three's render(), the solver). (idle)/(program)/(garbage collector) rows are V8's own. */
+const CPU_PROFILE = argv.includes("--cpu-profile");
+const CPU_PROFILE_MS = +arg("--cpu-ms", "3000");
 type XZ = [number, number];
 const lines = args("--line").map((spec) => {
   const eq = spec.indexOf("=");
@@ -141,14 +147,14 @@ const BREAKDOWN_HOOK = `(() => {
   // phase 1: n frames with nothing wrapped (the profiler only) — the honest timings; phase 2: n instrumented frames
   // (counts and attribution; the wrappers slow the frame, so its own timings are not comparable)
   window.__frameBreakdown = (n) => new Promise((done) => {
-    const p0 = window.__hitreg.profiler; if (p0) { p0.enabled = true; p0.reset?.(); }
+    const p0 = window.__hitreg.profiler; if (p0) { p0.enabled = true; p0.reset?.(); } window.__hitreg.setGpuTiming?.(true);
     const f0c = window.__sprintFrames ? window.__sprintFrames.length : 0; let k = 0;
     const cleanTick = () => {
       if (++k <= n) { requestAnimationFrame(cleanTick); return; }
       const w = window.__sprintFrames ? window.__sprintFrames.slice(f0c + 1, f0c + 1 + n).map((x) => x.work).sort((a, b) => a - b) : [];
       const s = p0?.summary?.();
       const clean = { workP50: w.length ? +w[Math.floor(w.length / 2)].toFixed(1) : null, workP95: w.length ? +w[Math.floor(w.length * 0.95)].toFixed(1) : null,
-        frameMs: s?.frameMs, scopes: s ? [...s.scopes].sort((a, b) => b.avgSelfMs - a.avgSelfMs).slice(0, 20).map((x) => [x.path, +x.avgSelfMs.toFixed(2)]) : null,
+        frameMs: s?.frameMs, gpuMs: s?.gpuMs ?? null, shaderBuildsPending: window.__hitreg.renderer.shaderBuildsPending ?? null, scopes: s ? [...s.scopes].sort((a, b) => b.avgSelfMs - a.avgSelfMs).slice(0, 20).map((x) => [x.path, +x.avgSelfMs.toFixed(2)]) : null,
         counters: s ? Object.fromEntries(Object.entries(s.counters || {}).map(([kk, v]) => [kk, +(+v.avg).toFixed(1)])) : null };
       instrumented(n).then((res) => done({ clean, ...res }));
     };
@@ -402,19 +408,19 @@ await page.addInitScript(BREAKDOWN_HOOK);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const waitUntil = async (cond: () => Promise<boolean>, ms: number) => { const t = Date.now(); while (Date.now() - t < ms) { if (await cond()) return true; await sleep(500); } return false; };
 const ev = <T,>(src: string, a?: unknown) => page.evaluate(`(${src})(${JSON.stringify(a ?? null)})`) as Promise<T>;
-type St = { scene: string; mode: string; travelling: boolean; loading: boolean; sim: boolean; pid: string | null; chunkLoading: number };
-const state = () => ev<St>(`() => { const h = window.__hitreg; return { scene: h.sceneName(), mode: h.playMode.get(), travelling: h.travelling(), loading: !!h.loading?.(), sim: !!h.sim, pid: h.playerId(), chunkLoading: h.chunkManager.stats.loading }; }`);
+type St = { scene: string; mode: string; travelling: boolean; loading: boolean; sim: boolean; pid: string | null; chunkLoading: number; builds: number };
+const state = () => ev<St>(`() => { const h = window.__hitreg; return { scene: h.sceneName(), mode: h.playMode.get(), travelling: h.travelling(), loading: !!h.loading?.(), sim: !!h.sim, pid: h.playerId(), chunkLoading: h.chunkManager.stats.loading, builds: h.renderer.shaderBuildsPending ?? 0 }; }`);
 
 const t0 = Date.now();
 await page.goto(`${base}/?scene=${encodeURIComponent(SCENE)}`, { waitUntil: "load" });
 if (!(await waitUntil(() => page.evaluate(() => !!(window as unknown as { __hitreg?: { playerId?: unknown } }).__hitreg?.playerId), 240000))) { console.error("STOP: the dev app never came up"); await browser.close(); process.exit(2); }
-await waitUntil(async () => (await state()).scene === SCENE, 120000);
+if (!(await waitUntil(async () => (await state()).scene === SCENE, 120000))) console.error(`scene ${SCENE} not up after 120 s: ${JSON.stringify(await state())}; page errors: ${JSON.stringify(logs.slice(-8))}`);
 await sleep(1500);
 await page.locator("canvas").first().focus().catch(() => {});
 if (MODE === "play") {
   await page.keyboard.press("Backquote");
   const inPlay = async () => { const s = await state(); return s.mode === "playing" && s.sim && !!s.pid && !s.loading; };
-  if (!(await waitUntil(inPlay, +arg("--play-wait-ms", "300000")))) { console.error(`STOP: play never started: ${JSON.stringify(await state())}`);
+  if (!(await waitUntil(inPlay, +arg("--play-wait-ms", "300000")))) { console.error(`STOP: play never started: ${JSON.stringify(await state())}; page errors: ${JSON.stringify(logs.slice(-8))}`);
     // what the arrival gate is waiting for: simulation cells desired but not loaded, and the loader's own sets
     console.error("chunk state: " + JSON.stringify(await ev(`() => { const cm = window.__hitreg.chunkManager; const notLoaded = []; for (const [k, r] of cm.desiredCells) if (r === "simulation" && cm.hasCell(k) && !cm.loaded.has(k)) notLoaded.push(k); return { lastFocus: cm.lastFocus, focus: [cm.focusX, cm.focusZ], cellSize: cm.streamer?.cellSize, simNotLoaded: notLoaded, inFlight: [...cm.inFlight], pending: [...cm.pending.keys()], queue: cm.cellQueue.slice(0, 30), inFlightSupercells: [...(cm.inFlightSupercells?.keys?.() ?? cm.inFlightSupercells ?? [])].slice(0, 20), landing: cm.isLandingReady(cm.focusX, cm.focusZ) }; }`))); await browser.close(); process.exit(2); }
   await ev(`() => document.exitPointerLock?.()`);
@@ -426,9 +432,50 @@ type Entry = { t: number; key: string; x: number; z: number; exists: boolean; lo
 type Run = { samples: Sample[]; entries: Entry[]; frames: [number, number, number][]; nudges: { t: number; x: number; z: number }[]; total: number; breakdown?: Record<string, unknown> | null };
 /** The console line for a breakdown: totals, top scopes, top draw rows and matrix branches. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const brief = (b: any) => ({ clean: b.clean ? { work: b.clean.workP50, p95: b.clean.workP95, scopes: b.clean.scopes?.slice(0, 10), draws: b.clean.counters?.drawCalls } : null, work: b.workP50, draws: b.drawsPerFrame, roMs: b.renderObjectMs, mats: b.materials, um: b.matrices.updateMatrix, umw: b.matrices.updateMatrixWorld,
+const brief = (b: any) => ({ clean: b.clean ? { work: b.clean.workP50, p95: b.clean.workP95, gpu: b.clean.gpuMs?.avg, builds: b.clean.shaderBuildsPending, scopes: b.clean.scopes?.slice(0, 10), draws: b.clean.counters?.drawCalls } : null, work: b.workP50, draws: b.drawsPerFrame, roMs: b.renderObjectMs, mats: b.materials, um: b.matrices.updateMatrix, umw: b.matrices.updateMatrixWorld,
   walked: b.graph.walked, objects: b.graph.objects, heap: b.heap, scopes: b.profile?.scopes?.slice(0, 8) });
 const results: Record<string, unknown>[] = [];
+
+type CpuRow = { k: string; pct: number; ms: number };
+type CpuProfile = { ms: number; samples: number; self: CpuRow[]; inclusive: CpuRow[]; files: CpuRow[] };
+/** A CDP sampling profile over `ms` of wall-clock on the page's main thread, aggregated three ways (see --cpu-profile). */
+async function cpuProfile(ms: number): Promise<CpuProfile> {
+  type Node = { id: number; callFrame: { functionName: string; url: string; lineNumber: number }; children?: number[] };
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Profiler.enable");
+  await cdp.send("Profiler.setSamplingInterval", { interval: 100 });
+  await cdp.send("Profiler.start");
+  await sleep(ms);
+  const { profile } = (await cdp.send("Profiler.stop")) as { profile: { nodes: Node[]; samples: number[]; timeDeltas: number[]; startTime: number; endTime: number } };
+  await cdp.send("Profiler.disable");
+  await cdp.detach();
+  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  const parentOf = new Map<number, number>();
+  for (const n of profile.nodes) for (const c of n.children ?? []) parentOf.set(c, n.id);
+  const selfUs = new Map<number, number>();
+  for (let i = 0; i < profile.samples.length; i++) selfUs.set(profile.samples[i]!, (selfUs.get(profile.samples[i]!) ?? 0) + (profile.timeDeltas[i] ?? 0));
+  const total = profile.endTime - profile.startTime;
+  const src = (n: Node) => n.callFrame.url.replace(/^https?:\/\/[^/]+\//, "").replace(/\?.*$/, "").replace(/^node_modules\/\.vite\/deps\//, "deps/").replace(/^@fs\/.*?\/Engine\//, "");
+  const key = (n: Node) => `${n.callFrame.functionName || "(anonymous)"} ${src(n)}:${n.callFrame.lineNumber + 1}`;
+  const file = (n: Node) => src(n) || n.callFrame.functionName || "(native)";
+  const bySelf = new Map<string, number>(), byFile = new Map<string, number>(), inclusive = new Map<string, number>();
+  const add = (m: Map<string, number>, k: string, us: number) => m.set(k, (m.get(k) ?? 0) + us);
+  for (const [id, us] of selfUs) {
+    const n = byId.get(id)!;
+    add(bySelf, key(n), us);
+    add(byFile, file(n), us);
+    const seen = new Set<string>();
+    for (let at: number | undefined = id; at !== undefined; at = parentOf.get(at)) {
+      const k = key(byId.get(at)!);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      add(inclusive, k, us);
+    }
+  }
+  const top = (m: Map<string, number>, n: number): CpuRow[] =>
+    [...m].sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, us]) => ({ k, pct: +((us / total) * 100).toFixed(1), ms: +(us / 1000).toFixed(1) }));
+  return { ms: +(total / 1000).toFixed(0), samples: profile.samples.length, self: top(bySelf, 40), inclusive: top(inclusive, 40), files: top(byFile, 20) };
+}
 const pct = (xs: number[], p: number) => { if (!xs.length) return NaN; const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.max(0, Math.ceil((p / 100) * s.length) - 1))]!; };
 
 const ARMS: { label: string; on: boolean | null; js?: string }[] = ARMS_SPEC
@@ -451,9 +498,14 @@ for (const base of lines) for (const armDef of ARMS) {
   await waitUntil(async () => { const s = await state(); return !s.travelling && !s.loading; }, 240000);
   // settle: the rings around the start finish streaming (or the settle budget runs out)
   await waitUntil(async () => (await state()).chunkLoading === 0, SETTLE_MS);
+  // ...and the background shader precompiles those cells queued: a window measured over them is paying for
+  // compiles, not the scene (6 ms a frame of compileAsync showed up in a "standing" profile before this wait)
+  await waitUntil(async () => (await state()).builds === 0, SETTLE_MS);
   await sleep(3000);
   const standing = BREAKDOWN ? await ev<Record<string, unknown>>(`() => window.__frameBreakdown(90)`) : null;
   if (standing) console.log(JSON.stringify({ line: line.name, standing: brief(standing) }));
+  const cpu = CPU_PROFILE ? await cpuProfile(CPU_PROFILE_MS) : null;
+  if (cpu) console.log(JSON.stringify({ line: line.name, cpu: { ms: cpu.ms, self: cpu.self.slice(0, 14), files: cpu.files.slice(0, 8) } }));
   if (SHOT) {
     await ev(`() => window.__hitreg.editorVisible?.set(false)`);
     await sleep(1500);
@@ -462,7 +514,7 @@ for (const base of lines) for (const armDef of ARMS) {
     await ev(`() => window.__hitreg.editorVisible?.set(true)`);
     console.log(`shot: ${file}`);
   }
-  if (STAND_ONLY) { results.push({ summary: { line: line.name }, standing }); continue; }
+  if (STAND_ONLY) { results.push({ summary: { line: line.name }, standing, cpu }); continue; }
   console.log(`${line.name}: start ${sx.toFixed(0)},${sz.toFixed(0)} (${((Date.now() - t0) / 1000).toFixed(0)} s)`);
   await page.locator("canvas").first().focus().catch(() => {});
   await ev(`() => document.exitPointerLock?.()`);
@@ -500,7 +552,7 @@ for (const base of lines) for (const armDef of ARMS) {
   console.log(JSON.stringify({ line: summary.line, readyAhead: summary.readyAhead, enteredUnloaded: summary.enteredUnloaded, enteredNoCollider: summary.enteredNoCollider, lod: summary.lod, proxyCellsNear: summary.proxyCellsNear, frames: summary.frames, nudges: summary.nudges }));
   const sprinting = run.breakdown ?? null; delete run.breakdown;
   if (sprinting) console.log(JSON.stringify({ line: line.name, sprinting: brief(sprinting) }));
-  results.push({ summary, profile, standing, sprinting, run });
+  results.push({ summary, profile, standing, cpu, sprinting, run });
   if (profile) console.log(JSON.stringify({ profile: { frameMs: profile["frameMs"], gapMs: profile["gapMs"], gpuMs: profile["gpuMs"], scopes: (profile["scopes"] as { path: string; avgMs: number; avgSelfMs: number }[]).slice(0, 12).map((x) => [x.path, +x.avgSelfMs.toFixed(2), +x.avgMs.toFixed(2)]) } }));
 }
 await browser.close().catch(() => {});
@@ -528,9 +580,9 @@ for (const r of results) {
 }
 const bdRows = results.flatMap((r) => (["standing", "sprinting"] as const).filter((k) => r[k]).map((k) => [`${(r["summary"] as { line: string }).line} ${k}`, r[k]] as const));
 if (bdRows.length) {
-  md.push("", "## Frame breakdown (per frame, 90 frames)", "", "| when | clean work p50 / p95 | clean top scopes (self ms) | instrumented work p50 | draws main / shadow / post | renderObject ms | materials main / shadow | updateMatrix / updateMatrixWorld | objects walked / all | alloc MB/frame, GCs | top scopes (self ms) |", "|---|---|---|---|---|---|---|---|---|---|---|");
+  md.push("", "## Frame breakdown (per frame, 90 frames)", "", "| when | clean work p50 / p95 | GPU ms avg | clean top scopes (self ms) | instrumented work p50 | draws main / shadow / post | renderObject ms | materials main / shadow | updateMatrix / updateMatrixWorld | objects walked / all | alloc MB/frame, GCs | top scopes (self ms) |", "|---|---|---|---|---|---|---|---|---|---|---|---|");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  for (const [w, b] of bdRows as [string, any][]) md.push(`| ${w} | ${b.clean?.workP50} / ${b.clean?.workP95} | ${(b.clean?.scopes ?? []).slice(0, 8).map((x: [string, number]) => `${x[0]} ${x[1]}`).join("; ")} | ${b.workP50} | ${b.drawsPerFrame.main} / ${b.drawsPerFrame.shadow} / ${b.drawsPerFrame.post} | ${b.renderObjectMs} | ${b.materials.main} / ${b.materials.shadow} | ${b.matrices.updateMatrix} / ${b.matrices.updateMatrixWorld} | ${b.graph.walked} / ${b.graph.objects} | ${b.heap.allocMBperFrame}, ${b.heap.gcs} | ${(b.profile?.scopes ?? []).slice(0, 6).map((x: [string, number]) => `${x[0]} ${x[1]}`).join("; ")} |`);
+  for (const [w, b] of bdRows as [string, any][]) md.push(`| ${w} | ${b.clean?.workP50} / ${b.clean?.workP95} | ${b.clean?.gpuMs?.avg?.toFixed?.(1) ?? "-"} | ${(b.clean?.scopes ?? []).slice(0, 8).map((x: [string, number]) => `${x[0]} ${x[1]}`).join("; ")} | ${b.workP50} | ${b.drawsPerFrame.main} / ${b.drawsPerFrame.shadow} / ${b.drawsPerFrame.post} | ${b.renderObjectMs} | ${b.materials.main} / ${b.materials.shadow} | ${b.matrices.updateMatrix} / ${b.matrices.updateMatrixWorld} | ${b.graph.walked} / ${b.graph.objects} | ${b.heap.allocMBperFrame}, ${b.heap.gcs} | ${(b.profile?.scopes ?? []).slice(0, 6).map((x: [string, number]) => `${x[0]} ${x[1]}`).join("; ")} |`);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   for (const [w, b] of bdRows as [string, any][]) {
     md.push("", `### ${w}`, "", "Draws (per frame) by pass, branch, type — top by ms:", "");
@@ -543,6 +595,16 @@ if (bdRows.length) {
     for (const m of (b.matrices.entries ?? []).slice(0, 10)) md.push(`- ${m.calls} / ${m.um}: ${m.k}`);
     md.push("", `Matrix ms by top-level branch: ${b.matrices.msByTop.slice(0, 8).map((m: { k: string; ms: number }) => `${m.k} ${m.ms}`).join("; ")}`);
   }
+}
+for (const r of results) {
+  const c = r["cpu"] as CpuProfile | null | undefined;
+  if (!c) continue;
+  md.push("", `## CPU profile standing — ${(r["summary"] as { line: string }).line} (${c.ms} ms, ${c.samples} samples)`, "", "Self time by function (% of wall-clock):", "");
+  for (const x of c.self.slice(0, 30)) md.push(`- ${x.pct}% ${x.ms} ms: ${x.k}`);
+  md.push("", "Inclusive time by function:", "");
+  for (const x of c.inclusive.slice(0, 25)) md.push(`- ${x.pct}% ${x.ms} ms: ${x.k}`);
+  md.push("", "Self time by source file:", "");
+  for (const x of c.files.slice(0, 15)) md.push(`- ${x.pct}% ${x.ms} ms: ${x.k}`);
 }
 if (logs.length) md.push("", "## Page errors", "", ...logs.slice(-12).map((l) => `- ${l}`));
 fs.writeFileSync(path.join(OUT, `${SCENE}-sprint.md`), md.join("\n") + "\n");

@@ -89,6 +89,8 @@ import {
   buildScene,
   collectBones,
   EngineRenderer,
+  PRECOMPILE_SLICE_LOADING_MS,
+  PRECOMPILE_SLICE_MS,
   FoliageLodSystem,
   InstancedPropPool,
   sceneLighting,
@@ -2257,6 +2259,11 @@ async function main(): Promise<void> {
     4000,
   );
   const controls = new CameraControls(camera, canvas);
+  // Prop-pool pages live outside the streamed cell groups, so a cell's precompile never reaches them: without this
+  // every first-seen prop model built its shaders synchronously inside render() on its first draw.
+  propPool.onPageAdded = (meshes) => {
+    for (const mesh of meshes) void renderer.precompileGroup(mesh, camera, built.scene);
+  };
   /** Scratch for the editor streaming focus (the orbit target) — see the frame loop. */
   const editorFocus = new THREE.Vector3();
   // ?at=x,z[,y] (scene-scope.ts): start the editor camera, i.e. the edit-mode streaming focus, at that place
@@ -2642,6 +2649,7 @@ async function main(): Promise<void> {
   document.body.appendChild(overlayContainer);
   mountEditor({
     container: overlayContainer,
+    propReviewUrl: "/prop-review.html?project=world-kit",
     store,
     registry,
     assets,
@@ -3087,6 +3095,9 @@ async function main(): Promise<void> {
   const socialPanel = gatewayFlow?.social ?? null;
   // the load-in screen: a painted screen until the world around the player is streamed in and the frame rate has
   // settled (shaders compiled, models uploaded) — instead of dropping them into a hitching, half-built world
+  /** True from boot until the streamer first goes quiet: the chunk streamer bursts while it is. */
+  let initialStreamPending = true;
+  const bootedAt = performance.now();
   const loadScreen = mountLoadScreen({
     creation: () => findCreation(assets),
     textureUrl: (id) => assets.getTexture(id)?.url,
@@ -3281,6 +3292,10 @@ async function main(): Promise<void> {
   // floor collider then came in ABOVE it (wreck-hole, 2026-10-12: stuck under the deck at y 0.3, 5.6 m short of the exit).
   let travelHold: { id: string; pos: [number, number, number]; meshesSince?: number } | null = null;
   const groundHold = new GroundLoadHold();
+  /** For PhysicsSim.holdUngrounded: one closure for the life of the session, not one per step. */
+  const isCellSimulated = (x: number, z: number): boolean => chunkManager.isCellSimulated(x, z);
+  /** A/B switch for probes (`__hitreg.holdUngrounded(false)` lets ungrounded bodies fall again). */
+  let holdUngroundedBodies = true;
   let travelView: { x: number; z: number; started: number } | null = null;
   const travelLoadingEl = document.createElement("div");
   travelLoadingEl.setAttribute("role", "status");
@@ -4381,10 +4396,22 @@ async function main(): Promise<void> {
   rebuild();
   clientLog("boot: scene built");
 
-  const refreshThumbnails = () => void renderThumbnails({
-    assets, registry, renderer, backend, thumbnails, thumbnailRequests,
-    span: (name, detail) => profiler.span(name, detail),
-  });
+  // Asset thumbnails bake in their own scene on the main thread (8 s measured on Skelmorrow, each one a set of
+  // shader builds for that scene's context). Not while the world is loading in: a request made then is held and
+  // baked once the load screen is down and the first stream has settled (see the frame loop).
+  let thumbnailsDue = false;
+  const thumbnailsDeferred = () => initialStreamPending || loadScreen.showing();
+  const refreshThumbnails = () => {
+    if (thumbnailsDeferred()) {
+      thumbnailsDue = true;
+      return;
+    }
+    thumbnailsDue = false;
+    void renderThumbnails({
+      assets, registry, renderer, backend, thumbnails, thumbnailRequests,
+      span: (name, detail) => profiler.span(name, detail),
+    });
+  };
   refreshThumbnails();
   thumbnailRequests.subscribe(refreshThumbnails);
   assetsVersion.subscribe(refreshThumbnails);
@@ -4684,6 +4711,9 @@ async function main(): Promise<void> {
     const chunkStats = chunkManager.stats;
     profiler.setCounter("chunks", chunkStats.chunks);
     profiler.setCounter("chunkEntities", chunkStats.entities);
+    // terrain disk cache: a snapshot taken after a slow load says whether the load regenerated or read back
+    profiler.setCounter("voxelCacheHits", voxelDiskCacheStats.hits);
+    profiler.setCounter("voxelCacheMisses", voxelDiskCacheStats.misses);
     profiler.setCounter("loading", chunkStats.loading + subsceneManager.stats.loading + gltfLoadingCount());
     const tiers = foliageLod.tierCounts();
     profiler.setCounter("foliageNear", tiers.near);
@@ -4794,6 +4824,11 @@ async function main(): Promise<void> {
       },
       // A/B switch for the play-mode freeze of static entity subtrees
       freezeStatic: (on: boolean) => (on ? freezeStaticEntities() : thawStaticEntities()),
+      // A/B switch for the hold on dynamic bodies standing where no ground is simulated (PhysicsSim.holdUngrounded)
+      holdUngrounded: (on: boolean) => {
+        holdUngroundedBodies = on;
+        if (!on) sim?.releaseUngrounded();
+      },
       portalCurtain: () => portalCurtain.visible,
       // the local body and a dev fast-travel to an exact point (map travel with a given height): tools/portal-play.mts
       playerId: () => localPlayerId(),
@@ -4832,6 +4867,8 @@ async function main(): Promise<void> {
       cloth: (id: string) => cloth.swayOf(id)?.toArray() ?? null,
       // the animation system itself: a perf probe toggles `holdBones` for an in-session A/B
       animations,
+      // the scene's particle system (stats(): emitters, asleep, batches, particles; sleepDistance for an A/B)
+      particles,
       info: () => JSON.parse(JSON.stringify(renderer.renderer.info)),
       graphStats: () => {
         const byType = new Map<string, number>();
@@ -5027,8 +5064,12 @@ async function main(): Promise<void> {
       profiler.end();
       // Hidden tabs still simulate. Ground protection must not depend on the render/update callback.
       groundHold.update(sim, localPlayerId(), (x, z) => chunkManager.isCellLoaded(x, z));
+      // Every other dynamic body (a mob asleep 300 m away, a dropped crate) whose cell carries no collider yet
+      // is held where it stands and slept — see PhysicsSim.holdUngrounded. Before the readback: the held
+      // height is what the scene sees.
+      if (holdUngroundedBodies) sim.holdUngrounded(isCellSimulated);
       profiler.begin("physics.readback");
-      for (const [id, state] of sim.states()) {
+      for (const [id, state] of sim.states(true)) {
         const object = built.objects.get(id);
         if (!object) continue;
         applyBodyState(object, state);
@@ -5175,6 +5216,16 @@ async function main(): Promise<void> {
         const focusObj =
           playMode.get() !== "edit" && followTargetId ? built.objects.get(followTargetId) : null;
         profiler.begin("chunks");
+        // integrate at full speed while nobody can see the frame: the load-in screen is up, or the editor is
+        // streaming the world in for the first time after boot (one cell a frame took 90-160 s on a 1100-cell
+        // world). NOT while playing behind a lifted load screen: the far ring kept bursting for 70 s after entry
+        // and held the game at ~10 fps (383 of 944 frames over 50 ms, measured) — in play the pacing budgets apply.
+        // (a scene with nothing to stream settles after a moment, or the deferred thumbnails would never bake)
+        if (initialStreamPending && chunkManager.stats.loading === 0 && (chunkManager.stats.chunks > 0 || performance.now() - bootedAt > 3000)) initialStreamPending = false;
+        chunkManager.integrationBurst = loadScreen.showing() || (initialStreamPending && playMode.get() === "edit");
+        // nobody sees the frame behind the load screen: let the background shader builds fill it
+        renderer.precompileSliceMs = chunkManager.integrationBurst ? PRECOMPILE_SLICE_LOADING_MS : PRECOMPILE_SLICE_MS;
+        if (thumbnailsDue && !thumbnailsDeferred()) refreshThumbnails();
         if (focusObj) {
           const p = focusObj.getWorldPosition(followPos);
           chunkManager.update(p.x, p.z);

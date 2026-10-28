@@ -48,7 +48,8 @@ npx tsx tools/dress.mts walk --project <p> --plan <plan> --scene <s>   # real bo
 ## Owner rulings 2026-10-20 (enforced by `dress check`)
 - Chapel: altar first, `{ kind: "auto", room, near: "apse" | "back-wall" }` (faces the nave); pews `prefer: "row", near: <altar>` in 2+ rows. Warnings `chapel-altar`, `chapel-pews`.
 - A lectern/podium (`neverInDoorLine`) never stands in a door line (doorway/entry width carried 3 m in): violation `door-line`; auto spots skip them.
-- Nothing solid stands within 1.2 m in front of a doorway, entry or hallway mouth, dungeon rooms included (owner walk 2026-10-21): violation `opening-clear`; auto spots skip it.
+- Nothing solid stands within 2 m in front of a doorway, entry or hallway mouth, on either side of the door, dungeon rooms included (owner walks 2026-10-21 and 2026-10-27: "remove anything a few grid tiles from a door"): violation `opening-clear` (`OPENING_CLEAR`); auto spots skip it.
+- Every building with a door holds at least one light INSIDE its footprint (a hearth, candle, lantern or chandelier fixture from the plan's bucket): `town-lights check` fails `interior <id>: no light inside` and the zonegen `lights` row with it (owner walk 2026-10-27: houses read black at night).
 - Books lie flat on tables, desks and chests, upright only on shelves (sidecar `pose: { surface: "flat", shelf: "upright" }`): violation `book-upright`.
 - A standing candelabra within 1.2 m of a table is violation `candelabra-table` unless placed on a wall, `prefer` wall/corner or near the altar; a table takes the LOW candelabra `on` it.
 - Props tagged `sign` (hanging trade signs, sign posts) never stand inside a room: violation `sign-indoors`; on a town exterior they go on `door-sign-<lot>` anchors (`town-exterior door-signs`). Wall boards (notice/tally boards) are not signs and may dress a room (owner ruling 2026-10-21).

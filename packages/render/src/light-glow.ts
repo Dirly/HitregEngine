@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import { attribute, cameraPosition, float, length, max, normalize, positionLocal, pow, saturate, uniform, uv, vec3 } from "three/tsl";
+import { applyAdditiveFog } from "./additive-fog.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type N = any;
@@ -34,9 +35,9 @@ export function haloMaterial(): THREE.MeshBasicNodeMaterial {
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
-    fog: false,
     toneMapped: true,
   });
+  applyAdditiveFog(m);
   m.name = "light-glow";
   const a: N = attribute("aHalo", "vec4");
   const tint: N = attribute("aHaloColor", "vec4");

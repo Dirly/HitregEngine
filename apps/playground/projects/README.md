@@ -18,7 +18,7 @@ in either direction. Cloning a project into `projects/<name>/` of any engine
 working copy is the whole install step. Keep the project's branch on `main`
 to match the engine's.
 
-## The projects in this checkout (2026-10-08)
+## The projects in this checkout (2026-10-28)
 
 A project is not always a whole game: shared layers are projects too, and a world lists them in
 `project.json` `dependsOn` (the editor, server and authoring tools load a project's closure).
@@ -27,13 +27,15 @@ A project is not always a whole game: shared layers are projects too, and a worl
 | --- | --- | --- |
 | `foundation` | Dirly/hitreg-foundation | the shared game: characters, combat scripts, items, spells, creatures, UI, audio, their workbenches and the `field` server test fixture. Depends on no world. |
 | `world-kit` | Dirly/hitreg-world-kit | shared world-building content: catalogued props, purchased packs (resized textures), dressing sets, town role tiles, kit Blockbench sources. Depends on `foundation`. |
-| `proving` | Dirly/hitreg-proving | the sample world: zones, towns, POIs, NPCs, quests, site props. Depends on both + its dungeons. |
-| `fieldfast-hall`, `fieldfast-barrow`, `gnawspur-deeps`, `rime-hall` | Dirly/hitreg-<name> | proving's instanced dungeons |
+| `proving` | Dirly/hitreg-proving | the older sample world: zones, towns, POIs, NPCs, quests, site props. Depends on both. Its four example dungeons were archived 2026-10-28 (post-mortem: we dogfood world building from scratch). |
+| `firstshore` | (local) | the one-zone proof world being built from `docs/postmortems/skelmorrow.md`; brief and ledger in `firstshore/authoring/RUN.md`. |
 | `dc-carved-library`, `dc-pattern-workshop` | Dirly/hitreg-<name> | workbenches of the DC carving/construction tools |
 
 `npx tsx tools/assets-reach.mts <project> --check-deps` (from `apps/playground`) lists references
 that resolve only outside a project's closure — missing at runtime. Retired projects and pruned assets
-are in `HitRegStudios/projects-archive/restructure-2026-10-08/` with undo lists.
+are in `HitRegStudios/projects-archive/restructure-2026-10-08/` with undo lists; the Skelmorrow retirement
+(skelmorrow, its dungeons, every `pb-*` place, every lab/proof bench, proving's dungeons) is listed in
+`HitRegStudios/projects-archive/README.md` (2026-10-28).
 
 ## Layout
 

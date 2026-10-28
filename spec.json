@@ -543,7 +543,7 @@
         },
         "silhouette": {
           "default": 0.6,
-          "description": "How dark the far landmark reads against the fog: 0 = fades toward the fog colour like the ground, 1 = a near-black shape. The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never pops at the edge.",
+          "description": "How dark the far landmark reads against the fog: 0 = fades toward the fog colour like the ground, 1 = a clearly darker shape (40% under the fog colour; never a black cutout). The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never pops at the edge.",
           "type": "number",
           "minimum": 0,
           "maximum": 1
@@ -17561,7 +17561,7 @@
         },
         "__schema987": {
           "default": 0.6,
-          "description": "How dark the far landmark reads against the fog: 0 = fades toward the fog colour like the ground, 1 = a near-black shape. The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never pops at the edge.",
+          "description": "How dark the far landmark reads against the fog: 0 = fades toward the fog colour like the ground, 1 = a clearly darker shape (40% under the fog colour; never a black cutout). The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never pops at the edge.",
           "$ref": "#/$defs/__schema988"
         },
         "__schema988": {
@@ -34770,6 +34770,72 @@
         }
       }
     },
+    "prop-curation": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/__schema0"
+        },
+        "props": {
+          "$ref": "#/$defs/__schema1"
+        }
+      },
+      "required": [
+        "version",
+        "props"
+      ],
+      "additionalProperties": false,
+      "description": "Owner prop review choices in authoring/prop-curation.json. Builders respect exclusions across the project dependency closure and nested prefabs; installed scenes and source assets are preserved.",
+      "$defs": {
+        "__schema0": {
+          "type": "number",
+          "const": 1
+        },
+        "__schema1": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "use": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "exclude",
+                  "trash"
+                ],
+                "description": "Owner choice for future builders. Trash removes a prop from the active review library and blocks future placement while retaining assets for recovery and existing references. Exclude and trash survive regeneration; allow cannot override either in a dependency project."
+              },
+              "note": {
+                "default": "",
+                "type": "string",
+                "maxLength": 2000
+              },
+              "reviewedHash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "Prefab/dependency fingerprint when reviewed. Changed content is shown as needing review; exclusions still apply."
+              },
+              "updatedAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              }
+            },
+            "required": [
+              "use",
+              "reviewedHash",
+              "updatedAt"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
     "theme": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -35216,8 +35282,8 @@
     "hitreg.armor-atlas": {
       "version": 1,
       "id": "hitreg.armor-atlas",
-      "name": "Armor / Weapon Atlas",
-      "description": "Register generated artwork against a UV key and write a game-ready atlas. Character armor uses a 256px sheet; longsword weapons use a 128px sheet with weapon-sized bleed by default.",
+      "name": "Armor / Weapon / Prop Atlas",
+      "description": "Register painted artwork against a UV key. Armor and weapon presets remain supported; custom prop guides use their supplied manifest at its measured resolution with nearest filtering.",
       "category": "Assets/Generate",
       "surfaces": [
         "assets",
@@ -35260,9 +35326,23 @@
             {
               "value": "longsword",
               "label": "longsword"
+            },
+            {
+              "value": "prop",
+              "label": "custom prop UV guide"
             }
           ],
           "default": "armor"
+        },
+        "manifest": {
+          "label": "Prop UV manifest",
+          "description": "Required for the custom prop sheet: manifest.json from props paint plan. Its named islands, measured square size and bleed govern registration; size/bleed/filter controls below apply only to armor and weapon presets. This tool registers custom artwork; props paint import combines it with shared material tiles for the model.",
+          "required": false,
+          "kind": "file",
+          "accept": [
+            "application/json"
+          ],
+          "maxBytes": 262144
         },
         "name": {
           "label": "Output name",
@@ -35276,7 +35356,7 @@
         },
         "size": {
           "label": "Atlas size",
-          "description": "Square output size in pixels. Presets are character armor 256px and longsword 128px; set this only when intentionally overriding the sheet preset.",
+          "description": "Armor/weapon presets only: square output size in pixels. Custom prop guides always retain their manifest resolution, so this control cannot silently reduce their texel density.",
           "required": true,
           "kind": "number",
           "default": 256,
@@ -35287,7 +35367,7 @@
         },
         "bleed": {
           "label": "Bleed",
-          "description": "Padding texels dilated around UV islands. Presets are armor 8px and longsword 3px, keeping the same relative gutter after downsampling.",
+          "description": "Armor/weapon presets only: padding texels around UV islands. Custom prop guides retain the bleed declared by their manifest.",
           "required": true,
           "kind": "number",
           "default": 8,
@@ -35298,7 +35378,7 @@
         },
         "filter": {
           "label": "Filter",
-          "description": "Box filtering is the normal downsampling path; nearest preserves hard source pixels.",
+          "description": "Armor/weapon presets only: box downsamples smoothly, nearest preserves pixels. Custom prop guides always use nearest filtering at their measured resolution.",
           "required": true,
           "kind": "select",
           "options": [
@@ -35396,7 +35476,34 @@
             "type": "string",
             "enum": [
               "armor",
-              "longsword"
+              "longsword",
+              "prop"
+            ]
+          },
+          "manifest": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mediaType": {
+                "type": "string",
+                "enum": [
+                  "application/json"
+                ]
+              },
+              "data": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 349528,
+                "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+              }
+            },
+            "required": [
+              "name",
+              "mediaType",
+              "data"
             ]
           },
           "name": {
@@ -37557,7 +37664,7 @@
               },
               "silhouette": {
                 "default": 0.6,
-                "description": "How dark the far landmark reads against the fog: 0 = fades toward the fog colour like the ground, 1 = a near-black shape. The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never pops at the edge.",
+                "description": "How dark the far landmark reads against the fog: 0 = fades toward the fog colour like the ground, 1 = a clearly darker shape (40% under the fog colour; never a black cutout). The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never pops at the edge.",
                 "type": "number",
                 "minimum": 0,
                 "maximum": 1
@@ -39848,7 +39955,7 @@
               },
               "silhouette": {
                 "default": 0.6,
-                "description": "How dark the far landmark reads against the fog: 0 = fades toward the fog colour like the ground, 1 = a near-black shape. The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never pops at the edge.",
+                "description": "How dark the far landmark reads against the fog: 0 = fades toward the fog colour like the ground, 1 = a clearly darker shape (40% under the fog colour; never a black cutout). The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never pops at the edge.",
                 "type": "number",
                 "minimum": 0,
                 "maximum": 1

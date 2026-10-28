@@ -254,3 +254,4 @@ test("arrival becomes ready once every scheduled near cell has loaded, on a diag
     assert.equal(manager.isArrivalReady(x, z), true, `focus ${x},${z}: scheduled ${scheduled.length}`);
   }
 });
+

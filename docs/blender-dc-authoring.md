@@ -10,6 +10,11 @@ and more legible than composing CSG recipes. DC removes internal coincident face
 within a shared field. Independently extracted groups are separate meshes;
 importing them together does not union them.
 
+Apply `docs/art-direction.md` to the complete layout and its finish. Blender
+supplies real spatial structure; palette textures carry repeated surface detail.
+Keep unique mapped ornaments on separate display/prop meshes or supported decals:
+DC discards source UVs, so a painted focal panel must not enter the volume bake.
+
 Proof of the chain: `apps/playground/projects/hero-tower-blender` (NOTES.md there):
 export → convert → dual contouring → mesh audit, all groups passing at 0.12 m with no
 hand transcription.

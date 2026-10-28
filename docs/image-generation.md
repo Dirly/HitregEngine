@@ -63,6 +63,10 @@ folder. Project manifests reference request ids.
 
 ## Writing the prompt
 
+- Follow `docs/art-direction.md` across all visual content. Plan painted identity
+  with the layout and forms; request tiles, trims or registered focal artwork as
+  appropriate. Local painted relief and bevel shading may carry form, while
+  directional scene lighting stays out of the texture.
 - **Say the style every time.** The default look for this game is PSX-era pixel art — see the
   [PSX style](../CLAUDE.md) convention. Say "straight-on, evenly lit, no baked highlights, no directional shadows,
   no perspective" for anything that becomes a texture; the generator adds cinematic lighting otherwise.

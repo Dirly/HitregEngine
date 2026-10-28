@@ -39,3 +39,5 @@ generator (`MMO/WFC/Generated/make_*.py`) add the piece, then rebuild every test
 - Edit Derek's source kits (`MMO/WFC/*.obj`). The corrected copies are in `UVFixed/`; re-exported pieces go through
   `MMO/WFC/tools/uvfix/fix_uv.py -- <file>` then `weld.py`.
 - Treat a warning as acceptable: geometry problems are failures (KIT-RULES §22.10).
+- Export a ruin while KIT-RULES §36 (R70, closed wall ends) is unbuilt: every kit wall is two open sheets and a
+  broken bay exposes its neighbours as hollow slots. Build R70 and its open-end gate first (0 open ends per GLB).

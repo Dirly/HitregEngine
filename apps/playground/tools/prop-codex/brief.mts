@@ -5,6 +5,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from 'node:url';
 import type { PropRequest } from "../_prop-composite-guard.mts";
 import { DEFAULT_KIND_SIZES, kindOf } from "../_prop-real-size.mts";
 
@@ -44,6 +45,7 @@ export interface BriefInput {
   reviewNote?: string;
   /** Gate text from a failed check, fed back on the retry. */
   retry?: string;
+  reuseNotes?: string;
 }
 
 /** A prop name from a request id: the slug's first words, never the culture repeated, at most 5 words / 40 chars. */
@@ -84,8 +86,10 @@ export function writeBrief(input: BriefInput): string {
     r.why ? `Why it is wanted: ${r.why}` : "",
     "",
     "## What to make",
+    "Reuse existing models before making geometry. Books, candles, skulls and other existing components belong in prefab assemblies. A generated body must not remodel those components; leave measured attachment positions and compose the existing assets afterwards. Retexturing an existing model is preferred when its form already fits.",
+    input.reuseNotes ? `Preferred reusable sources (binding):\n${input.reuseNotes}` : "",
     `ONE static prop: **${r.name.replace(/-/g, " ")}** — for the **${r.culture}** culture${input.cultureNote ? ` (${input.cultureNote})` : ""}, **${scale.id}** scale.`,
-    "It must be nameable at a glance from 10 m by its silhouette alone. If the request names a stand-in, yours replaces it in the same spot.",
+    "Its overall shape and function must read at 10 m. Identity and ornament may come from painted artwork; do not model details merely to make the untextured silhouette name every motif. If the request names a stand-in, yours replaces it in the same spot.",
     "If the request describes a scene (a pile, a set, a heap of several things), make the ONE strongest object of it that reads as the whole idea.",
     "",
     "## Real size (binding)",
@@ -98,11 +102,18 @@ export function writeBrief(input: BriefInput): string {
     `- No part smaller than ${LIMITS.partMinExtent * 100} cm in its largest dimension: nails, rivets, grain, rope twist, writing, seams, studs, stitching are painted by the role texture, never modelled. Chain = a few chunky links or a coiled tube, not 40 links.`,
     `- At most ${LIMITS.trianglesMax} triangles after triangulation (aim for 150-700). Prefer beams/blocks/panels; use low segment counts (6-10) on lathe/tube/vessel.`,
     "- Openings, gaps, legs, cavities and outlines are real geometry; surfaces are not.",
-    `- Texel density is fixed by the helper at ${LIMITS.texel.target} texels/m: never scale UVs, never add materials, colours, images or modifiers.`,
-    "- Structural = geometry (frame, boards, legs, rims, straps wider than 5 cm, lids). Painted = texture (grain, weave, rust, writing, stains, small fittings).",
+    `- Texel density is fixed by the helper at ${LIMITS.texel.target} texels/m. Use named paint(...) surfaces for custom artwork; the tool owns their UVs, image import and atlas packing. Do not manually scale UVs or create materials, images or modifiers.`,
+    "- Geometry carries the outer silhouette, openings, functional depth, support and moving parts. Paint carries carved relief, decorative shell segmentation, veins, bevel shading, faces, symbols, patina, seams and small fittings, even when the motif itself is large.",
+    "- First decide what is structural and what is painted. A beetle door is a thick door with painted beetle artwork; an elaborate seal is a shallow disc with a painted face; an insect statue uses a few shaped masses with painted shell divisions and eyes. Do not assemble ornamental legs, veins or a seal from tubes when artwork can express them.",
     "",
-    "## Material roles (the only materials; pass `role='<name>'`)",
+    "## Shared material roles (plain surfaces; custom painted regions are declared separately)",
     ...Object.entries(ROLE_NOTES).map(([k, v]) => `- \`${k}\`: ${v}`),
+    "",
+    "## Named artwork surfaces (prefer these for identity and ornament)",
+    "Build the simple shape with the helpers and give its part a stable name. Then call:",
+    "`paint(m, 'beetle-front', part='door body', projection='front', detail='A painted carved beetle with layered wing covers, recessed legs, aged bronze borders and worn teal pigments.')`",
+    "The helper paints only the facing polygons of that part. Projections: front/back/left/right/top/bottom; cylinder unwraps a vertical shell with a real seam. Use separate named front/back surfaces when the artwork differs. A flat disc face uses top or front according to its modeled pose; its circular UV footprint is preserved.",
+    "Use a detailed art description rather than generic material names. No image or file access in the design: `props paint plan` measures the surface and writes the exact UV guide, `props paint gen` generates/registers art, and `props paint import --art <png>` registers supplied art. Missing or stale artwork blocks final builds. Ordinary unpainted wood/stone props may still use shared roles alone.",
     "",
     "## Frame and mount",
     "- Blender coordinates, metres, Z up. The FRONT of the prop faces **-Y**; its back is +Y.",
@@ -117,7 +128,7 @@ export function writeBrief(input: BriefInput): string {
     "## Contract (the check enforces it)",
     `Write exactly one file, \`${name}.py\`: a Python snippet executed inside the helper namespace of \`context/helpers.py\` (read it, and the`,
     "examples in `context/examples.py`, which are real catalogued designs in the same palette). Rules:",
-    `- Build exactly one mesh: \`m=Mesh('${name}')\`, then helper calls (block, beam, panel, table, tray, vessel, disc, wheel, sack, loaf, m.tube, m.lathe, m.slab, m.add) and \`math\`.`,
+    `- Build exactly one mesh: \`m=Mesh('${name}')\`, then helper calls (block, beam, panel, table, tray, vessel, disc, wheel, sack, loaf, m.tube, m.lathe, m.slab, m.add), paint(...) declarations and \`math\`.`,
     "- No imports, no bpy, no file access, no functions other than small local helpers, no randomness (use fixed numbers).",
     "- Every helper call names a part (`part='...'`) where it takes one, saying what the part IS.",
     "- End with exactly ONE call:",
@@ -144,6 +155,7 @@ export function helperContext(worldKit: string): string {
   if (a < 0 || b < 0) throw Error(`town-craft build.py has no helper section (def block .. def emit): ${tc}`);
   const meshText = fs.readFileSync(mesh, "utf8");
   const m0 = meshText.indexOf("class Mesh");
+  const surfaceText = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'surfaces.py'), 'utf8');
   return [
     "# Helper library for prop designs (read-only reference). Mesh is the shared mesh builder; the functions below it",
     "# are the town-craft helpers. Coordinates: metres, Z up, front faces -Y. UVs and the atlas are handled for you.",
@@ -153,6 +165,7 @@ export function helperContext(worldKit: string): string {
     meshText.slice(m0 >= 0 ? m0 : 0).split("\n    def object(")[0],
     "",
     build.slice(a, b).trimEnd(),
+    surfaceText.slice(surfaceText.indexOf('PROJECTIONS ='), surfaceText.indexOf('def clipped(')).trimEnd(),
     "",
   ].join("\n");
 }

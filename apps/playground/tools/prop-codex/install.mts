@@ -1,20 +1,23 @@
 /**
  * Install the Codex-made props of world-kit as the `codex-craft/` collection, the town-craft way:
- * designs (authoring/codex-craft/designs/*.py) -> Blender build (source/*.glb, geometry.json) -> packed onto the SHARED
- * town-craft atlas page (one texture with the 48 town-craft props: the renderer uploads it once) -> prefabs + catalogue
+ * designs (authoring/codex-craft/designs/*.py) -> paint preflight -> Blender build (source/*.glb, geometry.json)
+ * -> shared town atlas for generic props or a budgeted painted atlas -> prefabs + catalogue
  * rows + dressing sidecar, registered in authoring/prop-catalogs.json -> review cards from the runtime glTFs.
  * The town-craft models re-emitted by the pack must come out byte-identical (checked; a changed page is an error).
  */
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import os from 'node:os';
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { applyOps, createScene, ComponentRegistry, registerCoreComponents, dressingSchema, prefabFromSubtree, type Op } from "@hitreg/core";
-import { BLENDER, blenderBuild, type GeometryRecord } from "./check.mts";
+import { applyOps, createScene, ComponentRegistry, registerCoreComponents, dressingSchema, prefabFromSubtree, mergeVocabulary, type Op } from "@hitreg/core";
+import { BLENDER, blenderBuild, gateFaults, type GeometryRecord } from "./check.mts";
+import {paintingStatus} from './paint.mts';
+import {packBuiltProps, PAINTED_ATLAS} from './pack.mts';
+import {assertDesignReuse,readReusePolicy} from '../_prop-reuse.mts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ENGINE = path.resolve(HERE, "../../../..");
 export const COLLECTION = "codex-craft";
 const sha = (p: string) => crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
 const readJson = (p: string) => JSON.parse(fs.readFileSync(p, "utf8").replace(/^﻿/, ""));
@@ -58,29 +61,52 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
   const D = dir(worldKit), designs = path.join(D, "designs"), source = path.join(D, "source");
   const files = fs.readdirSync(designs).filter((f) => f.endsWith(".py")).sort().map((f) => path.join(designs, f));
   if (!files.length) throw Error(`no designs in ${designs}`);
+  const reusePolicy=readReusePolicy(worldKit);
+  // A planning build measures named UV regions but never publishes placeholder artwork.
+  const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'hitreg-prop-preflight-'));
+  try {
+    const plans=blenderBuild(worldKit,files,scratch,path.join(scratch,'geometry.json'),{paintMode:'plan'});
+    for(const g of plans){
+      if(g.error)throw Error(`${g.name}: ${g.error}`);
+      assertDesignReuse(worldKit,path.join(designs,g.name+'.py'),g,reusePolicy);
+      if(g.paintPlan?.surfaces.length){const s=paintingStatus(worldKit,g.name,g.paintPlan);if(!s.ready)throw Error(`${g.name}: ${s.faults.join('; ')}. Use props paint plan/gen/import before install.`);}
+    }
+  } finally {
+    const resolved=path.resolve(scratch),temp=path.resolve(os.tmpdir())+path.sep;
+    if(!resolved.startsWith(temp)||!path.basename(resolved).startsWith('hitreg-prop-preflight-'))throw Error('Unexpected prop preflight scratch path');
+    fs.rmSync(resolved,{recursive:true,force:true});
+  }
   // a removed design must not linger as a source the pack re-reads
   if (fs.existsSync(source)) for (const f of fs.readdirSync(source)) if (f.endsWith(".glb") && !files.some((d) => path.basename(d, ".py") === path.basename(f, ".glb"))) fs.rmSync(path.join(source, f));
   log(`build ${files.length} design(s) in Blender`);
   const records = blenderBuild(worldKit, files, source, path.join(D, "geometry.json"));
   const failed = records.filter((r) => r.error), built = records.filter((r) => !r.error);
-  for (const f of failed) { log(`  BUILD FAILED ${f.name}: ${f.error}`); fs.rmSync(path.join(source, f.name + ".glb"), { force: true }); }
+  if(failed.length)throw Error(failed.map(g=>`${g.name}: ${g.error}`).join('\n'));
+  const origins = readOrigins(worldKit);
+  const vocabularyFile=path.join(worldKit,'authoring/dressing/vocabulary.json'),scales=mergeVocabulary(fs.existsSync(vocabularyFile)?readJson(vocabularyFile):undefined).scales;
+  for(const g of built.filter(g=>g.paint)){
+    const origin=origins[g.name],scale=scales.find(s=>s.id===origin?.scale);
+    if(!origin||!scale)throw Error(`${g.name}: missing source origin or scale`);
+    const faults=gateFaults(g,{name:g.name,culture:origin.culture,scale:{id:scale.id,height:scale.height},worldKit},scales);
+    if(faults.length)throw Error(`${g.name}: ${faults.join('; ')}`);
+  }
 
   // pack onto the shared town-craft page; the town-craft models it re-emits must not change
   const tcDir = path.join(worldKit, "assets/models/town-craft");
-  const before = new Map(fs.readdirSync(tcDir).map((f) => [f, sha(path.join(tcDir, f))]));
-  const pack = spawnSync(process.execPath, [path.join(ENGINE, "tools/wfc-3d/kit.mjs"), "pack", source, "--project", path.basename(worldKit), "--atlas", "town-craft", "--out", `models/${COLLECTION}`], { encoding: "utf8", cwd: path.resolve(worldKit, "../.."), maxBuffer: 1 << 26 });
-  const packLog = `${pack.stdout ?? ""}${pack.stderr ?? ""}`;
-  if (pack.status !== 0) throw Error(`kit.mjs pack failed:\n${packLog.slice(-2000)}`);
+  const before = new Map((fs.existsSync(tcDir)?fs.readdirSync(tcDir):[]).map((f) => [f, sha(path.join(tcDir, f))]));
+  const packMessages:string[]=[];
+  packBuiltProps(worldKit,built,s=>{packMessages.push(s);log(s);});
+  const packLog=packMessages.join('\n');
   const changed = [...before].filter(([f, h]) => sha(path.join(tcDir, f)) !== h).map(([f]) => f);
   if (changed.length) throw Error(`the pack changed ${changed.length} town-craft model(s) (${changed.slice(0, 4).join(", ")}): the shared page moved; restore them from git and investigate`);
-  const atlas = readJson(path.join(worldKit, "assets/textures/atlas/town-craft.atlas.json"));
-  if (atlas.pages !== 1) throw Error(`town-craft atlas now has ${atlas.pages} pages; a Codex prop must sample the existing role sheet only`);
+  const townLayout=path.join(worldKit, "assets/textures/atlas/town-craft.atlas.json");
+  if (fs.existsSync(townLayout)&&readJson(townLayout).pages !== 1) throw Error(`town-craft atlas exceeds its one-page shared-material budget`);
 
   // prefabs, catalogue, sidecar
   const reg = new ComponentRegistry(); registerCoreComponents(reg);
   const anyWater = built.some((g) => g.water);
   if (anyWater) ensurePoolWater(worldKit);
-  const origins = readOrigins(worldKit), rows: any[] = [], assets: any[] = [], sidecar: any = { version: 1, props: {} };
+  const rows: any[] = [], assets: any[] = [], sidecar: any = { version: 1, props: {} };
   for (const g of built) {
     const o = origins[g.name]; if (!o) throw Error(`${g.name}: no request origin in ${COLLECTION}/requests.json`);
     const id = `${COLLECTION}/${g.name}`, model = `${id}.gltf`, d = declaration(g, o);
@@ -108,7 +134,8 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
       recipe: "apps/playground/tools/prop-codex/build.py (town-craft helpers + role sheet)", sourceModel: `authoring/${COLLECTION}/source/${g.name}.glb`, sourceModelSha256: sha(path.join(source, g.name + ".glb")),
       request: o.request, requestProject: o.project, for: o.for, design: g.design, size: g.size,
       frame: `glTF Y-up metres; ${g.mount === "wall" ? "wall-contact rear, vertically centred" : "bottom-centre foot"} root; front +Z`,
-      parts: g.parts, textureRoles: [...new Set((g.parts ?? []).map((p) => p.role))].sort(), triangles: g.triangles, materials: 1, atlas: "town-craft", filter: "nearest",
+      parts: g.parts, textureRoles: [...new Set((g.parts ?? []).map((p) => p.role))].sort(), triangles: g.triangles, materials: 1, atlas: g.paint ? PAINTED_ATLAS : "town-craft", filter: "nearest",
+      ...(g.paint?{painting:{guide:`authoring/${COLLECTION}/paint/${g.name}/key.png`,layout:`authoring/${COLLECTION}/paint/${g.name}/layout.json`,art:`authoring/${COLLECTION}/paint/${g.name}/art.png`,receipt:`authoring/${COLLECTION}/paint/${g.name}/receipt.json`,geometrySha256:g.paint.geometrySha256,artSha256:g.paint.artSha256,atlasSha256:g.paint.atlasSha256,surfaces:g.paint.surfaces.map(({name,part,projection,detail,metres,pixels,texel})=>({name,part,projection,detail,metres,pixels,texel}))}}:{}),
       texelsPerMetre: g.texel, alpha: "opaque; openings are actual geometry", instancing: "one body mesh/material, static instancing", lod: "none",
       collision: g.solid ? "exact static trimesh from published model" : "none (soft)", ...(g.water ? { water: `engine water disc r ${g.water.radius} m, depth ${g.water.depth} m (${POOL_WATER})` } : {}), behavior: "Static decoration; no gameplay.", effects: [],
       review: `authoring/${COLLECTION}/reports/prop-${g.name}.png`, madeBy: "Codex design via props codex (tools/prop-codex)", sha256: sha(file),
@@ -116,9 +143,13 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
     assets.push({ id: model, path: `assets/models/${model}`, sha256: sha(runtime), source: `authoring/${COLLECTION}/source/${g.name}.glb` });
   }
   if (anyWater) assets.push({ id: POOL_WATER, path: `assets/materials/${POOL_WATER}.json`, sha256: sha(path.join(worldKit, "assets/materials", POOL_WATER + ".json")), source: "tools/prop-codex/install.mts (engine water shader, calm pool)" });
+  if(built.some(g=>g.paint)){
+    const layout=readJson(path.join(worldKit,`assets/textures/atlas/${PAINTED_ATLAS}.atlas.json`));
+    for(let i=0;i<layout.pages;i++){const p=`assets/textures/atlas/${PAINTED_ATLAS}-${i}.png`;assets.push({id:p,path:p,sha256:sha(path.join(worldKit,p)),source:'tools/prop-codex/pack.mts'});}
+  }
   write(path.join(D, "catalog.json"), {
-    version: 1, about: "Props designed by Codex from open prop requests (props codex), built on the town-craft helpers and packed on the town-craft atlas page.",
-    source: { builder: "apps/playground/tools/prop-codex/build.py", helpers: "authoring/town-craft/build.py (helper section)", meshHelper: "authoring/crockin-river-culture/mesh.py", roleSheet: "assets/textures/town-craft/materials.png", restrictions: "Generated geometry only; town-craft role art (see town-craft/art-provenance.json)." },
+    version: 1, about: "Props from open requests: simple functional geometry, shared material tiles and optional named hand-painted surfaces.",
+    source: { builder: "apps/playground/tools/prop-codex/build.py", helpers: "authoring/town-craft/build.py (helper section)", meshHelper: "authoring/crockin-river-culture/mesh.py", roleSheet: "assets/textures/town-craft/materials.png", painting:'apps/playground/tools/prop-codex/surfaces.py + paint.mts; per-prop provenance receipts', restrictions: "Generated geometry; town-craft role art (see town-craft/art-provenance.json); custom art provenance in each painting receipt." },
     props: rows, assets,
   });
   write(path.join(D, "dressing.json"), sidecar);
@@ -135,11 +166,15 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
   if (cardNames.length) {
     const models = cardNames.map((n) => path.join(worldKit, "assets/models", COLLECTION, n + ".gltf"));
     const args = ["--background", "--factory-startup", "--python", path.join(HERE, "render.py"), "--", "--models", models.join(","), "--cards", path.join(D, "reports")];
+    const painted=built.filter(g=>g.paint&&cardNames.includes(g.name)).map(g=>g.name);
+    if(painted.length)args.push('--painted',painted.join(','));
     const waters = built.filter((g) => g.water && cardNames.includes(g.name)).map((g) => `${g.name}:${[...g.water!.centre, g.water!.radius].join(",")}`);
     if (waters.length) args.push("--water", waters.join(";"));
     if (opts.sheet) args.push("--sheet", opts.sheet, "--labels", (opts.sheetLabels ?? cardNames).join(","));
     log(`render ${cardNames.length} card(s)${opts.sheet ? " + sheet" : ""}`);
+    for(const n of cardNames)for(const p of ['prop',...(painted.includes(n)?['clay','unlit']:[])])fs.rmSync(path.join(D,'reports',`${p}-${n}.png`),{force:true});
     const r = spawnSync(BLENDER, args, { encoding: "utf8", maxBuffer: 1 << 26 });
+    if(painted.length&&(r.status!==0||painted.some(n=>['prop','clay','unlit'].some(p=>!fs.existsSync(path.join(D,'reports',`${p}-${n}.png`))))))throw Error('Painted prop review renders incomplete: '+String(r.stderr).slice(-600));
     for (const n of cardNames) { const c = path.join(D, "reports", `prop-${n}.png`); if (fs.existsSync(c)) cards.push(c); }
     if (cards.length !== cardNames.length) log(`  render: ${cards.length}/${cardNames.length} cards (exit ${r.status}) ${(r.stderr ?? "").slice(-600)}`);
   }

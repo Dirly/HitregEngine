@@ -23,7 +23,7 @@ import { cameraPosition, clamp, float, log, max, min, mix, output, positionWorld
  * - past 80 % of the reach it is driven to fully fogged, so it is gone at
  *   `fogReach` whatever the fog does (and culling may drop it there).
  *
- * What it fogs TOWARD is the fog colour darkened by `silhouette` (up to 70 %),
+ * What it fogs TOWARD is the fog colour darkened by `silhouette` (up to 40 %),
  * the darkening dissolving back into the fog colour over the last 30 % of the
  * reach: a dark shape on the horizon that never pops at the edge.
  *
@@ -42,8 +42,9 @@ const REACH_DEPTH = 3;
 const FADE_START = 0.8;
 /** The silhouette tone returns to the fog colour from here (fraction of reach). */
 const TONE_FADE_START = 0.7;
-/** `silhouette: 1` darkens the fog colour by this much. */
-const MAX_DARKEN = 0.7;
+/** `silhouette: 1` darkens the fog colour by this much. Was 0.7: at 250 m by day a silhouette-1 chapel drew as a black
+ *  cutout against fog-grey trees at the same distance (owner, 2026-10-27: "the church isn't affected by fog"). */
+const MAX_DARKEN = 0.4;
 /** 1 - f is clamped here before the log (a fully fogged pixel has infinite depth). */
 const MIN_TRANSMITTANCE = 1e-4;
 
@@ -98,7 +99,7 @@ export function landmarkFogKey(settings: LandmarkFog): string {
 type N = any;
 
 /** Parts for the scene fog this build sees, or null (no fog / unknown kind = the scene's fog unchanged). */
-function partsFor(builder: N): LandmarkFogParts | null {
+export function sceneFogParts(builder: N): LandmarkFogParts | null {
   const node = builder.fogNode as N;
   if (!node) return null;
   const attached = node[LANDMARK_FOG_PARTS] as LandmarkFogParts | undefined;
@@ -122,7 +123,7 @@ function partsFor(builder: N): LandmarkFogParts | null {
 
 function landmarkSetupFog(reachU: N, silhouetteU: N): (builder: N, outputNode: N) => N {
   return (builder: N, outputNode: N): N => {
-    const parts = partsFor(builder);
+    const parts = sceneFogParts(builder);
     if (!parts) {
       // whatever fog this is, draw it as the scene does (NodeMaterial.setupFog)
       if (builder.fogNode) {
@@ -165,6 +166,9 @@ export function landmarkFogSource(material: THREE.Material): THREE.Material {
 export function landmarkFogMaterial(material: THREE.Material, settings: LandmarkFog): THREE.Material {
   const source = landmarkFogSource(material);
   if ((source as THREE.Material & { fog?: boolean }).fog === false) return source; // a material that opted out of fog stays out
+  // Light cards keep ordinary atmospheric extinction. A landmark's darker
+  // fog colour would turn their whole transparent quad into a visible sheet.
+  if (source.blending === THREE.AdditiveBlending) return source;
   const key = landmarkFogKey(settings);
   let byKey = variants.get(source);
   if (!byKey) variants.set(source, (byKey = new Map()));

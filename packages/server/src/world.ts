@@ -164,6 +164,12 @@ export class HeadlessWorld {
   readonly afterPhysics = new Set<(dt: number) => void>();
   /** Runs after scripts each fixed step (replication, bookkeeping). */
   readonly afterStep = new Set<(dt: number) => void>();
+  /**
+   * Is the ground at (x, z) in the sim? Set by the host that streams terrain (the server's TerrainStreamer); each
+   * step every dynamic body standing where it answers false is held and slept (PhysicsSim.holdUngrounded) instead
+   * of falling through ground that is not there.
+   */
+  groundSimulated: ((x: number, z: number) => boolean) | null = null;
   private readonly profiler: ProfilerLike | undefined;
   /** Static mesh colliders stream around foci (HeadlessWorldOptions.streamStatics). */
   readonly streamsStatics: boolean;
@@ -547,8 +553,9 @@ export class HeadlessWorld {
     profiler?.begin("step");
     this.sim.step(dt);
     profiler?.end();
+    if (this.groundSimulated) this.sim.holdUngrounded(this.groundSimulated);
     profiler?.begin("readback");
-    for (const [id, state] of this.sim.states()) {
+    for (const [id, state] of this.sim.states(true)) {
       const object = this.objects.get(id);
       if (object) applyBodyState(object, state);
     }

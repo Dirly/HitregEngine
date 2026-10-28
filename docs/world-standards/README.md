@@ -33,6 +33,15 @@ its skill's Gates and delete it here.
 - Budget table: no medium row in `docs/zone-creation.md` (small is 200k there, 150k in the skill).
 - OPEN: the run as one script rather than a coordinator following the doc.
 
+**Look (owner walk 2026-10-27)**
+- OPEN: one texel standard. World and props are 40 texels/m, the player body, armour and held gear 109; purchased
+  props re-skinned to 40 read 2-3x coarser than the character. The owner rules one standard or a declared ratio;
+  then the prop texel gate compares with the character standard, not only the town tile.
+- Per-building dark windows (no interior lights, or abandoned): the pane material is shared per kit, so the flag needs
+  an instance attribute. Today every window is lit, street face only (`window-lights.ts`).
+- An interior light STEP in the town builder (fixtures per dwelling from the plan's bucket). Today `town-lights check`
+  only fails a house with no light inside its footprint.
+
 **Sites**
 - Reach check for a premise's landmarks from the road graph; slope survey at the creature's footprint scale.
 - Viewpoint sight-line against natural ground before the freeze; contrast of the defining read from that viewpoint.

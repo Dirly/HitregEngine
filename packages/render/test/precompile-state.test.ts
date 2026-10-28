@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three/webgpu";
-import { EngineRenderer } from "../src/renderer.js";
+import { EngineRenderer, PRECOMPILE_SLICE_MS } from "../src/renderer.js";
 
 function fixture(compile: (root: THREE.Object3D) => Promise<void>) {
   // Exercise the real precompile path without requiring a GPU in unit tests.
   const engine = Object.create(EngineRenderer.prototype) as EngineRenderer;
-  Object.assign(engine, { renderer: { compileAsync: compile }, postUnavailable: true,
+  // Object.create skips the field initializers: give the queue its default slice budget by hand
+  Object.assign(engine, { renderer: { compileAsync: compile }, postUnavailable: true, precompileSliceMs: PRECOMPILE_SLICE_MS,
     precompileStats: { borrowed: 0, plain: 0, objects: 0, fallbacks: 0, healed: 0 } });
   const root = new THREE.Group();
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());

@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_KIND_SIZES, realSizeIssue } from "../_prop-real-size.mts";
 import { CATEGORIES, LANDMARK_TRIANGLES, LIMITS, type ScaleInfo } from "./brief.mts";
+import {readReusePolicy,reuseFaults} from '../_prop-reuse.mts';
 
 export const BLENDER = process.env.HITREG_BLENDER ?? "P:/Program Files/Blender Foundation/Blender 5.2/blender.exe";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +24,8 @@ export interface GeometryRecord {
   rooms?: string[] | null; use?: string[] | null; against?: string; shift?: number[];
   /** An engine water disc in glTF frame (Y up, origin-relative): centre [x, y, z], radius, depth. */
   water?: { centre: number[]; radius: number; depth: number } | null;
+  paintPlan?: import('./paint.mts').PaintPlan | null;
+  paint?: (Omit<import('./paint.mts').PaintPlan,'surfaces'> & {ready: boolean; size: number; atlasSha256: string; artSha256: string; layoutSha256: string; surfaces: (import('./paint.mts').PaintPlan['surfaces'][number] & {texel?: number})[]}) | null;
 }
 export interface Job { name: string; culture: string; scale: ScaleInfo; worldKit: string; /** a landmark request's height, m */ landmark?: number }
 
@@ -55,14 +58,17 @@ export function gateFaults(rec: GeometryRecord, job: Job, scales: ScaleInfo[]): 
   if (!CATEGORIES.includes(rec.category ?? "")) out.push(`category "${rec.category}": one of ${CATEGORIES.join(", ")}`);
   if (!["indoor", "outdoor", "both"].includes(rec.setting ?? "")) out.push(`setting "${rec.setting}": indoor, outdoor or both`);
   if (!(rec.cultures ?? []).some((c) => c === job.culture || c === "any")) out.push(`cultures [${(rec.cultures ?? []).join(", ")}] must include "${job.culture}"`);
-  if ((rec.parts ?? []).length < 2) out.push("one part only: a prop is built from its real parts (a lid has battens, a tub has a rim and staves)");
+  if ((rec.parts ?? []).length < (rec.paintPlan?.surfaces.length ? 1 : 2)) out.push("one part only: a prop is built from its real parts (a lid has battens, a tub has a rim and staves)");
+  for (const s of rec.paint?.surfaces ?? []) if (!s.texel || s.texel < LIMITS.texel.min || s.texel > LIMITS.texel.max) out.push(`paint surface ${s.name}: texel density ${s.texel ?? 0}/m outside ${LIMITS.texel.min}-${LIMITS.texel.max}`);
   return out;
 }
 
 /** Run the Blender build on design files; returns the geometry records. */
-export function blenderBuild(worldKit: string, designs: string[], outDir: string, geometry: string): GeometryRecord[] {
+export function blenderBuild(worldKit: string, designs: string[], outDir: string, geometry: string, options: {paintMode?: 'plan'|'final'; paintRoot?: string} = {}): GeometryRecord[] {
   fs.mkdirSync(outDir, { recursive: true });
-  const r = spawnSync(BLENDER, ["--background", "--factory-startup", "--python", path.join(HERE, "build.py"), "--", "--world-kit", worldKit, "--designs", designs.join(","), "--out", outDir, "--geometry", geometry], { encoding: "utf8", maxBuffer: 1 << 26 });
+  fs.rmSync(geometry, {force:true});
+  const r = spawnSync(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", path.join(HERE, "build.py"), "--", "--world-kit", worldKit, "--designs", designs.join(","), "--out", outDir, "--geometry", geometry, "--paint-mode", options.paintMode ?? 'final', ...(options.paintRoot ? ['--paint-root', options.paintRoot] : [])], { encoding: "utf8", maxBuffer: 1 << 26 });
+  if (r.status !== 0) throw Error(`Blender build failed (exit ${r.status}):\n${(r.stdout ?? '').slice(-1500)}\n${(r.stderr ?? '').slice(-1500)}`);
   if (!fs.existsSync(geometry)) throw Error(`blender build wrote no geometry (exit ${r.status}):\n${(r.stdout ?? "").slice(-1500)}\n${(r.stderr ?? "").slice(-1500)}`);
   return (JSON.parse(fs.readFileSync(geometry, "utf8")) as { props: GeometryRecord[] }).props;
 }
@@ -75,8 +81,8 @@ async function main() {
   const design = path.join(stage, `${job.name}.py`);
   let faults: string[];
   try {
-    const [rec] = blenderBuild(job.worldKit, [design], path.join(stage, "out"), path.join(stage, "geometry.json"));
-    faults = rec ? gateFaults(rec, job, job.scales) : ["build produced no record"];
+    const [rec] = blenderBuild(job.worldKit, [design], path.join(stage, "out"), path.join(stage, "geometry.json"), {paintMode:'plan'});
+    faults = rec ? [...gateFaults(rec, job, job.scales),...reuseFaults(rec,readReusePolicy(job.worldKit))] : ["build produced no record"];
     if (rec && !rec.error) console.log(`gate ${job.name}: ${rec.size!.map((v) => v.toFixed(2)).join("x")} m, ${rec.triangles} tris, ${rec.parts!.length} parts, texel ${rec.texel}/m`);
   } catch (e) { faults = [(e as Error).message]; }
   fs.writeFileSync(path.join(stage, "gate.txt"), faults.length ? faults.map((f) => `- ${f}`).join("\n") + "\n" : "pass\n");

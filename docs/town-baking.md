@@ -5,6 +5,11 @@ Read it with the owning WFC kit's construction rules and [culling.md](culling.md
 Construction rules decide which pieces form a valid building; this policy
 decides how that valid building becomes efficient runtime content.
 
+The visual default is [art-direction.md](art-direction.md), for both the layout
+and every building in it. Plan tiling art, trims and mapped focal panels with the
+structural kit; prove a textured sample before repetition. Baking preserves that
+finish and its texel scale rather than substituting more ornamental geometry.
+
 Here, **baking means compiling static geometry and compatible materials**.
 It does not imply baked lighting, fewer triangles, or merging gameplay objects.
 Choose the bake boundaries while planning the town, before exporting geometry.

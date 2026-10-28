@@ -88,6 +88,7 @@ console.log("3/3 assembling bundle…");
 cpSync("dist-game/play.html", `${out}/index.html`);
 cpSync("dist-game/assets", `${out}/assets`, { recursive: true });
 console.log(`\n✅ ${out}/  — serve on any static host for a playable URL.`);
+console.log(`   see it as players will: pnpm -F playground preview:game ${out}  → http://localhost:4180/${mode === "server" ? "?server=ws://127.0.0.1:8787  (with: pnpm -F @hitreg/server serve --scene <scene>)" : ""}`);
 console.log(withConsole ? "   developer console: INCLUDED (--no-console to strip it)" : "   developer console: stripped");
 if (mode === "server") {
   const where = values.gateway ? `gateway ${values.gateway}` : values.server ? `open server ${values.server}` : "gateway = the page's own origin (or ?gateway= on the page)";

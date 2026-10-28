@@ -88,6 +88,8 @@ import { auditWorld } from "./worldgen-audit.mts";
 import { modelBounds } from "./_gltf-bounds.mjs";
 import { borderClassifier, borderReport, planBarriers, snowLineOf, stripBarrierFeatures, type BorderPairReport } from "./worldgen-borders.mts";
 import { commandLandforms, landformsStageCheck } from "./worldgen-landforms.mts";
+// @ts-expect-error plain ESM helper without types
+import { decodePng } from "./_png.mjs";
 import { commandZoneTextures, zoneTexturesStageCheck } from "./worldgen-zone-textures.mts";
 import { stageStamp } from "./_stage-stamp.mts";
 import { commandScatterFloat } from "./worldgen-scatter-float.mts";
@@ -9347,6 +9349,94 @@ function commandCover(): void {
         `${layer.bladeWidth}x${layer.bladeHeight}m  <=${perDisc} blades  ${layer.biomes.length ? layer.biomes.join(",") : "any biome"}` +
         `${layer.water ? `  water:${layer.water.mode}` : ""}${layer.clump ? "  clumped" : ""}${bits.length ? `  [${bits.join(" ")}]` : ""}`,
     );
+  }
+
+  // ---- colour: a layer's blades read against the ground tile they grow on. Owner walk 2026-10-27: moving grass popped
+  // in at the fade distance in a colour the zone's ground did not have (every layer shared one bright tip, keyed on
+  // generic surface names while each zone paints its own tiles). Effective blade colour = the sprite's mean opaque
+  // colour over its used tiles x bladeColor (what the grass shader draws), or blade/tip mixed for untextured blades;
+  // compared with the mean colour of every ground surface the layer names, by value (luminance ratio) and by hue.
+  const COLOUR = { lumRatio: [0.5, 2.0] as const, hueDeg: 40, minSat: 0.15 };
+  type Rgb = [number, number, number];
+  const hex = (s: string): Rgb | null => {
+    const m = /^#?([0-9a-f]{6})$/i.exec((s ?? "").trim());
+    if (!m) return null;
+    const v = parseInt(m[1]!, 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  };
+  const toHex = (c: Rgb): string => `#${c.map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, "0")).join("")}`;
+  const meanCache = new Map<string, Rgb | null>();
+  const meanOf = (file: string, tiles?: { cols: number; rows: number; used: number[] }): Rgb | null => {
+    const key = `${file}|${tiles ? tiles.used.join(",") : ""}`;
+    if (meanCache.has(key)) return meanCache.get(key)!;
+    let out: Rgb | null = null;
+    try {
+      const { width, height, data } = decodePng(fs.readFileSync(file)) as { width: number; height: number; data: Uint8Array };
+      const tw = tiles ? width / tiles.cols : width;
+      const th = tiles ? height / tiles.rows : height;
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (tiles && !tiles.used.includes(Math.floor(y / th) * tiles.cols + Math.floor(x / tw))) continue;
+          const i = (y * width + x) * 4;
+          if (data[i + 3]! < 64) continue;
+          r += data[i]!; g += data[i + 1]!; b += data[i + 2]!; n++;
+        }
+      }
+      if (n > 0) out = [r / n, g / n, b / n];
+    } catch { out = null; }
+    meanCache.set(key, out);
+    return out;
+  };
+  const lum = (c: Rgb): number => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
+  const hueSat = (c: Rgb): [number, number] => {
+    const r = c[0] / 255, g = c[1] / 255, b = c[2] / 255;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    let h = 0;
+    if (d > 1e-6) h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    return [(h * 60 + 360) % 360, mx > 0 ? d / mx : 0];
+  };
+  const hueGap = (a: number, b: number): number => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+  for (const layer of layers) {
+    if (layer.water || layer.surfaces.length === 0) continue;
+    let blade: Rgb | null = null;
+    if (layer.texture) {
+      const used = layer.atlas ? (layer.tiles.length ? layer.tiles : [...Array(layer.atlas.columns * layer.atlas.rows).keys()]) : [];
+      const sprite = meanOf(textureFile(layer.texture), layer.atlas ? { cols: layer.atlas.columns, rows: layer.atlas.rows, used } : undefined);
+      const k = hex(layer.bladeColor) ?? [255, 255, 255];
+      if (sprite) blade = [(sprite[0] * k[0]) / 255, (sprite[1] * k[1]) / 255, (sprite[2] * k[2]) / 255];
+    } else {
+      const a = hex(layer.bladeColor), b = hex(layer.tipColor);
+      if (a && b) blade = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+    }
+    if (!blade) continue;
+    const [bh, bs] = hueSat(blade);
+    // a layer names a generic surface ("grass"); inside a zone the tile actually drawn for it is the zone's own
+    // (`regions[].ground.grass`, worldgen zone-textures), so the blades are read against every tile they stand on
+    const tilesFor = (name: string): { where: string; surface: string }[] => [
+      { where: "", surface: name },
+      ...(recipe.regions ?? []).flatMap((g) => {
+        const m = (g as { ground?: Record<string, string> }).ground?.[name.toLowerCase()];
+        return m && m.toLowerCase() !== name.toLowerCase() ? [{ where: ` in ${g.id}`, surface: m }] : [];
+      }),
+    ];
+    for (const name of layer.surfaces) {
+      for (const tile of tilesFor(name)) {
+      const sf = recipe.surfaces.find((s) => s.name.toLowerCase() === tile.surface.toLowerCase());
+      if (!sf?.map) continue;
+      const ground = meanOf(textureFile(sf.map));
+      if (!ground) continue;
+      const ratio = lum(blade) / Math.max(0.02, lum(ground));
+      const [gh, gs] = hueSat(ground);
+      const hueOff = bs >= COLOUR.minSat && gs >= COLOUR.minSat ? hueGap(bh, gh) : 0;
+      if (ratio < COLOUR.lumRatio[0] || ratio > COLOUR.lumRatio[1] || hueOff > COLOUR.hueDeg)
+        findings.push(
+          `${layer.id}: blades read ${toHex(blade)} over ${tile.surface}${tile.where} (${toHex(ground)}): value x${ratio.toFixed(2)}, hue ${Math.round(hueOff)}° off — ` +
+            `they pop in at the fade distance in a colour the ground does not have; derive bladeColor/tipColor from the zone's ground tile ` +
+            `(value within x${COLOUR.lumRatio[0]}-${COLOUR.lumRatio[1]}, hue within ${COLOUR.hueDeg}°)`,
+        );
+      }
+    }
   }
 
   const points = option("points", 1500);

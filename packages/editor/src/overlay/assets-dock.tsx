@@ -126,6 +126,7 @@ export function AssetsDock(props: {
   assetsVersion: Observable<number>;
   thumbnails: Observable<Record<string, string>>;
   thumbnailRequests?: Observable<string[]>;
+  propReviewUrl?: string;
   onCreateMaterial: (folder: string) => void;
   onCreateSpritesheet: (folder: string) => void;
   onCreatePrefab: (entityId: string, folder: string) => void;
@@ -292,6 +293,15 @@ export function AssetsDock(props: {
   return (
     <>
       <DockHeader title="Assets">
+        {props.propReviewUrl && <a
+          href={props.propReviewUrl}
+          target="_blank"
+          rel="noopener"
+          style={{ ...buttonStyle, textDecoration: "none", whiteSpace: "nowrap" }}
+          title="Browse props and choose what future builders may use"
+        >
+          Review props ↗
+        </a>}
         <span title="Search within the selected folder (and its subfolders)">
           <SearchInput value={query} onChange={(value) => { setQuery(value); setPage(0); }} />
         </span>

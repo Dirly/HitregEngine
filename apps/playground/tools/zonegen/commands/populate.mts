@@ -1549,12 +1549,35 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     f.push(...rareFindings(named, entries));
   }
 
+  // ---- the hub town's halo (owner ruling 2026-10-27: undead stood at the starter town's own graveyard, and the whole-moor
+  // solo row carried skeletons up to the town box): nothing that attacks on sight — a roamer disc or route, a camp, and the
+  // template bodies that stand at an area — within --hub-halo m (default 300) of the hub town, the area's radius included.
+  // A town's own graveyard, kirk, fields and yards are the town. Roamers fail; a camp or group only warns (a quest may
+  // want a bandit camp on the town's edge, and the brief carries that).
+  const hubHalo = num("hub-halo", 300);
+  for (const a of areas) {
+    const mix = (a.life?.["mix"] as Array<{ template?: string; temperament?: string }> | undefined) ?? [];
+    const areaTemper = (a.life?.["temperament"] as string | undefined) ?? a.temperament;
+    const hostileMix = mix.filter((m) => (m.temperament ?? areaTemper ?? "hostile") === "hostile");
+    const hostile = a.kind === "wanderer" ? hostileMix.length > 0 : (a.temperament ?? "hostile") === "hostile";
+    if (!hostile) continue;
+    const reach = Math.hypot(a.x - hub[0], a.z - hub[1]) - (a.kind === "wanderer" ? a.radius : 0);
+    if (reach >= hubHalo) continue;
+    const who = a.kind === "wanderer" ? [...new Set(hostileMix.map((m) => m.template ?? "?"))].join(", ") : a.creature;
+    f.push({
+      level: a.kind === "wanderer" ? "error" : "warn",
+      code: "hub-halo",
+      message: `${a.id} (${a.kind}): ${who} attack on sight within ${Math.round(Math.max(0, reach))} m of the hub town (halo ${hubHalo} m); move the anchor out, make those rows passive/territorial, or keep them to a place beyond the halo`,
+    });
+  }
+
   // ---- ops
   const ops = buildOps(ctx, zone, areas, used, disabledCamps, kit, f);
 
   const rules = [
     `zone land: inside ${zone}'s polygon, outside its town zones`,
     `not within ${sanctMargin} m of a sanctuary (${sanct.length} circles: safe POIs + safe town zones, as serve() publishes them)`,
+    `nothing that attacks on sight within ${hubHalo} m of the hub town (radius included): roamers fail, camps warn (hub-halo)`,
     `not within a road's half width + ${roadMargin} m (every recipe road, path and street)`,
     `not in water deeper than ${wade} m, not on ground steeper than ${maxSlope} (sin of the angle: ${Math.round((Math.asin(maxSlope) * 180) / Math.PI)}°)`,
     `not inside a non-wild reservation (+10 m): ${reserved.map((r) => r.location).join(", ")}`,

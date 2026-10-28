@@ -4,6 +4,11 @@ Use this for the early blockout/finish sample and the final read-only review. In
 
 ## Questions the owner must resolve
 
+- **Visual construction:** Apply `docs/art-direction.md` across the whole layout.
+  Do simple low-poly forms and painted surfaces deliver the intended richness?
+  Inspect a representative textured sample before repetition. Return unnecessary
+  modeled ornament, absent focal artwork and broken UV scale as concrete faults;
+  a completed textured asset may have a simple clay view.
 - **Fantasy adventure:** Apply `docs/world-standards/adventure-design.md`. What specific fantasy discovery
   draws the player, what does investigation reveal, and what is its payoff? Point to visible features and actual
   supported play. A medieval trade with generic danger, a darker name or lore hidden in the brief is returned under

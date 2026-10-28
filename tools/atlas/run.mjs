@@ -38,13 +38,22 @@ const PRESETS = {
  */
 export async function run(context, inputs) {
   const sheet = inputs.sheet ?? "armor";
-  const preset = PRESETS[sheet] ?? PRESETS.armor;
+  let custom;
+  if(sheet==='prop'){
+    if(!inputs.manifest?.data)throw new Error('Custom prop UV guides require the manifest.json produced by props paint plan');
+    custom=JSON.parse(Buffer.from(inputs.manifest.data,'base64').toString('utf8'));
+    if(![256,512,1024].includes(custom.size)||!Number.isInteger(custom.bleed)||custom.bleed<0||custom.bleed>8||!custom.slots||typeof custom.slots!=='object'||Array.isArray(custom.slots)||Object.keys(custom.slots).length<1||Object.keys(custom.slots).length>32)throw new Error('Invalid custom prop UV manifest: expected a measured square page, bleed and 1–32 named islands');
+    for(const [color,slot] of Object.entries(custom.slots))if(!/^#[a-f0-9]{6}$/i.test(color)||!slot||typeof slot.name!=='string'||!slot.name||slot.transparency!==false||slot.cut!==false)throw new Error('Custom prop islands must be named, opaque surfaces with cut:false');
+  }
+  const preset = custom?{size:custom.size,bleed:custom.bleed,filter:'nearest'}:PRESETS[sheet] ?? PRESETS.armor;
   const keyPath = path.join(context.runDir, "key.png");
   const artPath = path.join(context.runDir, "art.png");
   const outputDir = path.join(context.runDir, "output");
   fs.mkdirSync(outputDir, { recursive: true });
   fs.writeFileSync(keyPath, pngBytes(inputs.key));
   fs.writeFileSync(artPath, pngBytes(inputs.art));
+  const manifestPath=custom?path.join(context.runDir,'manifest.json'):path.join(here, MANIFESTS[sheet] ?? MANIFESTS.armor);
+  if(custom)fs.writeFileSync(manifestPath,JSON.stringify(custom));
 
   const args = [
     path.join(here, "import-atlas.mjs"),
@@ -53,15 +62,15 @@ export async function run(context, inputs) {
     "--art",
     artPath,
     "--manifest",
-    path.join(here, MANIFESTS[sheet] ?? MANIFESTS.armor),
+    manifestPath,
     "--out",
     outputDir,
     "--size",
-    String(inputs.size ?? preset.size),
+    String(custom?preset.size:inputs.size ?? preset.size),
     "--bleed",
-    String(inputs.bleed ?? preset.bleed),
+    String(custom?preset.bleed:inputs.bleed ?? preset.bleed),
     "--filter",
-    String(inputs.filter ?? preset.filter),
+    String(custom?preset.filter:inputs.filter ?? preset.filter),
   ];
   if (inputs.slices) args.push("--slices");
   if (inputs.artMargin) args.push("--art-margin");

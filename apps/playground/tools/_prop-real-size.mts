@@ -7,7 +7,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export interface KindSize { match: string; dim: "h" | "long" | "max"; range: [number, number]; note?: string }
+/** `long`: an optional second bound on the longer horizontal side (a stool is short AND narrow: a 1 m wide "stool" is a side table). */
+export interface KindSize { match: string; dim: "h" | "long" | "max"; range: [number, number]; long?: [number, number]; note?: string }
 export interface KindSizes { userHeight: number; kinds: Record<string, KindSize> }
 interface ScaleClass { id: string; height: number }
 
@@ -48,7 +49,15 @@ export function realSizeIssue(id: string, size: number[], scale: string | undefi
   const lo = +(k.range[0] * f).toFixed(2);
   const hi = +(k.range[1] * f).toFixed(2);
   const v = +measureDim(size, k.dim).toFixed(2);
-  if (v >= lo && v <= hi) return null;
+  if (v >= lo && v <= hi) {
+    if (!k.long || k.dim === "long") return null;
+    // the second bound (owner walk 2026-10-27: a purchased pack's `Stool_1`, 0.6 m tall and 1.05 m wide, was dressed as a
+    // stool beside tables; it is a side table — a pack's object name is never an identity)
+    const w = +measureDim(size, "long").toFixed(2);
+    const wlo = +(k.long[0] * f).toFixed(2), whi = +(k.long[1] * f).toFixed(2);
+    if (w >= wlo && w <= whi) return null;
+    return `real size: a ${kind} ${w} m across is outside ${wlo}-${whi} m for a ${cls?.id ?? "human"}-scale user${k.note ? ` (${k.note})` : ""}: the name is the pack's, not what the thing is — re-declare it as what its size says it is`;
+  }
   const dimWord = k.dim === "h" ? "tall" : k.dim === "long" ? "long" : "across";
   return `real size: a ${kind} ${v} m ${dimWord} is outside ${lo}-${hi} m for a ${cls?.id ?? "human"}-scale user${k.note ? ` (${k.note})` : ""}${v > hi ? ": never scale a prop up to read from far away; a bigger one needs its own model" : ""}`;
 }

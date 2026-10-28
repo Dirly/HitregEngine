@@ -59,6 +59,9 @@ pnpm -F playground exec tsx tools/voxel-blades.mts <recipe.json> --sites --caves
   STALE bake fails (town row `wall`) -> `worldgen op --apply <op>` + `tools/landmark.mts` (the foot reseats on the lowest
   ground of each span), else deepen `footing.depth`. Never prop a wall up with a terrain patch.
 - `scatter-float` > 0.35 m -> a clearing over the edit, or let the engine re-seat; never bury additive blobs to kill foliage.
+- `worldgen cover` colour finding (`<layer>: blades read #.. over <surface>`) -> set the layer's `bladeColor`/`tipColor`
+  from the zone ground tile it grows on (value within x0.5-2, hue within 40°). Grass that pops in at the fade distance
+  in its own colour is the symptom (owner walk 2026-10-27); a world's own layers name its zone surfaces, never `grass`.
 - Stray rock hanging in the air (overhang noise on steep banks, carve slivers) -> `tsx tools/voxel-floaters.mts <world> --project <p> --river <id> | --box x0,z0,x1,z1 | --world --apply` (status row `floaters`; `--mesh` counts what the mesher draws, `--undo`); never hand-carve them.
 - `voxel-blades` skirt ends in air / open edges > 0 -> a mesher seam fault: report it with coordinates (engine work);
   "blades" from field shape (MC interpolation, a step in `height()`) are the height source, not the mesher.

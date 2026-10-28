@@ -10,6 +10,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import {propPolicy} from './_prop-curation.mts';
 import { readableReportFile } from "./_dress-report.mts";
 import {
   entityOwnerState,
@@ -210,6 +211,7 @@ export function ownerInfo(projectsRoot: string, scene: string, entity: string, t
 
 /** The props an owner may swap in (the project's dependsOn closure prop index), plus the real-size table. */
 export function ownerCatalog(projectsRoot: string, project: string, kindSizesFile: string) {
+  const builderPolicy=propPolicy(projectsRoot,project);
   const seen = new Set<string>();
   const order: string[] = [];
   const visit = (p: string): void => {
@@ -235,7 +237,7 @@ export function ownerCatalog(projectsRoot: string, project: string, kindSizesFil
   const pick = ["id", "mount", "size", "category", "scale", "cultures", "setting", "solid", "contact", "fire"];
   return {
     project,
-    props: [...props.values()].filter((r) => r["ok"] !== false).map((r) => Object.fromEntries(pick.filter((k) => k in r).map((k) => [k, r[k]]))),
+    props: [...props.values()].filter((r) => r["ok"] !== false&&!builderPolicy.excluded(String(r['id']))).map((r) => Object.fromEntries(pick.filter((k) => k in r).map((k) => [k, r[k]]))),
     kinds,
   };
 }

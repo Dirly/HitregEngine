@@ -70,6 +70,7 @@ import { designFaults, requireFinalReview, setStage } from "../../../tools/poi-r
 // @ts-ignore untyped engine tool module
 import { tierFor } from "../../../tools/poi-review/size-tiers.mjs";
 import { builtStoneSet, zonePalette } from "./_zone-palette.mts";
+import {propPolicy} from './_prop-curation.mts';
 
 type V2 = [number, number];
 const argv = process.argv.slice(2), cmd = argv[0], world = argv[1] ?? "";
@@ -134,7 +135,9 @@ function gradeTrack(recipe: any, t: ApproachTrack | null): any[] {
 function withoutPlace(w: any) { const features: any = {}; for (const [k, v] of Object.entries(w.features ?? {})) features[k] = Array.isArray(v) ? v.filter((f) => !ownsFeature(f)) : v; return { ...w, features }; }
 /** A prop's catalogue dressing declaration (the prefab root's `dressing` component), for the plan's culture checks. */
 const propInfoCache = new Map<string, { cultures?: string[]; height?: number; size?: number[] } | null>();
+let placementPolicy:ReturnType<typeof propPolicy>|undefined;
 function propInfo(prefab: string): { cultures?: string[]; height?: number; size?: number[] } | null {
+  (placementPolicy??=propPolicy(PROJECTS,project)).assertAllowed(prefab);
   if (!propInfoCache.has(prefab)) { const f = findAsset(project, `prefabs/${prefab}.json`); let d: any = null;
     try { const j = f ? read(f) : null; d = Object.values(j?.entities ?? {}).map((e: any) => e?.components?.dressing).find(Boolean) ?? null; } catch {}
     propInfoCache.set(prefab, d ? { cultures: d.cultures, height: Array.isArray(d.size) ? d.size[1] : undefined, size: Array.isArray(d.size) ? d.size : undefined } : null); }
@@ -487,6 +490,7 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
   const reg = new ComponentRegistry(); registerCoreComponents(reg); registerChunkComponents(reg);
   const SF = sceneFile(p, w), WF = worldFile(p, w);
   const ops = read(path.join(JOB, "ops.json")) as any[], worldOps = read(path.join(JOB, "world-ops.json")) as any[], operators = read(path.join(JOB, "operators.json")) as any[];
+  if(!remove){const policy=propPolicy(PROJECTS,p);for(const op of ops){const id=op.entity?.components?.prefab?.prefabId??(op.component==='prefab'?op.data?.prefabId:undefined);if(id)policy.assertAllowed(id);}}
   // scene: everything tagged poi:<poi> (and its dressing) out, deepest first; then the ops in
   const scene = read(SF), own = Object.keys(scene.entities).filter((id) => (scene.entities[id].tags ?? []).includes(`poi:${poi}`) || id.startsWith(`dress-${poi}-`));
   const depth = (id: string): number => (scene.entities[id]?.parent ? 1 + depth(scene.entities[id].parent) : 0);

@@ -13,6 +13,12 @@ site-specific props and its instanced dungeons (`fieldfast-hall`, `fieldfast-bar
 prop catalogue maintenance with `--project world-kit`; world tools with the world's project.
 Tools read a project's `dependsOn` closure, so a world sees foundation and world-kit content.
 
+**All visual content, layouts and Blender experiments:** read
+[art-direction.md](art-direction.md) before the subsystem route below. Texture-led
+PSX art is the shared default across environments, structures and assets. Plan the
+painted finish along with the structural forms, and review a textured sample
+before repeating a style or major asset group.
+
 ## Dungeons
 
 - **Dungeon rooms and tunnels are modeled in Blender** (Blender MCP) and imported
@@ -36,6 +42,14 @@ Tools read a project's `dependsOn` closure, so a world sees foundation and world
 
 ## Zones, POIs and towns
 
+- **Before reworking any world, town, POI or dungeon tool for the next world:** read
+  `docs/postmortems/skelmorrow.md` (fault → check table). Every row is a check to build into the named
+  tool, not a line for a brief; a tool rework that leaves its rows unbuilt is not done.
+- **Making texture-first low-poly props:** read `docs/prop-cataloging.md` and
+  `apps/playground/tools/prop-codex/README.md`. Use named painted surfaces for
+  emblems, carved motifs and wear; keep geometry for silhouette and useful depth.
+  `props paint` measures guides, generates or imports artwork and blocks stale
+  artwork before the normal `world-kit` prop install.
 - **Making a zone (towns, POIs, dungeons, quests) from a generated world, or dressing any
   space with props:** read `docs/zone-pipeline.md`. The order is a command, `zonegen status`
   (ok/STALE/MISSING + `--next`); do the row it names. Props are placed by NAME through a

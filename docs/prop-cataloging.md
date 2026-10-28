@@ -7,6 +7,47 @@ vegetation and effect-bearing prefab assemblies. Updating an existing prop also
 updates its record and invalidates reviews of changed bytes. Do not rely on chat
 history or a loose asset directory as the catalog.
 
+## Owner review
+
+Open **Assets → Review props** in the development editor, or
+`/prop-review.html?project=world-kit`. The grid includes registered props from the
+selected project and its dependencies. It opens on **Standalone props**;
+**Asset type** separates building/WFC modules, whole buildings, effect helpers
+and source parts. A standalone prop assembled from kit parts stays in the prop
+view. Excluded entries remain reviewable.
+Search or filter a collection, select a card for its larger image or orbitable
+3D view, then use **A** to keep, **X** to exclude, arrows to browse and **Z** to
+undo the last choice. Choices save immediately; optional notes record what needs
+changing. Refresh picks up newly installed or modified content. Generated previews
+wait for texture node graphs to finish loading before caching an image; a failed
+texture is reported instead of being saved as an untextured preview.
+
+**Delete** on a card or **Delete from library** in its details moves it to
+**Trash** immediately; the Delete key does the same for the selected prop.
+Trashed props disappear from active browsing and cannot be used in future builds.
+Open **Trash** to restore them, or undo the last deletion with **Z**. This is
+recoverable library deletion: shared asset files and existing placements are
+retained. Restore an inherited trash choice in the project named on its card.
+
+Unreviewed props remain available by default. Excluding a prop blocks future
+builder use; it preserves its files and existing placements. Review **world-kit**
+to curate the shared library for dependent worlds, or select a world for a local
+exclusion. An exclusion in a dependency or nested prefab also blocks wrappers
+containing it. Restore the named prop in its owning review project rather than
+trying to override that exclusion from a world.
+
+Owner choices live separately in `authoring/prop-curation.json` (the
+`prop-curation` schema in the spec), survive regeneration, and are never compiled
+into source prefab declarations. A changed prefab, material or model/texture
+fingerprint marks the review stale while keeping exclusions in force. Reset
+removes that project's explicit choice and exposes any inherited choice again.
+
+Builder menus, dressing, owner swaps, place-build, and the shared scene-ops file
+writer read the policy fresh. New builders must call `_prop-curation.mts` before
+choosing a prefab and use the validated scene writer; cached indices are metadata,
+not permission to bypass owner exclusions. Render previews and moves/removals of
+existing placements do not create new uses.
+
 ## Required process
 
 1. Search the project's registered catalogs before importing or rebuilding.
@@ -64,7 +105,14 @@ history or a loose asset directory as the catalog.
    plain wood or stone, since that also matches the town's grain; generate new art
    only for painted or mixed surfaces, grouped onto as few pages as possible. A UV
    layout that stacks islands or shrinks them to a few texels cannot carry new art:
-   re-unwrap first. Keep the kit one page and one material whatever the route.
+   re-unwrap first. Keep each prop on one material. Generic town props share the
+   existing town page; unique painted props use a separate collection atlas with
+   an enforced page budget and no automatic downsampling. For new low-poly props
+   with named painted details, follow the
+   [texture-first prop workflow](../apps/playground/tools/prop-codex/README.md):
+   structural geometry, measured UV guide, artwork registration, then clay,
+   unlit and lit review. Ornament belongs in the texture unless it changes the
+   silhouette or needs functional depth.
 5. For fire props, keep ember geometry/material separate from the ordinary atlas.
    Retain the engine ember material and linked fire VFX in the prefab. Catalog the
    effect IDs and attachment positions, along with lit/unlit variants. A purchased
@@ -108,6 +156,23 @@ tables/chairs/benches -> legs, else base); declare it when it is not — a lante
 that stands on a sill, a boulder that should sit on its base.
 
 ## Reuse first: wrap, variant, compose
+
+Owner ruling (2026-10-28): use existing books, candles, skulls and other useful
+parts across collections. A new culture or collection does not justify another
+mesh for the same object. Derek's modelled skull is the source for volumetric
+necromancer skulls. Retexture an existing suitable model before replacing it.
+Use `props reuse` for preferred parts; `props reuse schema` emits the validating
+schema for `world-kit/authoring/prop-reuse.json`. This is authoring policy,
+separate from the owner's keep/exclude/trash decisions.
+
+The prop generation runner checks protected names before launching a job. Its
+Blender gate also checks named geometry parts, and the installer checks new or
+edited designs before publishing. Unchanged installed legacy designs may be
+rebuilt; they are not thereby approved. A matching part must become a nested
+existing prefab in a composition, rather than newly generated body geometry.
+These are semantic name checks, not a geometric duplicate detector: ad-hoc
+importers still owe the same intake and reuse review. Renaming is not a remedy.
+`props dupes <id>` also checks shared collection outputs; shared is not approval.
 
 A builder who needs a prop the menu lacks makes it from what exists, in this order, with `props.mts`
 (`tools/_prop-make.mts`). Each command writes a new prefab in a NEW collection, a catalog row that records its

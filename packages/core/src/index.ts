@@ -470,4 +470,5 @@ export * from "./game-ui.js";
 export * from "./quest-blocks.js";
 export * from "./npc/index.js";
 export * from "./zfight.js";
+export * from './prop-curation.js';
 export { COOLDOWN_NETSTATE, cooldownKey, cooldownSchema, registerCooldownNetState } from "./cooldown.js";

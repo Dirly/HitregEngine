@@ -62,7 +62,7 @@ describe("particle batching", () => {
     expect(smoke.mesh).not.toBe(a.mesh);
     expect(a.mesh.instanceCount).toBe(5);
     expect([a.offset, a.count, b.offset, b.count]).toEqual([0, 3, 3, 2]);
-    expect(particles.stats()).toEqual({ emitters: 3, batches: 2, particles: 6 });
+    expect(particles.stats()).toEqual({ emitters: 3, asleep: 0, batches: 2, particles: 6 });
     expect(a.mesh.parent).toBe(scene);
     expect((a.mesh.material as THREE.Material).forceSinglePass).toBe(true);
 

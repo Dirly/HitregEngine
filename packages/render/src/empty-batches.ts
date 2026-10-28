@@ -22,8 +22,37 @@ export interface ScreenCull {
 }
 let screenCull: ScreenCull | null = null;
 
+/**
+ * A frozen static subtree's verdict (its bits, and what it hid or declared shadowless) is reused for up to this many
+ * walks before the subtree is visited again. The walk visited every object of every town and cell each frame
+ * (~39k on a populated world, ~4 ms) to re-find the same empties and the same too-small props; nothing inside a
+ * frozen subtree moves, so only the camera-dependent size tests can change, and a prop crossing the 2.5 px line a
+ * few frames late is invisible. Expiry is staggered per root so the re-walks spread over frames.
+ */
+const FROZEN_VERDICT_FRAMES = 4;
+interface FrozenVerdict {
+  version: number;
+  frame: number;
+  cull: boolean;
+  bits: number;
+  hidden: THREE.Object3D[];
+  shadowless: THREE.Object3D[];
+}
+const frozenVerdicts = new WeakMap<THREE.Object3D, FrozenVerdict>();
+let walkFrame = 0;
+
+/** Tests: forget every cached frozen-subtree verdict. */
+export function resetFrozenVerdicts(): void {
+  walkFrame += FROZEN_VERDICT_FRAMES;
+}
+/** Tests: how many walks (the creating one included) a fresh verdict for `root` is reused — staggered by its id. */
+export function frozenVerdictLife(root: THREE.Object3D): number {
+  return FROZEN_VERDICT_FRAMES - (root.id % FROZEN_VERDICT_FRAMES);
+}
+
 export function hideNonRenderingBranches(root: THREE.Object3D, shadowless?: THREE.Object3D[], cull?: ScreenCull | null): THREE.Object3D[] {
   screenCull = cull && cull.pxPerUnit > 0 && cull.minRadiusPx > 0 ? cull : null;
+  walkFrame += 1;
   const hidden: THREE.Object3D[] = [];
   collectEmpty(root, root, hidden, shadowless ?? null);
   for (const object of hidden) object.visible = false;
@@ -218,7 +247,20 @@ function collectEmpty(
     if (object !== root) hidden.push(object);
     return 0;
   }
-  if (isFrozenStaticSubtree(object)) frozen = object;
+  let verdictVersion = -1;
+  if (isFrozenStaticSubtree(object)) {
+    frozen = object;
+    if (object !== root) {
+      verdictVersion = frozenSubtreeVersion(object);
+      const v = frozenVerdicts.get(object);
+      if (v && v.version === verdictVersion && v.cull === (screenCull !== null) && walkFrame - v.frame < FROZEN_VERDICT_FRAMES) {
+        // what the last walk hid (only what is visible now: something else may have hidden it since)
+        for (const o of v.hidden) if (o.visible) hidden.push(o);
+        if (shadowless) for (const o of v.shadowless) shadowless.push(o);
+        return v.bits;
+      }
+    }
+  }
   if (screenCull && frozen && object !== root && object.children.length > 0 &&
       (object.isGroup || object.type === "Object3D")) {
     const b = boundsOf(object, frozen);
@@ -232,6 +274,8 @@ function collectEmpty(
       }
     }
   }
+  const verdictHidden = hidden.length;
+  const verdictShadowless = shadowless ? shadowless.length : 0;
   const draws = !(object.isGroup || object.isBone) && object.layers.mask !== 0 &&
     !!(object.isMesh || object.isLine || object.isPoints || object.isSprite || object.isLight) &&
     !(object.isInstancedProps && object.instanceCount === 0) &&
@@ -251,6 +295,17 @@ function collectEmpty(
     // same rule: keep only the highest shadowless branch
     shadowless.length = shadowStart;
     shadowless.push(object);
+  }
+  if (verdictVersion >= 0) {
+    frozenVerdicts.set(object, {
+      version: verdictVersion,
+      // staggered: a quarter of the roots re-walk on any given frame, not all of them on the same one
+      frame: walkFrame - (object.id % FROZEN_VERDICT_FRAMES),
+      cull: screenCull !== null,
+      bits,
+      hidden: hidden.slice(verdictHidden),
+      shadowless: shadowless ? shadowless.slice(verdictShadowless) : [],
+    });
   }
   return bits;
 }

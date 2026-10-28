@@ -32,10 +32,14 @@
  *                                    the project's prop-request list by culture (authoring/dressing/prop-requests.json)
  *   npx tsx tools/props.mts codex <request id...> | --all --project <p> [--batch 5] [--names <id>=<name>,...] [--scales <id>=<scale>,...] [--redo --notes-file <{id: review note}>] [--dry] [--designs-only] [--review-sheet <png>]
  *                                    open prop requests -> one bounded Codex design job each (tools/prop-codex: brief, codex-task.mjs,
- *                                    Blender gate, one retry with the gate text) -> world-kit codex-craft/ on the town-craft atlas page,
+ *                                    Blender gate, one retry with the gate text) -> world-kit codex-craft/ on shared or painted atlas pages,
  *                                    catalogued, review cards, sync/index/status, request made; ledger in <p>/authoring/dressing/prop-requests.md
  *   npx tsx tools/props.mts codex install [--cards <name,...>] [--review-sheet <png>]   (rebuild + pack + catalogue the designs; cards; close requests)
  *   npx tsx tools/props.mts dupes [<new prefab id>...]                     (DUPLICATE of <existing id>; exit 1 when ids are given and one is)
+ *   npx tsx tools/props.mts reuse | reuse schema                          (preferred reusable parts; validated authoring policy schema)
+ *   npx tsx tools/props.mts paint plan|status|gen|import <design name...> [--art <png>] [--force] | paint schema
+ *                                    named paint(...) surfaces -> measured UV guide -> generated/supplied artwork -> registered source atlas;
+ *                                    writes world-kit authoring/codex-craft/paint only; final builds refuse missing/stale paint
  *   npx tsx tools/props.mts menu --map <map id> --room <room id> [--role r] [--plan p] [--wealth w] [--all]
  *       roles: the catalogue's, or a mix (cottage = hall+bedroom+kitchen, guardroom = hall+bedroom, living = hall); with
  *       --plan the room's own role + `also` count too. Named sets that fit are listed first (name, members, footprint).
@@ -67,6 +71,7 @@ import { kindSizes, realSizeIssue, standsAgainstWall, type KindSize } from "./_p
 import { addRequest, closeRequest, reopenRequest, compositeFaults, readRequests, requestsFile } from "./_prop-composite-guard.mts";
 import { texelDensity, clearGeometryCaches, projectedTexels, type Density, type TexInfo, type PixelPage } from "./_prop-geometry.mts";
 import { blockbenchReport } from "./_bb-sources.mts";
+import {propPolicy,filterPropIndex} from './_prop-curation.mts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ROOMS = ["bedroom", "kitchen", "hall", "tavern", "shop", "workshop", "storage", "office", "chapel", "cellar", "street", "plaza", "quay", "yard", "camp", "ruin", "dungeon", "cave-mouth", "path", "shore"];
@@ -107,6 +112,7 @@ const INDEX = "authoring/prop-catalogs.json";
  * WRITES (index, report, new props) go to --project.
  */
 const ROOTS: string[] = closure(projectName).map((p: string) => path.join(PROJECTS, p));
+const builderPolicy=propPolicy(PROJECTS,projectName);
 const proj = (rel: string): string => firstExisting(ROOTS, rel) ?? path.join(PROJECT, rel);
 
 // -------------------------------------------------------------- catalogs ----
@@ -426,6 +432,7 @@ const FAMILIES: [string, RegExp][] = [
   ["campfire", /campfire|fire-?pit/], ["table", /\btable\b/], ["bench", /\bbench\b/], ["stool", /stool/], ["chair", /chair/], ["bed", /(?<!(reed|river|sea|flower|peat) )\bbeds?\b/],
   ["lantern", /lantern/],["shelter", /tarp|lean-to|shelter/], ["brazier", /brazier/], ["gravestone", /grave-?stone|headstone/],
   ["column", /column|pillar/], ["statue", /statue/],
+  ["book", /\bbooks?\b|grimoire|tome|ledger/], ["candle", /\bcandles?\b|candelabr/],
 ];
 const familyOf = (id: string): string | null => { const n = id.split("/").pop()!.replace(/[-_]/g, " "); return FAMILIES.find(([, re]) => re.test(n))?.[0] ?? null; };
 interface Dupe { id: string; family: string; of: string[] }
@@ -442,7 +449,7 @@ function duplicates(only?: string[]): Dupe[] {
   const out: Dupe[] = [];
   for (const id of ids.sort()) {
     const fam = familyOf(id), owners = all.get(id) ?? [];
-    if (!fam || !shared.has(fam) || (owners.length && isShared(owners))) continue;
+    if (!fam || !shared.has(fam)) continue;
     if (owners.some((o) => o.row?.wraps || o.row?.variantOf || o.row?.composedFrom)) continue;
     if (fs.existsSync(prefabFile(ASSETS, id))) { const nested = prefabGeometry(ASSETS, id).nested; if (nested.some((n) => shared.get(fam)!.includes(n))) continue; }
     out.push({ id, family: fam, of: shared.get(fam)!.filter((s) => s !== id) });
@@ -523,7 +530,7 @@ function buildIndex() {
 function menu() {
   if (!fs.existsSync(INDEX_OUT)) buildIndex();
   if (flag("map")) return roomMenu();
-  const idx = readJson(INDEX_OUT);
+  const idx = filterPropIndex(readJson(INDEX_OUT),builderPolicy);
   const props: any[] = idx.props, sets: any[] = idx.sets ?? [];
   const tally = (key: string) => { const c = new Map<string, number>(); for (const p of props) for (const v of [].concat(p[key] ?? [])) if (v !== "") c.set(v, (c.get(v) ?? 0) + 1); return [...c].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}(${n})`).join(" "); };
   if (flags.rooms) { console.log(`rooms: ${ROLE_WORDS()}\nin use: ${tally("rooms")}  (props with no rooms fit anywhere)`); return; }
@@ -595,6 +602,8 @@ function searchMenu(props: any[], word: string) {
   const offered = new Set(props.map((p) => p.id)), hidden: string[] = [];
   for (const [id, owners] of catalogued()) {
     if (offered.has(id) || !hit(id)) continue;
+    const excluded=builderPolicy.excluded(id);
+    if(excluded){hidden.push(`${id} (OWNER EXCLUDED by ${excluded.project}: ${excluded.id}${excluded.note?' - '+excluded.note:''})`);continue;}
     const d = lookup(id, owners);
     const next = owners.map((o) => o.row.supersededBy).find((v) => typeof v === "string");
     hidden.push(`${id} (${next ? `superseded by ${next}` : d?.kind === "exempt" ? d.reason.replace(/\s+/g, " ").slice(0, 110) : d ? "declared as a part/slot" : "not declared"})`);
@@ -701,7 +710,7 @@ function roomMenu() {
     for (const [a, b] of standStretches(lv, w)) if (b - a > stand) [stand, standAt] = [b - a, `${w.id} ${a.toFixed(2)}..${b.toFixed(2)}`];
     for (const [a, b] of w.spans) if (b - a > hang) [hang, hangH] = [b - a, w.height];
   }
-  const idx = readJson(INDEX_OUT), props: any[] = idx.props, sets: any[] = idx.sets ?? [];
+  const idx = filterPropIndex(readJson(INDEX_OUT),builderPolicy), props: any[] = idx.props, sets: any[] = idx.sets ?? [];
   const pf = placeFilter(roomId, roles);
   const roleOk = (rooms: string[]) => !roles.length || !rooms.length || rooms.some((r) => roles.includes(r));
   const wealthOk = (w: string[]) => !wealth || !w.length || w.includes(wealth);
@@ -763,7 +772,7 @@ function roomMenu() {
 function pitchMenu(map: any) {
   const anchors: any[] = map.anchors ?? [];
   if (!anchors.length) { console.log(`# map ${map.id} has no rooms and no pitches: nothing is placed on it by name (re-measure it)`); process.exitCode = 1; return; }
-  const idx = readJson(INDEX_OUT), props: any[] = idx.props;
+  const idx = filterPropIndex(readJson(INDEX_OUT),builderPolicy), props: any[] = idx.props;
   const pf = placeFilter(undefined, flag("role") ? expandRoomRoles([flag("role")!]) : []);
   const kinds = new Map<string, any[]>();
   for (const a of anchors) kinds.set(a.kind, [...(kinds.get(a.kind) ?? []), a]);
@@ -1138,7 +1147,7 @@ async function codexCommand() {
   const batch = picked.slice(0, Number(flag("batch") ?? 5)).filter((r) => {
     // a redo answers the owner's review of an existing Codex prop: the review, not the name guard, decides it
     const dup = flags.redo && done.has(`${projectName}:${r.id}`) ? [] : requestDupe(names[r.id] ?? propName(r), r.culture, r.scale);
-    if (dup.length) { skipped.push(`${r.id}: DUPLICATE of ${dup.slice(0, 3).join(", ")} (use it, or name the request apart from that family)`); return false; }
+    if (dup.length) { skipped.push(`${r.id}: DUPLICATE of ${dup.slice(0, 3).join(", ")} (reuse, retexture or compose the existing model; renaming is not a reuse decision)`); return false; }
     return true;
   });
   for (const s of skipped) console.log(`skip ${s}`);
@@ -1158,6 +1167,14 @@ async function codexCommand() {
 }
 
 async function main() {
+  if (cmd === 'paint') {
+    const {paintCommand} = await import('./prop-codex/paint.mts');
+    const wk = path.resolve(HERE, '..', 'projects', 'world-kit');
+    const result = await paintCommand(wk, positional[0] ?? '', positional.slice(1), {art:flag('art'), force:!!flags.force});
+    console.log(JSON.stringify(result, null, 2));
+    if (positional[0] === 'status' && Array.isArray(result) && result.some((r:any)=>!r.ready)) process.exitCode=1;
+    return;
+  }
   decode =(await import("./_png.mjs" as string)).decodePng;
   if (cmd === "measure") {
     const ids = positional.length ? positional : flags.all ? [...catalogued(flag("catalog"))].map(([k]) => k) : [];
@@ -1258,6 +1275,13 @@ async function main() {
     return;
   }
   if (cmd === "menu") return menu();
+  if (cmd === "reuse") {
+    const {readReusePolicy,reuseBrief,propReuseSchema}=await import('./_prop-reuse.mts');
+    if(positional[0]==='schema'){const {z}=await import('zod');console.log(JSON.stringify(z.toJSONSchema(propReuseSchema),null,2));return;}
+    const root=ROOTS.find(r=>fs.existsSync(path.join(r,'authoring/prop-reuse.json')));
+    console.log(root?reuseBrief(readReusePolicy(root)):'No preferred-part policy in this project closure. Search props menu before authoring.');
+    return;
+  }
   if (cmd === "dupes") {
     // with ids: the intake check a builder runs on its NEW prefabs before cataloguing them (exit 1 on a duplicate)
     const list = duplicates(positional.length ? positional : undefined);

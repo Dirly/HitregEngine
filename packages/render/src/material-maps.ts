@@ -390,6 +390,7 @@ interface MaterialState {
   generation: number;
   /** Textures requested and not yet wired — the graph is about to change. */
   loading: boolean;
+  failedMaps?: string[];
 }
 
 const materialState = new WeakMap<THREE.Material, MaterialState>();
@@ -421,6 +422,17 @@ export function materialMapKeyOf(material: THREE.Material): string | undefined {
  */
 export function materialMapsLoading(material: THREE.Material): boolean {
   return materialState.get(material)?.loading === true;
+}
+
+/** One-shot captures must wait for node graphs, not `.map`, which is null while loading. */
+export async function waitForMaterialMaps(materials: Iterable<THREE.Material>, timeoutMs = 15_000): Promise<void> {
+  const unique = [...new Set(materials)], deadline = Date.now() + timeoutMs;
+  while (unique.some(materialMapsLoading)) {
+    if (Date.now() >= deadline) throw new Error('Material textures did not finish loading');
+    await new Promise<void>(resolve => setTimeout(resolve, 20));
+  }
+  const failed = unique.flatMap(material => materialState.get(material)?.failedMaps ?? []);
+  if (failed.length) throw new Error(`Material textures failed to load: ${[...new Set(failed)].join(', ')}`);
 }
 
 const wiredListeners = new WeakMap<THREE.Material, Array<() => void>>();
@@ -1145,6 +1157,8 @@ export function applyMaterialMaps(
   makeMaterialUniforms(material, data);
   const state = materialState.get(material)!;
   const generation = ++state.generation;
+  state.loading = false;
+  state.failedMaps = [];
 
   const fields = materialMapPlan(data);
   if (fields.length === 0) return;
@@ -1155,6 +1169,7 @@ export function applyMaterialMaps(
     const assetId = data[field] as string | undefined;
     const url = assetId ? options.resolveTexture?.(assetId) : undefined;
     if (!url) {
+      if (assetId) state.failedMaps!.push(assetId);
       if (assetId) console.warn(`[render] no texture asset "${assetId}" for material ${field}`);
       return [];
     }
@@ -1174,7 +1189,10 @@ export function applyMaterialMaps(
     results.forEach((result, i) => {
       const request = requests[i]!;
       if (result.status === "fulfilled") textures[request.field] = result.value;
-      else console.warn(`[render] texture failed to load: ${request.url}`, result.reason);
+      else {
+        state.failedMaps!.push(request.url);
+        console.warn(`[render] texture failed to load: ${request.url}`, result.reason);
+      }
     });
     if (Object.keys(textures).length === 0) return;
     wireMaterialMaps(material, data, textures);

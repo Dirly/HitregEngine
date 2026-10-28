@@ -262,7 +262,8 @@ function applyWindowGlass(root: THREE.Object3D): void {
       // each window its own: lit or dark tonight, its dusk hour, warm or pale, a slow flicker
       const seed = windowSeed(uv().x);
       const light = windowLight(seed);
-      glass.emissiveNode = pane.mul(light).mul(float(1.6)) as THREE.Node<"vec3">;
+      // the street face only: from inside a room a pane is dark at night (owner ruling 2026-10-27)
+      glass.emissiveNode = pane.mul(light).mul(float(1.6)).mul(windowOutside(uv().y)) as THREE.Node<"vec3">;
       // by day the street side shows a dim room behind the leading, brighter
       // at grazing angles where the glass reflects the sky (window-lights.ts)
       if (src.map) {

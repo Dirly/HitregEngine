@@ -3,6 +3,7 @@ import { patchShadowPassAlphaTest } from "./shadow-pass-material.js";
 import { GpuUploadProbe } from "./gpu-uploads.js";
 import { cacheUniformUploads } from "./uniform-upload-cache.js";
 import { PRECOMPILE_SAFE } from "./precompile-safe.js";
+import { retainBuilderStates, type BuilderStateRetention, type NodeManagerLike } from "./builder-state-retention.js";
 import { trackRenderObjects, type RenderObjectSweep } from "./render-object-sweep.js";
 import { materialMapsLoading } from "./material-maps.js";
 import { beginSkinnedBoundsFrame, endSkinnedBoundsFrame } from "./skinned-bounds.js";
@@ -48,8 +49,15 @@ interface RenderObjectLike {
   group: unknown;
   dispose(): void;
 }
+/** three's RenderContext, as far as the precompile reads it: which target and MRT it was last rendered into. */
+interface RenderContextLike {
+  id?: number;
+  renderTarget?: unknown;
+  mrt?: unknown;
+}
+
 interface RendererInternals {
-  _renderContexts?: { get: (rt: unknown, mrt: unknown, depth?: number) => unknown };
+  _renderContexts?: { get: (rt: unknown, mrt: unknown, depth?: number) => unknown; _renderContexts?: Record<string, RenderContextLike> };
   _createObjectPipeline?: (...args: unknown[]) => void;
   _objects?: { get: (...args: unknown[]) => RenderObjectLike };
   _nodes?: { getForRender: (renderObject: unknown) => unknown; getForRenderAsync?: (renderObject: unknown) => Promise<unknown> };
@@ -114,7 +122,12 @@ export interface BloomOptions {
 const tmpWind = new THREE.Vector3();
 
 /** Main-thread budget per frame for the time-sliced scene precompile. */
-const PRECOMPILE_SLICE_MS = 6;
+/** Background shader builds per frame, in play: a cell's compiles ride along without a visible hitch. */
+export const PRECOMPILE_SLICE_MS = 6;
+/** ...and while a load screen or boot curtain hides the frame: nobody sees it, so the builds may fill it. */
+export const PRECOMPILE_SLICE_LOADING_MS = 40;
+/** How long a precompile reuses its collected light list before walking the scene for lights again. */
+const COMPILE_LIGHT_LIST_TTL_MS = 1000;
 
 const nextFrame = (): Promise<void> =>
   new Promise((resolve) => {
@@ -289,6 +302,9 @@ export class EngineRenderer {
     this.uploadProbe = new GpuUploadProbe(backend);
     this.uniformUploadStats = cacheUniformUploads(backend);
     this.renderObjectSweep = trackRenderObjects(this.renderer);
+    // generated shader states outlive their last render object (see builder-state-retention.ts)
+    const nodes = (this.renderer as unknown as { _nodes?: NodeManagerLike<unknown> })._nodes;
+    if (nodes && typeof nodes.delete === "function" && nodes.nodeBuilderCache instanceof Map) this.builderStateRetention = retainBuilderStates(nodes);
     return backend.isWebGPUBackend ? "webgpu" : "webgl";
   }
 
@@ -709,8 +725,19 @@ export class EngineRenderer {
    * synchronous shader build, `fallbacks` how many of those threw.
    */
   readonly precompileStats = { borrowed: 0, plain: 0, objects: 0, fallbacks: 0, healed: 0 };
+  /** Generated shader states kept past their last render object; null before init (builder-state-retention.ts). */
+  builderStateRetention: BuilderStateRetention<unknown> | null = null;
   /** Measured in render(): the nesting depth the scene pass actually draws at. */
   private scenePassCallDepth = SCENE_PASS_CALL_DEPTH;
+  /**
+   * The render context the post chain's scene pass ACTUALLY draws into, found after a frame by its target and
+   * MRT. three keys contexts by target, MRT and render-call depth, and the depth of the scene pass depends on how
+   * many passes nest above it (4 on a chain with sharpen, bloom and AO — not the 2 once assumed). The context id is
+   * part of every shader's cache key, so a precompile in a context of the wrong depth builds shaders the frame can
+   * never use: measured on a 1060-cell load, 372 precompile builds (11.6 s) under a context no pass rendered, and
+   * the frame building the same 250 shaders again, synchronously, on first draw.
+   */
+  private scenePassContext: { context: RenderContextLike; renderTarget: unknown; mrt: unknown } | null = null;
   /** False until the current post chain has drawn a frame (see below). */
   private chainRendered = false;
   /** Precompiles waiting for the chain's first frame. */
@@ -720,15 +747,29 @@ export class EngineRenderer {
   private asyncBuildsGuarded = false;
   private shaderBuildTail: Promise<void> = Promise.resolve();
   private shaderBuildTime = 0;
+  /**
+   * Main-thread time the background shader builds may take per frame (PRECOMPILE_SLICE_MS). A host raises it to
+   * PRECOMPILE_SLICE_LOADING_MS while its load screen is up: nobody sees those frames, so the precompiles of the
+   * cells landing behind the screen may fill them instead of trailing the cells by a minute.
+   */
+  precompileSliceMs = PRECOMPILE_SLICE_MS;
+
+  /** Shader builds queued or running in the background (precompiles). A frame measurement taken while this is
+   *  > 0 is paying for compiles, not for the scene — probes settle on it reaching 0. */
+  get shaderBuildsPending(): number {
+    return this.shaderBuildsQueued;
+  }
+  private shaderBuildsQueued = 0;
 
   /** All concurrent chunk/VFX precompiles share one frame budget. */
   private enqueueShaderBuild(build: () => unknown): Promise<unknown> {
     const previous = this.shaderBuildTail ?? Promise.resolve();
     let release!: () => void;
     this.shaderBuildTail = new Promise<void>((resolve) => { release = resolve; });
+    this.shaderBuildsQueued += 1;
     return (async () => {
       await previous;
-      if ((this.shaderBuildTime ?? 0) >= PRECOMPILE_SLICE_MS) {
+      if ((this.shaderBuildTime ?? 0) >= this.precompileSliceMs) {
         await nextFrame();
         this.shaderBuildTime = 0;
       }
@@ -736,6 +777,7 @@ export class EngineRenderer {
       try { return build(); }
       finally {
         this.shaderBuildTime = (this.shaderBuildTime ?? 0) + performance.now() - started;
+        this.shaderBuildsQueued -= 1;
         release();
       }
     })();
@@ -791,6 +833,51 @@ export class EngineRenderer {
     };
   }
 
+  /**
+   * What a precompile hands three as its `targetScene`. compileAsync(root, camera, targetScene) walks
+   * targetScene.traverseVisible ONCE PER CALL to collect lights — the whole world (39k objects on a populated
+   * zone) for every streamed cell's precompile: 5 s of a 70 s warm load (2026-10-27). The stand-in is a Scene that
+   * mirrors what three reads off the scene reference (background, environment, fog and their nodes — the cache keys
+   * of the generated shaders come from those, not from the scene's identity) and whose traverseVisible yields the
+   * target's lights from a list refreshed at most every COMPILE_LIGHT_LIST_TTL_MS.
+   */
+  private compileTarget(targetScene: THREE.Scene): THREE.Scene {
+    const t = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (!this.lightStandIn || this.lightStandInFor !== targetScene) {
+      const standIn = new THREE.Scene();
+      const lights = (): THREE.Light[] => this.compileLights;
+      standIn.traverseVisible = function (callback: (object: THREE.Object3D) => unknown) {
+        for (const light of lights()) callback(light);
+      };
+      this.lightStandIn = standIn;
+      this.lightStandInFor = targetScene;
+      this.compileLightsAt = -Infinity;
+    }
+    if (t - this.compileLightsAt > COMPILE_LIGHT_LIST_TTL_MS) {
+      const list: THREE.Light[] = [];
+      targetScene.traverseVisible((object) => { if ((object as THREE.Light).isLight) list.push(object as THREE.Light); });
+      this.compileLights = list;
+      this.compileLightsAt = t;
+    }
+    const s = this.lightStandIn;
+    s.background = targetScene.background;
+    s.environment = targetScene.environment;
+    s.fog = targetScene.fog;
+    s.backgroundNode = targetScene.backgroundNode;
+    s.environmentNode = targetScene.environmentNode;
+    s.fogNode = targetScene.fogNode;
+    s.backgroundBlurriness = targetScene.backgroundBlurriness;
+    s.backgroundIntensity = targetScene.backgroundIntensity;
+    s.backgroundRotation.copy(targetScene.backgroundRotation);
+    s.environmentIntensity = targetScene.environmentIntensity;
+    s.environmentRotation.copy(targetScene.environmentRotation);
+    return s;
+  }
+  private lightStandIn: THREE.Scene | null = null;
+  private lightStandInFor: THREE.Scene | null = null;
+  private compileLights: THREE.Light[] = [];
+  private compileLightsAt = -Infinity;
+
   private async compileInSceneContext(
     root: THREE.Object3D,
     camera: THREE.Camera,
@@ -831,7 +918,19 @@ export class EngineRenderer {
     // probe with them precompiled, none without. They compile on first draw,
     // exactly as the scene-level ocean plane always has.
     const hidden: THREE.Object3D[] = [];
+    // Lights under the subtree stay out of the compile's light set. compileAsync keys every shader it builds on
+    // the light set it projects: the target scene's visible lights PLUS whatever lights sit under `root`. A streamed
+    // cell's lamps are still visible here (the light budget hides authored lights in its next update, before the
+    // frame renders), so its shaders were built under a light key the frame never uses and built AGAIN, synchronously,
+    // on first draw — and the shared render list's LightsNode was left holding the wrong set between frames. Measured
+    // on a 1060-cell load: 69 light-key flips in the main pass, each one a wave of rebuilds.
+    const lightsHidden: THREE.Object3D[] = [];
     root.traverse((object) => {
+      if ((object as THREE.Light).isLight && object.visible) {
+        object.visible = false;
+        lightsHidden.push(object);
+        return;
+      }
       if (!(object as THREE.Mesh).isMesh) return;
       const material = (object as THREE.Mesh).material;
       // ...unless the material says it reads nothing of the frame (VFX: see
@@ -889,11 +988,16 @@ export class EngineRenderer {
       renderer.setMRT(scenePass.getMRT());
       const depth = this.scenePassCallDepth;
       const self = this;
+      const live = this.scenePassContext;
       this.guardAsyncBuilds(internals);
       contexts.get = function (rt: unknown, mrt: unknown) {
-        const context = originalGet.call(this, rt, mrt, depth);
-        if (rt === scenePass.renderTarget) self.sceneContext = { context, pass: scenePass };
-        return context;
+        if (rt === scenePass.renderTarget) {
+          // the pass's own context when a frame has shown it (scenePassContext); the depth guess only before that
+          const context = live && live.renderTarget === rt && live.mrt === mrt ? live.context : originalGet.call(this, rt, mrt, depth);
+          self.sceneContext = { context, pass: scenePass };
+          return context;
+        }
+        return originalGet.call(this, rt, mrt, depth);
       };
       // Shader CODE is generated by three from live renderer state — it reads
       // getRenderTarget()/getMRT()/isOutputTarget while building — and
@@ -936,7 +1040,7 @@ export class EngineRenderer {
       // synchronously, before its first await — the borrowed state only has
       // to hold for that prologue, and must be undone before the frame loop
       // renders again.
-      pending = renderer.compileAsync(root, camera, targetScene);
+      pending = renderer.compileAsync(root, camera, this.compileTarget(targetScene));
     } finally {
       undo();
       // compileAsync collects its render list synchronously, before its first
@@ -946,6 +1050,7 @@ export class EngineRenderer {
       // holding visible=false hides water/effects from those same frames.
       for (const object of restore) object.frustumCulled = true;
       for (const object of hidden) object.visible = true;
+      for (const object of lightsHidden) object.visible = true;
     }
     try {
       await pending;
@@ -1068,12 +1173,19 @@ export class EngineRenderer {
         }
         scopes?.begin("draw");
         try {
-          // The scene pass renders two levels below wherever we are now (the
-          // quad render, then the pass nested in it) — recorded for
-          // compileInSceneContext, which must key its compiles the same way.
-          const internals = this.renderer as unknown as { _callDepth?: number };
+          // Before the first frame the scene pass's depth is a guess (two below here: the quad render, then the
+          // pass nested in it — true only for a chain with nothing between). After it, the pass's real context is
+          // looked up by target and MRT (scenePassContext), which is what compileInSceneContext keys its builds on.
+          const internals = this.renderer as unknown as { _callDepth?: number } & RendererInternals;
           this.scenePassCallDepth = (internals._callDepth ?? -1) + 2;
           this.pipeline!.render();
+          const pass = this.chain!.scenePass;
+          const mrt = pass.getMRT();
+          if (this.scenePassContext === null || this.scenePassContext.renderTarget !== pass.renderTarget || this.scenePassContext.mrt !== mrt) {
+            const registry = internals._renderContexts?._renderContexts;
+            const found = registry ? Object.values(registry).find((c) => c.renderTarget === pass.renderTarget && c.mrt === mrt) : undefined;
+            this.scenePassContext = found ? { context: found, renderTarget: pass.renderTarget, mrt } : null;
+          }
         } finally {
           scopes?.end();
         }
@@ -1148,6 +1260,7 @@ export class EngineRenderer {
     this.chain?.dispose();
     this.pipeline?.dispose();
     this.pipeline = null;
+    this.scenePassContext = null; // a rebuilt chain gets a new scene pass; its context is found after its first frame
     this.chain = null;
     this.pipelineScene = null;
     this.pipelineCamera = null;

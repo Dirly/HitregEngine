@@ -25,7 +25,7 @@ export const landmarkComponentSchema = z
       .default(0.6)
       .describe(
         "How dark the far landmark reads against the fog: 0 = fades toward the fog colour like the ground, 1 = a " +
-          "near-black shape. The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never " +
+          "clearly darker shape (40% under the fog colour; never a black cutout). The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never " +
           "pops at the edge.",
       ),
   })

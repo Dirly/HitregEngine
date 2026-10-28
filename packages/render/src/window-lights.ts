@@ -25,6 +25,7 @@ import {
   vec3,
 } from "three/tsl";
 import { nightLevel } from "./daylight.js";
+import { applyAdditiveFog } from "./additive-fog.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type N = any;
@@ -98,7 +99,9 @@ export function windowSeed(u: N): N {
  * candle flicker. Shared by the glass and its card so the two always agree.
  */
 export function windowLight(seed: N): N {
-  const lit: N = step(hash(seed), float(0.7));
+  // every window of a lived-in house is lit (owner ruling 2026-10-27: no random dark panes; a house with no lights or an
+  // abandoned one is dark as a whole — that per-building flag is still open, docs/world-standards/README.md)
+  const lit: N = float(1);
   const onset: N = hash(seed.add(3.17)).mul(0.4).add(0.15);
   const on: N = smoothstep(onset, onset.add(0.2), nightLevel).mul(lit);
   const warm: N = mix(vec3(1.0, 0.5, 0.18), vec3(1.0, 0.76, 0.46), hash(seed.add(7.31)));
@@ -159,8 +162,8 @@ export function windowCardMaterial(): THREE.MeshBasicNodeMaterial {
     depthWrite: false,
     blending: THREE.AdditiveBlending,
     side: THREE.DoubleSide,
-    fog: false,
   });
+  applyAdditiveFog(m);
   m.name = "window-light-cards";
   m.userData[NO_SHADOW_FLAG] = true;
   const raw: N = uv();

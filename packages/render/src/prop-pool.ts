@@ -120,6 +120,13 @@ export class InstancedPropPool {
   /** Bumped per owner on every add, so cached bounds know they are stale. */
   private readonly ownerVersions = new Map<object, number>();
 
+  /**
+   * A new page (one model's instanced meshes) was just parented under `group`: the host precompiles it there in
+   * the background. Pages live OUTSIDE the streamed cell groups, so a cell's own precompile never reaches them —
+   * without this, every first-seen prop model built its shaders synchronously inside render() on its first draw.
+   */
+  onPageAdded: ((meshes: readonly THREE.Object3D[]) => void) | null = null;
+
   constructor(private readonly lod: FoliageLodSystem) {
     this.group.name = "prop-pool";
     // pages never move; nothing under here needs the per-frame matrix walk
@@ -394,6 +401,7 @@ export class InstancedPropPool {
       mesh.boundingSphere = new THREE.Sphere(new THREE.Vector3(), POOL_SPHERE_RADIUS);
       this.group.add(mesh);
     }
+    this.onPageAdded?.(meshes);
     this.lod.register(batch);
     return { batch, bounds: modelBounds, ids: new Array<string | undefined>(capacity), free: [], used: 0, impostor, nearLocals };
   }

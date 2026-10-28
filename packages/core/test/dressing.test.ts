@@ -134,15 +134,16 @@ const at = (r: DressingResolveResult, id: string) => r.placements.find((p) => p.
 describe("resolveDressing", () => {
   it("puts paper on a table top at the table's height", () => {
     const r = run([
-      { id: "t", prop: "table", place: { kind: "floor", at: [2, 3] } },
+      // off the entry lane's and the doorway's 2 m clear boxes (OPENING_CLEAR, owner walk 2026-10-27)
+      { id: "t", prop: "table", place: { kind: "floor", at: [3.2, 1.5] } },
       { id: "p", prop: "paper", place: { kind: "on", item: "t" } },
     ]);
     expect(codes(r, "p")).toEqual([]);
     expect(codes(r, "t")).toEqual([]);
     const p = at(r, "p");
     expect(p.position[1]).toBeCloseTo(0.75 + MOUNT_CLEAR); // thin paper held off the board
-    expect(p.position[0]).toBeCloseTo(2);
-    expect(p.position[2]).toBeCloseTo(3);
+    expect(p.position[0]).toBeCloseTo(3.2);
+    expect(p.position[2]).toBeCloseTo(1.5);
     expect(p.room).toBe("A");
   });
 
@@ -210,14 +211,15 @@ describe("resolveDressing", () => {
   });
 
   it("expands a set and lands its paper on its own desk", () => {
-    const r = run([{ id: "study", set: "desk-set", place: { kind: "floor", at: [2, 2.5] } }]);
+    // the set stands past the doorway's 2 m clear box (z 2.5..3.5 widened by OPENING_CLEAR)
+    const r = run([{ id: "study", set: "desk-set", place: { kind: "floor", at: [3, 4.5] } }]);
     expect(r.violations.filter((v) => v.item.startsWith("study"))).toEqual([]);
     expect(r.placements.map((p) => p.id)).toEqual(["study/desk", "study/chair", "study/letter"]);
     const desk = at(r, "study/desk"), letter = at(r, "study/letter"), chair = at(r, "study/chair");
     expect(letter.position[0]).toBeCloseTo(desk.position[0]);
     expect(letter.position[2]).toBeCloseTo(desk.position[2]);
     expect(letter.position[1]).toBeCloseTo(0.8 + MOUNT_CLEAR);
-    expect(chair.position[2]).toBeCloseTo(3.0);
+    expect(chair.position[2]).toBeCloseTo(5.0);
     expect(Math.abs(chair.yaw)).toBeCloseTo(Math.PI);
   });
 
@@ -372,10 +374,11 @@ describe("hearth clearance ('H' cells)", () => {
   });
 
   it("warns a solid prop close to it and is silent further away", () => {
-    const near = go([{ id: "c", prop: "crate", place: { kind: "floor", at: [2.45, 3.75] } }]);
+    // z 4.25: beside the hearth's H cells (z 3.0..4.5) but past the doorway's 2 m clear box (z 2.5..3.5)
+    const near = go([{ id: "c", prop: "crate", place: { kind: "floor", at: [2.45, 4.25] } }]);
     expect(codes(near, "c")).toEqual([]);
     expect(wcodes(near, "c")).toContain("hearth-clearance");
-    const far = go([{ id: "c", prop: "crate", place: { kind: "floor", at: [3.0, 3.75] } }]);
+    const far = go([{ id: "c", prop: "crate", place: { kind: "floor", at: [3.0, 4.25] } }]);
     expect(wcodes(far, "c")).not.toContain("hearth-clearance");
   });
 

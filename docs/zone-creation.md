@@ -9,6 +9,11 @@ ledger. Standards the work is held to are TASK SKILLS, named per step below (ind
 The owner's test for a zone is not "do the quests work". It is "does every place feel hand-made and alive". Every
 phase below serves that test; the quest loop is the last phase, not the first.
 
+All visual phases follow `docs/art-direction.md`: texture-led PSX forms,
+materials and artwork are planned together across the entire layout. The look
+and place phases prove a representative textured sample before repeating a
+building style or asset group; final review checks the integrated finish.
+
 ## The phases
 
 | # | Phase | Who (proposal; the owner may reassign) | Budget | Gate | Skills |

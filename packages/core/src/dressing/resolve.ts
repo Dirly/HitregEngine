@@ -2386,7 +2386,8 @@ export const CAMP_TENT_GAP: readonly [number, number] = [3, 5];
 /** A work line's racks/frames/benches stand this far apart along their edge. */
 export const WORK_PITCH: readonly [number, number] = [1.5, 2.5];
 /** Nothing solid stands within this many metres in front of a door, an opening or a hallway mouth (`opening-clear`), indoors and out. */
-export const OPENING_CLEAR = 1.2;
+// 1.2 m until the owner walk of 2026-10-27 ("remove anything a few grid tiles away from a door in a house"): 2 m, both sides
+export const OPENING_CLEAR = 2.0;
 /** Outdoor density: the fewest props per 100 m² of an area's placeable ground, by area role (`site-sparse`); at least 2. */
 export const SITE_DENSITY: Readonly<Record<string, number>> = { camp: 1.2, yard: 1.0, ruin: 1.0, shore: 0.6, path: 0.4, "cave-mouth": 0.8 };
 /** Outdoor density cap: the most props per 100 m² of placeable ground (`site-dense`). */

@@ -76,3 +76,4 @@ export {
 } from "./selection-ops.js";
 export { screenToNdc, setRayFromScreen } from "./screen-ray.js";
 export { booleanMeshes, polyFromObject, geometryFromObject, type BooleanOp } from "./csg.js";
+export {mountPropReview,type PropReviewHost,type ReviewProp,type ReviewCatalog} from './prop-review.js';

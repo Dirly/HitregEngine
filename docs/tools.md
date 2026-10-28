@@ -83,8 +83,12 @@ writer for outputs; do not write project paths directly. Add the tool to the
 committed spec composition in `packages/core/examples/write-spec.ts` when it is
 part of the stable engine distribution, then run `pnpm spec`.
 
-The Armor Atlas adapter deliberately calls the existing CLI importer, keeping
-the CLI and registered tool on one implementation. Its final PNG becomes a
+The Armor / Weapon / Prop Atlas adapter deliberately calls the existing CLI
+importer, keeping the CLI and registered tool on one implementation. Custom prop
+guides use the manifest emitted by `props paint plan`; the manifest preserves
+their measured resolution and named islands rather than applying an armor preset.
+See `apps/playground/tools/prop-codex/README.md` for the complete prop workflow.
+Its final PNG becomes a
 texture asset immediately; diagnostic slices, registration output, and reports
 remain in the run record.
 

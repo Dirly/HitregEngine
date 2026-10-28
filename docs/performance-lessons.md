@@ -2118,3 +2118,185 @@ is not that object's cost.
   it cells are HLOD proxies whose trees can only be impostors). Full-detail ring 4 not applied (+3-4 ms).
 - **Next: freeze still entities in the editor** (walk 14k -> ~3.8k objects, ~-3 ms edit-mode matrices): freeze as
   play does, thaw the frozen root holding the selection / an active gizmo, re-freeze after each reconcile.
+
+## Asleep mobs were falling: hold every body whose ground is not simulated (2026-10-27)
+
+Owner snapshot (Skelmorrow, play, the Hagsheer moor): 11 fps, frame p50 80 ms, JS 75 ms a frame against 18.5 ms of
+GPU; `render/draw` 19, `render/matrices` 14, `update/particles` 6.4, and the fixed step running 4-5 times a frame.
+Reproduced headless with `sprint-probe --stand-only --breakdown` at the snapshot's camera: the renderer's matrix walk
+did ~20k `updateMatrix` a frame while only ~4.8k objects were reachable — every mob skeleton (270-550 bones each) was
+re-walked every frame although the 10-22 bone hold was installed and `held` was set.
+
+**Cause (an in-page diagnostic, not a theory):** 183 of 184 asleep mob bodies changed position every frame — falling
+~14 m per two frames. Population entities live in the base scene, so their dynamic bodies exist everywhere, but the
+terrain collider exists only in simulation-tier cells (73 m around the player). Everything farther had nothing under
+it. While the controllers stepped every mob at 60 Hz nobody noticed; the moment the sleep rule stopped stepping them,
+gravity owned them: the hold's parent-matrix comparison failed every frame (the body moved), the held weapons
+re-uploaded, Rapier integrated and broad-phased 190 falling capsules, and the readback applied 190 states a step.
+The dedicated server had the same hole (its NPC manager teleports fallers back to spawn every 30 ticks).
+
+**Fix — `PhysicsSim.holdUngrounded(isSimulated)`** (after `step()`, before the readback, in local play, the play
+host and `HeadlessWorld.step`): a dynamic body standing where the ground is not simulated is put to sleep where it
+stands; a script that wakes it (a mid-band controller's `setLinvel`) gets its height restored and its vertical
+velocity zeroed after the step and sleeps again; an authoritative move upward raises the held height; the hold ends
+the moment its ground is simulated (the body wakes and settles). `states(true)` — the readback set — reports a
+sleeping dynamic body twice (render interpolation keeps a previous and a current pose) and then skips it until it
+wakes or is moved in its sleep; `states()` stays complete for point lookups. `ChunkManager.isCellSimulated` /
+`HeadlessWorld.groundSimulated` answer the ground question. Tests: physics `test/hold-ungrounded.test.ts`.
+Diagnostic after: moving bodies 188 -> 5, held skeletons whose parent moved 185 -> 2.
+
+In-session arms, standing at the snapshot's spot (`--arms "nohold=h.holdUngrounded(false)~hold=h.holdUngrounded(true)"`,
+clean work p50): 77.9 -> 61.5 ms; `render/matrices` 13.5 -> 6.5, `fixed/physics.step` 3.1 -> 1.4,
+`fixed/physics.readback` 2.1 -> 0, renderer `updateMatrix` 33.8k -> 16.8k a frame.
+
+**Also found and fixed in the same pass:**
+
+- **Particles simulated everywhere.** Every emitter in the world (84 in the scene's system, more in the VFX system's)
+  integrated and wrote matrices every frame whatever its distance. `ParticleSystem.sleepDistance` (default 220 m,
+  `sleepDistance: 0` to disable): an emitter beyond it sleeps; coming back inside primes its cloud to steady state so
+  a fire does not pop in empty. 71 of 84 asleep standing on the moor; `update/particles` 3.8 -> 1.4 ms (the owner's
+  spot had 6.4). Test: render `test/particles-sleep.test.ts`.
+- **character-look's per-frame ancestor walk** (`parent.updateWorldMatrix(true)` for ~110 held characters) was
+  tried as a skip-when-the-last-matrix-matches shortcut and reverted: the walk is what sees a parent moved THIS frame
+  (the test guards it), and once bodies stopped falling it cost 0.5 ms. Not a lever.
+- **The HUD's minimap redrew every map layer ten times a second** (~3.5 ms a call). The layers draw once into an
+  offscreen canvas and scroll with the player; only the arrow is drawn per call (`world-map.ts`). The HUD's
+  journal/ability/panel `querySelectorAll` sweeps run once a second instead of ten times, and the compass measures
+  its width once a second instead of every frame (`querySelectorAll` was 3.4% of a standing profile).
+- **The render walk re-visited every frozen subtree every frame.** `hideNonRenderingBranches` walked ~39k objects a
+  frame (4-5% of the profile) to re-find the same empties and too-small props. A frozen static subtree's verdict (bits,
+  what it hid, what is shadowless) is now reused for up to 4 walks, staggered per root; a change inside it (version
+  bump) is seen on the next walk, and a reused hide only applies to objects still visible. Test in
+  `test/screen-cull.test.ts`.
+
+**Measurement traps met:**
+
+- A "standing" window measured before the background precompiles drained was paying 4-6 ms a frame for
+  `compileAsync`. `EngineRenderer.shaderBuildsPending` counts queued/running builds; the probe now settles on it
+  reaching 0 (and reports it) before every breakdown.
+- `sprint-probe --cpu-profile` takes a CDP sampling profile standing (self / inclusive by function, self by file):
+  it is what decomposed `render/draw`. On this machine about a third of wall-clock is `(program)` — native time
+  inside the WebGPU bindings and the browser, which only fewer draws reduce. Draws standing: ~205 main, ~135 shadow
+  (three cascades), 22 post.
+- Vite's dependency optimizer re-bundles when play mode imports modules it had not seen and then RELOADS the page
+  over its client websocket: three runs in a row measured the starter scene ("Untitled") or died with "execution
+  context was destroyed". `vite.agent-test.config.ts` now sets `server.hmr: false` (no client websocket, no
+  reload); the probe prints the page's errors and the state it saw when the scene or play does not come up.
+
+**Where it ended (two settled arms in one session, standing at the snapshot spot, headless 1600x900, the
+agent config with its client websocket off — see the trap below): clean work p50 29.8 / 30.7 ms (the first
+baseline this day read 49 ms), `render/draw` 13.0, `render/matrices` 3.2, `render` 2.9, every other scope
+under 1 ms; renderer `updateMatrix` 13.6k a frame (was 29.5k).**
+
+- Vite with its client websocket on can reload the page under a probe (see above); with `server.hmr: false` in
+  `vite.agent-test.config.ts` the same scene measured 30 ms where the earlier arms read 53-61. Do not compare numbers
+  across that change; compare arms within one session.
+
+**Still open after this pass:** `render/draw` ~13 ms is the frame. Levers, in order:
+shadow cascade cadence (refresh the two far cascades on alternate frames — ~135 shadow draws a frame), per-draw
+cost in three's WebGPU backend (uniform updates and bind groups per draw: `update`/`updateByType`/`updateNumber`
+~5% + `(program)`), and GTAO at half resolution plus bloom/grade/sandstorm/fxaa/sharpen on a 2327x1230 canvas
+(the owner's GPU time was 18.5 ms, a 54 fps ceiling by itself: measure with the profiler's GPU timing before
+touching the chain).
+
+## Load time: the dev server was not the problem, the terrain cache was dead and the streamer was pacing itself (2026-10-27)
+
+Owner: "load times get crazy". Measured headless (1600x900, warm machine) before any change, the dev app on
+Skelmorrow: cold load 144 s to playable (scene up 19 s, every cell in 114 s), a SECOND load 121 s — the published
+bundle against the dedicated server was no better (joined in 14-18 s, every cell in 93-162 s). Load time is the
+world streaming in, not Vite serving modules.
+
+**Three causes, in the order they were found:**
+
+1. **The terrain disk cache had been crashing on every write.** The owner's client log held 100 of 100 entries
+   `Cannot read properties of null (reading 'bytes') @ voxel-disk-cache.ts`: the eviction cursor met a record
+   with no value (a write torn by one of the week's crashes) and threw inside the IndexedDB transaction, which
+   aborts it — nothing was ever cached again and every load regenerated the whole world. Guarded, and the broken
+   record is evicted like any other. Profiler snapshots now carry `voxelCacheHits` / `voxelCacheMisses`: a slow
+   load with misses ≈ cells is this.
+2. **One cell per frame.** `CELL_INTEGRATION_BUDGET_MS` (2.5 ms, right for play) admits exactly one 6-18 ms cell a
+   frame; a ~1100-cell world took as many frames to appear, at load-time frame rates. `ChunkManager.integrationBurst`
+   (set by both hosts while the load screen / boot curtain is up or until the first stream settles) integrates
+   under `CELL_INTEGRATION_BUDGET_BURST_MS` (40 ms) and publishes 4 supercells a frame. Test:
+   `apps/playground/test/chunk-burst.test.ts`.
+3. **Vite re-optimizing mid-load.** The default dependency crawl misses the terrain worker's module graph (and what
+   only play mode imports); Vite discovered those on first use, re-bundled and RELOADED the page 60 s into a load
+   (or, with no client websocket, left the workers answering nothing). `optimizeDeps.entries` now lists
+   `index.html`, `play.html` and `src/voxel-worker.ts`. The agent/probe config got its own `cacheDir`: a probe's
+   re-optimization into the shared `node_modules/.vite` hands the owner's running dev server stale pre-bundles.
+
+Also: each streamed cell's precompile made three walk the whole scene for lights (`compileAsync`'s
+`targetScene.traverseVisible`, 5 s of a 70 s load) — the renderer now hands it a stand-in scene with a cached light
+list (`EngineRenderer.compileTarget`).
+
+**After (same harness):** cold 71-75 s to playable (cells in 59-62 s), warm 63-72 s (cells in 44-48 s, 6800 cache
+hits, 2 misses). Skipping every other draw while bursting changed nothing (reverted): the remaining ~45 s is the
+main thread building 1100 cells and their supercells — expandScene/buildScene/batching, shader code generation
+(three's NodeBuilder ≈ 6-8% of the load), texture uploads, GC — at 13% idle. Cutting it further means cheaper cells
+(fewer entities per cell: 8.8k chunk entities on this world) or fewer materials, not more pacing tricks.
+
+**How to measure a load:** a scratch Playwright script that opens `?scene=<id>` headless, polls
+`__hitreg.chunkManager.stats.loading`, `__hitreg.voxelCache` and `__hitreg.renderer.shaderBuildsPending`, presses
+Backquote and waits for play — twice in one browser context (cold, then warm cache) — with Vite's stdout and the
+page's console/4xx captured. A CDP sampling profile from navigation to play is what found the light walk. The
+published bundle is measured the same way against `vite preview --outDir dist/<project>` plus
+`pnpm -F @hitreg/server serve --scene <scene>` (docs/hosting.md, "Seeing the published client locally").
+
+## Shader builds during a load: the precompile was building for a context no frame used (2026-10-27, later)
+
+Owner, same day: "how do we get load time to something reasonable? 110 cells are insane". Headless trace of a
+Skelmorrow load with `NodeManager.getForRender` hooked (every synchronous shader build: material, object chain,
+cache-key parts, render context, phase): **909 synchronous builds, 22.4 s of main thread**, 574 of them for a
+material × layout pair that had ALREADY been built. Three causes, found in this order:
+
+1. **three drops a builder state the moment its last render object goes.** A render object is disposed when its
+   geometry or material is disposed (prop pool, particle batch and moving-instances pages regrowing their instance
+   buffers; a supercell part replaced by its consolidation) and whenever the scene-state key changes. The next
+   object with the same key regenerates the WGSL from scratch, 20-70 ms. `retainBuilderStates`
+   (`packages/render/src/builder-state-retention.ts`, installed by `EngineRenderer.init`) keeps zero-user states
+   and drops them oldest-first past `RETAINED_BUILDER_STATES` (1024). After it: 0 evictions over a load, 0 keys
+   built twice.
+2. **Streamed cells polluted the precompile's light set.** `compileAsync` keys every shader on the lights it
+   projects: the target scene's visible lights PLUS whatever lights sit under the compiled subtree. A cell's lamps
+   are still visible at integration (the light budget hides authored lights in its next update, before the frame
+   renders), so the cell's shaders were built under a light key the frame never uses — 69 light-key flips in the
+   main pass, each a wave of rebuilds. `compileInSceneContext` now hides the subtree's own lights for the
+   synchronous prologue in which three collects the render list.
+3. **The precompile ran in the wrong render context — and the context id is part of every shader's cache key.**
+   three keys render contexts by target, MRT and render-call DEPTH. The scene pass of the post chain renders at
+   depth 4 (passes nest: sharpen, bloom, AO, then the scene), not the 2 the precompile assumed, so every
+   precompiled shader (372 builds, 11.6 s, sliced) landed under a context no pass ever drew with and the frame
+   built the same ~250 shaders again, synchronously, on first draw. After the first frame the renderer now looks the
+   scene pass's real context up by target and MRT (`EngineRenderer.scenePassContext`) and compiles into that. Check
+   with the trace: "render-phase builds whose exact key a precompile had built earlier" must stay 0 AND the
+   precompile's builds must share the frame's context id.
+
+**After all three (same harness):** synchronous builds in frames of the scene pass 253 → ~160 (8.0 → 6.6 s); total
+synchronous build time 22.4 → ~14 s, of which ~7 s is the sliced precompile (6 ms a frame, 40 behind the load
+screen) and ~6.6 s is first-draw builds of objects nothing precompiles: base-scene glTF models drawn individually
+until the next static-batch rebuild (~63, the biggest slice), weapon ubermeshes on a mob's first appearance (~14),
+particle batches (~54, cheap), prop-pool pages drawn before their precompile is reached (~18). Those are the next
+load-time lever: precompile a model on arrival before it is drawn, warm the weapon pages at boot.
+
+**Tried and dropped twice: hiding a streamed subtree until its compile settles.** With the context fixed it still
+changed nothing (165 frame builds vs 160) — the frame's remaining builds are objects outside the hidden groups — and
+it brought back one failed pipeline per load ("Color target has no corresponding fragment stage output", a build
+in the wrong MRT context). A subtree is shown the frame it arrives; the precompile has to be keyed right instead.
+
+Also moved off the load: the editor's asset thumbnails (8 s of shader builds in their own scene) are held while
+`initialStreamPending` or the load screen is up and baked once the first stream settles (`main.ts`,
+`thumbnailsDue`).
+
+**How to trace it:** the scratch probe wraps `renderer._nodes.getForRender` and records, per build, the material
+name, the object chain, `renderObject.initialCacheKey`, `getDynamicCacheKey()`, `lightsNode.getCacheKey(true)` and
+its light ids, `context.id`, the camera and target, whether the call came from `renderer.render` (synchronous in a
+frame) or from the precompile, and wraps `nodeBuilderCache.delete` to count evictions with their caller. Group by
+(phase, context id) first: a precompile that does not share the frame's context id is doing nothing.
+
+**Unrelated, same session.** The cloud shadows on the ground were 7 m stair-steps because the sky's cloud texture
+is a 1-bit mask painted at ~128 px: `cloud-shadow.ts` now samples a blurred copy (`softenCoverage`, 256², σ≈13 m)
+and widens the coverage band. Landmark fog silhouettes (`landmark-fog.ts`) read as black cutouts at 250 m; the
+owner called it "the church isn't affected by the fog" — `MAX_DARKEN` 0.7 → 0.4. A sprint probe across the moor
+(`sprint-probe --line`, 700 m at 7.7 m/s) showed full detail ready 140 m ahead at worst, 0 cells entered without a
+collider, 0 LOD-late samples: the pop the owner sees is the proxy → full-detail swap at the 144 m ring edge or a
+first-use glTF landing late, not streaming lag.

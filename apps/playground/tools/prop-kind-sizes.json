@@ -11,7 +11,7 @@
     "chain": { "match": "\\bchains?\\b(?! ?(mail|posts?|sheave|winch|capstan))", "dim": "h", "range": [0.05, 1.3], "note": "a barrier chain hangs about waist-high; a chain lying down is flat" },
     "table": { "match": "\\btable\\b", "dim": "h", "range": [0.6, 1.1] },
     "chair": { "match": "chair", "dim": "h", "range": [0.75, 1.6], "note": "a plain seat to a high-backed chair" },
-    "stool": { "match": "stool", "dim": "h", "range": [0.3, 0.85] },
+    "stool": { "match": "stool", "dim": "h", "range": [0.3, 0.85], "long": [0.2, 0.6], "note": "a seat for one: short AND narrow; wider than 0.6 m it is a side table or a bench" },
     "bench": { "match": "\\bbench\\b", "dim": "h", "range": [0.35, 1.1] },
     "chest": { "match": "\\bchest\\b|coffer", "dim": "h", "range": [0.25, 1.0] },
     "sack": { "match": "sack", "dim": "h", "range": [0.15, 1.1] },

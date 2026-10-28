@@ -7,7 +7,7 @@ centrepiece=). The helpers are town-craft's own (sliced from its build.py so the
 the same code), the role sheet is town-craft's materials.png. Writes one GLB per design and a geometry record per design
 (size, triangles, parts with extents, roles, texel density, errors). Never saves a .blend.
 """
-import bpy, bmesh, math, json, copy, sys, traceback
+import bpy, bmesh, math, json, copy, sys, traceback, hashlib
 from pathlib import Path
 from mathutils import Vector
 
@@ -17,6 +17,8 @@ def opt(name, default=None):
 WK = Path(opt('world-kit')).resolve(); HERE = WK / 'authoring/town-craft'; PROJECT = WK
 SOURCE = Path(opt('out')).resolve(); SOURCE.mkdir(parents=True, exist_ok=True)
 GEOMETRY = Path(opt('geometry')).resolve()
+PAINT_PLAN = opt('paint-mode','final') == 'plan'
+PAINT_ROOT = Path(opt('paint-root',str(WK/'authoring/codex-craft/paint'))).resolve()
 spec = opt('designs')
 designs = sorted(Path(spec).glob('*.py')) if Path(spec).is_dir() else [Path(p) for p in spec.split(',') if p]
 
@@ -40,6 +42,7 @@ exec(compile((WK / 'authoring/mesh-cleanup.py').read_text(), 'mesh-cleanup.py', 
 build = (HERE / 'build.py').read_text()
 a, b = build.index('def block('), build.index('def emit(')
 exec(compile(build[a:b], 'town-craft helpers', 'exec'), globals())
+exec(compile((Path(__file__).parent/'surfaces.py').read_text(), 'prop painted surfaces', 'exec'), globals())
 
 # per-part extents (the fussy-detail gate) and role checks ride on Mesh.add
 _add = Mesh.add
@@ -56,7 +59,30 @@ def emit(m, design, category='tool', mount='floor', solid=True, setting='both', 
     if current.get('emitted'): raise RuntimeError('emit called more than once')
     current['emitted'] = True
     if m.name != current['name']: raise RuntimeError(f'mesh is named "{m.name}", the design file is "{current["name"]}"')
-    ob = m.object(wall=mount == 'wall'); clean = clean_coplanar(ob.data)
+    paint_plan,face_map = describe_paint(m)
+    texture_size = 1024; paint_record = None
+    if paint_plan['surfaces']:
+        if PAINT_PLAN:
+            # Dimension-correct placeholder coordinates for design checks ONLY; never exported.
+            layout={'size':1024,'roles':{r:{'x':0,'y':0,'w':128,'h':128} for r in paint_plan['roles']},
+                    'surfaces':{s['name']:{'x':0,'y':0,'w':s['pixels'][0],'h':s['pixels'][1]} for s in paint_plan['surfaces']}}
+            paint_material=mat
+        else:
+            folder=PAINT_ROOT/m.name
+            if not (folder/'receipt.json').exists():raise ValueError('painted surfaces need artwork: run props paint plan / gen or import for '+m.name)
+            layout=json.loads((folder/'layout.json').read_text());receipt=json.loads((folder/'receipt.json').read_text())
+            sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+            if layout['geometrySha256']!=paint_plan['geometrySha256']:raise ValueError('paint UV guide is stale: re-plan and import '+m.name)
+            for filename,key in [('layout.json','layoutSha256'),('key.png','keySha256'),('manifest.json','manifestSha256'),('art.png','artSha256'),('atlas.png','atlasSha256')]:
+                if not (folder/filename).exists() or sha(folder/filename)!=receipt[key]:raise ValueError('paint '+filename+' changed: import artwork again for '+m.name)
+            if sha(WK/'assets/textures/town-craft/materials.png')!=receipt['roleSheetSha256']:raise ValueError('shared role art changed: import artwork again')
+            image=bpy.data.images.load(str(folder/'atlas.png'),check_existing=True);image.reload();image.pack()
+            paint_material=mat.copy();paint_material.name='Painted prop atlas • '+m.name
+            next(n for n in paint_material.node_tree.nodes if n.type=='TEX_IMAGE').image=image
+            paint_record={**paint_plan,'ready':True,'size':layout['size'],'atlasSha256':receipt['atlasSha256'],'artSha256':receipt['artSha256'],'layoutSha256':receipt['layoutSha256']}
+        texture_size=layout['size'];ob=painted_object(m,paint_plan,face_map,layout,paint_material,wall=mount=='wall')
+    else:ob=m.object(wall=mount=='wall')
+    clean = clean_coplanar(ob.data)
     drop = 0.0
     if mount == 'ceiling':  # origin at the top centre: the suspension point
         drop = max(v.co.z for v in ob.data.vertices)
@@ -68,7 +94,7 @@ def emit(m, design, category='tool', mount='floor', solid=True, setting='both', 
     bm = bmesh.new(); bm.from_mesh(ob.data); bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-6); bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces)); bm.to_mesh(ob.data); bm.free(); ob.data.update()
     for o in bpy.context.selected_objects: o.select_set(False)
     ob.select_set(True); bpy.context.view_layer.objects.active = ob; bpy.context.view_layer.update()
-    bpy.ops.export_scene.gltf(filepath=str(SOURCE / (m.name + '.glb')), export_format='GLB', use_selection=True, export_yup=True, export_apply=True, export_materials='EXPORT')
+    if not PAINT_PLAN:bpy.ops.export_scene.gltf(filepath=str(SOURCE / (m.name + '.glb')), export_format='GLB', use_selection=True, use_active_scene=True, export_yup=True, export_apply=True, export_materials='EXPORT')
     me = ob.data; uvl = me.uv_layers.active
     used = {i for p in me.polygons for i in p.vertices}; pts = [me.vertices[i].co for i in used]
     lo = [min(p[k] for p in pts) for k in range(3)]; hi = [max(p[k] for p in pts) for k in range(3)]
@@ -76,7 +102,7 @@ def emit(m, design, category='tool', mount='floor', solid=True, setting='both', 
     for p in me.polygons:
         vs = [me.vertices[i].co for i in p.vertices]; uv = [uvl.data[li].uv for li in p.loop_indices]
         area = (vs[1] - vs[0]).cross(vs[2] - vs[0]).length / 2
-        uarea = abs((uv[1].x - uv[0].x) * (uv[2].y - uv[0].y) - (uv[2].x - uv[0].x) * (uv[1].y - uv[0].y)) / 2 * 1024 * 1024
+        uarea = abs((uv[1].x - uv[0].x) * (uv[2].y - uv[0].y) - (uv[2].x - uv[0].x) * (uv[1].y - uv[0].y)) / 2 * texture_size * texture_size
         if area > 1e-6: dens.append((math.sqrt(uarea / area), area))
     dens.sort(); total = sum(w for _, w in dens); acc = 0; median = 0
     for d, w in dens:
@@ -85,7 +111,22 @@ def emit(m, design, category='tool', mount='floor', solid=True, setting='both', 
     current['record'] = {'name': m.name, 'design': design, 'category': category, 'mount': mount, 'solid': bool(solid), 'setting': setting,
         'cultures': list(cultures or []), 'centrepiece': bool(centrepiece), 'rooms': rooms, 'use': use, 'against': against,
         'size': [round(hi[0] - lo[0], 4), round(hi[2] - lo[2], 4), round(hi[1] - lo[1], 4)], 'triangles': len(me.polygons),
-        'parts': m.parts, 'roles': sorted(set(m.roles)), 'shift': list(m.shift), 'cleanup': clean, 'texel': round(median, 2), 'water': wrec}
+        'parts': m.parts, 'roles': sorted(set(m.roles)), 'shift': list(m.shift), 'cleanup': clean, 'texel': round(median, 2), 'water': wrec,
+        'paintPlan': paint_plan if paint_plan['surfaces'] else None, 'paint': paint_record}
+    if paint_record:
+        surface_density={s['name']:[] for s in paint_plan['surfaces']}
+        for p in me.polygons:
+            uv=[uvl.data[li].uv for li in p.loop_indices];vs=[me.vertices[i].co for i in p.vertices]
+            area=(vs[1]-vs[0]).cross(vs[2]-vs[0]).length/2
+            if area<1e-9:continue
+            ua=abs((uv[1].x-uv[0].x)*(uv[2].y-uv[0].y)-(uv[2].x-uv[0].x)*(uv[1].y-uv[0].y))/2*texture_size**2
+            for name,r in layout['surfaces'].items():
+                if all(r['x']-1e-4<=v.x*texture_size<=r['x']+r['w']+1e-4 and r['y']-1e-4<=(1-v.y)*texture_size<=r['y']+r['h']+1e-4 for v in uv):surface_density[name].append((math.sqrt(ua/area),area))
+        for s in paint_record['surfaces']:
+            values=sorted(surface_density[s['name']]);total=sum(w for d,w in values);acc=0;s['texel']=0
+            for d,w in values:
+                acc+=w
+                if acc>=total/2:s['texel']=round(d,2);break
 
 for f in designs:
     current.clear(); current['name'] = f.stem

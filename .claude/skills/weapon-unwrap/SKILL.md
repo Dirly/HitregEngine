@@ -68,6 +68,12 @@ key. Copy the `longsword` entry and change it. In this order:
 
 ## For a NEW mob — what the ghoul taught
 
+**The body is Derek's.** A mob body comes from his model folders (the dragon
+folder, Tripo, Blockbench). Never build one in Blender or from the human rig's
+rest joints (ruling 2026-10-27: the agent-built skeleton did not pass beside
+his models). Your work starts at the unwrap of a body he supplied; a creature
+with no body is a request.
+
 The ghoul (`ghoul` recipe, `sets/ghoul/prompt.md`) took ten generator rounds;
 each item below cost at least one. Details and measurements are in
 docs/mob-atlas.md.

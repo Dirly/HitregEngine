@@ -1,8 +1,8 @@
 {
   "version": 1,
   "id": "hitreg.armor-atlas",
-  "name": "Armor / Weapon Atlas",
-  "description": "Register generated artwork against a UV key and write a game-ready atlas. Character armor uses a 256px sheet; longsword weapons use a 128px sheet with weapon-sized bleed by default.",
+  "name": "Armor / Weapon / Prop Atlas",
+  "description": "Register painted artwork against a UV key. Armor and weapon presets remain supported; custom prop guides use their supplied manifest at its measured resolution with nearest filtering.",
   "category": "Assets/Generate",
   "surfaces": [
     "assets",
@@ -44,8 +44,20 @@
         {
           "value": "longsword",
           "label": "longsword"
+        },
+        {
+          "value": "prop",
+          "label": "custom prop UV guide"
         }
       ]
+    },
+    "manifest": {
+      "kind": "file",
+      "label": "Prop UV manifest",
+      "description": "Required for the custom prop sheet: manifest.json from props paint plan. Its named islands, measured square size and bleed govern registration; size/bleed/filter controls below apply only to armor and weapon presets. This tool registers custom artwork; props paint import combines it with shared material tiles for the model.",
+      "required": false,
+      "accept": ["application/json"],
+      "maxBytes": 262144
     },
     "name": {
       "kind": "string",
@@ -59,7 +71,7 @@
     "size": {
       "kind": "number",
       "label": "Atlas size",
-      "description": "Square output size in pixels. Presets are character armor 256px and longsword 128px; set this only when intentionally overriding the sheet preset.",
+      "description": "Armor/weapon presets only: square output size in pixels. Custom prop guides always retain their manifest resolution, so this control cannot silently reduce their texel density.",
       "default": 256,
       "integer": true,
       "min": 64,
@@ -69,7 +81,7 @@
     "bleed": {
       "kind": "number",
       "label": "Bleed",
-      "description": "Padding texels dilated around UV islands. Presets are armor 8px and longsword 3px, keeping the same relative gutter after downsampling.",
+      "description": "Armor/weapon presets only: padding texels around UV islands. Custom prop guides retain the bleed declared by their manifest.",
       "default": 8,
       "integer": true,
       "min": 0,
@@ -79,7 +91,7 @@
     "filter": {
       "kind": "select",
       "label": "Filter",
-      "description": "Box filtering is the normal downsampling path; nearest preserves hard source pixels.",
+      "description": "Armor/weapon presets only: box downsamples smoothly, nearest preserves pixels. Custom prop guides always use nearest filtering at their measured resolution.",
       "default": "box",
       "options": [
         {

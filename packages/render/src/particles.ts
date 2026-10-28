@@ -376,8 +376,11 @@ class Emitter {
   private spawnDebt = 0;
   private emitting: boolean;
   private runtimeVisible = true;
-  /** Hidden (by the document or at runtime) this frame: no simulation, nothing drawn. */
+  /** Hidden (by the document or at runtime) or beyond the sleep distance this frame: no simulation, nothing drawn. */
   private asleep = false;
+  get sleeping(): boolean {
+    return this.asleep;
+  }
   // struct-of-arrays pools, sized once at registration
   private readonly pos: Float32Array;
   private readonly vel: Float32Array;
@@ -650,11 +653,25 @@ class Emitter {
   }
 
   /** Advance the simulation one frame. Draws nothing — see `write`. */
-  simulate(frameDt: number): void {
+  /**
+   * `sleepDistanceSq` > 0: an emitter farther than that from the camera (camPos, set by the system) sleeps —
+   * no births, integration or instance writes. A standing fire 400 m off is a pixel, and a populated world
+   * had over a hundred of them simulating and writing matrices every frame. Coming back inside the distance
+   * primes the cloud (see {@link prime}) so it does not pop in empty.
+   */
+  simulate(frameDt: number, sleepDistanceSq = 0): void {
     const d = this.data;
     // Authored-hidden and runtime-hidden effects are genuinely asleep: no
     // births, integration, instance writes, or invisible steady-state cloud.
     this.asleep = !this.runtimeVisible || !this.isHierarchyVisible();
+    if (!this.asleep && sleepDistanceSq > 0) {
+      const e = this.group.matrixWorld.elements; // last laid-out position: a frame stale at worst, fine for a distance
+      const dx = e[12]! - camPos.x, dy = e[13]! - camPos.y, dz = e[14]! - camPos.z;
+      const far = dx * dx + dy * dy + dz * dz > sleepDistanceSq;
+      if (far) this.asleep = true;
+      else if (this.sleptFar) this.prime();
+      this.sleptFar = far;
+    }
     if (this.asleep) {
       this.alive = 0;
       this.spawnDebt = 0;
@@ -662,14 +679,38 @@ class Emitter {
     }
     // Idle: nothing alive and nothing to spawn (an ambient layer dialled to 0)
     // costs no matrix walk and no loop. Bursts and splashes update their own transforms.
-    const rate = d.when === "night" ? d.rate * (1 - worldDaylight.value) : d.when === "day" ? d.rate * worldDaylight.value : d.rate;
+    const rate = this.rateNow();
     if (this.alive === 0 && (!this.emitting || !(rate > 0.001))) {
       this.spawnDebt = 0;
       return;
     }
     this.group.updateWorldMatrix(true, false);
     // simulation time this frame: the whole frame, or whole PSX ticks (often 0)
-    const dt = this.stepped(frameDt);
+    this.advance(this.stepped(frameDt), rate);
+  }
+
+  private sleptFar = false;
+
+  /** This frame's birth rate: the authored rate, dimmed by daylight for `when` layers. */
+  private rateNow(): number {
+    const d = this.data;
+    return d.when === "night" ? d.rate * (1 - worldDaylight.value) : d.when === "day" ? d.rate * worldDaylight.value : d.rate;
+  }
+
+  /** Woken after a distance sleep: run the cloud to its steady state in a few coarse ticks, so it is there on the first frame. */
+  private prime(): void {
+    const d = this.data;
+    if (!this.emitting || !(d.rate > 0)) return;
+    this.group.updateWorldMatrix(true, false);
+    const life = Math.max(d.lifetime[0], d.lifetime[1]);
+    const ticks = 8;
+    const rate = this.rateNow();
+    for (let k = 0; k < ticks; k++) this.advance(life / ticks, rate);
+  }
+
+  /** Integrate `dt` of simulation time (already stepped) and spawn what the rate owes. */
+  private advance(dt: number, rate: number): void {
+    const d = this.data;
 
     // integrate + retire (swap-remove keeps [0, alive) dense — no compaction)
     const { pos, vel, age, life, rot, phase } = this;
@@ -1230,12 +1271,24 @@ export interface ParticleSystemOptions {
    * its other modules.
    */
   host?: THREE.Object3D;
+  /**
+   * Emitters farther than this (metres) from the render camera sleep — no births, integration or instance
+   * writes — and prime their cloud when the camera comes back. A standing fire 400 m off is a pixel; a populated
+   * world had over a hundred simulating every frame. 0 = never sleep by distance. Default 220.
+   */
+  sleepDistance?: number;
 }
+
+export const PARTICLE_SLEEP_DISTANCE = 220;
 
 export class ParticleSystem {
   private readonly emitters = new Map<string, Emitter>();
   private readonly batches = new Map<string, ParticleBatch>();
-  constructor(private readonly options: ParticleSystemOptions = {}) {}
+  /** Runtime knob (probes A/B it): metres, 0 = never. */
+  sleepDistance: number;
+  constructor(private readonly options: ParticleSystemOptions = {}) {
+    this.sleepDistance = options.sleepDistance ?? PARTICLE_SLEEP_DISTANCE;
+  }
 
   register(
     entityId: string,
@@ -1273,7 +1326,8 @@ export class ParticleSystem {
     camera.getWorldQuaternion(camQuat);
     camera.getWorldPosition(camPos);
     invCamQuat.copy(camQuat).invert();
-    for (const emitter of this.emitters.values()) emitter.simulate(dt);
+    const sleepSq = this.sleepDistance > 0 ? this.sleepDistance * this.sleepDistance : 0;
+    for (const emitter of this.emitters.values()) emitter.simulate(dt, sleepSq);
     for (const batch of this.batches.values()) batch.flush();
   }
 
@@ -1301,11 +1355,12 @@ export class ParticleSystem {
     return emitter ? { mesh: emitter.batch.mesh, offset: emitter.offset, count: emitter.drawn } : undefined;
   }
 
-  /** Emitters, batches (= draw calls), and particles drawn as of the last update. */
-  stats(): { emitters: number; batches: number; particles: number } {
-    let particles = 0;
+  /** Emitters (and how many are asleep: hidden or beyond `sleepDistance`), batches (= draw calls), and particles drawn as of the last update. */
+  stats(): { emitters: number; asleep: number; batches: number; particles: number } {
+    let particles = 0, asleep = 0;
     for (const batch of this.batches.values()) particles += batch.mesh.instanceCount;
-    return { emitters: this.emitters.size, batches: this.batches.size, particles };
+    for (const emitter of this.emitters.values()) if (emitter.sleeping) asleep++;
+    return { emitters: this.emitters.size, asleep, batches: this.batches.size, particles };
   }
 
   clear(): void {

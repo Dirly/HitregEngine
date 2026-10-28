@@ -75,3 +75,46 @@ describe("screen-size cull", () => {
     restoreNonRenderingBranches(hidden);
   });
 });
+
+describe("frozen-subtree verdict reuse", () => {
+  it("re-tests a frozen group's props against the camera only every few walks, never a moved one", async () => {
+    const { freezeStaticSubtree, refreshStaticSubtree } = await import("../src/static-transforms.js");
+    const { resetFrozenVerdicts, frozenVerdictLife } = await import("../src/empty-batches.js");
+    resetFrozenVerdicts();
+    const scene = new THREE.Scene();
+    const town = new THREE.Group();
+    const prop = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), new THREE.MeshBasicMaterial());
+    const big = new THREE.Mesh(new THREE.BoxGeometry(50, 50, 50), new THREE.MeshBasicMaterial()); // keeps the group itself un-culled
+    prop.geometry.computeBoundingSphere(); big.geometry.computeBoundingSphere();
+    town.add(prop, big); scene.add(town);
+    scene.updateMatrixWorld(true);
+    freezeStaticSubtree(town);
+    const far = new THREE.Vector3(0, 0, 400), near = new THREE.Vector3(0, 0, 1);
+    // far: the tiny prop is under 2.5 px and hidden
+    let hidden = hideNonRenderingBranches(scene, undefined, cullAt(far));
+    expect(hidden).toContain(prop);
+    restoreNonRenderingBranches(hidden);
+    // the camera steps up to it: the cached verdict still hides it while it lives (staggered per root)...
+    if (frozenVerdictLife(town) > 1) {
+      hidden = hideNonRenderingBranches(scene, undefined, cullAt(near));
+      expect(hidden).toContain(prop);
+      restoreNonRenderingBranches(hidden);
+    }
+    // ...and within four walks it is re-tested and drawn
+    let shown = false;
+    for (let i = 0; i < 4 && !shown; i++) {
+      hidden = hideNonRenderingBranches(scene, undefined, cullAt(near));
+      shown = !hidden.includes(prop);
+      restoreNonRenderingBranches(hidden);
+    }
+    expect(shown).toBe(true);
+    // a change inside the subtree (its version bumps) is seen on the very next walk
+    hidden = hideNonRenderingBranches(scene, undefined, cullAt(far));
+    restoreNonRenderingBranches(hidden);
+    prop.scale.setScalar(400);
+    refreshStaticSubtree(town);
+    hidden = hideNonRenderingBranches(scene, undefined, cullAt(far));
+    expect(hidden).not.toContain(prop);
+    restoreNonRenderingBranches(hidden);
+  });
+});

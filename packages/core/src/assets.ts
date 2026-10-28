@@ -20,6 +20,7 @@ import { gameHudSchema, questSchema, tooltipSchema } from "./game-ui.js";
 import { performActionsSchema } from "./quest-blocks.js";
 import { dressingPlanSchema, dressingSetSchema, socketMapSchema } from "./dressing/schema.js";
 import { ownerOverridesSchema } from "./dressing/owner.js";
+import { propCurationSchema } from './prop-curation.js';
 
 export const terrainHeightfieldSchema = z.object({
   version: z.literal(1).default(1),
@@ -60,6 +61,7 @@ export function registerCoreAssetTypes(assets: AssetLibrary): void {
   assets.defineDataType("dressing-plan", dressingPlanSchema);
   // The owner's hand edits to placed props (<plan>.owner.json beside a plan; authoring/owner-overrides/<scene>.json for installer props).
   assets.defineDataType("owner-overrides", ownerOverridesSchema);
+  assets.defineDataType('prop-curation', propCurationSchema);
   registerThemeAssetType(assets);
 }
 

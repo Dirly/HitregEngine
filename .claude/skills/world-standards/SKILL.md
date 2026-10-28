@@ -58,6 +58,8 @@ How a zone run is run: `docs/zone-creation.md` (skill `zone-creator`). Reviewer 
   GPT draws art. An Opus owner writing prop transforms is a fault.
 - Rulings live in tools and skills; a brief points at them and never restates or narrows them ("no new models" means
   no new MESHES for what the catalogue has; new skins are always allowed).
+- Agents never author a creature BODY (owner 2026-10-27): themes and skins on an existing body only; a missing creature
+  is a request to the owner, never a Blender build script or a mesh from the human rig's joints.
 - Budgets: small ~150k, medium ~300k, large ~400k, dungeon ~450k; a long trail gets its own owner; a capital two owners.
   Every stage reports what it used. An owner past ~400k context hands off with its handoff file.
 - A handoff states what is missing ("story not yet visible", prop requests).

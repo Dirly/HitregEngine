@@ -280,6 +280,16 @@ export const CELL_INTEGRATION_BUDGET_MS = 2.5;
  * it is avoiding.
  */
 export const CELL_INTEGRATION_BUDGET_FAST_MS = 6;
+/**
+ * The integration budget while nobody is looking: the host's load screen or boot curtain is up, or the world is
+ * streaming in for the first time. One cell costs 6-18 ms, so the 2.5 ms budget admits ONE cell a frame and a
+ * ~1100-cell world took as many frames to appear — 90-160 s at load-time frame rates, with the terrain cache
+ * warm (measured 2026-10-27). Behind a curtain there is no frame to keep flat; the only thing that matters is
+ * how soon the curtain can drop.
+ */
+export const CELL_INTEGRATION_BUDGET_BURST_MS = 40;
+/** Supercell (HLOD) publishes per frame while bursting; otherwise one. */
+const SUPERCELL_PUBLISHES_BURST = 4;
 /** Speed (units/s) above which the fast budget applies. */
 const FAST_BUDGET_SPEED = 4;
 /** Smoothed frame interval above which the fast budget is withheld. */
@@ -397,6 +407,9 @@ export interface ChunkLifecycle {
    * in the BACKGROUND, so the first frame that happens to look at it does not
    * compile them synchronously inside render(). Never awaited by the caller —
    * see EngineRenderer.precompileGroup for why gating the add is not an option.
+   * (Hiding the group until the compile settled was tried on 2026-10-27 and
+   * reverted: the load's synchronous builds were REBUILDS of already-drawn
+   * materials, not first draws — see docs/performance-lessons.md.)
    */
   precompile?: (group: THREE.Object3D) => void;
   /** A `renderMode: "instanced"` batch's chunk unloaded — unregister it from
@@ -490,6 +503,11 @@ export class ChunkManager {
    * tools/sprint-probe.mts --ab flips it inside one page session.
    */
   leadStreaming = true;
+  /**
+   * Set by the host while its load screen / boot curtain is up or the world is streaming in for the first time:
+   * cells and supercells publish under CELL_INTEGRATION_BUDGET_BURST_MS instead of the per-frame pacing budgets.
+   */
+  integrationBurst = false;
   private lead = { x: 0, z: 0 };
   private lastLeadCell: [number, number] | null = null;
   /** Smoothed interval between update() calls (≈ the frame time), for the fast budget's cap. */
@@ -800,6 +818,16 @@ export class ChunkManager {
     if (!s) return true;
     const key = `${Math.floor(x / s.cellSize)}_${Math.floor(z / s.cellSize)}`;
     return !this.hasCell(key) || this.loaded.has(key);
+  }
+
+  /** Is the ground at (x, z) in the physics sim — a simulation-tier cell (collider resident), or no streamed cell at all? */
+  isCellSimulated(x: number, z: number): boolean {
+    const s = this.streamer;
+    if (!s) return true;
+    const key = `${Math.floor(x / s.cellSize)}_${Math.floor(z / s.cellSize)}`;
+    if (!this.hasCell(key)) return true;
+    const chunk = this.loaded.get(key);
+    return !!chunk && chunk.simulated;
   }
 
   /** Local landing coverage, not queue emptiness (queued work is not ground). */
@@ -1334,8 +1362,12 @@ export class ChunkManager {
    * inline bypass, because an HLOD proxy carries no collider.
    */
   private drainPendingSupercells(): void {
-    const publish = this.pendingSupercells.shift();
-    if (publish) publish();
+    const n = this.integrationBurst ? SUPERCELL_PUBLISHES_BURST : 1;
+    for (let i = 0; i < n; i++) {
+      const publish = this.pendingSupercells.shift();
+      if (!publish) return;
+      publish();
+    }
   }
 
   private drainPendingCells(fx: number, fz: number): void {
@@ -1345,8 +1377,8 @@ export class ChunkManager {
     const started = now();
     let integrated = 0;
     // a fast-moving focus gets the larger budget, unless frames are already long
-    const budget =
-      this.leadStreaming && this.focusVelocity.speed > FAST_BUDGET_SPEED && this.frameMs < FAST_BUDGET_MAX_FRAME_MS
+    const budget = this.integrationBurst ? CELL_INTEGRATION_BUDGET_BURST_MS
+      : this.leadStreaming && this.focusVelocity.speed > FAST_BUDGET_SPEED && this.frameMs < FAST_BUDGET_MAX_FRAME_MS
         ? CELL_INTEGRATION_BUDGET_FAST_MS
         : CELL_INTEGRATION_BUDGET_MS;
     while (this.pending.size > 0) {
@@ -1804,6 +1836,9 @@ export class ChunkManager {
         this.registerPart(part);
         for (const key of part.cellKeys) existing.cellKeys.add(key);
         existing.entityCount += entityCount;
+        // an appended part is new content: compile it in the background like a first bake (the group-level
+        // precompile below ran once, for the first part only)
+        this.lifecycle.precompile?.(part.group);
         return;
       }
       if (existing) {
@@ -1819,6 +1854,7 @@ export class ChunkManager {
         this.registerPart(part);
         existing.cellKeys = new Set(part.cellKeys);
         existing.entityCount = entityCount;
+        this.lifecycle.precompile?.(part.group);
         return;
       }
       const group = new THREE.Group();

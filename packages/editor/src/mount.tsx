@@ -65,6 +65,8 @@ export interface MountOptions {
   pathRadius: Observable<number>;
   thumbnails: Observable<Record<string, string>>;
   thumbnailRequests?: Observable<string[]>;
+  /** Host-provided page for reviewing which props builders may use. */
+  propReviewUrl?: string;
   dockSizes: Observable<DockSizes>;
   assetsVersion: Observable<number>;
   /** Entity id -> bone names of its loaded skinned model (bone dropdowns). */
@@ -144,6 +146,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       pathRadius={options.pathRadius}
       thumbnails={options.thumbnails}
       thumbnailRequests={options.thumbnailRequests}
+      propReviewUrl={options.propReviewUrl}
       dockSizes={options.dockSizes}
       assetsVersion={options.assetsVersion}
       modelBones={options.modelBones}

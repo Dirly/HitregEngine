@@ -13,6 +13,12 @@ For a finished town, also follow [town-baking.md](town-baking.md): keep these
 editable parts and compile runtime geometry by building shell and independent
 interior units. Kit import and texture packing alone do not produce that bake.
 
+Follow [art-direction.md](art-direction.md) for the whole kit and its example
+layouts. Model the structural forms and usable openings; use repeating wall/roof
+art, trims and mapped focal panels for surface richness. Finish a representative
+textured assembly before multiplying parts. A simple textured form is valid;
+adding modeled masonry joints, shingles or ornament is not the default.
+
 ## 1. Pick a cell size and stick to it
 
 A kit lives on a grid of identical cells. Decide the cell before the first
@@ -46,7 +52,9 @@ examples.
   examples are easy to build. Two straight walls in neighbouring cells then
   meet flush; two walls in one cell overlap at the post, which reads fine at
   this style. If you want a real corner post, model one as its own part.
-- **Doors and windows are wall parts** with a hole. Same edge rule. If a
+- **Usable doors and see-through windows are wall parts** with a hole. A sealed
+  decorative window may be painted on a wall part; it does not create an opening
+  or a passage connector. Same edge rule. If a
   door needs a frame that pokes into the neighbouring cell, don't: keep every
   part inside its own cell.
 - **Stairs, pillars, furniture** sit wherever they belong inside the cell,

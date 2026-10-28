@@ -9,6 +9,7 @@
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit && node tools/typecheck-projects.mjs",
     "build:game": "node tools/publish.mjs",
+    "preview:game": "vite preview --port 4180 --strictPort --outDir",
     "typecheck:projects": "node tools/typecheck-projects.mjs",
     "place": "tsx tools/place.mts",
     "worldgen": "tsx tools/worldgen.mts",

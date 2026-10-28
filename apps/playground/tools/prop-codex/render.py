@@ -15,6 +15,7 @@ def opt(name, default=None):
 models = [Path(p) for p in opt('models').split(',') if p]
 cards = Path(opt('cards')); cards.mkdir(parents=True, exist_ok=True)
 sheet = opt('sheet'); labels = (opt('labels') or '').split(',')
+painted = set((opt('painted') or '').split(','))
 
 scene = bpy.context.scene
 for o in list(scene.objects): bpy.data.objects.remove(o, do_unlink=True)
@@ -97,7 +98,25 @@ for i, p in enumerate(props):
     target = (lo + hi) / 2; span = max(hi - lo)
     cam.location = target + Vector((1.0, -1.85, 1.1)) * span; aim(cam, target); cam.data.ortho_scale = span * 1.55
     scene.render.resolution_x = 900; scene.render.resolution_y = 900
-    scene.render.filepath = str(cards / ('prop-' + p['name'] + '.png')); bpy.ops.render.render(write_still=True); show(p, False)
+    scene.render.filepath = str(cards / ('prop-' + p['name'] + '.png')); bpy.ops.render.render(write_still=True)
+    if p['name'] in painted:
+        originals=[(ob,list(ob.data.materials)) for ob in p['meshes']]
+        clay=material('geometry review clay',(.42,.42,.42))
+        for ob,mats in originals:
+            for slot in ob.material_slots:slot.material=clay
+        scene.render.filepath=str(cards/('clay-'+p['name']+'.png'));bpy.ops.render.render(write_still=True)
+        for ob,mats in originals:
+            for slot,ma in zip(ob.material_slots,mats):
+                unlit=bpy.data.materials.new('unlit artwork review');unlit.use_nodes=True;nt=unlit.node_tree;nt.nodes.clear();out=nt.nodes.new('ShaderNodeOutputMaterial');em=nt.nodes.new('ShaderNodeEmission');em.inputs['Strength'].default_value=1
+                image=next((n.image for n in ma.node_tree.nodes if n.type=='TEX_IMAGE'),None)
+                if image:
+                    tex=nt.nodes.new('ShaderNodeTexImage');tex.image=image;tex.interpolation='Closest';nt.links.new(tex.outputs['Color'],em.inputs['Color'])
+                else:em.inputs['Color'].default_value=ma.diffuse_color
+                nt.links.new(em.outputs[0],out.inputs['Surface']);slot.material=unlit
+        scene.render.filepath=str(cards/('unlit-'+p['name']+'.png'));bpy.ops.render.render(write_still=True)
+        for ob,mats in originals:
+            for slot,ma in zip(ob.material_slots,mats):slot.material=ma
+    show(p, False)
 
 if sheet:
     x = 0.0; gap = .8

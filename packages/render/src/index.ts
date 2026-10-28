@@ -106,6 +106,8 @@ export {
 } from "./grass.js";
 export {
   EngineRenderer,
+  PRECOMPILE_SLICE_LOADING_MS,
+  PRECOMPILE_SLICE_MS,
   type Backend,
   type BloomOptions,
   type EngineRendererOptions,
@@ -165,6 +167,8 @@ export { LightBudgetSystem } from "./light-budget.js";
 export { chimneySmoke, ChimneySmoke } from "./chimney-smoke.js";
 export { updateWorldAmbience, setWorldExtrasEnabled } from "./ambience.js";
 export { cloudShadow } from "./cloud-shadow.js";
+export { PRECOMPILE_SAFE } from "./precompile-safe.js";
+export { BuilderStateRetention, RETAINED_BUILDER_STATES, retainBuilderStates } from "./builder-state-retention.js";
 export { updateCharacterGrounding } from "./contact-shadows.js";
 export { pathGeometry, type PathMeshSource } from "./path-mesh.js";
 export { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
@@ -233,7 +237,7 @@ export {
   type SkyData,
   type SkyFogData,
 } from "./scene-lighting.js";
-export { currentMaterialEnvironment, setEnvironment, applyModelTextureFilter, type TextureFilter } from "./material-maps.js";
+export { currentMaterialEnvironment, setEnvironment, applyModelTextureFilter, waitForMaterialMaps, type TextureFilter } from "./material-maps.js";
 export { cachedSkyEnvironmentTexture, clearSkyEnvironmentCache } from "./environment.js";
 export {
   batchStaticMeshes,

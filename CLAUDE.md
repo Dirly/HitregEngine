@@ -23,6 +23,11 @@ pnpm typecheck                   # all packages
 
 ## Non-negotiable invariants
 
+- **Texture-led PSX content by default, across all future layouts and assets.**
+  Read `docs/art-direction.md` for any visual content work, including Blender-only
+  tests. Geometry carries silhouette, usable space and functional depth; painted
+  textures carry surface identity and ornament. Plan and review the textured
+  finish before repeating a style or asset group.
 - **Catalog reusable props before installation** (shared props live in `world-kit`). Every imported, user-made,
   generated or modified prop/vegetation variant follows `docs/prop-cataloging.md`.
   Update the owning catalog, preserve source/UV/material/behavior information,
@@ -87,7 +92,9 @@ Read the relevant sections once, and revisit them when the task or code changes.
 **Building content** (dungeons, zones, POIs, towns, NPCs, characters, gear,
 atlases, icons, art and audio generation, rivers and falls): read
 **`docs/workflows.md`** — the routing for every content workflow and the tool
-`--project` to use — then the README of the project you are working in.
+`--project` to use — then the README of the project you are working in. Before extending any
+builder (town kit, place-build, dress, populate, worldgen), read `docs/postmortems/skelmorrow.md`:
+its fault → check table is the backlog of checks those tools still owe.
 For fantasy places and their stories, read **`docs/world-standards/adventure-design.md`**
 before choosing premises or writing quests. Skelmorrow's POIs are fantasy
 discoveries and adventures; medieval trades are supporting context. A grim name,

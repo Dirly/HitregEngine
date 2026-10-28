@@ -75,7 +75,8 @@ export class VoxelDiskCache {
             cursor.onsuccess = () => {
               const item = cursor.result;
               if (!item || total <= this.limit) { meta.put(total, "bytes"); return; }
-              if (item.primaryKey !== fullKey) { total -= (item.value as Entry).bytes; item.delete(); }
+              // a record with no value (a write torn by a crash) is evicted like any other, not tripped over
+              if (item.primaryKey !== fullKey) { total -= (item.value as Entry | null)?.bytes ?? 0; item.delete(); }
               item.continue();
             };
           };

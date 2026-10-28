@@ -17,6 +17,7 @@ import {
   vec3,
 } from "three/tsl";
 import { windowLight } from "./window-lights.js";
+import { applyAdditiveFog } from "./additive-fog.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type N = any;
@@ -36,7 +37,7 @@ export const WINDOWS_KEY = "hitregWindows";
 export const WINDOW_STRIDE = 6;
 
 const NEAR_FADE: [number, number] = [150, 260];
-const FAR_FADE: [number, number] = [2600, 3400];
+const FAR_FADE: [number, number] = [350, 600];
 /** Angular size floor: radius ≥ this × distance (≈ 1.5 px at 1080p, 60° fov). */
 const MIN_ANGULAR = 0.0016;
 
@@ -51,8 +52,8 @@ export function distantWindowMaterial(): THREE.MeshBasicNodeMaterial {
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
-    fog: false,
   });
+  applyAdditiveFog(m);
   m.name = "distant-windows";
   const a: N = attribute("aWin", "vec4"); // centre xyz, seed
   const n: N = attribute("aWinN", "vec2"); // outward normal x, z

@@ -130,17 +130,39 @@ function check(scene: SceneDoc): number {
   const inp = inputFor(scene);
   const installed = installedOf(scene);
   const res = checkTownLights(inp, rule, installed);
+  // interiors (owner walk 2026-10-27: "all houses have abysmal interior lighting at night"): every building with a door
+  // holds at least one light INSIDE its footprint — a dressed fixture (prefab fixtures/*, a lit/candle/lantern/hearth
+  // prefab) or a raw light component. Street lanterns stand outside the footprint, so they never count.
+  const inside = (p: XZ, poly: XZ[]): boolean => {
+    let ok = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, zi] = poly[i]!, [xj, zj] = poly[j]!;
+      if (zi > p[1] !== zj > p[1] && p[0] < ((xj - xi) * (p[1] - zi)) / (zj - zi) + xi) ok = !ok;
+    }
+    return ok;
+  };
+  const LIT = /^fixtures\/|-lit\b|candle|lantern|lamp|torch|brazier|hearth|chandelier|sconce|fire/i;
+  const lightsIn = new Map<string, number>();
+  for (const e of Object.values(scene.entities) as J[]) {
+    const at = e.components?.transform?.position as number[] | undefined;
+    if (!at || !(e.components?.light || LIT.test(String(e.components?.prefab?.prefabId ?? "")))) continue;
+    for (const b of inp.buildings) if (b.poly.length >= 3 && inside([at[0]!, at[2]!], b.poly)) lightsIn.set(b.id, (lightsIn.get(b.id) ?? 0) + 1);
+  }
+  const dark = inp.buildings.filter((b) => b.door && !(lightsIn.get(b.id) ?? 0)).map((b) => b.id);
+  const failures = [...res.failures, ...dark.map((id) => `interior ${id}: no light inside its footprint (a hearth, candle or lantern fixture from the plan's bucket) — the house reads black at night`)];
+  const ok = res.ok && dark.length === 0;
   const report = {
-    town: townName, world: townDoc.world, scene: townDoc.scene, ok: res.ok, at: new Date().toISOString(),
+    town: townName, world: townDoc.world, scene: townDoc.scene, ok, at: new Date().toISOString(),
     rule: path.relative(projectDir, streetLightingFile(projectDir)).replaceAll("\\", "/"), profile, standing,
-    counts: res.counts, total: installed.length, failures: res.failures,
+    counts: res.counts, total: installed.length, failures,
+    interiors: Object.fromEntries(inp.buildings.filter((b) => b.door).map((b) => [b.id, lightsIn.get(b.id) ?? 0])),
     lanterns: installed.map((l) => ({ id: l.id, prefab: l.prefab, kind: l.kind, ref: l.ref, at: l.at.map((v) => +v.toFixed(2)) })),
   };
   fs.writeFileSync(path.join(towns, `${townName}-lights.json`), `${JSON.stringify(report, null, 1)}\n`);
-  for (const f of res.failures) console.log(`  ! ${f}`);
+  for (const f of failures) console.log(`  ! ${f}`);
   const tally = Object.entries(res.counts).map(([k, n]) => `${n} ${k}`).join(", ") || "none";
-  console.log(`LIGHTS ${townName}: ${installed.length} lanterns (${tally}), ${res.failures.length} failure(s) -> ${res.ok ? "ok" : "FAILED"}`);
-  return res.ok ? 0 : 1;
+  console.log(`LIGHTS ${townName}: ${installed.length} lanterns (${tally}), ${dark.length} dark interior(s), ${failures.length} failure(s) -> ${ok ? "ok" : "FAILED"}`);
+  return ok ? 0 : 1;
 }
 
 const sceneNow = (): SceneDoc => readJson(sceneFile) as SceneDoc;

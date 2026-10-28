@@ -51,7 +51,7 @@ import {
   type ChunkStreamerData,
   type SpritesheetDoc,
 } from "@hitreg/core";
-import { MovingInstanceSystem, EngineRenderer, buildScene, gltfLoadingCount, type PostFxData, makeMeshGeometryProvider, AnimationSystem, CROWD_POSE_LOD, ParticleSystem, BillboardSystem, LightBudgetSystem, updateWorldAmbience, updateCharacterGrounding, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
+import { MovingInstanceSystem, EngineRenderer, PRECOMPILE_SLICE_LOADING_MS, PRECOMPILE_SLICE_MS, buildScene, gltfLoadingCount, type PostFxData, makeMeshGeometryProvider, AnimationSystem, CROWD_POSE_LOD, ParticleSystem, BillboardSystem, LightBudgetSystem, updateWorldAmbience, updateCharacterGrounding, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
 import { createAmbientVfx, createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 
 /** The `camera` component, straight off the schema. */
@@ -237,6 +237,8 @@ async function main(): Promise<void> {
   // loadingScreen until its near ground is in. Not over the gateway's sign-in
   // card (a fresh visit), which it would hide.
   let bootCurtain: PortalCurtain | null = null;
+  /** The boot curtain is showing (the streamer bursts while it is). */
+  let bootCurtainUp = false;
   if (netEndpoint.kind !== "gateway" || resumed) {
     const bootScene = resumed?.grant.scene ?? query.get("scene");
     const file = bootScene ? `${bootScene}.scene.json` : manifest.entry.scene;
@@ -245,6 +247,7 @@ async function main(): Promise<void> {
     if (art) {
       const title = art.title ?? file.replace(/.scene.json$/, "").replace(/-/g, " ").replace(/w/g, (c) => c.toUpperCase());
       bootCurtain = mountPortalCurtain();
+      bootCurtainUp = true;
       void bootCurtain.show(title);
       bootCurtain.setProgress(0.05);
       await bootCurtain.setArt({ url: art.url, title });
@@ -1039,12 +1042,14 @@ async function main(): Promise<void> {
   }, 250);
 
   const groundHold = new GroundLoadHold();
+  const isCellSimulated = (x: number, z: number): boolean => chunkManager.isCellSimulated(x, z);
   const loop = new FixedTimestepLoop({
     fixedUpdate: (dt) => {
       if (++staticsStreamStep % 6 === 0) sim.updateStaticsAroundBodies();
       sim.step(dt);
       groundHold.update(sim, localPlayerId(), (x, z) => chunkManager.isCellLoaded(x, z));
-      for (const [id, state] of sim.states()) {
+      sim.holdUngrounded(isCellSimulated); // bodies standing where no collider is resident sleep instead of falling
+      for (const [id, state] of sim.states(true)) {
         const obj = built.objects.get(id);
         if (obj) applyBodyState(obj, state);
         let p = curr.get(id);
@@ -1085,6 +1090,10 @@ async function main(): Promise<void> {
         const p = focusObj
           ? focusObj.getWorldPosition(streamFocus)
           : streamFocus.copy(camera.position);
+        // full-speed integration behind the boot curtain only (see ChunkManager.integrationBurst): once the player
+        // is in, the far ring streams under the pacing budgets instead of holding the game at ~10 fps
+        chunkManager.integrationBurst = bootCurtainUp;
+        renderer.precompileSliceMs = bootCurtainUp ? PRECOMPILE_SLICE_LOADING_MS : PRECOMPILE_SLICE_MS;
         chunkManager.update(p.x, p.z);
       }
       if (!followId) controls.update(dt); // the rig owns the camera when there is one
@@ -1162,6 +1171,7 @@ async function main(): Promise<void> {
       if (quiet < 3 && performance.now() - started < 30000) return;
       clearInterval(poll);
       curtain.setProgress(1);
+      bootCurtainUp = false;
       setTimeout(() => curtain.hide(), 160);
     }, 100);
   }

@@ -4,6 +4,13 @@ What a reviewer agent checks (`docs/zone-creation.md`, "The reviewer"). Each lin
 evidence. Measurable lines first; a taste line is a fault only when the picture shows it plainly. Cite a line by its
 code (S3, D5 ...).
 
+Apply `docs/art-direction.md` to every visual review, including Q1/Q2 and P5.
+Texture-led PSX applies to the entire layout and its assets. Simple geometry with
+finished painted artwork is valid; an unfinished primitive substitute is not.
+Inspect structural form, unlit artwork and the integrated player-height view.
+Missing focal artwork or modeled surface ornament replacing the planned painted
+finish is a fault. Respect each subsystem's supported texture/UV path.
+
 The Place lines (P1-P5) are not taste lines (owner ruling 2026-10-22, after a zone of places passed every gate and
 read as nothing): a story element that is not in the frames, or a prop no element explains, is a FAULT. It is never a
 logged note and never a prop request. A reviewer who writes "no nets visible" and passes has failed the review.

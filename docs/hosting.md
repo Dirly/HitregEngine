@@ -515,6 +515,20 @@ produces the player-only site under `apps/playground/dist/<project>`. A plain
 `build` produces the editor; pointing a public host or tunnel at it exposes the
 authoring interface and does world rendering while the gateway card is open.
 Serve the published folder for players and keep the authoring URL separate.
+
+**Seeing the published client locally** (no editor, no dev server, the real bundle):
+
+```
+pnpm -F playground build:game skelmorrow skelmorrow.scene.json   # → apps/playground/dist/skelmorrow
+pnpm -F @hitreg/server serve --scene skelmorrow                   # the world, on ws://127.0.0.1:8787
+pnpm -F playground preview:game dist/skelmorrow                   # static server on :4180
+# open http://localhost:4180/?server=ws://127.0.0.1:8787
+```
+
+A `multiplayer: "server"` project's bundle needs a server to join (with none it waits at the gateway card);
+`?server=` points it at the open dev server above. Load time there is the world streaming in, not the dev server:
+measured 2026-10-27 the bundle joined in 14-18 s and the world was fully in at 90-160 s before the streamer's
+load-time burst budget (`docs/performance-lessons.md`).
 The gateway panel in the published client waits for a character's Play grant
 before loading boot data, constructing the scene, or streaming terrain.
 The simulation server remains headless; a player's browser still needs the

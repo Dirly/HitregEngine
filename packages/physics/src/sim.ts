@@ -454,6 +454,8 @@ export class PhysicsSim {
       this.bodies.delete(id);
       this.moving.delete(id);
       this.sensors.delete(id);
+      this.heldUngrounded.delete(id);
+      this.reportedAsleep.delete(id);
       this.queriesDirty = true;
       // a controller outlives its body otherwise — chunk streaming unloads and
       // reloads the same entity id, and a stale controller holds wasm memory
@@ -1210,6 +1212,60 @@ export class PhysicsSim {
     return this.sensors.has(id);
   }
 
+  /**
+   * Hold every dynamic body standing where the ground is not simulated (`isSimulated(x, z)` false: a cell whose
+   * terrain collider is not resident). Such a body has nothing under it and otherwise falls forever — on
+   * Skelmorrow 183 of 184 asleep mobs were falling at terminal velocity, each one moving every step (the renderer
+   * re-walked their skeletons, held weapons re-uploaded, the solver integrated them) while no player could see
+   * them. The body is put to sleep where it stands, which Rapier then skips entirely. A script that wakes it (a
+   * mid-band controller's setLinvel) gets the height restored and the vertical velocity zeroed after the step, and
+   * it sleeps again. An authoritative move upward (a respawn) raises the held height. The hold ends the moment its
+   * ground is simulated: the body wakes and settles onto the real collider. Call once per step, after step() and
+   * before states(). Returns how many bodies are held.
+   */
+  holdUngrounded(isSimulated: (x: number, z: number) => boolean): number {
+    const held = this.heldUngrounded;
+    for (const [id, body] of this.moving) {
+      if (!body.isDynamic()) continue;
+      const t = body.translation();
+      if (isSimulated(t.x, t.z)) {
+        if (held.delete(id)) body.wakeUp();
+        continue;
+      }
+      let y = held.get(id);
+      if (y === undefined || t.y > y) {
+        y = t.y;
+        held.set(id, y);
+      } else if (t.y < y) {
+        this.qPos.x = t.x;
+        this.qPos.y = y;
+        this.qPos.z = t.z;
+        body.setTranslation(this.qPos, false);
+        this.reportedAsleep.delete(id); // moved in its sleep: the next states() reports it once more
+      }
+      if (!body.isSleeping()) {
+        const v = body.linvel();
+        if (v.y !== 0) {
+          this.qVel.x = v.x;
+          this.qVel.y = 0;
+          this.qVel.z = v.z;
+          body.setLinvel(this.qVel, false);
+        }
+        body.sleep();
+      }
+    }
+    return held.size;
+  }
+  /** Stop holding: every held body wakes where it is (an A/B switch; the hold is otherwise released by ground arriving). */
+  releaseUngrounded(): void {
+    for (const id of this.heldUngrounded.keys()) this.moving.get(id)?.wakeUp();
+    this.heldUngrounded.clear();
+  }
+  /** Bodies held by {@link holdUngrounded} and the height each is held at. */
+  private readonly heldUngrounded = new Map<string, number>();
+  /** How many times {@link states}(true) has reported each sleeping body since it fell asleep. */
+  private readonly reportedAsleep = new Map<string, number>();
+
   /** One moving body's position as the physics world has it now (states() without building a map of every body). */
   getPosition(id: string): Vec3 | null {
     const body = this.moving.get(id);
@@ -1822,9 +1878,25 @@ export class PhysicsSim {
   }
 
   /** World-space states of every moving body, keyed by (expanded) entity id. */
-  states(): Map<string, BodyState> {
+  /**
+   * Every moving body's pose — or, with `onlyChanged`, the readback set: a sleeping dynamic body has not moved
+   * since the step it fell asleep, so it is reported once and then skipped until it wakes (or is moved in its
+   * sleep — see holdUngrounded). A hundred resting mobs were a hundred readbacks a step. Point lookups
+   * (`states().get(id)`) keep the complete map.
+   */
+  states(onlyChanged = false): Map<string, BodyState> {
     const out = new Map<string, BodyState>();
+    const reported = this.reportedAsleep;
     for (const [id, body] of this.moving) {
+      if (onlyChanged) {
+        if (body.isDynamic() && body.isSleeping()) {
+          // twice, not once: a host's render interpolation keeps a previous and a current pose, and the second
+          // report is what brings the previous one up to the resting pose
+          const times = reported.get(id) ?? 0;
+          if (times >= 2) continue;
+          reported.set(id, times + 1);
+        } else if (reported.size > 0) reported.delete(id);
+      }
       const t = body.translation();
       const r = body.rotation();
       out.set(id, {

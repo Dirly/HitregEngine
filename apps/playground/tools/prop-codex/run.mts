@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import type { PropRequest } from "../_prop-composite-guard.mts";
 import { exampleContext, helperContext, propName, writeBrief, type ScaleInfo } from "./brief.mts";
 import { dir as collectionDir, writeOrigin } from "./install.mts";
+import {readReusePolicy,reuseFaults,reuseBrief} from '../_prop-reuse.mts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLAYGROUND = path.resolve(HERE, "../..");
@@ -41,6 +42,8 @@ const parseTokens = (out: string) => { const m = out.match(/Codex tokens:? ([\d,
 export async function runJob(req: Req, o: { name?: string; scale: ScaleInfo; scales: ScaleInfo[]; worldKit: string; cultureNote?: string; reviewNote?: string; runner?: Runner; jobRoot?: string; log?: (s: string) => void }): Promise<JobOutcome> {
   const runner = o.runner ?? codexTaskRunner, log = o.log ?? (() => {});
   const name = o.name ?? propName(req);
+  const reusePolicy=readReusePolicy(o.worldKit),reuse=reuseFaults({name:`${name} ${req.name}`},reusePolicy);
+  if(reuse.length)return {request:req,name,status:'fail',attempts:0,seconds:0,tokens:null,gate:reuse.join('\n')};
   const jobDir = path.join(o.jobRoot ?? path.join(os.tmpdir(), "hitreg-prop-codex"), name);
   fs.mkdirSync(jobDir, { recursive: true });
   const helpers = path.join(jobDir, "helpers.py"), examples = path.join(jobDir, "examples.py"), job = path.join(jobDir, "job.json"), brief = path.join(jobDir, "brief.md");
@@ -50,7 +53,7 @@ export async function runJob(req: Req, o: { name?: string; scale: ScaleInfo; sca
   const dest = path.join(collectionDir(o.worldKit), "designs", `${name}.py`);
   const t0 = Date.now(); let tokens: number | null = null, gate = "", stage: string | undefined, retry: string | undefined;
   for (let attempt = 1; attempt <= 2; attempt++) {
-    fs.writeFileSync(brief, writeBrief({ request: req, name, scale: o.scale, cultureNote: o.cultureNote, reviewNote: o.reviewNote, retry }));
+    fs.writeFileSync(brief, writeBrief({ request: req, name, scale: o.scale, cultureNote: o.cultureNote, reviewNote: o.reviewNote, retry, reuseNotes:reuseBrief(reusePolicy) }));
     const check = `npx tsx tools/prop-codex/check.mts {stage} --job "${job}"`;
     log(`  ${name}: codex attempt ${attempt}`);
     const r = await runner(["--brief", brief, "--out", `${name}.py=${dest}`, "--context", `${helpers},${examples}`, "--check", check, "--timeout", "1500"]);

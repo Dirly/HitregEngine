@@ -301,6 +301,20 @@ export function createWorldMapOverlay(options: WorldMapOverlayOptions): { toggle
   const pinById = (id: string | null): MapPin | undefined => (id ? pins().find((p) => p.id === id) : undefined);
 
   // -- minimap service --------------------------------------------------------
+  // The HUD asks ten times a second. Drawing every layer (zones, roads, markers, labels) each time cost ~3.5 ms a
+  // call — a quarter of a 60 Hz frame. The layers are drawn once into an offscreen canvas centred on the player
+  // and reused, scrolled by the distance walked since, until the scroll exceeds a few pixels or anything that
+  // changes the picture does (data, layers, ink, pins, size); only the arrow is drawn fresh each call.
+  let minimapCache: { canvas: HTMLCanvasElement; cx: number; cz: number; scale: number; key: string } | null = null;
+  const MINIMAP_SCROLL_PX = 6;
+  /** Identity of a MapData object (a rebuilt map is a new object): part of the cache key. */
+  const dataIds = new WeakMap<object, number>();
+  let nextDataId = 1;
+  const dataIdOf = (d: object): number => {
+    let id = dataIds.get(d);
+    if (id === undefined) dataIds.set(d, (id = nextDataId++));
+    return id;
+  };
   window.addEventListener("hitreg:minimap-draw", (event) => {
     const req = (event as CustomEvent<MinimapRequest>).detail;
     if (!req?.canvas) return;
@@ -310,16 +324,56 @@ export function createWorldMapOverlay(options: WorldMapOverlayOptions): { toggle
     if (!ctx) return;
     const width = req.canvas.width;
     const height = req.canvas.height;
+    const scale = width / (2 * req.radius);
     const minimapLayers = new Set<LayerId>([...shown()].filter((l) => l !== "reservations" && l !== "sites"));
-    drawMapLayers(ctx, d, { cx: req.x, cz: req.z, scale: width / (2 * req.radius), width, height }, {
-      layers: minimapLayers,
-      base: baseIsPlain ? base : null,
-      player: { x: req.x, z: req.z, yaw: (-req.heading * Math.PI) / 180 },
-      compact: true,
-      ...mapInk(),
-      font: req.font ?? mapInk().font,
-      pins: pins(),
-    });
+    const ink = mapInk();
+    const font = req.font ?? ink.font;
+    const pinList = pins();
+    const key = [dataIdOf(d), width, height, req.radius, [...minimapLayers].join(","), baseIsPlain ? "base" : "nobase", JSON.stringify(ink), font,
+      pinList.map((p) => `${p.id}:${p.x}:${p.z}`).join(";")].join("|");
+    let cache = minimapCache;
+    const scrolled = cache && cache.key === key && cache.scale === scale
+      ? Math.max(Math.abs(req.x - cache.cx), Math.abs(req.z - cache.cz)) * scale
+      : Infinity;
+    if (scrolled > MINIMAP_SCROLL_PX) {
+      if (!cache) cache = minimapCache = { canvas: document.createElement("canvas"), cx: 0, cz: 0, scale, key };
+      cache.canvas.width = width;
+      cache.canvas.height = height;
+      cache.cx = req.x;
+      cache.cz = req.z;
+      cache.scale = scale;
+      cache.key = key;
+      const off = cache.canvas.getContext("2d")!;
+      drawMapLayers(off, d, { cx: req.x, cz: req.z, scale, width, height }, {
+        layers: minimapLayers,
+        base: baseIsPlain ? base : null,
+        player: null,
+        compact: true,
+        ...ink,
+        font,
+        pins: pinList,
+      });
+    }
+    ctx.fillStyle = ink.backgroundColor;
+    ctx.fillRect(0, 0, width, height); // the strip the scroll uncovers, until the next redraw
+    ctx.drawImage(cache!.canvas, (cache!.cx - req.x) * scale, (cache!.cz - req.z) * scale);
+    // the arrow, as drawMapLayers draws it in compact mode (k = 0.8), at the centre
+    const k = 0.8;
+    ctx.save();
+    ctx.translate(width / 2, height / 2);
+    ctx.rotate((req.heading * Math.PI) / 180);
+    ctx.beginPath();
+    ctx.moveTo(0, -10 * k);
+    ctx.lineTo(7 * k, 8 * k);
+    ctx.lineTo(0, 4 * k);
+    ctx.lineTo(-7 * k, 8 * k);
+    ctx.closePath();
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#000000";
+    ctx.stroke();
+    ctx.restore();
     req.handled = true;
     req.place = zoneAt(d, req.x, req.z);
   });

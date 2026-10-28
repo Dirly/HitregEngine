@@ -134,6 +134,7 @@ export async function run(ctx: Ctx): Promise<number> {
     questObjects: stage === "dress-site" || BUILDING_STAGES.includes(stage) ? questObjectsFor(p.projectDir, world, stage === "dress-site" ? ctx.opt("poi") : ctx.opt("town")) : "",
   };
   const text = fs.readFileSync(path.join(briefsDir, `${stage}.md`), "utf8").replace(/\{(\w+)\}/g, (m, k: string) => vars[k] ?? m);
-  console.log(text.trimEnd());
+  const visualStage = ["zone-brief", "zone-bestiary", "town", "dress-building", "dress-site"].includes(stage);
+  console.log([...(visualStage ? ["Read docs/art-direction.md for the shared texture-led PSX direction across this whole layout and its assets. Plan surface artwork with the structural forms and review a representative textured sample before repetition. Honour this job's scope; a planning brief does not authorize building."] : []), text.trimEnd()].join("\n\n"));
   return 0;
 }

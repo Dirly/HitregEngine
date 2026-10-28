@@ -12,6 +12,11 @@ For content work (dungeons, zones, POIs, towns, characters, gear, art, audio) re
 `docs/workflows.md` first: it routes every content workflow and names the project each
 tool runs on (`foundation`, `world-kit`, or the world).
 
+For all visual content and layouts, including Blender-only experiments, read
+`docs/art-direction.md`: texture-led PSX is the default going forward. Geometry
+provides silhouette, usable space and functional depth; painted textures provide
+surface identity and ornament. This applies across content workflows.
+
 For dungeon work, start with the installed `hitreg-dungeon-authoring` skill,
 its quickstart, the existing kit README, and the current project's plan/notes.
 Reference images, measured layouts, applicable stamp/carving tools, and the

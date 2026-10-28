@@ -43,6 +43,9 @@ door, the style's hearth), tower/gatehouse. Kit limits: four-storey blocks and t
 - Wear is a level any style can take: kept, weathered, run-down, ruined (only ruins/abandoned get 3).
 - Windows are props in every style but `default`: an empty opening filled by a window prop from one shared outline
   table; large church/hall windows are their own pieces; dormer windows stay baked. The pane is opaque and glows at
-  night (one material swap); each model's markers file carries one `window` marker per window.
+  night (one material swap) on its STREET face only: from inside a room the pane is dark at night; every window of a
+  lived-in house is lit, no random dark panes (owner 2026-10-27, `window-lights.ts`). A house with no interior lights
+  or at wear 3 (abandoned) shows dark windows as a whole — OPEN, the per-building flag is not wired yet
+  (docs/world-standards/README.md). Each model's markers file carries one `window` marker per window.
 - Styles must be cheap to make, many of them: change data, not code.
 - Not encoded yet / OPEN: see `docs/world-standards/README.md` "Not encoded yet".

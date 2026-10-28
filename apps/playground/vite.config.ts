@@ -27,6 +27,7 @@ import { voxelCodeKey } from "./tools/_voxel-code-key.mts";
 import { lockFileOf, lockIsStale } from "./tools/_scene-write.mts";
 import { assetChangePublisher, assetSourceProject, scopedAssetChange } from "./tools/_asset-watch.mts";
 import { assertPlayerModules } from "./tools/_player-boundary.mjs";
+import {propReview,savePropReview,reviewImage,propPreview} from './tools/_prop-review.mts';
 
 /**
  * The dev server is the AI/file bridge:
@@ -64,6 +65,10 @@ import { assertPlayerModules } from "./tools/_player-boundary.mjs";
 /** The bridge's own HTTP surface, surfaced through GET /__hitreg/spec so an AI
  * can discover the tooling without reading this file. */
 const BRIDGE_ENDPOINTS = [
+  { method: 'GET', path: '/__hitreg/prop-review?project=<p>', purpose: 'Visual prop review catalog, owner choices and content fingerprints across a project dependency closure. UI: /prop-review.html. Excluded assets remain reviewable.' },
+  { method: 'GET', path: '/__hitreg/prop-review/preview?project=<p>&id=<prefab>', purpose: 'Selected catalogued prefab dependency bundle for accurate 3D review, with scoped model and texture URLs.' },
+  { method: 'GET', path: '/__hitreg/prop-review/file?project=<p>&path=<authoring image>', purpose: 'Serve an authoring review image; paths and image extensions are validated.' },
+  { method: 'POST', path: '/__hitreg/prop-review?project=<p>', purpose: 'Persist one owner choice { id, use: allow|exclude|trash|reset, note?, revision, hash }. Trash deletes from the active library, retains assets for recovery and blocks builders; reset or allow can restore a local trash choice. Returns 409 on stale review. Schema: dataAssets[prop-curation]. Builders inherit exclusions; installed scenes are preserved.' },
   { method: "POST", path: "/__hitreg/log", purpose: "Browser startup checkpoints and client errors, also retained as the last 100 entries in .hitreg/client-log.json so an agent can diagnose startup before the context bridge is running." },
   { method: "GET", path: "/__hitreg/spec", purpose: "This capability spec + endpoint list." },
   { method: "GET", path: "/__hitreg/context", purpose: "What the user currently sees: scene, selection, camera, in-view entities, play mode, diagnostics, plus `focus` — where their attention is, ranked (focus.strongest names which of manipulating/hover/selection/asset to resolve \"this\" against, and focus.mode says what they are doing: edit, graybox, terrain-sculpt, editing-prefab:<id>, playing, …). Keyed per browser tab (bridgeSessionId) — with exactly one tab connected this just returns its data; with more than one, returns { multipleClients: true, clients: [...] } instead of guessing, pass ?id=<id> from that list to pick one." },
@@ -405,6 +410,23 @@ function hitregBridge(): Plugin {
           });
           req.on("error", reject);
         });
+
+      server.middlewares.use('/__hitreg/prop-review', (req,res)=>{
+        res.setHeader('cache-control','no-store');
+        const url=new URL(req.url??'/', 'http://local'), project=url.searchParams.get('project')??'world-kit';
+        const fail=(error:unknown)=>{res.statusCode=(error as {status?:number}).status??400;res.setHeader('content-type','application/json');res.end(JSON.stringify({error:String(error)}));};
+        if(req.method==='GET'){
+          try{
+            if(url.pathname==='/file'){const file=reviewImage(projectsRoot,project,url.searchParams.get('path')??'');res.setHeader('content-type',file.endsWith('.webp')?'image/webp':/\.jpe?g$/i.test(file)?'image/jpeg':'image/png');res.end(fs.readFileSync(file));return;}
+            res.setHeader('content-type','application/json');
+            if(url.pathname==='/preview'){res.end(JSON.stringify(propPreview(projectsRoot,project,url.searchParams.get('id')??'')));return;}
+            if(url.pathname!=='/'&&url.pathname!=='')throw Error('Unknown prop review route');
+            const {policy,...data}=propReview(projectsRoot,project);res.end(JSON.stringify(data));
+          }catch(error){fail(error);}return;
+        }
+        if(req.method==='POST'&&(url.pathname==='/'||url.pathname==='')){void readJsonBody(req,16384).then(body=>{res.setHeader('content-type','application/json');res.end(JSON.stringify(savePropReview(projectsRoot,project,body)));}).catch(fail);return;}
+        res.statusCode=405;res.end();
+      });
 
       // One invocation surface for both editor UI and agents. Tool code gets a
       // narrow asset writer that enforces the manifest's declared permissions
@@ -1645,6 +1667,11 @@ const devConsole = process.env["HITREG_CONSOLE"] === "1" || (!gameBuild && proce
 export default defineConfig({
   plugins: [...(gameBuild ? [playerBoundary()] : [hitregBridge()]), publishedScripts()],
   base: gameBuild ? "./" : "/",
+  // Pre-bundle from EVERY entry up front: the page, the published player page and the terrain worker. Vite's
+  // default crawl misses the worker's module graph (and anything only play mode imports), discovers those deps
+  // on first use, re-optimizes and reloads the page mid-load — a page that was 60 s into streaming a world starts
+  // over, and a client that cannot reload (hmr off) is left with workers that never answer (2026-10-27).
+  optimizeDeps: { entries: ["index.html", "play.html", "src/voxel-worker.ts"] },
   define: { "import.meta.env.HITREG_CONSOLE": JSON.stringify(devConsole ? "1" : "0") },
   server: {
     port: 5173,

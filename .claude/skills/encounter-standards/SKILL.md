@@ -19,6 +19,10 @@ members (`creature`, `theme`, `role`, `count`), optional `named` leader. Placed 
 ## Gates: failure -> fix
 - Populate gate fails -> a site with no clearing handed over (8 m, dry, standable) or a pack off the ground.
 - `map-dev.png` shows spawns on a road or in a town, packs nobody passes -> move the pack spots.
+- `hub-halo` (roamers error, camps warn): something that attacks on sight within `--hub-halo` m (300) of the hub town,
+  its radius included (owner 2026-10-27: undead stood at the starter town's own graveyard) -> anchor the row on a place
+  beyond the halo, make its mix passive/territorial, or keep undead to night rows out there. A town's own graveyard,
+  kirk, fields and yards are the town. Template bodies stand at their area, so they are caught with it.
 
 ## Rules
 - A first dungeon holds 70+ creatures alive at once, a large one 120+; every room and long passage on the route holds a pack.
@@ -32,6 +36,8 @@ members (`creature`, `theme`, `role`, `count`), optional `named` leader. Placed 
 - Rares and named creatures are not always up: they sit behind placeholders (`spawnArea.rares`, chance ≤ 0.3, a lockout)
   in a camp's slots, among roamers or on a route; `populate` warns `rare-always-up` / `rare-chance` (`RARE_RULES`).
 - Design for the creature even with no body yet: a placeholder stands in; never shrink a place for a capsule.
+- Creature BODIES are the owner's. An agent paints a theme on an existing body (reskin); it never builds a body in
+  Blender or from the human rig (owner 2026-10-27, on an agent-built skeleton). No body = a request, and a placeholder.
 - Seen on the server: an encounter is reviewed with the dedicated server's spawns; a count only true on paper is not seen.
 - Sight budget: rooms and doors break sight lines so one view holds ~20 animated bodies at most.
 - Counts are reported from a tool, never a tally.

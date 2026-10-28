@@ -10,7 +10,6 @@ import {
   mix,
   min as tslMin,
   mrt,
-  normalView,
   output,
   pass,
   rand,
@@ -43,6 +42,7 @@ import { chromaticAberration as caNode } from "three/addons/tsl/display/Chromati
 import { lut3D as lut3DNode } from "three/addons/tsl/display/Lut3DNode.js";
 import { lut3DTextureFrom } from "./post-lut.js";
 import { applySunGlare } from "./sun-glare.js";
+import { isSkyDepth } from "./depth.js";
 import { ScreenShafts, VolumetricShafts, type VolumetricRequest, type VolumetricSettings } from "./atmosphere.js";
 
 /* -------------------------------------------------------------------------- */
@@ -1034,7 +1034,10 @@ export class PostChain {
 
     const has = (id: PostPassId) => this.plan.includes(id);
 
-    const scenePass = pass(scene, camera);
+    // Three's depth-normal reconstruction uses textureLoad/textureSize, whose
+    // WGSL path cannot read a multisampled depth attachment. AO already has
+    // the scene's post antialiasing; keep its depth single-sampled as well.
+    const scenePass = pass(scene, camera, has("ao") ? { samples: 0 } : undefined);
     this.scenePass = scenePass;
     this.disposables.push(scenePass as unknown as Disposable);
 
@@ -1055,7 +1058,6 @@ export class PostChain {
     // later can never accidentally reintroduce the bug by taking full colour
     // from the wrong place. Anything needing the whole frame takes `output`.
     const mrtTargets: Record<string, Tsl> = { output, emissive };
-    if (has("ao")) mrtTargets["normal"] = normalView;
     if (has("motionBlur")) mrtTargets["velocity"] = velocity;
     scenePass.setMRT(mrt(mrtTargets));
 
@@ -1089,7 +1091,13 @@ export class PostChain {
 
     if (has("ao")) {
       const depthNode = scenePass.getTextureNode("depth") as Tsl;
-      const normalNode = scenePass.getTextureNode("normal") as Tsl;
+      // Reconstruct geometric normals from the depth that AO actually samples.
+      // The colour pass also draws transparent cards with depthWrite=false:
+      // writing normalView to MRT lets even an opacity-zero card overwrite the
+      // opaque surface's normal (vec3 gets alpha 1), shading its entire rectangle.
+      // Depth reconstruction also avoids normalizing the zero-cleared sky MRT.
+      // Three supports null here; @types/three omits that documented fallback.
+      const normalNode: Tsl = null;
       const aoPass = gtao(depthNode, normalNode, camera);
       aoPass.resolutionScale = AO_RESOLUTION_SCALE;
       this.aoNode = aoPass;
@@ -1106,7 +1114,10 @@ export class PostChain {
       // there for bloom.
       const em = emissiveColor.rgb.max(vec3(0));
       const lit = color.rgb.sub(em).max(vec3(0));
-      color = vec4(lit.mul(aoTexture.r).add(em), color.a);
+      // GTAO's built-in background discard assumes far depth = 1. Our WebGPU
+      // buffer is reversed (far = 0), so explicitly leave the sky unoccluded.
+      const visibility = isSkyDepth(depthNode.r).select(float(1), aoTexture.r);
+      color = vec4(lit.mul(visibility).add(em), color.a);
     }
 
     if (has("underwater")) {
@@ -1427,6 +1438,9 @@ export class PostChain {
     }
 
     this.outputNode = color;
+    // Apply authored uniforms on the first frame too. In particular GTAO's
+    // own radius defaults to 0.25, and otherwise only a later edit retunes it.
+    this.retune(fx, options.volumetric?.settings);
   }
 
   /** True when this chain still matches `fx` structurally. */

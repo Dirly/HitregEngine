@@ -3,6 +3,7 @@ import * as THREE from "three/webgpu";
 import type { SceneDoc } from "@hitreg/core";
 import { fogFactor, type FogSettings } from "../src/atmosphere.js";
 import { CullingSystem, cullRootsOf, registerCullRoots } from "../src/culling.js";
+import { applyAdditiveFog } from "../src/additive-fog.js";
 import {
   LANDMARK_MIN_FOG_SHARE,
   applyLandmarkFog,
@@ -58,7 +59,8 @@ describe("landmark fog curve", () => {
     const fog = new THREE.Color("#5a605e");
     const mid = landmarkFogFactor(0.99, 300, LANDMARK).tone;
     expect(mid).toBeCloseTo(0.6, 6);
-    expect(landmarkFogTone(fog, mid).r).toBeLessThan(fog.r * 0.65);
+    // silhouette 0.6 of the 40 % maximum darkening: 24 % under the fog colour (a darker shape, never a cutout)
+    expect(landmarkFogTone(fog, mid).r).toBeCloseTo(fog.r * 0.76, 5);
     expect(landmarkFogFactor(0.99, 600, LANDMARK).tone).toBe(0);
     expect(landmarkFogFactor(0.99, 300, { fogReach: 600, silhouette: 0 }).tone).toBe(0);
   });
@@ -78,6 +80,11 @@ describe("landmark fog variants", () => {
     const off = new THREE.MeshBasicNodeMaterial();
     off.fog = false;
     expect(landmarkFogMaterial(off, LANDMARK)).toBe(off);
+    const glow = new THREE.MeshBasicNodeMaterial({ blending: THREE.AdditiveBlending, transparent: true });
+    applyAdditiveFog(glow);
+    // A window card on a landmark must retain extinction-only fog, rather
+    // than gaining the landmark's darker fog-colour sheet over its rectangle.
+    expect(landmarkFogMaterial(glow, LANDMARK)).toBe(glow);
   });
 
   it("swaps a mesh's material reference only (arrays too) and restores it", () => {
