@@ -265,6 +265,13 @@ export interface SeaCliffs {
   rock(x: number, y: number, z: number): number;
   /** Highest rock (y) the profile can put at or near (x, z) — the planar band's top. */
   ceiling(col: SeaColumn): number;
+  /**
+   * The wall's top (or the nearest stack's) where (x, z) is on a stretch's wall, its platform or seaward of it (plan
+   * distance <= 2 m inland), with the stretch's hold in `out.b`; NaN elsewhere. The field paints a wall vertex as the
+   * biome at this height — the land BEHIND the cliff — never as the beach band its own height falls in (2026-10-28,
+   * "red rock in badlands, grey rock against pines").
+   */
+  wallTop(x: number, z: number, out: { b: number }): number;
   /** A fresh column record for {@link column}. */
   newColumn(): SeaColumn;
   /** The stacks (and arches) whose centres fall in the rectangle: for tools, cameras and surf. */
@@ -887,6 +894,16 @@ export function createSeaCliffs(docs: readonly SeaCliffDoc[], ctx: SeaCliffConte
       if (col.stackOut < 4) r = Math.max(r, 1 - smoothstep(-1, 3, col.stackOut));
       if (col.fin < 4) r = Math.max(r, 1 - smoothstep(-1, 3, col.fin));
       return col.b * low * r;
+    },
+    wallTop(x, z, out) {
+      out.b = 0;
+      if (x < bx0 || x > bx1 || z < bz0 || z > bz1) return NaN;
+      const col = colScratch;
+      if (evalColumn(x, z, col) <= 0 || col.q > 2) return NaN;
+      out.b = col.b;
+      if (col.stackOut < 4) return Math.max(col.top, col.stackTop);
+      if (col.fin < 4) return Math.max(col.top, col.finTop);
+      return col.top;
     },
     ceiling(col) {
       let c = col.top;

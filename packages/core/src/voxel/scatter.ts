@@ -29,7 +29,7 @@ import type { RockCap, VegetationTint } from "../components/core.js";
 import { rockCapResolver, rockSkinProbe } from "./rock-cap.js";
 import { buildShoreGrid, formationMembers, formationReach, lakeProbeMemo, nearestShore, refineShore, shoreLevel, waterPlacement, type LakeProbe, type ShoreGrid, type ShorePoint } from "./formations.js";
 import { vegetationIndex, type VegetationPlan } from "./vegetation.js";
-import { ROCK_EMBED, seatObject, type SolidProbe } from "./seat.js";
+import { ROCK_EMBED, fieldSolidProbe, seatObject, type SolidProbe } from "./seat.js";
 
 export interface VoxelScatterInstance {
   /** Rule that produced it — the scatter rule's `id`. */
@@ -132,8 +132,16 @@ export function scatterContact(rule: ScatterDoc): "embed" | "none" {
  * against each other.
  */
 export function scatterGroundProbe(field: WorldField): SolidProbe {
+  // beside a PLANAR wall (sea cliffs, buttes: density the heightfield only approximates) the real solid answers: rocks at
+  // a sea-cliff foot seated on the heightfield straddled the platform's steps or showed their undersides by 0.2-1 m
+  // (firstshore 2026-10-28, the west-coast lake-rocks). Elsewhere the cheap ground stays.
+  let dense: SolidProbe | null = null;
+  const sea = field.seaCliffs();
+  const col = sea?.newColumn();
+  const walled = (x: number, z: number): boolean => field.planarNear(x, z) || (!!sea && sea.column(x, z, col!) > 0 && sea.weight(col!) > 0);
   return {
     floor(x, z, hi, lo) {
+      if (walled(x, z)) return (dense ??= fieldSolidProbe(field)).floor(x, z, hi, lo);
       const e = editedGround(field, x, z, 0);
       const g = e === undefined ? field.ground(x, z) : e;
       if (g === null) return null;
@@ -166,8 +174,15 @@ export function scatterEmbed(rule: ScatterDoc): number {
 function seatRock(probe: SolidProbe, rule: ScatterDoc, x: number, z: number, base: number, yaw: number, scale: number, colliderSize?: readonly [number, number, number]): number | null {
   const size = scatterSeatSize(rule, scale, colliderSize);
   const r = seatObject(probe, { x, z, y: base, yaw, ...size, align: rule.alignToNormal }, "embed", { embed: scatterEmbed(rule), embedMin: scatterEmbed(rule), reachDown: Math.max(4, size.height * 2) });
-  return r.status === "unsupported" ? null : (r.y ?? base);
+  if (r.status === "unsupported") return null;
+  // the placer seats on the HEIGHTFIELD, the float gate re-measures on the DENSITY (0.25 m steps, overhang and bank
+  // shaping included): on river and lake banks the two differ by 0.05-0.15 m, and rocks seated to the 15 % target there
+  // read "embedded 2-9 % (< 10 %)" (firstshore 2026-10-28, the river-2 gorge and lake-1 shore-rocks). Bedded a little
+  // deeper than the heightfield asks, never more than a quarter of the rock.
+  return (r.y ?? base) - Math.min(SEAT_PROBE_MARGIN, size.height * 0.25);
 }
+/** Metres a scatter rock is sunk past its heightfield seat to cover the density the float gate measures. */
+export const SEAT_PROBE_MARGIN = 0.25;
 
 /** Yaw (radians) of a quaternion about +Y, enough to orient a footprint. */
 function quatYawOf(q: Quat): number {

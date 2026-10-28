@@ -240,6 +240,8 @@ export {
 
 export {
   createWorldField,
+  RIVER_FALL_MIN,
+  RIVER_RUN_GRADE,
   type WorldField,
   type RiverFall,
   type SurfaceSample,

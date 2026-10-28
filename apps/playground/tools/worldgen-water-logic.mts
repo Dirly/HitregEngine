@@ -50,6 +50,10 @@ export interface WaterLogicReport {
 
 /** Reported, never failing on their own. */
 const NOTE_KINDS = new Set<WaterLogicFinding["kind"]>(["flat-reach"]);
+/** How far under a lake's sheet a river's water may run at the lake's edge: the rivers stage's hair (0.15 + 0.7 x depth) at a 2 m channel. */
+export const RIVER_HAIR = 1.6;
+/** Most a river leaving a lake may lose per 4 m sample: the hair plus 4 m at the steepest `runGrade` (0.18). */
+export const OUTLET_STEP = RIVER_HAIR + 4 * 0.18;
 
 type Area = { near?: [number, number, number]; rect?: [number, number, number, number] };
 
@@ -206,6 +210,7 @@ export function waterLogic(recipe: WorldRecipe, opts: Area & { step?: number; fi
   }
   const cells = new Map<string, { n: number; x: number; z: number; kind: string; y: number; lower: number; why: string }>();
   const t: SurfaceSample = { y: 0, flowX: 0, flowZ: 0, kind: "lake", floor: 0 };
+  const u: SurfaceSample = { y: 0, flowX: 0, flowZ: 0, kind: "lake", floor: 0 };
   for (let z = box[1]; z <= box[3]; z += step) {
     for (let x = box[0]; x <= box[2]; x += step) {
       if (!inArea(area, x, z)) continue;
@@ -219,9 +224,29 @@ export function waterLogic(recipe: WorldRecipe, opts: Area & { step?: number; fi
         const nz = z + dz;
         const ng = field.height(nx, nz);
         if (ng >= y - 0.5) continue;
+        // the lake's flood runs on a 4 m raster, this grid on 16 m: when the ground between the wet sample and the lower
+        // dry one rises to the level, the sheet ends on that rim and the dry hollow beyond it is its own (2026-10-28)
+        let rim = false;
+        for (let k = 1; k < 4 && !rim; k++) if (field.height(x + (dx * k) / 4, z + (dz * k) / 4) >= y - 0.5) rim = true;
+        if (rim) continue;
         const wet = field.waterSurface(nx, nz, t) && t.y > ng;
         const ny = wet ? t.y : -Infinity;
-        if (wet && ny >= y - 0.5) continue;
+        // a river leaving or entering a lake runs a hair UNDER the lake by the rivers stage's own design
+        // (surface = lake level - SURFACE x channel depth - 0.15: up to ~1.6 m for a 2 m channel); a 0.5 m tolerance
+        // against river water failed every authored outlet and inflow on firstshore (2026-10-28)
+        if (wet && ny >= y - (t.kind === "river" ? RIVER_HAIR : 0.5)) continue;
+        // a steep outlet stream (its `runGrade` up to 18 %) loses more than the hair in 16 m: water that steps down
+        // continuously from the sheet, each 4 m within the hair plus what the steepest run grade loses there
+        // (OUTLET_STEP), is the river leaving the lake, not a sheet in the air
+        if (wet && t.kind === "river") {
+          let prev = y;
+          let steps = true;
+          for (let k = 1; k <= 4 && steps; k++) {
+            if (!field.waterSurface(x + (dx * k) / 4, z + (dz * k) / 4, u) || prev - u.y > OUTLET_STEP) steps = false;
+            else prev = u.y;
+          }
+          if (steps) continue;
+        }
         if (wet && t.kind === "river" && field.falls.some((f) => Math.hypot(f.x - nx, f.z - nz) < 40)) continue;
         // under the sea is the sea: a lagoon over its own beach is the coast's business
         if (ny > -Infinity && ny <= recipe.seaLevel + 0.05 && t.kind !== "river" && t.kind !== "lake" && t.kind !== "marsh") continue;

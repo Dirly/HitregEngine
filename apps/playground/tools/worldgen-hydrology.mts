@@ -335,12 +335,21 @@ export function extractBasins(grid: HydroGrid, hydro: HydroResult, minDepth = 1.
         const nz = iz + DZ[k]!;
         if (nx < 0 || nz < 0 || nx >= n || nz >= n) continue;
         const ni = nx + nz * n;
-        if (!inLake[ni] || seen[ni]) continue;
+        if (seen[ni]) continue;
+        // ONE SHEET IS ONE BASIN (2026-10-28): the walk crosses any standing water at this sheet's fill level, deep or
+        // not. Seeded from deep cells only, a bowl whose underwater saddle sat less than minDepth under the surface came
+        // out as two or three "basins" at the same spill level; the big one drained and the small ones kept the spill
+        // level, so their sheets hung 5 m over the drained bowl and their outlets started in the air (every dogfood seed
+        // failed water-logic on it). The parts of one bowl fill to levels a few decimetres apart on the lattice (55.69 /
+        // 55.78 / 55.83 on seed 1337), so the tolerance is the shallows rule (1 m), not a hair.
+        const sameSheet = !sea[ni] && filled[ni]! - height[ni]! >= 0.2 && Math.abs(filled[ni]! - filled[start]!) <= 1;
+        if (!inLake[ni] && !sameSheet) continue;
         seen[ni] = 1;
         stack.push(ni);
       }
     }
-    if (cells.length < minCells || level <= seaLevel + 0.5) continue;
+    const deepCount = cells.reduce((k, c) => k + (inLake[c] ? 1 : 0), 0);
+    if (deepCount < minCells || level <= seaLevel + 0.5) continue;
     const member = new Uint8Array(total);
     for (const c of cells) member[c] = 1;
     // The shallows. `minDepth` decides whether this is a lake at all, but a
@@ -349,7 +358,7 @@ export function extractBasins(grid: HydroGrid, hydro: HydroResult, minDepth = 1.
     // the sheet drawn from them ended in mid-air over a dry strip of bed. Grow
     // the member set through every neighbouring cell the same surface still
     // covers, however thinly, before tracing the outline.
-    const deep = cells.length;
+    const deep = deepCount;
     const shallow = [...cells];
     for (let head = 0; head < shallow.length; head++) {
       const i = shallow[head]!;

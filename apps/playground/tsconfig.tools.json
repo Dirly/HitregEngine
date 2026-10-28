@@ -10,5 +10,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["tools/worldgen-coast.mts", "test/worldgen-coast.test.ts", "tools/_stage-stamp.mts", "test/stage-stamp.test.ts"]
+  "include": ["tools/worldgen-coast.mts", "test/worldgen-coast.test.ts", "tools/_stage-stamp.mts", "test/stage-stamp.test.ts", "tools/worldgen-relief.mts", "test/worldgen-relief.test.ts", "tools/worldgen-dogfood.mts", "tools/_map-text.mts", "tools/worldgen-climate.mts"]
 }

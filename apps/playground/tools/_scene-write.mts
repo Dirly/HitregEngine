@@ -114,11 +114,19 @@ export function countItems(doc: any): number {
   return doc && typeof doc === "object" ? Object.keys(doc).length : 0;
 }
 
-/** Write text atomically: tmp next to the file, then rename (retried: Windows refuses a rename onto a file a watcher holds). */
+/** Write text atomically: tmp next to the file, fsynced, then rename (retried: Windows refuses a rename onto a file a watcher holds). */
 export function writeAtomic(file: string, text: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, text);
+  // fsync BEFORE the rename: NTFS journals the rename (metadata) ahead of the data, so a crash between the two left a
+  // 1.1 MB world recipe of NUL bytes under its new name (firstshore, 2026-10-28); flushed data survives the rename
+  const fd = fs.openSync(tmp, "w");
+  try {
+    fs.writeSync(fd, text);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   for (let i = 0; ; i++) {
     try { fs.renameSync(tmp, file); return; } catch (e: any) {
       if (i >= 40 || !["EPERM", "EBUSY", "EACCES"].includes(e?.code)) { fs.rmSync(tmp, { force: true }); throw e; }

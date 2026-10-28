@@ -102,6 +102,14 @@ export const coastSegmentSchema = z
         "sheer-cliff only, set by `worldgen coast-top`: metres the stretch's LEVEL top runs inland from the lip (its `edge`) so a " +
           "landmark can stand on it; the stage keeps it across re-runs by segment id and `coast --check` measures the flat square there.",
       ),
+    behind: z
+      .string()
+      .optional()
+      .describe(
+        "Strongest climate anchor 80 m inland of the segment — the biome BEHIND it. A sheer-cliff wall wears that biome's cliff " +
+          "rock (badlands red rock before a dry hinterland, grey rock under pines; `biomes[].cliff`), never a hand value: " +
+          "`coast --check` rule cliff-rock measures the wall's splat against it. Absent without climate zones.",
+      ),
     reason: z.string().default("").describe("Why the stage chose the type (log text; the field does not read it)."),
   })
   .describe("One shoreline segment of the coast plan.");

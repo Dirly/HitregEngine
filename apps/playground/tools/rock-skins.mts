@@ -431,7 +431,7 @@ export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; fiel
    * formation's anchor (members share the anchor's skin), with no border leniency: the bed under it blends the zones a
    * river divides, and "matches some stone there" passed a slate slab in a red pool (Skelmorrow's ochreburn fall).
    */
-  const judge = (kind: "scatter" | "scene", what: string, id: string, x: number, y: number, z: number, cap: { layer?: number; amount?: number; base?: number }, material: RockMaterial | null, inWater?: { x: number; z: number }) => {
+  const judge = (kind: "scatter" | "scene", what: string, id: string, x: number, y: number, z: number, cap: { layer?: number; amount?: number; base?: number }, material: RockMaterial | null, inWater?: { x: number; z: number }, capY = y) => {
     const base = cap.base ?? 0;
     const bank = inWater ? probe.bankStoneAt(inWater.x, inWater.z).surface : -1;
     const ci = bank >= 0 ? bank : probe.cliffSurfaceAt(x, y, z);
@@ -449,7 +449,7 @@ export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; fiel
     function judgeCap(): void {
       const amount = cap.amount ?? 0;
       if (amount <= 0) return;
-      const g = probe.groundBand(x, y, z);
+      const g = probe.groundBand(x, capY, z);
       const layer = cap.layer ?? 0;
       const capName = layer < names.length ? names[layer]! : `extra layer ${layer - names.length}`;
       // a margin over the resolver's own thresholds: a formation's members share their anchor's cap (one formation reads
@@ -480,7 +480,9 @@ export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; fiel
             if (!inArea(a, x, z)) continue;
             checkedScatter++;
             const wet = rule.water ? (anchors.get(inst.id.replace(/_f\d+$/, "")) ?? { x, z }) : undefined;
-            judge("scatter", rule.id, inst.id, x, inst.position[1], z, inst.rockCap, materials.get(scatterMaterialOf(rule, scatterBox(rule, inst), inst.scale) ?? "") ?? null, wet);
+            // the cap is judged at the GROUND, as the placer chose it (withRockCap reads the ground y): a rock bedded deeper than
+            // its heightfield seat (SEAT_PROBE_MARGIN) read a shore band 0.25 m down as the ground
+            judge("scatter", rule.id, inst.id, x, inst.position[1], z, inst.rockCap, materials.get(scatterMaterialOf(rule, scatterBox(rule, inst), inst.scale) ?? "") ?? null, wet, field.ground(x, z));
           }
         }
     }

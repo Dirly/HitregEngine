@@ -211,7 +211,9 @@ export function travelRoads(recipe: J): RoadLine[] {
   const towns = ((recipe.features?.towns ?? []) as J[]).map((t) => t.id as string);
   return ((recipe.features?.roads ?? []) as J[])
     .filter((r) => r.role !== "none" && r.role !== "paving" && !towns.some((t) => r.id.startsWith(`${t}-`)))
-    .map((r) => ({ id: r.id, points: (r.points as number[][]).map(xz), trail: String(r.id).startsWith("trail-") }));
+    .map((r) => ({ id: r.id, points: (r.points as number[][]).map(xz), trail: String(r.id).startsWith("trail-") }))
+    // a bridge deck is walked: the road pieces ending at its abutments are joined by it, not dead ends (2026-10-28)
+    .concat(((recipe.features?.bridges ?? []) as J[]).filter((b) => (b.points as number[][])?.length >= 2).map((b) => ({ id: b.id as string, points: (b.points as number[][]).map(xz), trail: false })));
 }
 
 /** Roads whose two ends each reach a different town: the main town-to-town roads. */
@@ -309,6 +311,8 @@ export const HAIRPIN_TURN = 100;
 export const WASTE_LEG = 30;
 /** A path end within this of another path, a town or a place is connected. */
 export const PATH_JOIN = 40;
+/** Gap a scrambled path leaves between two pieces of one route (margin 12 m x up to 8 widening rounds, both sides). */
+export const SCRAMBLE_JOIN = 120;
 /** Sight lines are tested from road points within this range. */
 export const SIGHT_RANGE = 700;
 /**
@@ -1351,10 +1355,19 @@ export function findSites(input: FindInput): SiteReport {
 
   // ---- 9. paths: dead ends, climbing tops, hairpins, wasted climbs
   const paths: PathFinding[] = [];
-  const connected = (x: number, z: number, self: string): string | null => {
+  /** One route's pieces (`path-a-b`, `path-a-b.2`, `path-a-b.s3`): `paths --scramble` leaves a faulting stretch of tread as
+   *  natural ground, walked, so a piece ending at a scramble gap continues in its sibling across it. */
+  const routeOf = (id: string): string => id.replace(/(\.s?\d+)+$/, "");
+  // by the piece itself, not its id: two scrambled pieces of one route can share an id (path-town-2-site-crown.s2 x2)
+  const connected = (x: number, z: number, piece: RoadLine): string | null => {
+    const self = piece.id;
+    for (const r of input.roads) {
+      if (r === piece || routeOf(r.id) !== routeOf(self)) continue;
+      for (const q of [r.points[0]!, r.points[r.points.length - 1]!]) if (Math.hypot(q[0] - x, q[1] - z) <= SCRAMBLE_JOIN) return `road ${r.id} (across a scramble)`;
+    }
     for (const c of input.content) if (Math.hypot(c.x - x, c.z - z) <= c.radius + PATH_JOIN + (c.kind === "town" ? 60 : 0)) return c.id;
     for (const r of input.roads) {
-      if (r.id === self) continue;
+      if (r === piece) continue;
       for (let s = 1; s < r.points.length; s++) if (segDist(x, z, r.points[s - 1]!, r.points[s]!) <= PATH_JOIN) return `road ${r.id}`;
     }
     return null;
@@ -1384,7 +1397,7 @@ export function findSites(input: FindInput): SiteReport {
       const [x, z] = pts[end]!;
       const k = g.cell(x, z);
       if (k < 0 || !g.zone[k]) continue;
-      const join = connected(x, z, r.id);
+      const join = connected(x, z, r);
       if (join) continue;
       // how much the last 600 m climbs to reach this end
       const n = Math.min(pts.length - 1, Math.round(600 / PSTEP));

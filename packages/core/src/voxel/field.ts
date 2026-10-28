@@ -763,6 +763,8 @@ export interface WorldField {
   climate(x: number, z: number): { temperature: number; moisture: number };
   /** Zone membership at (x, z). Every weight is 0 and `id` is "" for a recipe without zones. */
   zone(x: number, z: number): ZoneSample;
+  /** The climate lattice's sites within the world (or `limit`): cell indices, position, the anchor each draws. */
+  climateSites(limit?: number): { cell: [number, number]; x: number; z: number; anchor: string }[];
   /** Full biome/splat evaluation. `slope` defaults to a measured slope at (x,z). */
   biome(x: number, z: number, groundY?: number, slope?: number): BiomeSample;
   /** Splat weights into `out[offset..offset+surfaceCount-1]`, from a mesh vertex's own position + normal. */
@@ -931,7 +933,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   let seaCliffs: SeaCliffs | null = null;
   /**
    * What sea cliffs and butte fields keep clear of: recipe data, never solved data — the features that shape their
-   * own ground over a wide area (towns, roads, rivers, lakes, big fills). NOT height patches or POIs: a patch is
+   * own ground over a wide area (towns, roads, big fills). NOT height patches or POIs: a patch is
    * applied over the finished profile (heightThroughPatches) and levels its own footprint, and the planar walls hand
    * the column back to the patched heightfield under it (`hold`), so a pad or a POI on a stack top or a cliff top
    * levels locally. Clearing round them pushed the whole wall back 40-90 m and dropped any stack whose site weight
@@ -943,8 +945,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         ...recipe.features.towns.map((tw) => ({ points: [tw.center] as [number, number][], radius: tw.radius + tw.falloff })),
         // an approach onto a monument (keepLandforms) does not clear it away
         ...recipe.features.roads.filter((r) => !r.keepLandforms).map((r) => ({ points: r.points, radius: r.width / 2 + r.shoulder + r.smooth })),
-        ...recipe.features.rivers.map((r) => ({ points: r.points, radius: r.width / 2 + r.bank * 3 })),
-        ...recipe.features.lakes.map((l) => (l.polygon ? { points: l.polygon, radius: l.bank, closed: true } : { points: [l.center] as [number, number][], radius: l.radius + l.bank })),
+        // NOT rivers, NOT lakes (2026-10-28): the hydrology finds a basin on the field WITH the sea cliffs built, so a tarn on a cliff
+        // top sits on the cliffed ground; clearing the wall round it dropped that ground 40 m and hung the sheet in the
+        // air (every dogfood seed with a rim lake), and the outlet river leaving it pushed the wall back 40-90 m under
+        // the lake's own edge. Water is where the hydrology found it, never a reason to move the coast: a river bed
+        // solves its own slot through a cliff (a mouth over a sheer face is a fall into the sea).
       ];
   const seaOf = (): SeaCliffs =>
     (seaCliffs ??= createSeaCliffs(seaDocs, {
@@ -1137,6 +1142,12 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const marshMaterial = recipe.marshMaterial ?? recipe.waterMaterial;
   /** Which anchor a zone site picks — cached, since every column near a site asks. */
   const siteAnchorCache = new Map<number, number>();
+  /** Generator-pinned anchors per climate cell (`climate.zones.sites`): the cell's packed indices -> anchor index. */
+  const pinnedSites = new Map<number, number>();
+  for (const s of zones?.sites ?? []) {
+    const idx = anchorIndex.get(s.anchor);
+    if (idx !== undefined) pinnedSites.set(((s.cell[0] & 0xffff) << 16) | (s.cell[1] & 0xffff), idx);
+  }
 
   // ------------------------------------------------------------- landforms
   //
@@ -1299,6 +1310,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const key = ((cx & 0xffff) << 16) | (cz & 0xffff);
     const cached = siteAnchorCache.get(key);
     if (cached !== undefined) return cached;
+    const pinned = pinnedSites.get(key);
+    if (pinned !== undefined) {
+      siteAnchorCache.set(key, pinned);
+      return pinned;
+    }
     const lat = latitudeAt(sx, sz);
     const strength = latitude?.strength ?? 0;
     let total = 0;
@@ -1324,6 +1340,26 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     siteAnchorCache.set(key, chosen);
     return chosen;
+  }
+
+  /**
+   * Every climate site whose jittered position lies within `limit` (+ one cell): its lattice cell, position and the
+   * anchor it draws today (pinned or picked). The generator reads this to pin anchors from the ground under each cell.
+   */
+  function climateSites(limit?: number): { cell: [number, number]; x: number; z: number; anchor: string }[] {
+    const out: { cell: [number, number]; x: number; z: number; anchor: string }[] = [];
+    if (!hasZones) return out;
+    const reach = limit ?? (worldLimit === Infinity ? 4000 : worldLimit);
+    const n = Math.ceil(reach / zoneSize) + 1;
+    for (let gz = -n; gz <= n; gz++) {
+      for (let gx = -n; gx <= n; gx++) {
+        const px = (gx + 0.5 + (hashUnit(gx, gz, 1, zoneSeed) - 0.5) * zoneJitter) * zoneSize;
+        const pz = (gz + 0.5 + (hashUnit(gx, gz, 2, zoneSeed) - 0.5) * zoneJitter) * zoneSize;
+        if (Math.hypot(px, pz) > reach + zoneSize) continue;
+        out.push({ cell: [gx, gz], x: px, z: pz, anchor: anchors[siteAnchor(gx, gz, px, pz)]!.id });
+      }
+    }
+    return out;
   }
 
   /** Per-anchor blended weights at the last `zoneAt` call, plus the landform multipliers it implies. */
@@ -3854,11 +3890,26 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return hasSeaCliffs && steep < 1 ? Math.max(steep, seaOf().rock(x, y, z)) : steep;
   }
 
+  const wallScratch = { b: 0 };
+  /**
+   * The height a surface point's BIOME is read at: its own, except on a sea-cliff wall, its platform and its stacks,
+   * which read the biome at the wall's top — the land behind the cliff. The beach band (-2..2.5 m) and the seabed used
+   * to own every wall face in their window, so every cliff on every island wore the beach's grey `cliff` whatever
+   * stood behind it (coast --check rule cliff-rock, 2026-10-28: badlands red rock, a swamp's dark rock and mud).
+   */
+  function paintY(x: number, y: number, z: number): number {
+    if (!hasSeaCliffs || y < recipe.seaLevel - 1) return y;
+    const top = seaOf().wallTop(x, z, wallScratch);
+    if (!(top > y)) return y;
+    return y + (top - y) * wallScratch.b;
+  }
+
   function splatAt(x: number, y: number, z: number, normalY: number, out: Float32Array, offset: number): void {
     const steep = seaRock(x, y, z, steepnessFromNormalY(normalY));
-    const { temperature, moisture, heightOffset } = climateAt(x, z, y);
-    coastBeach = coastBeachAt(x, z, y);
-    memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
+    const py = paintY(x, y, z);
+    const { temperature, moisture, heightOffset } = climateAt(x, z, py);
+    coastBeach = coastBeachAt(x, z, py);
+    memberships(py + heightOffset, temperature, moisture, steep, scratchMembership);
     blendSurface(scratchMembership, steep, out, offset);
     decorate(x, y, z, steep, scratchMembership, out, offset);
   }
@@ -3888,9 +3939,10 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
 
   function tintAt(x: number, y: number, z: number, normalY: number, out: Float32Array, offset: number): void {
     const steep = seaRock(x, y, z, steepnessFromNormalY(normalY));
-    const { temperature, moisture, heightOffset } = climateAt(x, z, y);
-    coastBeach = coastBeachAt(x, z, y);
-    memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
+    const py = paintY(x, y, z);
+    const { temperature, moisture, heightOffset } = climateAt(x, z, py);
+    coastBeach = coastBeachAt(x, z, py);
+    memberships(py + heightOffset, temperature, moisture, steep, scratchMembership);
     blendTint(out, offset);
   }
 
@@ -3911,9 +3963,10 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     offset: number,
   ): void {
     const steep = seaRock(x, y, z, steepnessFromNormalY(normalY));
-    const { temperature, moisture, heightOffset } = climateAt(x, z, y);
-    coastBeach = coastBeachAt(x, z, y);
-    memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
+    const py = paintY(x, y, z);
+    const { temperature, moisture, heightOffset } = climateAt(x, z, py);
+    coastBeach = coastBeachAt(x, z, py);
+    memberships(py + heightOffset, temperature, moisture, steep, scratchMembership);
     blendSurface(scratchMembership, steep, out, offset);
     decorate(x, y, z, steep, scratchMembership, out, offset);
     blendTint(out, offset + surfaceCount);
@@ -5782,6 +5835,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       }
     };
     chains.forEach((_, ci) => visit(ci, 0));
+    /** The steepest this river's water runs: its own `runGrade` (written by `worldgen rivers` from its fall) or RIVER_RUN_GRADE. */
+    const runGradeOf = (i: number): number => docs[i]!.runGrade ?? RIVER_RUN_GRADE;
     for (const ci of order) {
       const run = refs[ci]!;
       const n = run.length;
@@ -5821,7 +5876,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         const [pi, pk] = run[idx - 1]!;
         const fromLake = inLake[pi]![pk] === 1 || rampFrom[idx - 1] === 1;
         if (!fromLake) continue;
-        const want = env[idx - 1]! - RIVER_RUN_GRADE * gaps[idx]!;
+        const want = env[idx - 1]! - runGradeOf(run[idx]![0]) * gaps[idx]!;
         if (want <= env[idx]!) continue;
         if (want - env[idx]! > OUTLET_RAMP) break;
         env[idx] = want;
@@ -5862,7 +5917,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
           water[idx] = fixed[idx]!;
           continue;
         }
-        const limit = idx === fallAt ? Infinity : water[idx + 1]! + RIVER_RUN_GRADE * gaps[idx + 1]!;
+        const limit = idx === fallAt ? Infinity : water[idx + 1]! + runGradeOf(run[idx + 1]![0]) * gaps[idx + 1]!;
         water[idx] = Math.min(env[idx]!, limit);
       }
       run.forEach(([i, k], idx) => {
@@ -6073,6 +6128,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   }
   const LAKE_FLOOD_CELL = 4;
   const LAKE_FLOOD_BANKS = 2;
+  /** How far under a lake's level the bank-shaped shore may lie and still carry the sheet (deeper is a drop). */
+  const LAKE_SHORE_DEPTH = 3;
   /**
    * How far under the lake a river beside it may run before the lake cedes
    * it the ground. It was 0.3 m: an outlet ramping down off the lake stays
@@ -6088,6 +6145,13 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const known = lakeFloods.get(lake);
     if (known) return known;
     const band = lake.bank * LAKE_FLOOD_BANKS;
+    // A margin cell is shore only while its ground is not below the lake's own floor: the 0.75-bank seed band and the
+    // flood used to take any ground under the level, so a tarn on a plateau rim drew its sheet 12-32 m out over a cliff
+    // 20 m below (every dogfood seed with a rim lake failed water-logic, 2026-10-28). Below the floor it is the drop.
+    const floorY = lake.waterY - lake.depth - 1;
+    // and the seed band (the bank-shaped shore) is wet only over ground within a shore's depth of the level: the bank
+    // blend cannot lift a cliff, and a 20 m deep bowl's floor rule still let the margin hang 15 m out over the drop
+    const shoreY = lake.waterY - LAKE_SHORE_DEPTH;
     let minX = lake.center[0] - lake.radius;
     let minZ = lake.center[1] - lake.radius;
     let maxX = lake.center[0] + lake.radius;
@@ -6140,7 +6204,10 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       // cells beside it; one only a little under takes just what its own
       // water covers — cleared wider, the lake's bed stood dry beside the
       // outlet of lakes whose river ramps off them gently
-      if (sd <= lake.bank * 0.75 && (sd <= 0 || !(blocked(cx(i), cz(i), 0.3) || blocked(cx(i), cz(i), LAKE_OUTLET_TOL, 0)))) {
+      // inside the outline too, the ground must not lie under the lake's own floor: the rasterised outline distance reads
+      // "inside" up to a cell past the polygon, and an outlet's trench carved 30 m down there hung the sheet (seed 1337)
+      const gi = height(cx(i), cz(i));
+      if (sd <= lake.bank * 0.75 && ((sd <= 0 && gi >= floorY) || (sd > 0 && gi >= shoreY && !(blocked(cx(i), cz(i), 0.3) || blocked(cx(i), cz(i), LAKE_OUTLET_TOL, 0))))) {
         wet[i] = 1;
         // only the rim of the reach grows; the inside needs no neighbours
         if (sd > lake.bank * 0.75 - LAKE_FLOOD_CELL * 1.5) queue.push(i);
@@ -6159,13 +6226,53 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         const x = cx(j);
         const z = cz(j);
         if (lakeDistance(lake, x, z) > band) continue;
-        if (height(x, z) >= lake.waterY - 0.05) continue;
+        const g = height(x, z);
+        if (g >= lake.waterY - 0.05 || g < floorY) continue;
         if (blocked(x, z)) continue;
         wet[j] = 1;
         queue.push(j);
       }
     }
     // dilate one cell, marked 2 so the dilation itself does not grow
+    // A flooded pocket whose boundary is still under the level found no wall: the water would run on, so it is the
+    // ground falling away from the lake (a rim over a valley or the sea, or past the floor and the band limit), not a
+    // bay the outline cut across. A bay's boundary rises out of the water on every side. Drain the open pockets back
+    // to the seed band (the river-blocked edge is the outlet's and does not count).
+    {
+      const seedBand = lake.bank * 0.75;
+      const drop: number[] = [];
+      for (let i = 0; i < nx * nz; i++) {
+        if (wet[i] !== 1 || lakeDistance(lake, cx(i), cz(i)) <= seedBand) continue;
+        const ix = i % nx;
+        const iz = Math.floor(i / nx);
+        let open = false;
+        for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+          const jx = ix + ox;
+          const jz = iz + oz;
+          if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) { open = true; break; }
+          const j = jz * nx + jx;
+          if (wet[j]) continue;
+          const x = cx(j);
+          const z = cz(j);
+          if (height(x, z) < lake.waterY - 0.05 && !blocked(x, z)) { open = true; break; }
+        }
+        if (open) drop.push(i);
+      }
+      while (drop.length > 0) {
+        const i = drop.pop()!;
+        if (wet[i] !== 1) continue;
+        wet[i] = 0;
+        const ix = i % nx;
+        const iz = Math.floor(i / nx);
+        for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+          const jx = ix + ox;
+          const jz = iz + oz;
+          if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
+          const j = jz * nx + jx;
+          if (wet[j] === 1 && lakeDistance(lake, cx(j), cz(j)) > seedBand) drop.push(j);
+        }
+      }
+    }
     for (let i = 0; i < nx * nz; i++) {
       if (wet[i] !== 1) continue;
       const ix = i % nx;
@@ -6456,6 +6563,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       zoneAtWarped(x, z);
       return { id: zoneName(), weights: Float32Array.from(zoneScratch) };
     },
+    climateSites,
     biome,
     splatAt,
     tintAt,

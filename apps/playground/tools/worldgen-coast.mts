@@ -332,17 +332,29 @@ export interface SegmentInfo {
   slopeBehind: number;
   concave: boolean;
   mud: boolean;
+  /** Strongest climate anchor BEHIND_M inland (majority over the segment's points), when the recipe has zones. */
+  behind?: string;
 }
 
-export function describeSegments(loop: number, points: ShorePoint[], cuts: SegmentCut[], spacing: number): SegmentInfo[] {
+/** Metres inland of the shoreline the biome behind a segment is read. */
+export const BEHIND_M = 80;
+/** Metres inland of the lip the cliff TOP's biome is read for the cliff-rock rule. */
+export const TOP_M = 20;
+
+export function describeSegments(loop: number, points: ShorePoint[], cuts: SegmentCut[], spacing: number, zoneAt?: (x: number, z: number) => string): SegmentInfo[] {
   const n = points.length;
   return cuts.map((c, index) => {
     const pts: [number, number][] = [];
     let exposed = 0, fetch = 0, facing = 0, slope = 0, bay = 0, mud = false;
+    const behindVotes = new Map<string, number>();
     for (let k = 0; k <= c.count; k++) {
       const p = points[(c.start + k) % n]!;
       pts.push([round(p.x), round(p.z)]);
       if (k === c.count) break;
+      if (zoneAt) {
+        const id = zoneAt(p.x - p.nx * BEHIND_M, p.z - p.nz * BEHIND_M);
+        if (id) behindVotes.set(id, (behindVotes.get(id) ?? 0) + 1);
+      }
       if (p.exposed) exposed++;
       fetch += p.fetch; facing += p.facing; slope += p.slope; bay += p.bay;
       mud ||= p.mud;
@@ -359,6 +371,7 @@ export function describeSegments(loop: number, points: ShorePoint[], cuts: Segme
       slopeBehind: round(slope / m, 3),
       concave: bay / m > 0,
       mud,
+      ...(behindVotes.size ? { behind: [...behindVotes.entries()].sort((a, b) => b[1] - a[1])[0]![0] } : {}),
     };
   });
 }
@@ -610,7 +623,7 @@ export function planCoast(recipe: WorldRecipe, opts: CoastPlanOptions = DEFAULT_
   loops.forEach((loop, li) => {
     const pts = analyseLoop(loop, ctx);
     const cuts = cutSegments(pts, opts.spacing, opts.minSegment, opts.maxSegment);
-    infos.push(describeSegments(li, pts, cuts, opts.spacing));
+    infos.push(describeSegments(li, pts, cuts, opts.spacing, recipe.climate.zones ? (x, z) => field.zone(x, z).id : undefined));
   });
   // groups by zone rules (the region under the segment's midpoint; no regions yet = one group per loop)
   const groups = new Map<string, AssignGroup>();
@@ -682,6 +695,7 @@ export function planCoast(recipe: WorldRecipe, opts: CoastPlanOptions = DEFAULT_
         length: s.length,
         ...(regionOf.get(s) ? { region: regionOf.get(s) } : {}),
         ...(stretchOf.has(s) ? { stretch: stretchOf.get(s) } : {}),
+        ...(s.behind ? { behind: s.behind } : {}),
         reach: 140,
         ...(previousTops.has(`cs-${li}-${s.index}`) && a.type === "sheer-cliff" ? { topEdge: previousTops.get(`cs-${li}-${s.index}`) } : {}),
         reason: a.reason,
@@ -850,6 +864,42 @@ export function checkCoastPlan(recipe: WorldRecipe, opts: { measureTops?: boolea
     } else if (s.stretch) findings.push({ rule: "cliff-no-stretch", detail: `${s.id}: a ${s.type} segment names stretch ${s.stretch}` });
   }
   for (const id of stretchIds) if (!referenced.has(id)) findings.push({ rule: "orphan-stretch", detail: `${id}: a coast-* stretch no sheer-cliff segment belongs to` });
+  // cliff rock: the wall of a sheer-cliff segment wears the cliff splat of the biome BEHIND it (2026-10-28: "badlands red
+  // rock then dry hinterland, grey rock against pines" — the biome decides, never a hand value). Measured on the field: the
+  // wall's steep splat at the segment's midpoint against the dominant cliff surface of the biome on the cliff TOP
+  // (TOP_M inland of the lip, on the higher side). Not BEHIND_M: a 100 m wall's top is the highland's even where the
+  // anchor 80 m inland is a swamp at 48 m (seed 1438) — the field paints the wall from the top (`paintY`).
+  if (opts.measureTops !== false) {
+    let cliffField: WorldField | null = null;
+    const out = new Float32Array(recipe.surfaces.length);
+    for (const s of docs) {
+      if (s.type !== "sheer-cliff" || !s.behind || !s.stretch || !stretchIds.has(s.stretch)) continue;
+      cliffField ??= createWorldField(recipe);
+      const mid = s.points[Math.floor(s.points.length / 2)]!;
+      const a = s.points[0]!, b = s.points[s.points.length - 1]!;
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+      const px = -(b[1] - a[1]) / len, pz = (b[0] - a[0]) / len;
+      const side = cliffField.height(mid[0] + px * BEHIND_M, mid[1] + pz * BEHIND_M) >= cliffField.height(mid[0] - px * BEHIND_M, mid[1] - pz * BEHIND_M) ? 1 : -1;
+      const bx = mid[0] + px * TOP_M * side, bz = mid[1] + pz * TOP_M * side;
+      // the biome the field paints the wall with: the wall column's own climate at the TOP's altitude (`paintY`) — read at
+      // the top 20 m inland instead, a climate-site border running along the lip failed a wall painted correctly (test continent)
+      const biome = recipe.biomes.find((o) => o.id === cliffField!.biome(mid[0], mid[1], cliffField!.height(bx, bz)).id);
+      if (!biome) continue;
+      // what the land behind paints a vertical face with — the biome's cliff AFTER the field's own remaps (zone ground,
+      // rock roles), measured: the raw `biome.cliff` array failed a wall that wears exactly what the inland crags wear
+      cliffField.splatAt(bx, cliffField.height(bx, bz), bz, 0, out, 0);
+      const want = Array.from(out);
+      const wantIdx = want.indexOf(Math.max(...want));
+      cliffField.splatAt(mid[0], recipe.seaLevel + 3, mid[1], 0, out, 0);
+      let gotIdx = 0;
+      for (let i = 1; i < out.length; i++) if (out[i]! > out[gotIdx]!) gotIdx = i;
+      const have = out[wantIdx] ?? 0;
+      if (gotIdx !== wantIdx && have < 0.3) {
+        const name = (i: number) => (recipe.surfaces[i] as { id?: string } | undefined)?.id ?? String(i);
+        findings.push({ rule: "cliff-rock", detail: `${s.id}: the wall wears ${name(gotIdx)} (${Math.round((out[gotIdx] ?? 0) * 100)} %) but the ${biome.id} behind it (${s.behind}) wears ${name(wantIdx)} on its cliffs (${Math.round(have * 100)} % here)` });
+      }
+    }
+  }
   // level tops asked for (coast-top): measured on the field, the square must reach 3/4 of the asked edge (or 120 m)
   const tops = docs.filter((s) => s.topEdge);
   for (const s of tops) {
@@ -942,7 +992,7 @@ export function commandCoast(host: CoastHost): void {
   if (argv.includes("--json")) console.log(JSON.stringify({ segments: plan.segments, stretches: plan.stretches, report: rep }, null, 1));
   else {
     console.log(`  ${plan.segments.length} segment(s), ${plan.stretches.length} cliff stretch(es)${kept.length ? `, ${kept.length} hand-written stretch(es) kept` : ""}:`);
-    for (const s of plan.segments) console.log(`    ${s.id.padEnd(9)} ${s.type.padEnd(12)} ${String(s.length).padStart(5)} m  ${s.exposure.padEnd(9)} fetch ${String(s.fetch).padStart(4)}  slope ${s.slopeBehind.toFixed(2)}  ${s.concave ? "bay     " : "headland"}${s.mud ? "  mud" : ""}${s.stretch ? `  -> ${s.stretch}` : ""}`);
+    for (const s of plan.segments) console.log(`    ${s.id.padEnd(9)} ${s.type.padEnd(12)} ${String(s.length).padStart(5)} m  ${s.exposure.padEnd(9)} fetch ${String(s.fetch).padStart(4)}  slope ${s.slopeBehind.toFixed(2)}  behind ${(s.behind ?? "-").padEnd(10)} ${s.concave ? "bay     " : "headland"}${s.mud ? "  mud" : ""}${s.stretch ? `  -> ${s.stretch}` : ""}`);
   }
   printReport(rep);
   host.writeRecipe(recipe, file);

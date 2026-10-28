@@ -83,6 +83,7 @@ import {
   type FillDoc,
   type BridgeDoc,
   type RiverPathDoc,
+  RIVER_FALL_MIN,
 } from "@hitreg/core";
 import { basinFootprint, computeHydrology, extractBasins, extractChannels, simplifyLoop, type Channel, type HydroGrid } from "./worldgen-hydrology.mts";
 import { nearestRouteCell, routeBetween, smoothRoute, solveProfile, type RouteGrid, type RouteOptions } from "./worldgen-routing.mts";
@@ -90,8 +91,12 @@ import { auditWorld } from "./worldgen-audit.mts";
 import { modelBounds } from "./_gltf-bounds.mjs";
 import { borderClassifier, borderReport, planBarriers, snowLineOf, stripBarrierFeatures, type BorderPairReport } from "./worldgen-borders.mts";
 import { commandLandforms, landformsStageCheck } from "./worldgen-landforms.mts";
+import { altitudeLadder, autoRelief, biomesGatedToMissingAnchors, commandRelief, reliefStageCheck, treeSampler, zonesLandformCheck } from "./worldgen-relief.mts";
 // @ts-expect-error plain ESM helper without types
 import { decodePng } from "./_png.mjs";
+import { drawText } from "./_map-text.mts";
+import { commandDogfood } from "./worldgen-dogfood.mts";
+import { assignClimateSites, biomeFindings, climateCellSize, describeBiomes, zonesBiomeCheck } from "./worldgen-climate.mts";
 import { commandZoneTextures, zoneTexturesStageCheck } from "./worldgen-zone-textures.mts";
 import { stageStamp } from "./_stage-stamp.mts";
 import { commandScatterFloat } from "./worldgen-scatter-float.mts";
@@ -221,7 +226,10 @@ function writeRecipe(recipe: WorldRecipe, file: string): void {
   const parsed = worldRecipeSchema.safeParse(recipe);
   if (!parsed.success) fail(`refusing to write an invalid recipe:\n${parsed.error.message}`);
   // under the file's lock, refused if another tool wrote the recipe after this one read it (tools/_scene-write.mts)
-  try { writeJsonFile(file, parsed.data, { label: `worldgen ${currentStage ?? "write"}` }); } catch (e) { fail((e as Error).message); }
+  // init --force REPLACES the world (2026-10-28: the count guard refused it, 42 -> 0 items, and the old world stayed with
+  // every later stage running on it); --allow-removals declares a stage's drops
+  const allowRemovals = (currentStage === "init" && flag("force")) || flag("allow-removals");
+  try { writeJsonFile(file, parsed.data, { label: `worldgen ${currentStage ?? "write"}`, ...(allowRemovals ? { allowRemovals: true } : {}) }); } catch (e) { fail((e as Error).message); }
   console.log(`wrote ${path.relative(process.cwd(), file)}`);
 }
 
@@ -265,7 +273,9 @@ const HELP = `worldgen — procedural world pipeline
   planar-cliffs <world> --from <recipe file | world> | --off: copy another world's terrain.planarCliffs (the DC cliff
                    profile mesher "auto" needs; per-anchor zone styles kept only for anchors this world has)
   continents <world> re-lay the landmasses (--count 1 --islands 2 --radius 2200 --gap 900 --lobes 2
-                   --limit auto --land-floor 4 --variation 0.55 --ocean -45); lobes stop a landmass being a disc
+                   --limit auto --land-floor 4 --variation 0.55 --ocean -45); lobes stop a landmass being a disc;
+                   then DERIVES THE RELIEF from the land (the \`relief\` stage: band frequencies from the landmass
+                   width, mask window/seed, anchor relief floor, amplitude to p98 150 m) — --no-relief keeps the bands
   coast  <world>   the COAST PLAN (after continents, before rivers): trace each landmass's shoreline, cut it into
                    segments at headland/bay inflections and where the exposure to the wind (terrain.dunes.angle, fetch
                    --fetch 1500 m) flips, type each from the zone's regions[].coast rules (sheer-cliff, rocky-shore,
@@ -280,13 +290,27 @@ const HELP = `worldgen — procedural world pipeline
                    before and after and by \`coast --check\`; its own stamp (nothing goes STALE), so run it before
                    rivers/towns/paths, or re-run whichever of them lies within the stretch's reach
   rivers <world>   HYDROLOGY: fill depressions, accumulate rain, trace the channel network,
-                   fill the LAKES (--lakes 16; --dry-zones badlands keeps none in those anchors) and the hollows on the network; rivers are AUTHORED
-                   (write { points, width } into features.rivers — the field solves the bed) unless
-                   --trace carves the traced network (--catchment 0.12 km² --step 16 --wet-grade Infinity: every reach wet, steep ones as cascading pools);
+                   fill the LAKES (--lakes, --dry-zones badlands keeps none in those anchors) and the hollows on the network;
+                   a world with an AUTHORED river (features.rivers { points, width } or a river-path) keeps lakes only
+                   unless --trace; one with none carves the traced network (--no-trace for lakes only). Lattice --step,
+                   --catchment km², --lakes, --lake-depth m and --min-river m DEFAULT FROM THE LAND (area + relief; the
+                   run prints them); --wet-grade Infinity: every reach wet, steep ones as cascading pools;
                    --endorheic <ids|dry> declares lakes no river reaches as sinks (tag; kept across re-runs) — the status
                    row fails on a lake that neither drains nor is declared
   descend <world>  --from x,z: follow the water downhill from a point to the sea, a lake or a pit,
                    and print the valley-floor polyline as --points (--simplify 30 m)
+  dogfood <world>  EAT THE GENERATOR: --seeds 10 (or --seed-list a,b) x the algorithmic chain (init --from --look proving,
+                   climate, continents + derived relief, coast, rivers, towns, zones) into a scratch project, judged by
+                   the rules (relief, upland, silhouette, interior lakes, woodland, coast, hydrology, water-logic,
+                   border); ONE contact sheet authoring/dogfood/<world>-seeds.png + a table; >= 80 % must pass; a
+                   failing seed is a generator fault (fix recipe-derived defaults, never the seed); --keep, --tile 560
+  relief <world>   re-derive the recipe's relief from THIS landmass (continents runs it by itself): --scale <km>
+                   (default: the largest landmass's measured width) sets the continent /
+                   mountains / mountainMask / mesas frequencies by (7 km / scale), then bisects mountains.amplitude
+                   until the land's p98 reaches --target 140 m over the sea; --anchor-relief 0.3 raises every zone
+                   anchor's relief to at least that; --mask-start/--mask-end; --dry; --report prints the altitude
+                   ladder (% of land per 20 m band, p05..p98, upland share) per zone. The \`zones\` status row then
+                   rules relief (>= 100 m p05->p98, >= 15 % upland) and interior (an inland lake, >= 15 % woodland)
   landform-calm <world>  write features.landformCalm: a disc over every town (pad + terraces), place region,
                    hand-built height patch and terrace wall, so anchor landform profiles and valleys leave the
                    ground they were built on alone (--falloff 120 m, --margin 30 m, --dry)
@@ -1315,6 +1339,12 @@ const MARSH_CAUSEWAY = 0.35;
 /** Depth range of a marsh pool (m): wading water over a mud bed. */
 const MARSH_LAKE_DEPTH = [1, 1.5] as const;
 
+/** A river's water grade (`runGrade`): the field's lowland grade, the cap, the margin over the need, the fall's window. */
+const RUN_GRADE_LOWLAND = 0.03;
+const RUN_GRADE_MAX = 0.18;
+const RUN_GRADE_MARGIN = 1.15;
+const RUN_GRADE_FALL_WINDOW = 60;
+
 function commandRivers(): void {
   const { recipe, file } = loadRecipe();
   /**
@@ -1326,11 +1356,14 @@ function commandRivers(): void {
    * valley-floor fills the hydrology is good at. The channel tree is still
    * computed: it decides which hollows are lakes.
    */
-  const traceRivers = flag("trace");
   // hand-written rivers (no bedY: the field solves them) are the author's,
   // and survive every re-run of this stage; drawn paths are re-solved
   // (split-fall branches are rewritten against the new falls every run, never kept)
   const handRivers = recipe.features.rivers.filter((r) => (!r.bedY || r.bedY.length !== r.points.length) && !r.id.endsWith("-split"));
+  // 2026-10-28 (algorithm-driven worlds): a world with NO authored river (no hand river, no drawn path) carves the
+  // traced network by default — the valley the hydrology finds is the valley; --no-trace keeps the lakes-only mode
+  const traceRivers = flag("trace") || (!flag("no-trace") && handRivers.length === 0 && recipe.features.riverPaths.length === 0);
+  if (traceRivers && !flag("trace")) console.log("  no authored river: carving the traced network (--no-trace for lakes only)");
   // this stage replaces its own features: sample the world WITHOUT them
   recipe.features.rivers = [];
   // hand-placed lakes (carve: true — a tarn an author dug to head a river) are the author's like hand rivers: kept and
@@ -1348,10 +1381,29 @@ function commandRivers(): void {
   // road embankments and town pads made every re-run drift from the last
   const field = createWorldField({ ...recipe, features: { ...recipe.features, towns: [], roads: [], bridges: [] } });
   const extent = extentFor(recipe);
-  const step = option("step", 16);
+  // DEFAULTS FROM THE LAND (2026-10-28): the preset's numbers are a 7 km continent's. Lattice step, catchment, lake
+  // count, lake depth and the shortest river all derive from the land area and its relief when no flag names them.
+  const landEstimateKm2 = (recipe.bounds?.continents ?? []).reduce((a, c) => a + Math.PI * c.radius * c.radius + c.lobes.reduce((b, l) => b + Math.PI * l[2] * l[2] * 0.5, 0), 0) / 1e6;
+  const step = option("step", landEstimateKm2 > 0 ? Math.max(8, Math.min(16, Math.round(Math.sqrt(landEstimateKm2) * 4.4))) : 16);
   const grid = sampleWorldGrid(field, extent, step);
   const cellArea = grid.step * grid.step;
-  const catchmentKm2 = option("catchment", 0.12);
+  const landOverSea: number[] = [];
+  for (let i = 0; i < grid.height.length; i++) if (grid.height[i]! > recipe.seaLevel + 0.5) landOverSea.push(grid.height[i]! - recipe.seaLevel);
+  const landKm2 = (landOverSea.length * cellArea) / 1e6;
+  const landRelief = altitudeLadder(landOverSea).relief;
+  const derived = {
+    // a channel needs this much catchment (km²): 0.2 % of the land, 0.01..0.12
+    catchment: Math.max(0.01, Math.min(0.12, Math.round(landKm2 * 0.002 * 1000) / 1000)),
+    // lakes: 2 + 0.4 per km² of land, 3..16
+    lakes: Math.max(3, Math.min(16, Math.round(2 + landKm2 * 0.4))),
+    // a basin is a lake from 1/45 of the land's relief (p05 -> p98) deep, 1..3.5 m: shallower ones on a steep
+    // upland are perched sheets over the next slope
+    lakeDepth: Math.max(1, Math.min(3.5, Math.round((landRelief / 45) * 10) / 10)),
+    // the shortest river worth carving: 85 m per km of land width, 150..300
+    minRiver: Math.max(150, Math.min(300, Math.round(Math.sqrt(Math.max(landKm2, 0)) * 85))),
+  };
+  console.log(`  land ${landKm2.toFixed(2)} km², relief ${landRelief.toFixed(1)} m, lattice ${step} m -> defaults catchment ${derived.catchment} km², lakes ${derived.lakes}, lake depth ${derived.lakeDepth} m, shortest river ${derived.minRiver} m`);
+  const catchmentKm2 = option("catchment", derived.catchment);
   const threshold = (catchmentKm2 * 1e6) / cellArea;
 
   const t0 = performance.now();
@@ -1369,7 +1421,7 @@ function commandRivers(): void {
     channels.push({ cells, size: hydro.accumulation[cells[cells.length - 1]!]!, joins: -1, authored: { path, points: dense } });
   }
   if (recipe.features.riverPaths.length > 0) console.log(`  ${recipe.features.riverPaths.length} drawn river paths join the network`);
-  const allBasins = extractBasins(grid, hydro, option("lake-depth", 1.0), Math.max(8, Math.round(3500 / cellArea)));
+  const allBasins = extractBasins(grid, hydro, option("lake-depth", derived.lakeDepth), Math.max(8, Math.round(3500 / cellArea)));
   // RIVERS FIRST. A basin is a lake only if the channel network runs
   // through it: the outlet channel leaves it, so every lake drawn has a
   // river leaving it, and most have one arriving. Every other depression
@@ -1417,7 +1469,7 @@ function commandRivers(): void {
   const paletteSurface = (...wanted: string[]): string => wanted.find((n) => recipe.surfaces.some((sf) => sf.name === n)) ?? "";
   const lakeSurface = stringOption("lake-surface", paletteSurface("wetsand", "sand"));
   const riverSurface = stringOption("surface", paletteSurface("gravel", "sand"));
-  const maxLakes = Math.round(option("lakes", 16));
+  const maxLakes = Math.round(option("lakes", derived.lakes));
   // --dry-zones badlands,desert: climate anchors that keep no hydrology lake (their hollows are filled instead)
   const dryZones = new Set(stringOption("dry-zones", "").split(",").map((s) => s.trim()).filter(Boolean));
   /**
@@ -1693,7 +1745,7 @@ function commandRivers(): void {
   const wetGrade = option("wet-grade", Infinity);
   // rivers are LOWLAND rivers: each begins where its valley flattens (see the trim below)
   const lowlandGrade = option("lowland-grade", 0.04);
-  const minRiver = option("min-river", 300);
+  const minRiver = option("min-river", derived.minRiver);
   // a head starts where its bed is within this of the ground
   const headDepth = option("head-depth", 6);
   // rivers start at a lake (on by default; --lake-heads 0 keeps every traced channel)
@@ -1728,6 +1780,32 @@ function commandRivers(): void {
       if (k >= cells.length - 1) {
         channelFate.set(channelIndex, "does not start at a lake (runs through none)");
         return;
+      }
+      // 2026-10-28 (dogfood): a head in the DRY BOWL of a drained lake started the river at the old rim, 4.8 m over
+      // the water, and the outlet climbed out of its lake (1 uphill step, outlet-above-lake on seed 1337). The head
+      // is the water's edge: walk on to the first wet/ring cell; a channel that only crosses the dry bowl starts from
+      // the nearest wet cell of that basin, so the cap below cuts the rim down to the drained level.
+      if (wetOrRing[cells[k]!]! < 0) {
+        const bowl = basinOf[cells[k]!]!;
+        let j = k;
+        while (j < cells.length && wetOrRing[cells[j]!]! < 0 && basinOf[cells[j]!] === bowl) j++;
+        if (j < cells.length && wetOrRing[cells[j]!]! >= 0) k = j;
+        else {
+          const hx = cells[k]! % grid.n;
+          const hz = (cells[k]! / grid.n) | 0;
+          let nearest = -1;
+          let nearestD = Infinity;
+          for (const c of wetCells.get(bowl) ?? []) {
+            const d = Math.hypot((c % grid.n) - hx, ((c / grid.n) | 0) - hz);
+            if (d < nearestD) {
+              nearestD = d;
+              nearest = c;
+            }
+          }
+          if (nearest >= 0) cells = [nearest, ...cells.slice(k)];
+          else cells = cells.slice(k);
+          k = 0;
+        }
       }
       if (k > 0) cells = cells.slice(k);
     }
@@ -2044,6 +2122,29 @@ function commandRivers(): void {
       pieces.push({ from: k, to: Math.min(wet.length - 1, e + 1), water: wet[k]! });
       k = e + 1;
     }
+    // The steepest its water may run (2026-10-28, dogfood): the field holds a river's water to 3 % outside its one
+    // fall, and an island stream losing 100 m in a kilometre was cut 30 m into its upland, its lake left hanging over
+    // the gorge head. The grade is what this profile must lose outside its sharpest RIVER_FALL_WINDOW (the fall), over
+    // its length, with a margin: steep island streams run as rapids, a lowland river stays at the field's 3 %.
+    let runGrade: number | undefined;
+    {
+      let length = 0;
+      const along: number[] = [0];
+      for (let j = 1; j < keep.length; j++) {
+        const a = points[keep[j - 1]!]!, b = points[keep[j]!]!;
+        length += Math.hypot(b[0] - a[0], b[1] - a[1]);
+        along.push(length);
+      }
+      const level = (j: number): number => Math.max(recipe.seaLevel, bed[keep[j]!]!);
+      let fall = 0;
+      for (let a = 0, b = 0; a < keep.length; a++) {
+        while (b + 1 < keep.length && along[b + 1]! - along[a]! <= RUN_GRADE_FALL_WINDOW) b++;
+        fall = Math.max(fall, level(a) - level(b));
+      }
+      const need = length > 0 ? (level(0) - level(keep.length - 1) - fall) / length : 0;
+      const grade = Math.min(RUN_GRADE_MAX, Math.round(need * RUN_GRADE_MARGIN * 1000) / 1000);
+      if (grade > RUN_GRADE_LOWLAND) runGrade = grade;
+    }
     pieces.forEach((piece, pieceIndex) => {
       const idx = keep.slice(piece.from, piece.to + 1);
       if (idx.length < 2) return;
@@ -2064,6 +2165,7 @@ function commandRivers(): void {
         surface: riverSurface,
         surfaceEdge: 3,
         taper: pieceIndex === 0 ? taper : 0,
+        ...(runGrade !== undefined ? { runGrade } : {}),
       });
     });
   });
@@ -2096,11 +2198,37 @@ function commandRivers(): void {
         `(${basin.cells.length} cells, ${wetCells.get(bi)?.size ?? 0} wet); channels: ${crossing.join("; ")}`,
     );
   }
+  // Touching sheets share a level (2026-10-28, dogfood seed 1337): two lakes whose shores meet within their banks, a
+  // metre or two apart in level, met as a 1.8 m step of water with no rim between them — the lower lake's bed shaping
+  // owns the ground there and the upper one's sheet ran on over it. Under RIVER_FALL_MIN apart nothing there is a fall:
+  // the upper lake takes the lower one's level (its shallows become shore). Settled lowest first, so a chain follows.
+  {
+    let merged = 0;
+    const order = [...lakes].sort((a, b) => a.waterY - b.waterY);
+    for (let a = 0; a < order.length; a++) {
+      const low = order[a]!;
+      if (!low.polygon) continue;
+      for (let b = a + 1; b < order.length; b++) {
+        const high = order[b]!;
+        if (!high.polygon || high.waterY <= low.waterY || high.waterY - low.waterY >= RIVER_FALL_MIN) continue;
+        const reach = low.bank + high.bank;
+        const near = high.polygon.some(([x, z]) => pointInPolygon(low.polygon!, x, z) || polygonDistance(low.polygon!, x, z) <= reach) || low.polygon.some(([x, z]) => pointInPolygon(high.polygon!, x, z) || polygonDistance(high.polygon!, x, z) <= reach);
+        if (!near) continue;
+        console.log(`  ${high.id} (${high.waterY}) touches ${low.id} (${low.waterY}) within their banks: one level, ${low.waterY}`);
+        high.waterY = low.waterY;
+        merged++;
+      }
+      order.sort((p, q) => p.waterY - q.waterY);
+    }
+    if (merged) console.log(`  ${merged} touching lake(s) brought to the level of the lake they meet`);
+  }
   recipe.features.rivers = [...rivers, ...handRivers];
   recipe.features.lakes = [...lakes, ...handLakes.filter((h) => !lakes.some((l) => l.id === h.id))];
   // every lake drains or is DECLARED: `--endorheic lake-2,lake-3` (or `dry` = every lake no river reaches) tags them
   // `endorheic`; the status `rivers` row fails on a lake that neither drains nor is declared (skelmorrow post-mortem)
-  const declare = stringOption("endorheic", "");
+  // a lake no river reaches is a tarn (2026-10-28, dogfood: a lake on a mountain stream was left undeclared on 2 of 10 seeds
+  // and the status row failed it): declared endorheic by default; --endorheic <ids> declares those only, --endorheic none declares nothing
+  const declare = stringOption("endorheic", "dry").replace(/^none$/, "");
   const declared = new Set(declare.split(",").map((s) => s.trim()).filter(Boolean));
   for (const l of recipe.features.lakes) {
     const named = declare === "dry" ? !lakeReached(recipe, l) : declared.has(l.id);
@@ -2356,6 +2484,7 @@ function commandDescend(): void {
  *   --fall <i> --snapshot          the compact context an agent reads to craft it:
  *                                  the fall, and a 32 x 32 grid (2 m) of ground
  *                                  height relative to the lip, water marked
+ *   --remove <site id>             take a written site out again (the field re-solves the plain fall)
  *   --fall <i> --template cascade --tiers 3 [--pool 16] [--rocks 1]
  *                                  write (or replace) a fall site: the drop split
  *                                  into even tiers with level pools, rocks on the
@@ -2372,6 +2501,16 @@ function commandFallSite(): void {
     falls.forEach((f, i) =>
       console.log(`${String(i).padStart(3)}  ${f.river.padEnd(16)} drop ${(f.top - f.bottom).toFixed(1).padStart(5)} m  foot [${f.x.toFixed(0)}, ${f.z.toFixed(0)}]  width ${f.width.toFixed(1)}`),
     );
+    return;
+  }
+  // --remove <site id>: take a written site back out (the field re-solves the plain fall)
+  const removeId = stringOption("remove", "");
+  if (removeId) {
+    const before = recipe.features.fallSites?.length ?? 0;
+    recipe.features.fallSites = (recipe.features.fallSites ?? []).filter((x) => x.id !== removeId);
+    if ((recipe.features.fallSites.length) === before) fail(`no fall site "${removeId}" (${(recipe.features.fallSites ?? []).map((x) => x.id).join(", ") || "none"})`);
+    writeRecipe(recipe, file);
+    console.log(`removed ${removeId}`);
     return;
   }
   const index = option("fall", -1);
@@ -5378,17 +5517,30 @@ function trailsPassingLips(recipe: WorldRecipe, trails: RoadDoc[], margin: numbe
     work = next;
   }
   // Rounds ran out: a piece that still draws a fault of its own is left out whole (a stub of tread between two
-  // scrambles is not worth a saw), unless it carries a bridge's abutment.
+  // scrambles is not worth a saw), unless it carries a bridge's abutment or a town gate.
   if (faults > 0) {
     const ids = new Set(work.map((r) => r.id));
     const gate = runLipsGate({ ...recipe, features: { ...recipe.features, roads: [...recipe.features.roads, ...work] } });
     const bad = new Set(gate.faults.filter((f) => ids.has(f.owner)).map((f) => f.owner));
     const onBridge = (r: RoadDoc): boolean =>
-      [r.points[0]!, r.points[r.points.length - 1]!].some(([x, z]) => keep.some(([kx, kz]) => Math.hypot(x - kx, z - kz) < 1));
+      // (12 m: the gates rule's reach — a road end at a town gate is kept like one at an abutment)
+      [r.points[0]!, r.points[r.points.length - 1]!].some(([x, z]) => keep.some(([kx, kz]) => Math.hypot(x - kx, z - kz) < 12));
     const kept = work.filter((r) => !bad.has(r.id) || onBridge(r));
     scrambles += work.length - kept.length;
     work = kept;
     faults = gate.faults.filter((f) => kept.some((r) => r.id === f.owner)).length;
+  }
+  // one id per piece: a piece cut again in a later round named its tail `<id>.s2` while an earlier round's `<id>.s2`
+  // still stood (firstshore 2026-10-28: two path-town-2-site-crown.s2) — a later duplicate takes the next free suffix
+  const used = new Set<string>();
+  for (const r of work) {
+    if (used.has(r.id)) {
+      const base = r.id.replace(/(\.s\d+)+$/, "");
+      let n = 2;
+      while (used.has(`${base}.s${n}`)) n++;
+      r.id = `${base}.s${n}`;
+    }
+    used.add(r.id);
   }
   return { trails: work, scrambles, faults };
 }
@@ -6194,6 +6346,10 @@ function commandPaths(): void {
       lead: { start: start.lead, end: [...end.lead].reverse() },
     });
     for (const r of built.roads) if (keepAll || onLandform(r.points)) { r.keepLandforms = true; kept.push(r.id); }
+    // the doc carries the cut/fill caps the profile was solved with, so the FIELD holds the shoulder and band to them too
+    // (2026-10-28, firstshore: the band regrade beside a bridge abutment stood a 1.15 m fill rim on the river bank,
+    // where the solved tread itself was within 0.8 m of the ground; trails already did this)
+    for (const r of built.roads) { r.maxCut ??= option("max-cut", 3); r.maxFill ??= option("max-fill", 0.8); }
     paths.push(...built.roads);
     bridges.push(...built.bridges);
     if (start.gate) served.add(`${towns[a]!.id}/${start.gate.id}`);
@@ -6227,7 +6383,10 @@ function commandPaths(): void {
     const t0 = performance.now();
     // without the trails: they are rebuilt after the paths and their own lip pass answers for where they meet a path
     const ground: WorldRecipe = { ...recipe, features: { ...recipe.features, roads: recipe.features.roads.filter((r) => !r.id.startsWith("trail-")) } };
-    const passed = trailsPassingLips(ground, paths, option("scramble-margin", 12), option("scramble-rounds", 8), bridges.flatMap((b) => b.points));
+    // never scrambled: a bridge abutment (the deck needs its road) and a town gate (`gates`: a road must arrive within 12 m;
+    // 2026-10-28 the scramble left Tawnstrand's gate 63 m from any tread and the gate stage failed it)
+    const keepAt = [...bridges.flatMap((b) => b.points), ...towns.flatMap((t) => (t.gates ?? []).map((g) => g.at as [number, number]))];
+    const passed = trailsPassingLips(ground, paths, option("scramble-margin", 12), option("scramble-rounds", 8), keepAt);
     console.log(
       `  lips: ${passed.faults === 0 ? "pass" : `${passed.faults} fault(s) left`}; ${passed.scrambles} path tread cut(s) left as natural ground ` +
         `(${paths.length} -> ${passed.trails.length} pieces, ${((performance.now() - t0) / 1000).toFixed(1)}s)`,
@@ -6756,7 +6915,18 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
   // a zonegen-built world (tools/_zone-sources.mts): its populations and its zone stories live in the zonegen folders
   const projectDir = recipeFile ? path.resolve(path.dirname(recipeFile), "..", "..") : null;
   return [
-    { name: "init", after: [], by: "procedural", how: "worldgen init <world> --from <look>", check: () => null },
+    {
+      name: "init",
+      after: [],
+      by: "procedural",
+      how: "worldgen init <world> --from <look>",
+      // a biome rule gated to anchors the world no longer has is UN-gated by the field (it would vanish otherwise) and
+      // then applies everywhere by weight: firstshore's temperate island read tundra 55 % / swamp 22 % / fen 21 %
+      check: (r) => {
+        const loose = biomesGatedToMissingAnchors(r);
+        return loose.length > 0 ? `${loose.length} biome rule(s) gated to anchors this world does not have apply EVERYWHERE (${loose.slice(0, 5).join(", ")}): worldgen climate <world> --anchors <kept> prunes them` : null;
+      },
+    },
     {
       name: "continents",
       after: ["init"],
@@ -6764,16 +6934,18 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
       how: "worldgen continents <world> --count 5 --islands 3 --limit 10500",
       check: (r) => (r.bounds?.continents?.length ? null : "no landmasses: the world is endless noise"),
     },
+    // the recipe's relief bands re-tuned to the landmass (the preset's are for a 7 km continent) — tools/worldgen-relief.mts
+    { name: "relief", after: ["continents"], by: "procedural", how: "worldgen continents <world> (derives it) or worldgen relief <world>", optional: true, check: (r) => reliefStageCheck(r) },
     // the coast PLAN: every shoreline segment typed (cliff / beach / cove ...) and the mix gated — tools/worldgen-coast.mts
-    { name: "coast", after: ["continents"], by: "procedural", how: "worldgen coast <world>", check: (r) => coastStageCheck(r) },
+    { name: "coast", after: ["continents", "relief"], by: "procedural", how: "worldgen coast <world>", check: (r) => coastStageCheck(r) },
     // landform key (image generator draws classes, the tool computes metres) — tools/worldgen-landforms.mts
-    { name: "landforms", after: ["continents"], by: "procedural", how: "worldgen landforms apply <world> --key <png>  (after: landforms base, landforms request)", optional: true, check: (r) => landformsStageCheck(r, findRecipeFile(r.name)) },
+    { name: "landforms", after: ["continents", "relief"], by: "procedural", how: "worldgen landforms apply <world> --key <png>  (after: landforms base, landforms request)", optional: true, check: (r) => landformsStageCheck(r, findRecipeFile(r.name)) },
     { name: "canyons", after: ["continents"], by: "procedural", how: "worldgen canyons <world>", optional: true, check: (r) => has(r.features.canyons.filter((c) => c.id.startsWith("canyon-")).length) },
     {
       name: "rivers",
       after: ["continents", "coast", "landforms", "canyons"],
       by: "procedural",
-      how: "worldgen rivers <world> --trace --catchment 0.6 --lakes 14",
+      how: "worldgen rivers <world> (lakes, depth, catchment and the shortest river default from the land; traces without an authored river)",
       check: (r) => {
         if (r.features.rivers.length === 0 && r.features.lakes.length === 0) return "no rivers and no lakes";
         const headless = riversNotFromLakes(r);
@@ -6795,7 +6967,15 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
       // ran (stamped) and found no town that wants shelves = done; never ran = MISSING
       check: (r) => (r.features.towns.some((t) => t.terraces.length > 0) || r.pipeline?.terrace ? null : "no town has been stepped — has it run?"),
     },
-    { name: "zones", after: ["towns", "terrace"], by: "procedural", how: "worldgen zones <world>", check: (r) => has(r.regions.length) },
+    {
+      name: "zones",
+      after: ["towns", "terrace"],
+      by: "procedural",
+      how: "worldgen zones <world>",
+      // drawn, AND each zone climbs its altitude ladder (`relief`) and has lakes + woods in its interior (`interior`):
+      // a one-zone island with no interior relief passed every gate (firstshore, 2026-10-28) — tools/worldgen-relief.mts
+      check: (r) => has(r.regions.length) ?? zonesLandformCheck(r, statusField(r)) ?? zonesBiomeCheck(r, statusField(r)),
+    },
     {
       // cover is RULES (biome / surface / water gates evaluated at runtime),
       // so it depends on nothing the other stages carve — only on the biome
@@ -7337,7 +7517,8 @@ function spanningEdges(towns: TownDoc[], extra: number): { a: number; b: number;
  * their coasts, so the sailing distance is authored rather than discovered.
  */
 /**
- * `worldgen climate <world> --anchors a,b,c [--size N] [--border N]` — which zone KINDS this world may draw, and how big
+ * `worldgen climate <world> --anchors a,b,c [--size N] [--border N] [--auto] [--report]` — which zone KINDS this world may draw, and how big
+ * (--auto pins every climate cell's anchor from the ground under it through `climate.transitions`; --report = the biomes rule)
  * a climate cell is. `init --from <look>` borrows every anchor of the source (tundra to jungle); a small world wants a
  * few temperate ones and a cell bigger than the land, so ONE anchor covers it. Biome rules and planar-cliff zone
  * styles that name a dropped anchor are left in place: they never fire. Schema-validated like every write.
@@ -7354,9 +7535,37 @@ function commandClimate(): void {
     zones.anchors = zones.anchors.filter((a) => keep.includes(a.id));
     console.log(`  anchors: ${zones.anchors.map((a) => a.id).join(", ")} (${before - zones.anchors.length} dropped)`);
   }
+  // a biome rule gated only to dropped anchors is un-gated by the field and applies everywhere by weight (firstshore's
+  // temperate island read tundra / swamp / fen): prune them with the anchors (--keep-biomes to leave them, flagged by status)
+  if (!flag("keep-biomes")) {
+    const loose = new Set(biomesGatedToMissingAnchors(recipe));
+    if (loose.size > 0) {
+      recipe.biomes = recipe.biomes.filter((b) => !loose.has(b.id));
+      const orphanScatter = recipe.scatter.filter((s) => s.biomes.length > 0 && s.biomes.every((b) => loose.has(b))).map((s) => s.id);
+      const orphanCover = recipe.cover.filter((c) => c.biomes.length > 0 && c.biomes.every((b) => loose.has(b))).map((c) => c.id);
+      console.log(`  pruned ${loose.size} biome rule(s) gated only to dropped anchors: ${[...loose].join(", ")}`);
+      if (orphanScatter.length) console.log(`  (scatter rules now filtered to no live biome, never fire: ${orphanScatter.join(", ")})`);
+      if (orphanCover.length) console.log(`  (cover layers now filtered to no live biome, never draw: ${orphanCover.join(", ")})`);
+    }
+  }
   if (flag("size")) zones.size = option("size", zones.size);
   if (flag("border")) zones.border = option("border", zones.border);
-  if (keep.length === 0 && !flag("size") && !flag("border")) fail("nothing to change: --anchors a,b,c, --size N and/or --border N");
+  if (flag("report")) {
+    const field = createWorldField(recipe);
+    const wild = recipe.regions.filter((g) => !g.within && g.polygon.length >= 3);
+    for (const z of wild.length ? wild : [null]) {
+      const rep = biomeFindings(recipe, field, z?.polygon ?? null, z?.name ?? z?.id ?? "world");
+      console.log(`  ${z?.name ?? z?.id ?? "world"}: ${describeBiomes(rep).join(" | ")}`);
+      for (const f of rep.findings) console.log(`    ! ${f}`);
+    }
+    return;
+  }
+  if (flag("auto")) {
+    delete zones.sites;
+    const sites = assignClimateSites(recipe, createWorldField(recipe), (line) => console.log(line));
+    zones.sites = sites.map((s) => ({ cell: s.cell, anchor: s.anchor }));
+  }
+  if (keep.length === 0 && !flag("size") && !flag("border") && !flag("auto")) fail("nothing to change: --anchors a,b,c, --size N, --border N, --auto (pin every cell's anchor from the ground) or --report (the biomes rule)");
   writeRecipe(recipe, file);
   const land = recipe.bounds?.continents.map((c) => c.radius + c.falloff * (1 - (recipe.bounds?.shelf ?? 0.58))) ?? [];
   console.log(`  climate cells ${zones.size} m (border ${zones.border} m)${land.length ? `; the largest landmass is ~${Math.round(Math.max(...land) * 2)} m across` : ""}`);
@@ -7522,6 +7731,32 @@ function commandContinents(countOverride?: number): void {
     console.log(`  dropped the coast plan (${planned} segments and its coast-* stretches): re-run worldgen coast`);
   }
   writeRecipe(recipe, file);
+  // the relief follows the land (2026-10-28, algorithm-driven worlds): the band frequencies from the landmass width,
+  // the mask window and seed, the anchors' relief floor and the mountain amplitude bisected to the target p98 — the
+  // preset's 7 km bands left a 2.3 km island a plate that passed every gate. --no-relief keeps the recipe's bands.
+  if (!flag("no-relief")) {
+    const stageBefore = currentStage;
+    currentStage = "relief";
+    const relief = autoRelief(recipe, { log: (line) => console.log(line) });
+    // the climate cells follow the land too: a look's cell size (proving: 9000 m) is one cell on a 3 km island, so the
+    // whole island was one anchor kind and woodland read 2 % or 91 % by seed (dogfood, 2026-10-28). Enough sites that
+    // every anchor can show on the largest landmass: width / sqrt(2 x anchors). --keep-climate-size leaves it.
+    const zones = recipe.climate.zones;
+    if (zones && zones.anchors.length > 0 && !flag("keep-climate")) {
+      // the cells from the land area (~3.5 on the largest landmass: several biomes, never one), then one anchor per
+      // cell from the ground under it through the transition grammar (worldgen climate --auto)
+      const size = climateCellSize(relief.landKm2);
+      if (size !== zones.size) {
+        console.log(`  climate cells ${zones.size} -> ${size} m (${relief.landKm2} km² of land, ~3.5 cells on the landmass)`);
+        zones.size = size;
+      }
+      delete zones.sites;
+      const sites = assignClimateSites(recipe, createWorldField(recipe), (line) => console.log(line));
+      zones.sites = sites.map((s) => ({ cell: s.cell, anchor: s.anchor }));
+    }
+    writeRecipe(recipe, file);
+    currentStage = stageBefore;
+  }
 
   const land = continents.reduce((a, c) => a + Math.PI * c.radius * c.radius + c.lobes.reduce((b, l) => b + Math.PI * l[2] * l[2] * 0.5, 0), 0) / 1e6;
   console.log(`${count} continent${count === 1 ? "" : "s"} + ${islands} island${islands === 1 ? "" : "s"}, ocean floor ${oceanFloor}m, land floor +${landFloor}m, limit ${limit}m:`);
@@ -8575,13 +8810,42 @@ function commandMap(): void {
   // BLACK the moment the palette grew past four.
   const splat = new Float32Array(Math.max(MAX_SURFACES, recipe.surfaces.length));
   const limit = field.worldLimit;
+  // --no-relief: the old slope-only shade. By default the land is HILLSHADED from the north-west (a directional light
+  // on the sampled heightfield), so a plateau, a gorge and a ridge read as shape — a slope-only shade drew the
+  // firstshore plate and its upland the same tan (2026-10-28)
+  const relief = !flag("no-relief");
+  const heights = new Float32Array(size * size);
+  for (let py = 0; py < size; py++) {
+    const z = cz - extent + py * step;
+    for (let px = 0; px < size; px++) {
+      const x = cx - extent + px * step;
+      const beyond = limit !== Infinity && x * x + z * z > limit * limit;
+      heights[px + py * size] = beyond ? recipe.bounds!.oceanFloor : field.height(x, z);
+    }
+  }
+  const hillshade = (px: number, py: number): number => {
+    const at = (ax: number, ay: number): number => heights[Math.max(0, Math.min(size - 1, ax)) + Math.max(0, Math.min(size - 1, ay)) * size]!;
+    const dx = (at(px + 1, py) - at(px - 1, py)) / (2 * step);
+    const dz = (at(px, py + 1) - at(px, py - 1)) / (2 * step);
+    // normal (-dx, 1, -dz), light from the north-west and 45 degrees up
+    const nl = (dx * 0.5 + 1 * 0.7071 + dz * 0.5) / Math.sqrt(dx * dx + 1 + dz * dz);
+    return 0.42 + 0.78 * Math.max(0, nl);
+  };
+  // woodland: expected tree density from the scatter rules + the vegetation plan, drawn as a canopy stipple
+  const trees = flag("no-trees") ? null : treeSampler(recipe, field);
+  const treeStep = Math.max(1, Math.round(12 / step));
+  const treeHash = (a: number, b: number): number => {
+    let n = Math.imul(a, 374761393) + Math.imul(b, 668265263) + 0x9e3779b9;
+    n = Math.imul(n ^ (n >>> 13), 1274126177);
+    return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+  };
 
   for (let py = 0; py < size; py++) {
     const z = cz - extent + py * step;
     for (let px = 0; px < size; px++) {
       const x = cx - extent + px * step;
       const beyond = limit !== Infinity && x * x + z * z > limit * limit;
-      const h = beyond ? recipe.bounds!.oceanFloor : field.height(x, z);
+      const h = heights[px + py * size]!;
       const slope = beyond ? 0 : field.slope(x, z);
       let r: number;
       let g: number;
@@ -8628,7 +8892,7 @@ function commandMap(): void {
             b += surfaces[i]![2] * w;
           }
           // hillshade from the north-west, the cartographic convention
-          const shade = 0.72 + 0.55 * Math.max(0, 1 - slope * 1.7);
+          const shade = relief ? hillshade(px, py) : 0.72 + 0.55 * Math.max(0, 1 - slope * 1.7);
           r *= 255 * shade;
           g *= 255 * shade;
           b *= 255 * shade;
@@ -8638,6 +8902,35 @@ function commandMap(): void {
       pixels[o] = clamp255(r);
       pixels[o + 1] = clamp255(g);
       pixels[o + 2] = clamp255(b);
+    }
+  }
+  // the woods, over the ground: one density sample per treeStep x treeStep block, the expected trees in that block
+  // drawn as canopy dots at hashed spots inside it (a plain shade of the biome hid where the forest actually is)
+  let treeDots = 0;
+  if (trees) {
+    for (let py = 0; py < size; py += treeStep) {
+      const z = cz - extent + py * step;
+      for (let px = 0; px < size; px += treeStep) {
+        const x = cx - extent + px * step;
+        const h = heights[px + py * size]!;
+        if (h < recipe.seaLevel) continue;
+        if (limit !== Infinity && x * x + z * z > limit * limit) continue;
+        const d = trees.density(x, z, h);
+        if (d <= 0) continue;
+        const expected = d * (treeStep * step) * (treeStep * step);
+        const dots = Math.min(treeStep * treeStep, Math.floor(expected + treeHash(px, py)));
+        for (let k = 0; k < dots; k++) {
+          const tx = px + Math.floor(treeHash(px * 7 + k, py) * treeStep);
+          const ty = py + Math.floor(treeHash(px, py * 7 + k) * treeStep);
+          if (tx >= size || ty >= size || heights[tx + ty * size]! < recipe.seaLevel) continue;
+          const to = (tx + ty * size) * 3;
+          const shade = relief ? hillshade(tx, ty) : 1;
+          pixels[to] = clamp255(38 * shade);
+          pixels[to + 1] = clamp255(92 * shade);
+          pixels[to + 2] = clamp255(44 * shade);
+          treeDots++;
+        }
+      }
     }
   }
 
@@ -8693,7 +8986,7 @@ function commandMap(): void {
     const out = path.join(assetsRoot(), "maps", `${recipe.name}.base.png`);
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, encodePng(pixels, size, size));
-    console.log(`wrote ${path.relative(process.cwd(), out)}  (${size}x${size}, ${extent * 2} world units across, ${step.toFixed(1)} m/px, base for the in-game map + zonegen map)`);
+    console.log(`wrote ${path.relative(process.cwd(), out)}  (${size}x${size}, ${extent * 2} world units across, ${step.toFixed(1)} m/px, ${relief ? "hillshaded" : "slope-shaded"}, ${treeDots} canopy dots, base for the in-game map + zonegen map)`);
     return;
   }
   if (plain) {
@@ -9008,74 +9301,6 @@ function commandBarriers(): void {
 }
 
 /** 5x7 block capitals, digits and a few marks — enough to write a zone's name on a PNG with no font files. */
-const FONT: Record<string, string[]> = {
-  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
-  B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
-  C: ["01110", "10001", "10000", "10000", "10000", "10001", "01110"],
-  D: ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
-  E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
-  F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
-  G: ["01110", "10001", "10000", "10111", "10001", "10001", "01111"],
-  H: ["10001", "10001", "10001", "11111", "10001", "10001", "10001"],
-  I: ["01110", "00100", "00100", "00100", "00100", "00100", "01110"],
-  J: ["00111", "00010", "00010", "00010", "00010", "10010", "01100"],
-  K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"],
-  L: ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
-  M: ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
-  N: ["10001", "10001", "11001", "10101", "10011", "10001", "10001"],
-  O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
-  P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
-  Q: ["01110", "10001", "10001", "10001", "10101", "10010", "01101"],
-  R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
-  S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
-  T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
-  U: ["10001", "10001", "10001", "10001", "10001", "10001", "01110"],
-  V: ["10001", "10001", "10001", "10001", "10001", "01010", "00100"],
-  W: ["10001", "10001", "10001", "10101", "10101", "10101", "01010"],
-  X: ["10001", "10001", "01010", "00100", "01010", "10001", "10001"],
-  Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
-  Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"],
-  "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
-  "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
-  "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
-  "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
-  "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
-  "5": ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
-  "6": ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
-  "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
-  "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
-  "9": ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
-  "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
-  "'": ["00100", "00100", "00000", "00000", "00000", "00000", "00000"],
-  ".": ["00000", "00000", "00000", "00000", "00000", "00000", "00100"],
-  " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
-};
-
-/** Write `text` at (x, y) in `colour` with a dark outline, `scale` px per font pixel. Unknown characters draw as a dot. */
-function drawText(pixels: Uint8Array, size: number, x: number, y: number, text: string, colour: [number, number, number], scale = 1): void {
-  const set = (px: number, py: number, c: [number, number, number]): void => {
-    if (px < 0 || py < 0 || px >= size || py >= size) return;
-    const o = (py * size + px) * 3;
-    pixels[o] = c[0];
-    pixels[o + 1] = c[1];
-    pixels[o + 2] = c[2];
-  };
-  const cells: Array<[number, number]> = [];
-  let cx = x;
-  for (const ch of text) {
-    const glyph = FONT[ch] ?? FONT["."]!;
-    for (let row = 0; row < 7; row++) {
-      for (let col = 0; col < 5; col++) {
-        if (glyph[row]![col] !== "1") continue;
-        for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) cells.push([cx + col * scale + sx, y + row * scale + sy]);
-      }
-    }
-    cx += 6 * scale;
-  }
-  for (const [px, py] of cells) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) set(px + dx, py + dy, [12, 12, 12]);
-  for (const [px, py] of cells) set(px, py, colour);
-}
-
 function clamp255(v: number): number {
   return v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
 }
@@ -9948,6 +10173,12 @@ switch (command) {
     break;
   case "landforms":
     commandLandforms({ argv, findRecipeFile, loadRecipe, writeRecipe, fail });
+    break;
+  case "relief":
+    commandRelief({ argv, loadRecipe: () => loadRecipe(), writeRecipe, fail });
+    break;
+  case "dogfood":
+    commandDogfood({ argv, worldName, project, playground: PLAYGROUND, fail });
     break;
   case "monoliths":
     commandMonoliths();

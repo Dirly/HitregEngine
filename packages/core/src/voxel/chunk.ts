@@ -1055,12 +1055,26 @@ function fallCurtain(fall: RiverFall, x0: number, z0: number, material: string, 
   // each column starts from its OWN lip (the real edge curves; the cut line is straight): where its ground leaves the
   // probe height under the river, if that is behind the brink
   const owns = across.map((_, c) => (columns ? profileFace(columns[c]!, fall.top - fallProbeDepth(fall), -7.5, lastOut + 4).face : null));
+  // the face the falling rows start hugging: the furthest-UPSTREAM face from 2 m under the surface down to the probe
+  // depth. Under a rounded brink the face recedes near the top and juts out below, and the probe depth alone (8 m on a
+  // 31 m fall) set the column 1.5 m out from the face 3 m down — the curtain hung 1.43 m off its cliff (firstshore
+  // river-2, 2026-10-28). The brink (start) still reads the probe depth: the top row must meet the upper water.
+  const faces = across.map((_, c) => {
+    if (!columns) return null;
+    let own: number | null = null;
+    for (let d = 2; d <= fallProbeDepth(fall) + 1e-6; d += 1) {
+      const face = profileFace(columns[c]!, fall.top - d, -7.5, lastOut + 4).face;
+      if (face !== null && (own === null || face < own)) own = face;
+    }
+    return own;
+  });
   // a column whose own lip stands upstream of the line starts its brink there too (its water ends there, clipped by
   // the ground): the sheet's top follows the real, curved edge instead of a straight line out over the drop
   const start = owns.map((own) => (own !== null && own < FALL_ROLL_BACK - 0.25 ? Math.max(-6, own - FALL_ROLL_BACK) : 0));
   const env = across.map((_, c) => {
     const own = owns[c];
-    return own === null || own === undefined ? lastOut : Math.min(lastOut + start[c]!, own + FALL_FACE_CLEAR);
+    const top = faces[c] ?? own;
+    return own === null || own === undefined ? (top === null || top === undefined ? lastOut : Math.min(lastOut, top + FALL_FACE_CLEAR)) : Math.min(lastOut + start[c]!, top! + FALL_FACE_CLEAR);
   });
   profile.forEach(([outBase, drop], row) => {
     // 1 at the sheet's bottom, 0.8 m under the pool: the pool's surface is ~0.95

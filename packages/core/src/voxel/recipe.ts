@@ -192,6 +192,18 @@ export const riverSchema = z.object({
         "with any lake it passes through and with the river it ends on, and cuts the bed under that level. Written " +
         "only on the field's solved copy (`WorldField.rivers`); a doc that carries it is taken exactly as written.",
     ),
+  runGrade: z
+    .number()
+    .min(0)
+    .max(0.3)
+    .optional()
+    .describe(
+      "Steepest the river's WATER runs (rise over run) outside its one fall; omitted = 0.03 (a lowland river). Where " +
+        "the land falls faster the water stays under it and the channel is cut down. `worldgen rivers` DERIVES it per " +
+        "river from its own profile (the drop it must lose outside its sharpest 60 m, over its length, x 1.15; 0.03..0.18): " +
+        "an island stream losing 100 m in 1 km at 3 % cut a 30 m canyon into its upland and left the lake it drains " +
+        "hanging 28 m over the gorge head (dogfood 2026-10-28). A hand-written river keeps what it says.",
+    ),
   maxGrade: z
     .number()
     .min(0)
@@ -1789,6 +1801,24 @@ export type LandformDoc = z.infer<typeof landformSchema>;
  * landform multipliers are what make it a different SHAPE of ground rather
  * than the same hills in a different colour.
  */
+/**
+ * The transition grammar between neighbouring climate anchors (2026-10-28, from the Skelmorrow failure: "cliffs into
+ * desert then into wetlands, which doesn't make sense"). Derived from each anchor's temperature/moisture, so a new
+ * anchor needs no table row; `allow`/`forbid` name exceptions. `worldgen climate --auto` places anchors to satisfy it
+ * and the `biomes` rule (status `zones` row, `worldgen dogfood`) measures it on the land.
+ */
+const climateTransitionsSchema = z
+  .object({
+    temperatureStep: z.number().min(0).max(1).default(0.45).describe("Largest temperature difference two neighbouring anchors may have (no tundra against jungle)."),
+    moistureStep: z.number().min(0).max(1).default(0.55).describe("Largest moisture difference two neighbouring anchors may have: desert reaches a wetland only through an intermediate (grassland, savanna, moor)."),
+    wetMoisture: z.number().min(0).max(1).default(0.85).describe("An anchor at or over this moisture, or with a water table, is a WETLAND: it sits on lowland or by the water and never touches a dry anchor."),
+    dryMoisture: z.number().min(0).max(1).default(0.25).describe("An anchor at or under this moisture is DRY: it sits on the lee (rain-shadow) side of the wind frame `terrain.dunes.angle`."),
+    allow: z.array(z.tuple([z.string(), z.string()])).default([]).describe("Pairs legal whatever the steps say."),
+    forbid: z.array(z.tuple([z.string(), z.string()])).default([]).describe("Pairs never legal."),
+  })
+  .prefault({})
+  .describe("Which climate anchors may neighbour which: steps in temperature and moisture, wetlands by water and lowland, dry biomes in the rain shadow; exceptions by name.");
+
 const zoneAnchorSchema = z.object({
   id: z.string(),
   temperature: z.number().min(0).max(1),
@@ -1873,7 +1903,7 @@ const marshSchema = z
  * always did, so nothing downstream knows zones exist.
  */
 const zonesSchema = z.object({
-  size: z.number().positive().default(2400).describe("Mean zone diameter in metres. A region should take minutes to cross, not seconds."),
+  size: z.number().positive().default(2400).describe("Mean zone diameter in metres. A region should take minutes to cross, not seconds. `worldgen continents` DERIVES it from the land area so the largest landmass carries ~3.5 cells (sqrt(km² / 3.5) km): a 5 km² island reads three or four biomes, never one (a look's 9000 m was one cell on a 3 km island)."),
   jitter: z.number().min(0).max(1).default(0.85).describe("How far each zone's site wanders from its grid point. 0 is a checkerboard."),
   warp: z.number().min(0).default(260).describe("Metres the zone borders are pushed around by noise, so they read as coastlines rather than as cell walls."),
   warpFrequency: z.number().positive().default(0.0009),
@@ -1887,6 +1917,16 @@ const zonesSchema = z.object({
     })
     .prefault({}),
   anchors: z.array(zoneAnchorSchema).min(1),
+  sites: z
+    .array(z.object({ cell: z.tuple([z.number().int(), z.number().int()]), anchor: z.string() }))
+    .optional()
+    .describe(
+      "Generator-pinned anchor per climate cell (`cell` = the lattice indices the field lays its jittered sites on, " +
+        "as `field.climateSites()` lists them). `worldgen climate --auto` (run by `continents`) writes one per cell " +
+        "with land under it from the ground's traits — altitude, shore distance, windward exposure, latitude — so a " +
+        "landmass carries several coherent biomes (wet by the water and lowland, dry behind the exposed side, forest on " +
+        "the lee, moor on the core). A cell not listed picks by weight and latitude as before.",
+    ),
   marsh: marshSchema,
   seed: z
     .number()
@@ -1943,7 +1983,9 @@ export const worldRecipeSchema = z.object({
         .object({ strength: z.number().min(0).default(28), frequency: z.number().positive().default(0.0016) })
         .default({ strength: 28, frequency: 0.0016 })
         .describe("Domain warp of the whole heightfield — turns noise-looking hills into eroded-looking landforms."),
-      continent: fbmSchema.default({ frequency: 0.00055, amplitude: 70, octaves: 4, lacunarity: 2, gain: 0.5, ridged: false, seed: 11 }),
+      continent: fbmSchema
+        .default({ frequency: 0.00055, amplitude: 70, octaves: 4, lacunarity: 2, gain: 0.5, ridged: false, seed: 11 })
+        .describe("The broad swell band. Its frequency is DERIVED by `worldgen continents` (the relief stage) from the landmass width: 0.75 swells across the largest landmass; the preset value is a 7 km continent's."),
       hills: fbmSchema.default({ frequency: 0.006, amplitude: 14, octaves: 4, lacunarity: 2.1, gain: 0.5, ridged: false, seed: 23 }),
       // Mountains are DELIBERATELY out of scale with the hills. A range whose
       // peaks land in the same altitude band as ordinary green hills produces
@@ -1951,7 +1993,9 @@ export const worldRecipeSchema = z.object({
       // of it inexplicably white. The amplitude has to clear the treeline
       // biome's floor by a wide margin for the snow line to be a place rather
       // than a colour.
-      mountains: fbmSchema.default({ frequency: 0.0019, amplitude: 900, octaves: 5, lacunarity: 2.05, gain: 0.52, ridged: true, seed: 37 }),
+      mountains: fbmSchema
+        .default({ frequency: 0.0019, amplitude: 900, octaves: 5, lacunarity: 2.05, gain: 0.52, ridged: true, seed: 37 })
+        .describe("The ridged upland band under the mountain mask. `worldgen continents` DERIVES its frequency (1.5 swells across the largest landmass) and bisects its amplitude until the land's p98 reaches 150 m over the sea; the preset values are a 7 km continent's."),
       mountainMask: z
         .object({
           spec: fbmSchema.default({ frequency: 0.0011, amplitude: 1, octaves: 3, lacunarity: 2, gain: 0.5, ridged: false, seed: 53 }),
@@ -1963,7 +2007,7 @@ export const worldRecipeSchema = z.object({
           start: 0.54,
           end: 0.8,
         })
-        .describe("Where mountains are ALLOWED. Without a mask, ridged noise puts peaks everywhere and the world reads as noise."),
+        .describe("Where mountains are ALLOWED. Without a mask, ridged noise puts peaks everywhere and the world reads as noise. `worldgen continents` DERIVES the spec's frequency (one swell per half landmass width), its seed (from the world seed) and the 0.45..0.8 window: one upland core per swell."),
       detail: fbmSchema.default({ frequency: 0.035, amplitude: 1.6, octaves: 3, lacunarity: 2, gain: 0.5, ridged: false, seed: 71 }),
       coast: z
         .object({
@@ -2298,6 +2342,7 @@ export const worldRecipeSchema = z.object({
             "field, which is exactly as artificial as it sounds — a clean arc of blight sweeping across a meadow. " +
             "Set `warp` and `strength` to 0 for the old razor-smooth behaviour.",
         ),
+      transitions: climateTransitionsSchema,
       zones: zonesSchema
         .optional()
         .describe(

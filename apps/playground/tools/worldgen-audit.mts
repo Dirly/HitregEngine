@@ -134,6 +134,8 @@ export function auditWorld(recipe: WorldRecipe, field: WorldField): WaterAudit {
   let toRiver = 0;
   let dangling = 0;
   let uphillSteps = 0;
+  /** How far under a lake a river's water may run at the mouth (the rivers stage's hair at a 2 m channel). */
+  const RIVER_HAIR_M = 1.6;
   let outletsOff = 0;
   const inlets = new Array<number>(lakes.length).fill(0);
   const outlets = new Array<number>(lakes.length).fill(0);
@@ -155,7 +157,14 @@ export function auditWorld(recipe: WorldRecipe, field: WorldField): WaterAudit {
     }
     // the WATER must never climb; the bed may, at the plunge pool under a waterfall
     const levels = r.surfaceY && r.surfaceY.length === r.points.length ? r.surfaceY : r.bedY;
-    for (let i = 0; i + 1 < levels.length; i++) if (levels[i + 1]! > levels[i]! + 1e-6) uphillSteps++;
+    // a river runs a hair UNDER the lake it enters (the rivers stage: SURFACE x depth + 0.15, up to ~1.6 m), so its last
+    // step up into the lake's sheet is the mouth, not an uphill reach (2026-10-28, dogfood seed 1337)
+    for (let i = 0; i + 1 < levels.length; i++) {
+      if (!(levels[i + 1]! > levels[i]! + 1e-6)) continue;
+      const p = r.points[i + 1]!;
+      if (levels[i + 1]! - levels[i]! <= RIVER_HAIR_M && inLake(p[0], p[1], levels[i + 1]!) >= 0) continue;
+      uphillSteps++;
+    }
     const last = r.points[r.points.length - 1]!;
     const first = r.points[0]!;
     const lastLake = inLake(last[0], last[1], surfaceAt(r, r.points.length - 1));

@@ -664,7 +664,43 @@ export function flatZoneShare(recipe: WorldRecipe, field: WorldField, c: Compone
   return n > 0 ? flat / n : 0;
 }
 
-function buildFeatures(recipe: WorldRecipe, comps: Component[], g: Grid, field: WorldField): Built {
+/** A gorge's low end is walked to the sea when the shore lies within this many metres of it. */
+export const GORGE_SEA_REACH = 500;
+const WALK_STEP = 40;
+
+/**
+ * The points that take a gorge's low end to the sea: a straight line, WALK_STEP m a step, to the NEAREST shoreline
+ * sample within GORGE_SEA_REACH (32 rays, 20 m along each), ending one sample under the sea. Null when no shore is in
+ * reach. Straight, not steepest descent: the lowland between a gorge and the coast is usually a hump the gorge has to
+ * cut through, and a descent walk stops in the hollow before it (firstshore: a 60 m coastal hump, the whole lowland
+ * bowl flooded 14 m deep over the trench).
+ */
+export function walkToSea(field: WorldField, from: [number, number], sea: number): [number, number][] | null {
+  const [x0, z0] = from;
+  if (field.height(x0, z0) <= sea + 0.5) return null;
+  let best: [number, number] | null = null;
+  let bestD = Infinity;
+  for (let a = 0; a < 32; a++) {
+    const dx = Math.cos((a / 32) * Math.PI * 2), dz = Math.sin((a / 32) * Math.PI * 2);
+    for (let d = 20; d <= GORGE_SEA_REACH && d < bestD; d += 20) {
+      if (field.height(x0 + dx * d, z0 + dz * d) <= sea + 0.5) { best = [x0 + dx * d, z0 + dz * d]; bestD = d; break; }
+    }
+  }
+  if (!best) return null;
+  const out: [number, number][] = [];
+  const steps = Math.max(1, Math.ceil(bestD / WALK_STEP));
+  for (let k = 1; k <= steps; k++) out.push([r1(x0 + ((best[0] - x0) * k) / steps), r1(z0 + ((best[1] - z0) * k) / steps)]);
+  return out;
+}
+
+/** Author overrides for the gorge class (`landforms apply --gorge-steps N --gorge-sharpness s`). */
+export interface BuildOptions {
+  /** Every gorge's wall as this many terrace steps (1 = one sheer riser: a river dropping into the gorge head hangs off one cliff instead of landing on a ledge). */
+  gorgeSteps?: number;
+  gorgeSharpness?: number;
+}
+
+function buildFeatures(recipe: WorldRecipe, comps: Component[], g: Grid, field: WorldField, options: BuildOptions = {}): Built {
   const out: Built = { ridges: [], canyons: [], blobs: [], fills: [], notes: [], dropped: [] };
   const counters = new Map<string, number>();
   const sea = recipe.seaLevel;
@@ -723,6 +759,11 @@ function buildFeatures(recipe: WorldRecipe, comps: Component[], g: Grid, field: 
           for (let s = 0; s < steps; s++) dense.push([r1(a[0] + ((b[0] - a[0]) * s) / steps), r1(a[1] + ((b[1] - a[1]) * s) / steps)]);
         }
         dense.push(points[points.length - 1]!);
+        // a gorge that stops short of the coast is a closed trench: the hydrology floods it into a ribbon lake 14 m deep
+        // instead of a river valley (firstshore). When the sea is within GORGE_SEA_REACH of its low end, walk that end
+        // down the natural ground to the shoreline so the floor meets the sea and the valley drains.
+        const tail = walkToSea(field, dense[dense.length - 1]!, sea);
+        if (tail) dense.push(...tail);
         const width = r1(clamp(lerp(18, 34, rand()), 10, Math.max(10, c.width * 0.6)));
         const depth = lerp(25, 45, rand());
         let running = Infinity;
@@ -730,8 +771,10 @@ function buildFeatures(recipe: WorldRecipe, comps: Component[], g: Grid, field: 
           running = Math.min(running, groundAt(p) - depth);
           return r1(Math.max(running, sea + 1.5));
         });
-        out.canyons.push({ id: base, points: dense, width, depth: r1(depth), rim: r1(width * lerp(0.7, 1.1, rand())), steps: 2 + Math.floor(rand() * 3), stepSharpness: r2(lerp(0.66, 0.9, rand())), floorY });
-        note = `${dense.length} pts, floor ${width} wide, ${r1(depth)} deep, ${floorY[0]} -> ${floorY[floorY.length - 1]} m`;
+        const steps = options.gorgeSteps ?? 2 + Math.floor(rand() * 3);
+        const stepSharpness = options.gorgeSharpness ?? r2(lerp(0.66, 0.9, rand()));
+        out.canyons.push({ id: base, points: dense, width, depth: r1(depth), rim: r1(width * lerp(0.7, 1.1, rand())), steps, stepSharpness, floorY });
+        note = `${dense.length} pts, floor ${width} wide, ${r1(depth)} deep, ${steps} step(s), ${floorY[0]} -> ${floorY[floorY.length - 1]} m${tail ? ` (low end walked ${tail.length} steps to the sea)` : ""}`;
         break;
       }
       case "crater": {
@@ -900,7 +943,12 @@ function commandApply(host: LandformsHost, world: string): void {
   f.heightPatches = own(f.heightPatches);
   f.fills = own(f.fills);
   const field = strippedField(recipe);
-  const built = buildFeatures(recipe, components, grid, field);
+  const gorgeSteps = opt(argv, "gorge-steps");
+  const gorgeSharpness = opt(argv, "gorge-sharpness");
+  const built = buildFeatures(recipe, components, grid, field, {
+    ...(gorgeSteps !== null ? { gorgeSteps: Math.max(1, Math.round(Number(gorgeSteps))) } : {}),
+    ...(gorgeSharpness !== null ? { gorgeSharpness: clamp(Number(gorgeSharpness), 0, 1) } : {}),
+  });
   for (const note of built.notes) console.log(`  ${note}`);
   f.ridges.push(...built.ridges);
   f.canyons.push(...built.canyons);
@@ -947,6 +995,23 @@ function patchWeight(p: HeightPatchDoc, x: number, z: number): number {
   const dx = x - p.origin[0], dz = z - p.origin[1];
   if (dx <= 0 || dz <= 0 || dx >= p.size[0] || dz >= p.size[1]) return 0;
   return smoothstep(0, p.blend, Math.min(dx, dz, p.size[0] - dx, p.size[1] - dz));
+}
+
+/** Smallest distance between two components' cell centres (m), each list strided to ~1500 samples. */
+export function componentGap(a: Component, b: Component, g: Grid): number {
+  const pick = (c: Component): [number, number][] => {
+    const stride = Math.max(1, Math.floor(c.cells.length / 1500));
+    const out: [number, number][] = [];
+    for (let k = 0; k < c.cells.length; k += stride) out.push(cellXZ(c.cells[k]!, g.n, g.cell, g.m));
+    return out;
+  };
+  const pa = pick(a), pb = pick(b);
+  let best = Infinity;
+  for (const [ax, az] of pa) for (const [bx, bz] of pb) {
+    const d = (ax - bx) * (ax - bx) + (az - bz) * (az - bz);
+    if (d < best) best = d;
+  }
+  return Math.sqrt(best);
 }
 
 function commandCheck(host: LandformsHost, world: string): void {
@@ -1001,8 +1066,9 @@ function commandCheck(host: LandformsHost, world: string): void {
     if (cls.maxLength && c.length > cls.maxLength) findings.push(`${id}: ${Math.round(c.length)} m long, over ${cls.maxLength} m`);
   });
 
-  // 3. incompatible overlap: a raise and a cut whose influence discs meet,
-  // and any feature under a landform-* height patch (none are written now; hand-added ones apply after every feature)
+  // 3. incompatible overlap: a raise and a cut whose influence reaches meet — measured between the components' own
+  // cells, not centroid discs: a 920 m gorge is not a 460 m circle, and a spur 250 m from it shares no ground (firstshore)
+  // — and any feature under a landform-* height patch (none are written now; hand-added ones apply after every feature)
   const influence = (cls: string): number => (cls === "plateau" ? 90 : cls === "ridge-spur" ? 120 : cls === "mesa" ? 20 : 60);
   for (let a = 0; a < components.length; a++) for (let b = a + 1; b < components.length; b++) {
     if (droppedAt.has(a) || droppedAt.has(b)) continue;
@@ -1010,8 +1076,11 @@ function commandCheck(host: LandformsHost, world: string): void {
     const ca = LANDFORM_CLASSES[A.cls]!.id, cb = LANDFORM_CLASSES[B.cls]!.id;
     const incompatible = (RAISE.has(ca) && CUT.has(cb)) || (CUT.has(ca) && RAISE.has(cb));
     if (!incompatible) continue;
-    const d = Math.hypot(A.cx - B.cx, A.cz - B.cz);
-    if (d < A.reach + B.reach + Math.max(influence(ca), influence(cb))) findings.push(`${ids[a]} (${ca}) and ${ids[b]} (${cb}) overlap: a raise and a cut fight over the same ground`);
+    const reach = influence(ca) + influence(cb);
+    // cheap reject first: the discs do not even meet
+    if (Math.hypot(A.cx - B.cx, A.cz - B.cz) >= A.reach + B.reach + reach) continue;
+    const gap = componentGap(A, B, grid);
+    if (gap < reach) findings.push(`${ids[a]} (${ca}) and ${ids[b]} (${cb}) overlap: ${Math.round(gap)} m apart, a raise and a cut fight over the same ground within ${reach} m`);
   }
   const patches = recipe.features.heightPatches.filter((p) => p.id.startsWith(PREFIX));
   for (let a = 0; a < patches.length; a++) for (let b = a + 1; b < patches.length; b++) {
@@ -1107,7 +1176,7 @@ export function commandLandforms(host: LandformsHost): void {
 
   landforms base    <world> [--size 1024] [--cx --cz --extent]   relief base map + base.json mapping + legend.json
   landforms request <world> [--brief "..."] [--dry] [--timeout 900]  prompt (landforms-prompt.md + legend) -> image-request.mjs gen
-  landforms apply   <world> [--key <png>] [--tolerance 72] [--grid N] [--open 1] [--min-px 4] [--dry]
+  landforms apply   <world> [--key <png>] [--tolerance 72] [--grid N] [--open 1] [--min-px 4] [--gorge-steps N] [--gorge-sharpness s] [--dry]
   landforms check   <world> [--coverage 0.15]                    gate (exit 1 on findings) + preview.png
   landforms legend                                                 the class table`);
   }
