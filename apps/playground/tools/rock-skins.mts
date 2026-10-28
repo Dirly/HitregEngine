@@ -382,6 +382,11 @@ export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; fiel
   };
   if (mainMaterial) {
     if (!skins) rows.push({ kind: "recipe", fault: "recipe", what: "rockSkins", id: recipe.name, detail: "the world has no rockSkins table: every rock wears its rule's fixed base, whatever zone it stands in" });
+    // a table row naming a stone the recipe does not have, or a slice the material does not have (init --from copies)
+    for (const [stone, slice] of Object.entries(skins ?? {})) {
+      if (stone !== "*" && !names.includes(stone)) rows.push({ kind: "recipe", fault: "recipe", what: "rockSkins", id: stone, detail: `rockSkins names ${stone}, no surface of ${recipe.name} (inherited from another world?): rock-skins install drops it` });
+      else if (slice >= mainMaterial.tones.length) rows.push({ kind: "recipe", fault: "recipe", what: "rockSkins", id: stone, detail: `rockSkins maps ${stone} to slice ${slice}; ${mainMaterial.id ?? "the rock material"} has ${mainMaterial.tones.length} bases` });
+    }
     for (const r of regions.filter((q) => !q.within)) {
       const cliff = cliffOf(r);
       const ci = cliff ? names.indexOf(cliff) : -1;
@@ -654,6 +659,13 @@ export function planRockSkins(project: string, recipe: WorldRecipe, bases: reado
   const out = bases.map((b) => ({ ...b }));
   const rockSkins: Record<string, number> = { ...((recipe as { rockSkins?: Record<string, number> }).rockSkins ?? {}) };
   const added: string[] = [], flagged: string[] = [];
+  // a stone the recipe no longer has (a world made with `init --from` inherits its source's zone cliffs: firstshore kept
+  // proving's five, pointing at slices its own material never had) is dropped, so it cannot hold or alias a slice
+  for (const name of Object.keys(rockSkins))
+    if (name !== "*" && !recipe.surfaces.some((q) => q.name === name)) {
+      delete rockSkins[name];
+      added.push(`${name}: dropped (no such surface in the recipe)`);
+    }
   // a stone ASSIGNED a slice (the 8 slices are full: a corridor's own stone reclaims one whose stone the world hardly
   // draws, by ruling): that slice takes its texture; every other stone on the slice now wears it (reported)
   for (const [name, slice] of Object.entries(assign)) {

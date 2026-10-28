@@ -261,8 +261,15 @@ export function zoneTexturesStageCheck(recipe: WorldRecipe, project: string, ass
       return error instanceof Error ? error.message : String(error);
     }
   }
-  if (wanted.length === 0) return null;
+  // a zone with no ground look is not "done" because nothing was declared (firstshore 2026-10-28: the row read ok
+  // with an empty cast while zone-1 drew the base tiles and rock-skins failed for want of a zone stone)
   const problems: string[] = [];
+  for (const z of recipe.regions.filter((r) => !r.within)) {
+    if (z.ground && Object.keys(z.ground).length > 0) continue;
+    const row = rows.find((r) => r.zone === z.id);
+    problems.push(row ? `${z.id}: palette ${row.palette} has no ground look (authoring/zonegen/palettes/${row.palette}.json)` : `${z.id}: no ground look (no cast row with a palette)`);
+  }
+  if (wanted.length === 0) return problems.length > 0 ? problems.slice(0, 4).join("; ") : null;
   for (const { row, palette } of wanted) {
     const region = recipe.regions.find((r) => r.id === row.zone);
     if (!region) {
