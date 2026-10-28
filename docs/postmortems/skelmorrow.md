@@ -225,6 +225,7 @@ and the check that owns it now. Grouped by the tool that must carry it.
 | zonegen status | crash on one bad JSON; stamps STALE forever | no | BROKEN row, never a crash; stamp tests |
 | labs | ~50 scratch projects in the closure | no | `labs --sweep`; labs never in a live scene's closure |
 | coordinator | 10-day uncommitted tree; tmp scripts | rule only | commit per tools round; iteration-file lint in status |
+| engine tests | rock-skins / rock-audit tests read the live Skelmorrow project (zone textures, rock materials, the closure); archiving the world failed 9 tests, and projects are gitignored so a bare checkout could never pass | no | BUILT 2026-10-28: `HITREG_PROJECTS_ROOT` hook (`projectsRoot()` in `tools/_closure.mjs`), generated `fixture-world` (`test/fixtures/rock-skins/build.mts`), and the lint `test/no-live-projects.test.ts` that fails on any `projects/<name>/` path in `test/*.test.ts` other than foundation, world-kit, a placeholder or a fixture |
 
 ## What worked and is kept
 

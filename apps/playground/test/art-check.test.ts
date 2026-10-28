@@ -188,10 +188,10 @@ test("builtOpPieces: wall ops (retaining, ramp) are built pieces like landmarks;
 });
 
 test("artTarget: the job's own project world by default, the preview lab when named", () => {
-  const job = "D:/x/apps/playground/projects/skelmorrow/authoring/zonegen/skelmorrow/zones/drownmere/pois/ironspur-delf";
-  assert.deepEqual(artTarget(job), { project: "skelmorrow", world: "skelmorrow" });
+  const job = "D:/x/apps/playground/projects/fixture-world/authoring/zonegen/fixture-world/zones/east/pois/ironspur-delf";
+  assert.deepEqual(artTarget(job), { project: "fixture-world", world: "fixture-world" });
   assert.deepEqual(artTarget(job, { project: "ispur-lab", world: "ispurlab" }), { project: "ispur-lab", world: "ispurlab" });
-  assert.deepEqual(artTarget(job.replaceAll("/", "\\")), { project: "skelmorrow", world: "skelmorrow" }, "a resolved Windows path");
+  assert.deepEqual(artTarget(job.replaceAll("/", "\\")), { project: "fixture-world", world: "fixture-world" }, "a resolved Windows path");
   assert.throws(() => artTarget("D:/x/somewhere"));
 });
 

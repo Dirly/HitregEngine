@@ -1,9 +1,13 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { defaultWorldRecipe, worldRecipeSchema, type VoxelMesh } from "@hitreg/core";
 import { rockAudit, walkMeshTriangles } from "../tools/worldgen-rock-audit.mts";
 import { paintPaletteFault, paletteRefusals, zonePalette, surfaceRoles } from "../tools/_zone-palette.mts";
 import { paletteSkinFaults } from "../tools/rock-skins.mts";
+
+import { FIXTURE_PROJECT, useRockSkinsFixture } from "./fixtures/rock-skins/build.mts";
+
+after(useRockSkinsFixture());
 
 const ZONE = [[-500, -500], [500, -500], [500, 500], [-500, 500]] as [number, number][];
 
@@ -112,14 +116,14 @@ test("rock-skins install refuses a zone slice outside its palette", () => {
 test("rock texel density: the body is projected in model metres, so a scaled-up piece loses texels per metre", () => {
   const recipe = worldRecipeSchema.parse({ ...world({ ground: ["z-grass"], cliff: ["z-cliff"] }), scatter: [] });
   const placed = [
-    { id: "boulder", what: "rock-kit/boulder", x: 10, y: 400, z: 10, material: "terrain/skelmorrow-rock", rockCap: { base: 4 }, modelBase: null, scale: 1 },
-    { id: "pillar", what: "rock-kit/buttress", x: 20, y: 400, z: 20, material: "terrain/skelmorrow-rock", rockCap: { base: 4 }, modelBase: null, scale: 3 },
+    { id: "boulder", what: "rock-kit/boulder", x: 10, y: 400, z: 10, material: "terrain/fixture-world-rock", rockCap: { base: 4 }, modelBase: null, scale: 1 },
+    { id: "pillar", what: "rock-kit/buttress", x: 20, y: 400, z: 20, material: "terrain/fixture-world-rock", rockCap: { base: 4 }, modelBase: null, scale: 3 },
   ];
-  const rep = rockAudit({ recipe, area, zone: "z", project: "skelmorrow", placed, meshCell: () => syntheticMesh(recipe) });
+  const rep = rockAudit({ recipe, area, zone: "z", project: FIXTURE_PROJECT, placed, meshCell: () => syntheticMesh(recipe) });
   assert.equal(rep.texel.checked, 2);
   assert.equal(rep.texel.under, 1);
   assert.equal(rep.texel.worst[0]!.id, "pillar");
-  assert.ok(Math.abs(rep.texel.worst[0]!.txm - 512 / 12.8 / 3) < 0.1, `hagsheer cliff 512 px / 12.8 m / x3 = 13.3 tx/m, got ${rep.texel.worst[0]!.txm}`);
+  assert.ok(Math.abs(rep.texel.worst[0]!.txm - 512 / 12.8 / 3) < 0.1, `fixture slate cliff 512 px / 12.8 m / x3 = 13.3 tx/m, got ${rep.texel.worst[0]!.txm}`);
   assert.ok(rep.worst.some((s) => s.kinds["low-texel"]));
   assert.equal(rep.ok, false);
 });

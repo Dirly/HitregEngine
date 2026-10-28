@@ -9,8 +9,15 @@ import { fileURLToPath } from "node:url";
 
 export const PROJECTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../projects");
 
+/**
+ * The folder holding the project folders. Production default: `apps/playground/projects`. Set the environment
+ * variable `HITREG_PROJECTS_ROOT` to point every closure lookup elsewhere (tests use it to read a self-contained
+ * fixture tree instead of a live game project). Read on every call, so a test may set it after import.
+ */
+export const projectsRoot = () => (process.env.HITREG_PROJECTS_ROOT ? path.resolve(process.env.HITREG_PROJECTS_ROOT) : PROJECTS);
+
 /** Project name from a name or a project directory path. */
-const nameOf = (project) => path.basename(path.resolve(PROJECTS, project));
+const nameOf = (project) => path.basename(path.resolve(projectsRoot(), project));
 
 /** The project first, then its dependencies (depth-first, each once). */
 export function closure(project) {
@@ -19,7 +26,7 @@ export function closure(project) {
     if (out.includes(name)) return;
     out.push(name);
     try {
-      const manifest = JSON.parse(fs.readFileSync(path.join(PROJECTS, name, "project.json"), "utf8"));
+      const manifest = JSON.parse(fs.readFileSync(path.join(projectsRoot(), name, "project.json"), "utf8"));
       for (const dep of manifest.dependsOn ?? []) visit(dep);
     } catch { /* no or invalid manifest: no dependencies */ }
   };
@@ -29,13 +36,13 @@ export function closure(project) {
 
 /** Existing `assets/<kind>` folders across the closure, the project's own first. */
 export function assetDirs(project, kind) {
-  return closure(project).map((p) => path.join(PROJECTS, p, "assets", kind)).filter((d) => fs.existsSync(d));
+  return closure(project).map((p) => path.join(projectsRoot(), p, "assets", kind)).filter((d) => fs.existsSync(d));
 }
 
 /** The first existing `assets/<rel>` across the closure, or null. */
 export function findAsset(project, rel) {
   for (const p of closure(project)) {
-    const f = path.join(PROJECTS, p, "assets", rel);
+    const f = path.join(projectsRoot(), p, "assets", rel);
     if (fs.existsSync(f)) return f;
   }
   return null;
@@ -43,7 +50,7 @@ export function findAsset(project, rel) {
 
 /** Like findAsset, but returns the project's own path when nothing exists (for error messages). */
 export function assetPath(project, rel) {
-  return findAsset(project, rel) ?? path.join(PROJECTS, nameOf(project), "assets", rel);
+  return findAsset(project, rel) ?? path.join(projectsRoot(), nameOf(project), "assets", rel);
 }
 
 /** Ids (file names without `ext`, top level of the folder) of one asset kind across the closure. */

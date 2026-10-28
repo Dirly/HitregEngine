@@ -41,7 +41,7 @@ import { applyOps, ComponentRegistry, createRockCapResolver, createWorldField, L
 import { fileURLToPath } from "node:url";
 import { decodePng } from "./_png.mjs";
 import { modelBounds } from "./_gltf-bounds.mjs";
-import { findAsset } from "./_closure.mjs";
+import { findAsset, projectsRoot } from "./_closure.mjs";
 import { worldChunks } from "./float.mts";
 import { applyOpsToSceneFile, updateJsonFile } from "./_scene-write.mts";
 import { zonePalette } from "./_zone-palette.mts";
@@ -762,8 +762,6 @@ export function writeLargeRockMaterial(material: { id: string; file: string; doc
   return { id, file, wrote, rules: changed };
 }
 
-const PROJECTS_DIR = path.resolve(import.meta.dirname, "..", "projects");
-
 /** The rock-cap material the world's scatter draws with, when it lives in `project` itself (so it may be written). */
 export function ownRockMaterial(project: string, recipe: WorldRecipe): { id: string; file: string; doc: any } | null {
   for (const rule of recipe.scatter) {
@@ -773,7 +771,7 @@ export function ownRockMaterial(project: string, recipe: WorldRecipe): { id: str
     if (!file) continue;
     const doc = JSON.parse(fs.readFileSync(file, "utf8"));
     if (doc.shader !== "rock-cap") continue;
-    return path.resolve(file).startsWith(path.resolve(PROJECTS_DIR, project) + path.sep) ? { id, file, doc } : null;
+    return path.resolve(file).startsWith(path.resolve(projectsRoot(), project) + path.sep) ? { id, file, doc } : null;
   }
   return null;
 }
