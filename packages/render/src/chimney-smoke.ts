@@ -133,7 +133,9 @@ export function findChimneys(root: THREE.Object3D, skip?: (material: THREE.Mater
   // candidates: small, squarish, high, flat tops with nothing above them
   const candidates = patches.filter((p) => {
     const w = p.x1 - p.x0, d = p.z1 - p.z0;
-    if (p.y < minY + height * 0.45) return false;
+    // high on the model: 45 % of its height, capped at 4 m -- a town district is ONE merged model (export_town.py), so a
+    // tower in it must not lift the bar over every house's stack (Derek 2026-10-28: "the smoke stack on the roofs doesn't work")
+    if (p.y < minY + Math.min(height * 0.45, 4)) return false;
     if (p.area < 0.08 || p.area > 2.6 || w < 0.25 || d < 0.25) return false;
     if (Math.max(w, d) / Math.min(w, d) > 2.5) return false;
     // nothing above it (a post under a roof is not a chimney)
@@ -161,7 +163,7 @@ export function findChimneys(root: THREE.Object3D, skip?: (material: THREE.Mater
     }
     found.push(new THREE.Vector3(x, p.y, z));
   }
-  return found.slice(0, 6);
+  return found.slice(0, 64); // a merged district carries every building's stack, not one model's six
 }
 
 /* ---------- drawing ---------- */
