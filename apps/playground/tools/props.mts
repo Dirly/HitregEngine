@@ -25,9 +25,10 @@
  *                                    same model(s), new material or art (--triplanar projects tiling art over atlas UVs in metres)
  *   npx tsx tools/props.mts compose <recipe.json>                          (props + models + primitives + alpha cards -> one prefab;
  *                                    REFUSED when its prefab parts mix cultures or scales, or a part is resized to stand in)
- *   npx tsx tools/props.mts request add --name <thing> --culture <c> --scale <s> --for <place> [--why text] [--landmark <m>] [--size <metres tall>] | request [--all]
+ *   npx tsx tools/props.mts request add --name <thing> --culture <c> --scale <s> --for <place> [--why text] [--landmark <m>] [--size <metres tall>] [--concept <png>] | request [--all]
+ *                                    --concept: the piece's concept frame (painted first); its Codex design job and `paint gen` get it as the reference
  *                                    --size: a hero prop's finished height; the Codex brief says it is made at that size, never scaled later
- *                                    (--landmark: a built landmark structure that tall, 6-30 m: the Codex gate builds it at full size, 40 tx/m)
+ *                                    (--landmark: a built landmark structure that tall, 6-40 m: the Codex gate builds it at full size, 40 tx/m)
  *                                    | request made <id> --with <catalogue prop id> | request drop <id> --why text | request reopen <id> --why text
  *                                    the project's prop-request list by culture (authoring/dressing/prop-requests.json)
  *   npx tsx tools/props.mts codex <request id...> | --all --project <p> [--batch 5] [--names <id>=<name>,...] [--scales <id>=<scale>,...] [--redo --notes-file <{id: review note}>] [--dry] [--designs-only] [--review-sheet <png>]
@@ -1339,7 +1340,9 @@ async function main() {
       if (lm !== undefined && !(lm > 6 && lm <= LANDMARK_MAX_M)) throw Error(`request add --landmark <m>: a landmark structure is over 6 m and at most ${LANDMARK_MAX_M} m tall`);
       const size = flag("size") ? Number(flag("size")) : undefined;
       if (size !== undefined && !(size > 0 && size <= 30)) throw Error("request add --size <metres tall>: the finished prop's height, 0-30 m");
-      const r = addRequest(RP, { name: need("name"), culture, scale, for: need("for"), why: flag("why") ?? "", ...(lm ? { landmark: lm } : {}), ...(size ? { size } : {}) });
+      const concept = flag("concept") ? path.relative(path.resolve(HERE, ".."), path.resolve(flag("concept")!)).replaceAll(String.fromCharCode(92), "/") : undefined;
+      if (concept && !fs.existsSync(path.resolve(HERE, "..", concept))) throw Error(`request add --concept: no such image ${concept}`);
+      const r = addRequest(RP, { name: need("name"), culture, scale, for: need("for"), why: flag("why") ?? "", ...(lm ? { landmark: lm } : {}), ...(size ? { size } : {}), ...(concept ? { concept } : {}) });
       console.log(`prop request ${r.id} (${r.status}) for ${r.for} -> ${path.relative(process.cwd(), requestsFile(RP))}`);
       return;
     }

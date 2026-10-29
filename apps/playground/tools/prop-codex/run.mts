@@ -56,7 +56,8 @@ export async function runJob(req: Req, o: { name?: string; scale: ScaleInfo; sca
     fs.writeFileSync(brief, writeBrief({ request: req, name, scale: o.scale, cultureNote: o.cultureNote, reviewNote: o.reviewNote, retry, reuseNotes:reuseBrief(reusePolicy) }));
     const check = `npx tsx tools/prop-codex/check.mts {stage} --job "${job}"`;
     log(`  ${name}: codex attempt ${attempt}`);
-    const r = await runner(["--brief", brief, "--out", `${name}.py=${dest}`, "--context", `${helpers},${examples}`, "--check", check, "--timeout", "1500"]);
+    const concept = req.concept ? path.resolve(PLAYGROUND, req.concept) : undefined;
+    const r = await runner(["--brief", brief, "--out", `${name}.py=${dest}`, "--context", [helpers, examples, ...(concept && fs.existsSync(concept) ? [concept] : [])].join(","), "--check", check, "--timeout", "1500"]);
     const t = parseTokens(r.output); if (t !== null) tokens = (tokens ?? 0) + t;
     stage = parseStage(r.output) ?? stage;
     const gateFile = stage ? path.join(stage, "gate.txt") : "";
@@ -91,7 +92,7 @@ export async function runBatch(reqs: Req[], o: { names?: Record<string, string>;
   for (const j of results) {
     appendLedger(o.projectsDir, j);
     if (j.status === "pass" || j.status === "retry-pass")
-      writeOrigin(o.worldKit, j.name, { request: j.request.id, project: j.request.project, for: j.request.for, culture: j.request.culture, scale: j.request.scale, tokens: j.tokens, seconds: j.seconds, attempts: j.attempts, at: new Date().toISOString() });
+      writeOrigin(o.worldKit, j.name, { request: j.request.id, project: j.request.project, for: j.request.for, culture: j.request.culture, scale: j.request.scale, ...(j.request.landmark ? { landmark: j.request.landmark } : {}), tokens: j.tokens, seconds: j.seconds, attempts: j.attempts, at: new Date().toISOString() });
   }
   return results;
 }

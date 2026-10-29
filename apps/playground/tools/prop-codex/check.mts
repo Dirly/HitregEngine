@@ -61,13 +61,21 @@ export function gateFaults(rec: GeometryRecord, job: Job, scales: ScaleInfo[]): 
   if ((rec.parts ?? []).length < (rec.paintPlan?.surfaces.length ? 1 : 2)) out.push("one part only: a prop is built from its real parts (a lid has battens, a tub has a rim and staves)");
   // L (Wristgate 2026-10-29): the 11 m fist passed this gate, then `paint plan` refused it (its painted surfaces + shared
   // role tiles overflow the one 1024 px page at 40 tx/m); the page budget is checked here, at design time
-  const pp = rec.paintPlan as { surfaces?: { name: string; pixels: number[] }[]; roles?: string[] } | null | undefined;
+  const pp = rec.paintPlan as { surfaces?: { name: string; pixels: number[]; metres?: number[] }[]; roles?: string[] } | null | undefined;
+  // L (c-props 2026-10-29): two jar designs passed here, then `paint plan` refused a thin lip ring painted with a
+  // cylinder projection ("measured resolution must stay within 32-48 texels/m"); the same band is checked at design time
+  for (const s of pp?.surfaces ?? []) if (s.metres?.length && s.pixels.some((v, i) => s.metres![i]! > 0 && (v / s.metres![i]! < 32 || v / s.metres![i]! > 48)))
+    out.push(`paint surface ${s.name}: its painted island measures ${s.pixels.map((v, i) => (v / s.metres![i]!).toFixed(0)).join(" x ")} texels/m, outside 32-48 (a thin ring or sliver cannot hold a paint region: merge it into the neighbouring region's part or leave it on the shared role)`);
+  // c-props 2026-10-29: paintPlanSchema allows at most 32 paint regions; a design over it passed here and died at paint plan
+  if ((pp?.surfaces?.length ?? 0) > 32) out.push(`paint regions: ${pp!.surfaces!.length} declared, at most 32: paint whole parts (one region per part and view that shows), not one per small piece`);
   if (pp?.surfaces?.length) {
     const px = pp.surfaces.reduce((a, s) => a + (s.pixels[0]! + 8) * (s.pixels[1]! + 8), 0) + (pp.roles?.length ?? 0) * 136 * 136;
     if (px > 1024 * 1024) out.push(`paint page: painted surfaces + shared roles need ${Math.round(px / 1024)}k px at 40 tx/m, over one 1024 px page (${1024}k): leave big plain faces (a plinth, a top) on the shared stone role instead of painting them, or split the piece`);
   }
   out.push(...unpaintedMonolithFaults(rec));
-  for (const s of rec.paint?.surfaces ?? []) if (!s.texel || s.texel < LIMITS.texel.min || s.texel > LIMITS.texel.max) out.push(`paint surface ${s.name}: texel density ${s.texel ?? 0}/m outside ${LIMITS.texel.min}-${LIMITS.texel.max}`);
+  // c-props 2026-10-29: a region whose faces all went in cleanup (a border back flush on the shaft, a log underside in the ash)
+  // has nothing left to show; it is skipped, not failed as "texel 0" (it only costs its island)
+  for (const s of rec.paint?.surfaces ?? []) if ((s as { finalFaces?: number }).finalFaces === 0) continue; else if (!s.texel || s.texel < LIMITS.texel.min || s.texel > LIMITS.texel.max) out.push(`paint surface ${s.name}: texel density ${s.texel ?? 0}/m outside ${LIMITS.texel.min}-${LIMITS.texel.max}`);
   return out;
 }
 

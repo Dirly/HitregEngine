@@ -24,7 +24,9 @@ const readJson = (p: string) => JSON.parse(fs.readFileSync(p, "utf8").replace(/^
 const write = (p: string, x: unknown) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, JSON.stringify(x, null, 2) + "\n"); };
 
 /** What filled each prop: the request it answers (authoring/codex-craft/requests.json, written when a design lands). */
-export interface Origin { request: string; project: string; for: string; culture: string; scale: string; tokens?: number | null; seconds?: number; attempts?: number; at?: string }
+export interface Origin { request: string; project: string; for: string; culture: string; scale: string; tokens?: number | null; seconds?: number; attempts?: number; at?: string;
+  /** the request's landmark height, kept here so the install gate survives the request project being archived */
+  landmark?: number }
 export const dir = (worldKit: string) => path.join(worldKit, "authoring", COLLECTION);
 export function readOrigins(worldKit: string): Record<string, Origin> {
   const f = path.join(dir(worldKit), "requests.json");
@@ -88,7 +90,8 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
     const origin=origins[g.name],scale=scales.find(s=>s.id===origin?.scale);
     if(!origin||!scale)throw Error(`${g.name}: missing source origin or scale`);
     // a LANDMARK request (request add --landmark <m>) is gated at its full height, as its design run was (L KNUCKLECROWN 2026-10-28: a 24 m finger-pillar designed as a landmark was refused at install as a 20 m giant-scale prop)
-    const reqFile=path.join(worldKit,'..',origin.project,'authoring/dressing/prop-requests.json'),reqs=fs.existsSync(reqFile)?readJson(reqFile):[],lm=(Array.isArray(reqs)?reqs:reqs.requests??[]).find((r:any)=>r?.id===origin.request)?.landmark;
+    // c-props 2026-10-29: firstshore was archived (HitRegStudios/projects-archive) and its 24 m finger-pillar fell back to the 20 m giant cap, failing EVERY install: the origin carries the height now, the archive is the legacy fallback
+    const reqFile=[path.join(worldKit,'..',origin.project),path.resolve(worldKit,'../../../../../projects-archive',origin.project)].map(p=>path.join(p,'authoring/dressing/prop-requests.json')).find(f=>fs.existsSync(f)),reqs=reqFile?readJson(reqFile):[],lm=origin.landmark??(Array.isArray(reqs)?reqs:reqs.requests??[]).find((r:any)=>r?.id===origin.request)?.landmark;
     const faults=gateFaults(g,{name:g.name,culture:origin.culture,scale:{id:scale.id,height:scale.height},worldKit,...(lm?{landmark:lm}:{})},scales);
     if(faults.length)throw Error(`${g.name}: ${faults.join('; ')}`);
   }

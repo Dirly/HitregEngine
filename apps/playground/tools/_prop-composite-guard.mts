@@ -54,7 +54,10 @@ export interface PropRequest { id: string; name: string; culture: string; scale:
   landmark?: number;
   /** HERO size (`request add --size <m>`): the finished prop's height in metres, made at that size and never scaled up after
    *  (Exiles' Bell 2026-10-24: the bell and the winch were made small and stood in the layout at x1.15-1.2). */
-  size?: number }
+  size?: number;
+  /** The piece's CONCEPT frame (`request add --concept <png>`, path from apps/playground), painted before the build
+   *  (art-direction: concept first): the Codex design job gets it as context, `props paint gen` as a second ref. */
+  concept?: string }
 export const requestsFile = (project: string): string => path.join(project, "authoring/dressing/prop-requests.json");
 export function readRequests(project: string): PropRequest[] {
   const f = requestsFile(project);
@@ -92,6 +95,7 @@ export function addRequest(project: string, r: Omit<PropRequest, "id" | "at" | "
   const dup = list.find((x) => x.status === "open" && x.name.toLowerCase() === r.name.toLowerCase() && x.culture === r.culture && x.scale === r.scale);
   if (dup && !dup.for.split(", ").includes(r.for)) dup.for = `${dup.for}, ${r.for}`;
   if (dup && r.size) dup.size = r.size;
+  if (dup && r.concept) dup.concept = r.concept;
   const row: PropRequest = dup ?? { id: `${r.culture}/${slug}`, ...r, at: new Date().toISOString(), status: "open" };
   if (!dup) list.push(row);
   const f = requestsFile(project);

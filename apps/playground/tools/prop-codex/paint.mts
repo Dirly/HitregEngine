@@ -121,12 +121,16 @@ export function importPainting(wk:string,name:string,artFile:string){
  write(path.join(dir,'receipt.json'),{version:1,geometrySha256:layout.geometrySha256,layoutSha256:sha(path.join(dir,'layout.json')),keySha256:sha(path.join(dir,'key.png')),manifestSha256:sha(path.join(dir,'manifest.json')),artSha256:sha(target),atlasSha256:sha(path.join(dir,'atlas.png')),roleSheetSha256:sha(path.join(wk,'assets/textures/town-craft/materials.png')),provenance:{importedFrom:path.resolve(artFile),registration:'tools/atlas/import-atlas.mjs'},review:'provisional; inspect clay, unlit artwork and lit renders'});
  return paintingStatus(wk,name);
 }
+/** The design's concept frame, if its prop request carried one (`request add --concept`): codex-craft requests.json -> the request project's prop-requests.json. */
+export function designConcept(wk:string,name:string,play=path.resolve(wk,'../..')):string|undefined{
+ try{const o=read(path.join(wk,'authoring/codex-craft/requests.json')).props?.[name];if(!o)return;const reqs=read(path.join(wk,'..',o.project,'authoring/dressing/prop-requests.json')).requests??[];const c=reqs.find((r:any)=>r.id===o.request)?.concept;return c&&fs.existsSync(path.resolve(play,c))?path.resolve(play,c):undefined;}catch{return;}
+}
 export function generatePainting(wk:string,name:string,force=false){
- const dir=paintDir(wk,name),layout=paintLayoutSchema.parse(read(path.join(dir,'layout.json'))),play=path.resolve(wk,'../..');
+ const dir=paintDir(wk,name),layout=paintLayoutSchema.parse(read(path.join(dir,'layout.json'))),play=path.resolve(wk,'../..'),concept=designConcept(wk,name,play);
  const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'hitreg-paint-prompt-')),promptFile=path.join(scratch,'prompt.txt');
  try{
-  fs.writeFileSync(promptFile,paintingBrief(layout));
-  const r=spawnSync(process.execPath,[path.join(play,'tools/image-request.mjs'),'gen','--id',`prop-${name}-paint`,'--target',path.relative(play,path.join(dir,'art.png')),'--size',`${layout.size}x${layout.size}`,'--ref',path.join(dir,'key.png'),'--purpose','UV-registered hand-painted prop artwork','--prompt-file',promptFile,...(force?['--force']:[])],{encoding:'utf8',cwd:play,maxBuffer:1<<26});
+  fs.writeFileSync(promptFile,paintingBrief(layout)+(concept?'\nThe FIRST attached image is the UV guide to paint; the SECOND is the concept frame: match its stone colour, palette, carved motifs and wear (never its perspective, backdrop or the scale figure).':''));
+  const r=spawnSync(process.execPath,[path.join(play,'tools/image-request.mjs'),'gen','--id',`prop-${name}-paint`,'--target',path.relative(play,path.join(dir,'art.png')),'--size',`${layout.size}x${layout.size}`,'--ref',path.join(dir,'key.png'),...(concept?['--ref',concept]:[]),'--purpose','UV-registered hand-painted prop artwork','--prompt-file',promptFile,...(force?['--force']:[])],{encoding:'utf8',cwd:play,maxBuffer:1<<26});
   if(r.status!==0)throw Error('Image generation failed: '+r.stdout+r.stderr);
  }finally{const resolved=path.resolve(scratch);if(!resolved.startsWith(path.resolve(os.tmpdir())+path.sep)||!path.basename(resolved).startsWith('hitreg-paint-prompt-'))throw Error('Unexpected painting prompt scratch path');fs.rmSync(resolved,{recursive:true,force:true});}
  importPainting(wk,name,path.join(dir,'art.png'));

@@ -64,6 +64,13 @@ test("gateFaults: painted surfaces that overflow the one 1024 px page are refuse
   assert.deepEqual(gateFaults(fits, job, scales), []);
   const over = { ...good, paintPlan: { surfaces: [surf("a", 900, 900), surf("b", 600, 400)], roles: ["stone", "iron"] } } as unknown as GeometryRecord;
   assert.match(gateFaults(over, job, scales).join(" | "), /paint page: .* over one 1024 px page/);
+  // c-props 2026-10-29: a thin lip ring whose island measures outside 32-48 tx/m is refused here, not first at paint plan
+  const sliver = { ...good, paintPlan: { surfaces: [{ ...surf("lip", 40, 8), metres: [1, 0.12] }], roles: ["stone"] } } as unknown as GeometryRecord;
+  assert.match(gateFaults(sliver, job, scales).join(" | "), /paint surface lip: .* outside 32-48/);
+  // a final-build region whose faces all went in coplanar cleanup is skipped; one with faces but texel 0 still fails
+  const paint = (finalFaces: number) => ({ ...good, paint: { surfaces: [{ ...surf("back", 40, 40), texel: 0, finalFaces }] } }) as unknown as GeometryRecord;
+  assert.deepEqual(gateFaults(paint(0), job, scales), []);
+  assert.match(gateFaults(paint(3), job, scales).join(" | "), /paint surface back: texel density 0/);
 });
 
 test("gateFaults: a landmark request is built at full height, never a small prop scaled up", () => {
@@ -74,6 +81,9 @@ test("gateFaults: a landmark request is built at full height, never a small prop
   assert.match(gateFaults({ ...tall, size: [2, 6, 3] }, lm, scales).join(" | "), /height: 6.00 m; the landmark is 18 m/, "a landmark built small is refused");
   assert.match(gateFaults({ ...tall, triangles: 3000 }, lm, scales).join(" | "), /triangles: 3000 > 2400/);
   assert.match(writeBrief({ request: req({ landmark: 18 }), name: "mine-headframe", scale: human }), /LANDMARK structure[\s\S]*18 m tall/);
+  // concept first (c-props 2026-10-29): a request's concept frame is attached and named in the brief
+  assert.match(writeBrief({ request: req({ landmark: 36, concept: "projects/x/authoring/concept-design/props/the-needle.png" }), name: "the-needle", scale: human }), /Concept frame[\s\S]*context\/the-needle\.png/);
+  assert.doesNotMatch(writeBrief({ request: req({}), name: "x", scale: human }), /Concept frame/);
 });
 
 test("gateFaults: a sound design passes; each rule refuses its fault", () => {

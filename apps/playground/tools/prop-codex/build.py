@@ -123,7 +123,7 @@ def emit(m, design, category='tool', mount='floor', solid=True, setting='both', 
             for name,r in layout['surfaces'].items():
                 if all(r['x']-1e-4<=v.x*texture_size<=r['x']+r['w']+1e-4 and r['y']-1e-4<=(1-v.y)*texture_size<=r['y']+r['h']+1e-4 for v in uv):surface_density[name].append((math.sqrt(ua/area),area))
         for s in paint_record['surfaces']:
-            values=sorted(surface_density[s['name']]);total=sum(w for d,w in values);acc=0;s['texel']=0
+            values=sorted(surface_density[s['name']]);total=sum(w for d,w in values);acc=0;s['texel']=0;s['finalFaces']=len(values)  # 0: cleanup removed every face (hidden against a neighbour)
             for d,w in values:
                 acc+=w
                 if acc>=total/2:s['texel']=round(d,2);break
