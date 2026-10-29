@@ -872,7 +872,13 @@ function install() {
   if (has("uninstall")) return applyPlace(project, tw, { remove: true, dry });
   if (!dry) requireFinalReview(JOB);
   // the ground the work was proved on: live (without this place) vs the lab (without this place), 4 m grid over the pockets
-  const plan = read(path.join(JOB, "reports", "plan.json")), live = ground(withoutPlace(read(worldFile(project, tw)))), labG = ground(withoutPlace(read(worldFile(lab, labWorld))));
+  // L (Wristgate 2026-10-29): an OWNER-BUILT place (its own build-spec, no `plan` run) has no reports/plan.json; the
+  // drift check then samples the reserved site's centre and its sub-sites (the door) instead of the planned pockets
+  const planFile = path.join(JOB, "reports", "plan.json");
+  const plan = fs.existsSync(planFile) ? read(planFile) : { pockets: (read(path.join(ZONE, "reservations.json")).reservations ?? [])
+    .filter((r: any) => r.location === poi || String(r.location).startsWith(`${poi}-`)).map((r: any) => ({ at: r.center })) };
+  if (!plan.pockets?.length) fail(`no reports/plan.json and no reservation for ${poi}: nothing to compare the live ground on`);
+  const live = ground(withoutPlace(read(worldFile(project, tw)))), labG = ground(withoutPlace(read(worldFile(lab, labWorld))));
   let d = 0; for (const k of plan.pockets) for (let x = -12; x <= 12; x += 4) for (let z = -12; z <= 12; z += 4) d = Math.max(d, Math.abs(live.height(k.at[0] + x, k.at[1] + z) - labG.height(k.at[0] + x, k.at[1] + z)));
   // L (install, Hagsheer 2026-10-20: the core road-band change moved the ground 0.24-0.94 m under five reviewed places):
   // a small drift re-seats the place's pieces on the live ground and gates float there; a large one is a re-plan
