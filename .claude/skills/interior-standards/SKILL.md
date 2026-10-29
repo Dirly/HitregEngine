@@ -32,6 +32,7 @@ npx tsx tools/dress.mts walk --project <p> --plan <plan> --scene <s>   # real bo
 - Refused points: the check-and-retry loop (refused -> auto open -> drop), never hand-nudging.
 - `auto-tight` -> no spot in the room clears the hearth/door buffers: accept it, split the set into single items, or a smaller piece.
 - Pews/benches facing an altar: `prefer: "row", near: "<altar item>"` (rows form behind each other). Fireside seats: `near: "hearth"`.
+- Open-plan kit house (few big map rooms): declare `zones[]` in the plan (hall bay, ledger strip, store...); `zone-wall` fails a zone with under 2 wall items, `zone-sparse` warns one under max(3, area/8) items; `open: true` only for a circulation zone kept clear on purpose. Daylight: `fixtures/window-daylight` on the `window` anchors.
 - Mixed rooms: roles `cottage` (hall+bedroom+kitchen), `guardroom` (hall+bedroom), `living` (hall), or `also`. A town building's
   menu is human civic/rural by default (`--culture <c>` / `--all` for others); an exterior map lists its pitches.
 - Rugs, papers, pictures are held off their floor/board/wall by `apply` (`mountOffset`); never hand-lift them.

@@ -545,6 +545,8 @@ export function worldChunks(field: WorldField, size = 384): [number, number, num
   for (const c of r.bounds?.continents ?? []) {
     const pad = (c.radius ?? 0) + (c.falloff ?? 0);
     x0 = Math.min(x0, c.center[0] - pad); z0 = Math.min(z0, c.center[1] - pad); x1 = Math.max(x1, c.center[0] + pad); z1 = Math.max(z1, c.center[1] + pad);
+    // cape tips (coast shape): a peninsula reaches past every disc
+    for (const cp of c.capes ?? []) { const tx = c.center[0] + cp[2], tz = c.center[1] + cp[3], tr = cp[5] + (c.falloff ?? 0); x0 = Math.min(x0, tx - tr); z0 = Math.min(z0, tz - tr); x1 = Math.max(x1, tx + tr); z1 = Math.max(z1, tz + tr); }
     for (const l of c.lobes ?? []) { x0 = Math.min(x0, l[0] - l[2] - (c.falloff ?? 0)); z0 = Math.min(z0, l[1] - l[2] - (c.falloff ?? 0)); x1 = Math.max(x1, l[0] + l[2] + (c.falloff ?? 0)); z1 = Math.max(z1, l[1] + l[2] + (c.falloff ?? 0)); }
   }
   if (!Number.isFinite(x0)) { const L = Number.isFinite(field.worldLimit) ? field.worldLimit : 1024; x0 = z0 = -L; x1 = z1 = L; }

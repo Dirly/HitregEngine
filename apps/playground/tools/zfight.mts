@@ -63,7 +63,9 @@ const DYNAMIC_TAGS = new Set(["player", "npc", "mob", "creature", "fx", "dynamic
 const isStatic = (e: any): boolean => {
   const c = e.components ?? {};
   if ((e.tags ?? []).some((t: string) => DYNAMIC_TAGS.has(t))) return false;
-  if (c.mesh && (c.mesh.static === false || c.mesh.moving === true)) return false;
+  // mesh.static is the HLOD/batch opt-in (default false), NOT "this moves": a plain primitive pad is drawn where it
+  // stands and z-fights like any kit piece (2026-10-29 f-house2: the lab pad flickered through the house floor unseen)
+  if (c.mesh && c.mesh.moving === true) return false;
   if (/^(characters|mobs)\//.test(c.prefab?.prefabId ?? "")) return false;
   const rb = c.rigidBody ?? c.rigidbody;
   if (rb && rb.type && rb.type !== "fixed" && rb.type !== "static") return false;

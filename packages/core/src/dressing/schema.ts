@@ -398,6 +398,30 @@ export const dressingObstacleSchema = z.object({
 });
 export type DressingObstacle = z.infer<typeof dressingObstacleSchema>;
 
+/**
+ * A role zone inside one open-plan map room: the kit's open-plan houses give a few big map rooms, so a hall, a ledger
+ * corner and a store share one room id. Declaring the zones lets `dress check` / `dress review` count each one's items,
+ * wall items and lights instead of averaging them over the whole room.
+ */
+export const dressingZoneSchema = z.object({
+  id: z.string().min(1).regex(/^[a-z0-9][a-z0-9._-]*$/i, "letters, digits, . _ - only"),
+  level: z.number().int().min(0).default(0),
+  rect: z
+    .tuple([z.number(), z.number(), z.number(), z.number()])
+    .describe("Map-local [x0, z0, x1, z1] metres; an item belongs to the zone when its placed origin falls inside."),
+  role: z.string().default("").describe("What the zone is (hall, office, storage, kitchen, bedroom...), for the reviewer."),
+  open: z.boolean().default(false).describe("A circulation zone kept open on purpose: no item minimum, wall items still counted."),
+  minWall: z.number().int().min(0).default(2).describe("Wall-hung items the zone must hold (shelves with goods, hangings, racks, sconces, boards)."),
+  minItems: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Furniture + wall items the zone must hold; omitted = max(3, area / 8 m²) (furnishing scales with the floor)."),
+  note: z.string().default(""),
+});
+export type DressingZone = z.infer<typeof dressingZoneSchema>;
+
 /** The outdoor vignette kinds the resolver lays out by rule (`arrangements[]`). */
 export const ARRANGEMENT_KINDS = ["camp", "work-line", "yard", "shrine", "midden", "lookout", "graveyard"] as const;
 export type ArrangementKind = (typeof ARRANGEMENT_KINDS)[number];
@@ -469,6 +493,13 @@ export const dressingPlanSchema = z
       .default([])
       .describe("Placed geometry on this space's floor that the socket map does not show (statues, pillars, set-piece models): no prop may overlap one."),
     items: z.array(dressingItemSchema).default([]),
+    zones: z
+      .array(dressingZoneSchema)
+      .default([])
+      .describe(
+        "Role zones inside open-plan map rooms (hall bay, ledger corner, store): each is counted on its own — items, wall items, lights — " +
+          "and fails `zone-wall` with fewer wall items than its `minWall`, warns `zone-sparse` under its item minimum.",
+      ),
     arrangements: z
       .array(dressingArrangementSchema)
       .default([])
@@ -490,6 +521,12 @@ export const dressingPlanSchema = z
   })
   .superRefine((plan, ctx) => {
     uniqueItemIds(plan.items, ctx);
+    const zids = new Set<string>();
+    plan.zones.forEach((zn, index) => {
+      if (zids.has(zn.id)) ctx.addIssue({ code: "custom", path: ["zones", index, "id"], message: `duplicate zone id "${zn.id}"` });
+      zids.add(zn.id);
+      if (zn.rect[2] <= zn.rect[0] || zn.rect[3] <= zn.rect[1]) ctx.addIssue({ code: "custom", path: ["zones", index, "rect"], message: "rect is [x0, z0, x1, z1] with x1 > x0 and z1 > z0" });
+    });
     const arr = new Set<string>();
     plan.arrangements.forEach((a, index) => {
       if (arr.has(a.id)) ctx.addIssue({ code: "custom", path: ["arrangements", index, "id"], message: `duplicate arrangement id "${a.id}"` });

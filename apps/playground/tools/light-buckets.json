@@ -25,10 +25,14 @@
         "fixtures/candles-lit",
         "fixtures/candle-a-lit",
         "fixtures/candle-b-lit",
-        "fixtures/lamp-lit",
-        "poi-props/candle-cluster"
+        "poi-props/candle-cluster",
+        "wall-props/candle-sconce-single-lit",
+        "wall-props/candle-sconce-double-lit",
+        "fixtures/window-daylight",
+        "poi-props/brazier",
+        "fixtures/candelabra-low-lit"
       ],
-      "note": "chandeliers and hearths in the big rooms, sconces along passages, candles and lamps on furniture."
+      "note": "chandeliers and hearths in the big rooms, a brazier corner in a hall, sconces along passages, candles and low candelabra on furniture (not fixtures/lamp-lit: its lit glass reads as a white bust at room distance, owner 2026-10-29); window-daylight on the window anchors (day only)."
     },
     "delve": {
       "for": "caves, mines, dens, cellars, sewers",

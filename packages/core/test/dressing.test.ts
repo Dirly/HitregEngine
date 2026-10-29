@@ -1052,3 +1052,38 @@ describe("opening-clear (owner walk 2026-10-21): nothing in front of a doorway o
     expect(r.violations.filter((v) => v.code === "opening-clear")).toEqual([]);
   });
 });
+
+describe("plan zones (open-plan role zones)", () => {
+  const zoned = (items: DressingPlanInput["items"], zones: unknown[]) => {
+    const plan = dressingPlanSchema.parse({ id: "zt", map: "zt-house", rooms: { A: { role: "office" }, B: { role: "hall" } }, items, zones });
+    return resolveDressing({ plan, map: MAP, prop: (id) => PROPS.get(id), set: (id) => SETS.get(id), options: { minItems: () => 0 } });
+  };
+  const items: DressingPlanInput["items"] = [
+    { id: "p1", prop: "painting", place: { kind: "wall", wall: "A.W", t: 1, height: 1.5 } },
+    { id: "p2", prop: "painting", place: { kind: "wall", wall: "A.W", t: 4.5, height: 1.5 } },
+    { id: "t", prop: "table", place: { kind: "floor", level: 0, at: [2, 4.5], yaw: 0 } },
+  ];
+  it("counts each zone's wall items on its own and fails a zone short of them", () => {
+    const r = zoned(items, [
+      { id: "south", rect: [0.25, 0.25, 4, 3], role: "hall", minItems: 0 },
+      { id: "north", rect: [0.25, 3, 4, 5.75], role: "office", minWall: 2, minItems: 2 },
+    ]);
+    const south = r.zones!.find((z) => z.zone === "south")!, north = r.zones!.find((z) => z.zone === "north")!;
+    // a painting hangs on the wall face just past the rect: it still belongs to the zone it hangs in, and to one zone only
+    expect(south.wall).toEqual(["p1"]);
+    expect(north.wall).toEqual(["p2"]);
+    expect(north.items).toBe(2);
+    expect(codes(r, "south")).toEqual(["zone-wall"]);
+    expect(codes(r, "north")).toEqual(["zone-wall"]);
+  });
+  it("an open zone has no item minimum and a plan without zones reports none", () => {
+    const r = zoned(items, [{ id: "all", rect: [0.25, 0.25, 4, 5.75], open: true, minWall: 2 }]);
+    expect(r.violations.filter((v) => v.code.startsWith("zone-"))).toEqual([]);
+    expect(r.warnings.filter((v) => v.code === "zone-sparse")).toEqual([]);
+    expect(run(items).zones).toBeUndefined();
+  });
+  it("warns a zone under its item minimum", () => {
+    const r = zoned(items, [{ id: "all", rect: [0.25, 0.25, 4, 5.75], minWall: 0, minItems: 5 }]);
+    expect(wcodes(r, "all")).toEqual(["zone-sparse"]);
+  });
+});

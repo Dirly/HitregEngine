@@ -144,6 +144,26 @@ export interface DressingResolveResult {
   warnings: DressingFinding[];
   /** One row per room of the map: centre clutter, wall share, scale/culture findings (`dress review`). */
   review?: DressingRoomReview[];
+  /** One row per declared plan zone (open-plan role zones): items, wall items, lights (`dress review`). */
+  zones?: DressingZoneReview[];
+}
+
+/** A declared plan zone counted on its own: what stands, hangs and burns in it. */
+export interface DressingZoneReview {
+  zone: string;
+  level: number;
+  role: string;
+  /** Rect area, m². */
+  area: number;
+  /** Floor furniture (solid) + wall-hung + ceiling items whose origin falls in the zone (surface items ride with their host). */
+  items: number;
+  /** Wall-hung items (mount wall), by id. */
+  wall: string[];
+  /** Lit fixtures of any mount whose origin falls in the zone, surface ones included. */
+  lights: number;
+  /** The item minimum it was held to (0 = an open circulation zone). */
+  minItems: number;
+  minWall: number;
 }
 
 
@@ -3622,6 +3642,55 @@ function reviewRooms(ctx: Ctx, placed: Res[]): DressingRoomReview[] {
   return out;
 }
 
+/** Metres past a zone's rect a wall-hung or wall-backed item's origin may sit and still belong to it. */
+const ZONE_WALL_PAD = 0.5;
+
+/** Declared plan zones (open-plan role zones): count each one, fail one with too few wall items, warn one under its item minimum. */
+function reviewZones(ctx: Ctx, placed: Res[]): DressingZoneReview[] {
+  const out: DressingZoneReview[] = [];
+  const zones = ctx.input.plan.zones ?? [];
+  // each item belongs to ONE zone: the first whose rect holds its origin; failing that, a wall-hung / wall-backed item
+  // goes to the first zone within ZONE_WALL_PAD of it (a zone drawn to the room's bounds owns the wall face just past them)
+  const inRect = (r: Res, zn: (typeof zones)[number], pad: number): boolean =>
+    r.level === zn.level && r.origin[0] >= zn.rect[0] - pad && r.origin[0] <= zn.rect[2] + pad && r.origin[2] >= zn.rect[1] - pad && r.origin[2] <= zn.rect[3] + pad;
+  const owner = new Map<Res, string>();
+  for (const r of placed) {
+    let z = zones.find((zn) => inRect(r, zn, 0));
+    if (!z && (r.onWall || r.data.mount === "wall")) {
+      // the nearest zone's rect within the pad
+      let best = ZONE_WALL_PAD;
+      for (const zn of zones) {
+        if (zn.level !== r.level) continue;
+        const dx = Math.max(zn.rect[0] - r.origin[0], 0, r.origin[0] - zn.rect[2]), dz = Math.max(zn.rect[1] - r.origin[2], 0, r.origin[2] - zn.rect[3]);
+        const d = Math.hypot(dx, dz);
+        if (d <= best) (best = d), (z = zn);
+      }
+    }
+    if (z) owner.set(r, z.id);
+  }
+  for (const zn of zones) {
+    const [x0, z0, x1, z1] = zn.rect;
+    const here = placed.filter((r) => owner.get(r) === zn.id);
+    // anchor-only fixtures (a building's own hearth / sconce / window light: no mesh of their own) furnish nothing
+    const seen = (r: Res): boolean => !r.data.anchorKinds?.length;
+    const standing = here.filter((r) => seen(r) && (r.floor || r.data.mount === "wall" || r.data.mount === "ceiling"));
+    // wall items: hung on a wall, or a wall-backed shelf / board / light standing on the floor (a bench is not one)
+    const wallPiece = (r: Res): boolean =>
+      seen(r) && (r.data.mount === "wall" || (!!r.onWall && !!r.floor && (["shelf", "decor", "light"] as const).some((k) => r.data.category === k || r.data.use.includes(k))));
+    const wall = here.filter(wallPiece).map((r) => r.work.id);
+    const lights = here.filter((r) => r.data.fire).length;
+    const area = (x1 - x0) * (z1 - z0);
+    const minItems = zn.open ? 0 : (zn.minItems ?? Math.max(3, Math.round(area / 8)));
+    out.push({ zone: zn.id, level: zn.level, role: zn.role, area: +area.toFixed(1), items: standing.length, wall, lights, minItems, minWall: zn.minWall });
+    const label = `zone ${zn.id} (${zn.role || "-"}, ${area.toFixed(0)} m²)`;
+    if (wall.length < zn.minWall)
+      vio(ctx, zn.id, "zone-wall", `${label} has ${wall.length} wall item(s)${wall.length ? ` (${wall.join(", ")})` : ""}; it needs ${zn.minWall}: shelves with goods, hangings, racks, sconces, a board`);
+    if (standing.length < minItems)
+      warn(ctx, zn.id, "zone-sparse", `${label} holds ${standing.length} furniture/wall items; furnishing scales with the floor: about ${minItems} (\`open: true\` for a circulation zone kept clear on purpose)`);
+  }
+  return out;
+}
+
 export function resolveDressing(input: DressingResolveInput): DressingResolveResult {
   const o = input.options ?? {};
   const dungeon = input.plan.space?.kind === "dungeon";
@@ -3812,6 +3881,7 @@ export function resolveDressing(input: DressingResolveInput): DressingResolveRes
   signChecks(ctx, placed);
   layoutChecks(ctx, placed);
   const review = reviewRooms(ctx, placed);
+  const zones = reviewZones(ctx, placed);
 
   const placements: DressingPlacement[] = [];
   for (const r of placed) {
@@ -3827,7 +3897,7 @@ export function resolveDressing(input: DressingResolveInput): DressingResolveRes
     });
     placements.push(...r.chain);
   }
-  return { placements, ...(ctx.autos.length ? { auto: ctx.autos } : {}), violations: ctx.violations, warnings: ctx.warnings, review };
+  return { placements, ...(ctx.autos.length ? { auto: ctx.autos } : {}), violations: ctx.violations, warnings: ctx.warnings, review, ...(zones.length ? { zones } : {}) };
 }
 
 // ---------------------------------------------------------------------------

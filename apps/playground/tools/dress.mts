@@ -137,6 +137,41 @@ function bodyLane(proj: string): { radius: number; height: number; laneWidth: nu
   const lim = controllerLimits(path.resolve(PLAYGROUND, "../.."), proj);
   return { radius: lim.radius, height: lim.height, laneWidth: +(2 * (lim.radius + LANE_COMFORT)).toFixed(3), source: "assets/prefabs/characters/player.json collider" };
 }
+/**
+ * A hung prop and its chain links (`<id>--chain-<k>`, k = 0 at the prop) move as ONE piece when the seat step re-seats
+ * any of them: the TOP link's correction (it hangs from the real ceiling, which the socket map's head can miss by half a
+ * metre under a steep roof) is applied to every link and the prop. Seating the links one by one opened a 0.53 m gap in
+ * the Reeve's hall chain (f-house 2026-10-29: the upper links rose to the roof, the lower ones and the chandelier stayed).
+ */
+export function rigidChains(doc: { entities: Record<string, any> }, ops: any[]): any[] {
+  const LINK = /^(.*)--chain-(\d+)$/;
+  const groups = new Map<string, { k: number; op: any }[]>();
+  for (const op of ops) {
+    const m = op.op === "set-component" && op.component === "transform" ? LINK.exec(String(op.id)) : null;
+    if (m) (groups.get(m[1]!) ?? groups.set(m[1]!, []).get(m[1]!)!).push({ k: Number(m[2]), op });
+  }
+  if (!groups.size) return ops;
+  const out = ops.filter((op) => {
+    const id = String(op.id ?? "");
+    const m = LINK.exec(id);
+    return !(m && groups.has(m[1]!)) && !groups.has(id);
+  });
+  for (const [base, links] of groups) {
+    const top = links.reduce((a, b) => (b.k > a.k ? b : a));
+    const was = doc.entities[top.op.id]?.components?.transform?.position;
+    if (!was) continue;
+    const dy = top.op.data.position[1] - was[1];
+    const members = [base, ...Object.keys(doc.entities).filter((id) => id.startsWith(`${base}--chain-`))];
+    for (const id of members) {
+      const t = doc.entities[id]?.components?.transform;
+      if (!t) continue;
+      const p = t.position ?? [0, 0, 0];
+      out.push({ op: "set-component", id, component: "transform", data: { ...t, position: [p[0], +(p[1] + dy).toFixed(4), p[2]] } });
+    }
+  }
+  return out;
+}
+
 const [cmd, ...argv] = process.argv.slice(2);
 
 function opt(name: string): string | undefined {
@@ -850,6 +885,7 @@ function apply(): void {
     // in passes (as float --fix): a candle placed on a crate's PLANNED top stays in the air when the crate itself is then
     // re-seated onto the real floor (the plan's floor y 10 cm off the rock), so the next pass sets it on the crate's new top
     let seat = seatPlaced(path.basename(proj), doc as never, placed), moved = 0;
+    seat.ops = rigidChains(doc as never, seat.ops);
     for (let pass = 0; pass < 4 && seat.ops.length; pass++) {
       const second = applyOps(doc, seat.ops, reg);
       batches.push(seat.ops as Op[]);
@@ -857,6 +893,7 @@ function apply(): void {
       inverse = [...second.inverse, ...inverse];
       moved += seat.ops.length;
       seat = seatPlaced(path.basename(proj), doc as never, placed);
+      seat.ops = rigidChains(doc as never, seat.ops);
     }
     console.log(`seat: ${moved} re-seats of ${placed.size} props on the real floor${seat.unsupported.length ? `; ${seat.unsupported.length} with NO support (move them in the plan): ${seat.unsupported.slice(0, 6).map((r) => r.id.slice(prefix.length)).join(", ")}` : ""}`);
   }
@@ -1031,6 +1068,12 @@ function writeReport(proj: string, r: ReturnType<typeof resolvePlan>): string {
       const pct = room.area ? Math.round((cover / room.area) * 100) : 0;
       L.push(`| ${room.id} | ${lv.level} | ${md(role || "-")} | ${md(spec?.also?.join(", ") || "-")} | ${md(spec?.owner || "-")} | ${md(spec?.wealth || "-")} | ${f2(room.area)} m² | ${here.length} (${b.minItems}) | ${f2(cover)} m², ${pct}% (${Math.round(b.maxCover * 100)}%)${cover > b.maxCoverM2 ? " **over**" : ""} | ${loose} (${b.loose})${loose > b.loose ? " **over**" : ""} |`);
     }
+  // declared role zones of open-plan rooms (plan.zones)
+  if (result.zones?.length) {
+    L.push("", "## Zones", "", "| Zone | Level | Role | Area | Items (min) | Wall items (min) | Lights |", "|---|---|---|---|---|---|---|");
+    for (const z of result.zones)
+      L.push(`| ${md(z.zone)} | ${z.level} | ${md(z.role || "-")} | ${f2(z.area)} m² | ${z.items} (${z.minItems || "open"}) | ${z.wall.length} (${z.minWall})${z.wall.length ? `: ${md(z.wall.join(", "))}` : ""} | ${z.lights} |`);
+  }
   // items
   L.push("", "## Items", "", "| Item | Prop or set | Where | Room | Why |", "|---|---|---|---|---|");
   for (const item of plan.items) {
@@ -1074,9 +1117,10 @@ function report(): void {
 /**
  * review: one summary per plan, never writing anything. Per room: wall share (furniture backed on or hung on a wall),
  * centre clutter 0..100 (solid non-set-piece props reaching the room's keep-clear middle), scale/culture violations;
+ * per declared plan zone (`zones[]`, the role zones of an open-plan room): items, wall items, lights;
  * then the plan's violations by code. --all reviews every plan of the project (ids rime-hall-*.json, not reports).
  */
-const RULE_WARNINGS = new Set(["chapel-altar", "chapel-pews", "no-chandelier"]);
+const RULE_WARNINGS = new Set(["chapel-altar", "chapel-pews", "no-chandelier", "zone-sparse"]);
 function review(): void {
   const proj = projectDir();
   const files = flag("all")
@@ -1101,6 +1145,11 @@ function review(): void {
       tot.scale += x.scaleViolations;
       tot.culture += x.cultureViolations;
     }
+    // declared role zones of open-plan rooms (plan.zones): each counted on its own
+    for (const z of result.zones ?? [])
+      console.log(`  zone ${z.zone} L${z.level} ${z.role || "-"} ${z.area.toFixed(0)} m²: ${z.items} items (min ${z.minItems || "open"}), ` +
+        `${z.wall.length} wall items (min ${z.minWall})${z.wall.length ? ` [${z.wall.join(", ")}]` : ""}, ${z.lights} lights` +
+        `${z.wall.length < z.minWall ? " WALL-SHORT" : ""}${z.items < z.minItems ? " SPARSE" : ""}`);
     // the owner's rulings (2026-10-20) that are warnings: chapels, tall rooms
     for (const w of result.warnings.filter((w) => RULE_WARNINGS.has(w.code))) console.log(`  WARN ${w.code} ${w.item}: ${w.message}`);
     tot.plans++;
