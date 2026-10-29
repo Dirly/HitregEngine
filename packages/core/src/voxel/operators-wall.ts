@@ -812,7 +812,10 @@ export function buildWall(input: unknown, reader: OperatorFieldReader, ctx: { id
     for (const st of p.stairs) {
       const a = clampS(Math.min(st.from, st.to)), b = clampS(Math.max(st.from, st.to)), up = st.to >= st.from;
       const iLow = stations.findIndex((s) => s >= (up ? a : b) - 1e-6), iTop = stations.findIndex((s) => s >= (up ? b : a) - 1e-6);
-      const y0 = gFace(up ? a : b), y1 = (iTop >= 0 ? secs[iTop]!.top : tops.at(-1)!);
+      // the walk's height AT the flight's head, between its stations (the next station's top is up to a segment's
+      // climb off it on a followed top: Saltharrow 10-29, a head 0.38 m under the walk with no headroom)
+      const head = up ? b : a, topAtHead = iTop > 0 ? tops[iTop - 1]! + ((tops[iTop]! - tops[iTop - 1]!) * (head - stations[iTop - 1]!)) / (stations[iTop]! - stations[iTop - 1]! || 1) : iTop === 0 ? tops[0]! : tops.at(-1)!;
+      const y0 = gFace(up ? a : b), y1 = topAtHead;
       const n = Math.max(1, Math.ceil((y1 - y0) / st.riser)), rise = (y1 - y0) / n, run = (b - a) / n;
       if (run < 0.25) warnings.push(`stair ${st.from}->${st.to}: treads ${run.toFixed(2)} m (< 0.25): lengthen the flight`);
       const sd = st.side === "face" ? f : -f;
@@ -832,6 +835,18 @@ export function buildWall(input: unknown, reader: OperatorFieldReader, ctx: { id
     // reach targets on the walk (a parapet wall is a walkway): the middle of the wall top
     if (p.parapet && p.parapet.walked) { const m = curve.at(L / 2); const i = stations.findIndex((s) => s >= L / 2); deckTargets.push({ name: "walk-mid", at: [r4(m.x), r4(secs[i]!.top + 0.1), r4(m.z)] }); }
     report.top = { min: r4(Math.min(...tops)), max: r4(Math.max(...tops)) };
+    // the SCREEN the wall puts up (apps/playground tools/_town-wall-rules.mts overlook gate): the line every ~4 m with
+    // its top + parapet (+ merlon) height, world XZ — what a viewer outside must see over
+    {
+      const scr = p.parapet ? p.parapet.height + (p.parapet.crenels ? p.parapet.crenels.height : 0) : 0;
+      let last = -Infinity;
+      report.profile = stations.flatMap((s, i) => {
+        if (s - last < 4 && i !== stations.length - 1) return [];
+        last = s;
+        const q = curve.at(s);
+        return [[r4(q.x), r4(q.z), r4(tops[i]! + scr)]];
+      });
+    }
     report.groundFace = { min: r4(Math.min(...gF)), max: r4(Math.max(...gF)) };
     if (p.backfill && !twoFaced) ground_ = backfillPatch(secs.map((c) => c.top - capH - 0.2), secs.map((c) => (f > 0 ? c.lT : c.rT)));
   }

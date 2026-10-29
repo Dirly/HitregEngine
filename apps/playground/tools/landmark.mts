@@ -182,6 +182,11 @@ const recipeFile = flag("recipe") ?? join("projects", project, "assets", "worlds
 const recipe: WorldRecipe = worldRecipeSchema.parse(JSON.parse(readFileSync(recipeFile, "utf8")));
 const doc = (recipe.features.operators ?? []).find((o) => o.id === opId) as Record<string, unknown> | undefined;
 if (!doc || (doc.op !== "landmark" && doc.op !== "wall")) throw new Error(`no installed landmark or wall operator "${opId}" in ${recipeFile} (worldgen op --apply first)`);
+// TOWN WALLS ARE MASONRY (Saltharrow 2026-10-29): a wall the town owns never bakes onto the zone's cliff skin
+{ const { townOwnerOf, townWallMaterialFault } = await import("./_town-wall-rules.mts");
+  const owner = townOwnerOf(doc as never, recipe.features.towns.map((t) => ({ id: t.id, center: t.center, radius: t.radius })));
+  const fault = owner ? townWallMaterialFault(doc as never) : null;
+  if (fault) { console.error(`REFUSED (town ${owner}): ${fault}`); process.exit(1); } }
 const reader = operatorReader(recipe, opId);
 // a `wall` is a built landmark whose solids come from the `wall` generator (its params -> the landmark's)
 const params = doc.op === "wall" ? wallLandmarkParams(operatorParams(doc), reader, { id: opId }) : landmarkOperatorSchema.parse(operatorParams(doc));

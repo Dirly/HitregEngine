@@ -110,10 +110,10 @@ import { commandWaterEdges } from "./water-edges.mts";
 import { commandWaterLogic } from "./worldgen-water-logic.mts";
 import { COAST_COLOURS, coastStageCheck, commandCoast, commandCoastTop } from "./worldgen-coast.mts";
 import { riverWaterDoc } from "./_river-water.mts";
-import { commandTerracePlace, loadTerraceKit, removeTownTerraceWalls, townTerraceWalls, type TownRiserLink } from "./worldgen-terrace-walls.mts";
+import { commandTerracePlace, kerbTownRisers, loadTerraceKit, recipeInverse, removeTownTerraceWalls, townTerraceWalls, type TownRiserLink } from "./worldgen-terrace-walls.mts";
 import { commandBridgePlace } from "./worldgen-bridge-spans.mts";
 import { CLIMB_NEEDS_PLACE, PLACE_REACH } from "./zonegen/commands/_site-finder.mts";
-import { PROGRAM_RULE, bandStreet, loadTownProgram, measureShelfFlat, planProgramShelves, programFitFindings, programLandGate, type TownProgram } from "./worldgen-town-program.mts";
+import { PROGRAM_RULE, bandStreet, kerbedBand, loadTownProgram, measureShelfFlat, planProgramShelves, programFitFindings, programLandGate, type TownProgram } from "./worldgen-town-program.mts";
 import { COASTAL_TOWN, TERRACE_DEFAULTS, coastalTownFindings, findCoastalSites, landGate, terraceReach } from "./worldgen-coastal-towns.mts";
 import { commandVegetation } from "./worldgen-vegetation.mts";
 import { commandRoad } from "./worldgen-road.mts";
@@ -467,6 +467,8 @@ const HELP = `worldgen — procedural world pipeline
                    --slabs file.json; exit 1 on a gap > --gap 0.25 m or ground through it > --clip 0.6 m
                    --wall <opId> (repeat) | --walls: a baked wall operator against the drawn ground, per <= 4 m segment; exit 1 on
                    daylight under any segment > --wall-gap 0.05 m or a stale bake. --list (every segment), --json, --out f
+  terrace-kerb <world>  --town <id> [--kerb 2.5] [--dry-run] [--inverse f]: an INSTALLED town's edge streets get their kerb
+                   (bands + riser faces seaward, lots stay), the lowest riser stops at a town quay's deck, risers re-solved; inverse kept
   terrace-place <world>  a terrace held up by REAL retaining walls (features.terraceWalls): --spec doc.json, or --id x
                    --footprint "x,z …" | --path "x,z …" (pad on the left) [--style masonry-common|masonry-stone|natural]
                    [--height m] [--top-y m] [--insert stair-turn@4:1 …] [--walls auto|0,2]; fits the pad patch, wall
@@ -4032,19 +4034,23 @@ function terraceTowns(
         );
         continue;
       }
-      const terraces: TerraceDoc[] = planned.bands.map((b, i) => ({
-        id: `${town.id}-terrace-${i + 1}`,
-        points: [
-          [round(b.a[0]), round(b.a[1])],
-          [round(b.b[0]), round(b.b[1])],
-        ],
-        radius: round(b.depth / 2),
-        falloff: round(me.riser),
-        groundY: b.level,
-        flatten: 1,
-        street: bandStreet(b, planned.downhill, program.acrossTypical, PROGRAM_RULE.street, inset),
-        tags: ["program"],
-      }));
+      // an edge street keeps its kerb: the band grows seaward under it (kerbedBand), street + lots stay put
+      const terraces: TerraceDoc[] = planned.bands.map((b, i) => {
+        const k = kerbedBand(b.a, b.b, b.depth, bandStreet(b, planned.downhill, program.acrossTypical, PROGRAM_RULE.street, inset));
+        return {
+          id: `${town.id}-terrace-${i + 1}`,
+          points: [
+            [round(k.a[0]), round(k.a[1])],
+            [round(k.b[0]), round(k.b[1])],
+          ],
+          radius: round(k.depth / 2),
+          falloff: round(me.riser),
+          groundY: b.level,
+          flatten: 1,
+          street: k.street,
+          tags: ["program"],
+        };
+      });
       town.terraces = terraces;
       town.flatten = 0;
       town.groundY = terraces[0]!.groundY;
@@ -10819,6 +10825,23 @@ switch (command) {
   case "fine":
     commandFine({ argv, project, loadRecipe: () => loadRecipe(), writeRecipe, fail });
     break;
+  case "terrace-kerb": {
+    // an installed town's edge streets get their kerb, the risers move seaward and are re-solved (kerbTownRisers)
+    const townId = stringOption("town", "");
+    if (!townId) fail("terrace-kerb: --town <id>");
+    const { recipe, file } = loadRecipe();
+    const before = structuredClone(recipe);
+    kerbTownRisers(recipe, townId, loadTerraceKit(project || "proving"), { kerb: option("kerb", PROGRAM_RULE.kerb), band: kerbedBand });
+    const edits = recipeInverse(before, recipe);
+    if (!edits.length) { console.log("terrace-kerb: nothing changed"); break; }
+    if (argv.includes("--dry-run")) { console.log(`terrace-kerb: ${edits.length} feature edit(s) (dry run: nothing written)`); break; }
+    writeRecipe(recipe, file);
+    const inv = stringOption("inverse", "") || path.join("projects", project || "proving", "authoring", "terrain", "undo", `${recipe.name}.terrace-kerb.${new Date().toISOString().replace(/[:.]/g, "-")}.inverse.json`);
+    fs.mkdirSync(path.dirname(inv), { recursive: true });
+    fs.writeFileSync(inv, JSON.stringify({ world: recipe.name, what: `terrace-kerb ${townId}`, edits }, null, 1) + "\n");
+    console.log(`  inverse: ${inv}  (worldgen op ${recipe.name} --undo <it>)`);
+    break;
+  }
   case "terrace-place":
     commandTerracePlace({ argv, project: project || "proving", loadRecipe: () => loadRecipe(), writeRecipe, fail });
     break;

@@ -20,6 +20,8 @@ import { kitWallSchema } from "./kit-walls.js";
 import { landmarkSchema } from "./ledge-landmark.js";
 import { groundPaintBounds, groundPaintSchema } from "./ground-paint.js";
 import { rockSetBounds, rockSetSchema } from "./rock-sets.js";
+import { terraceWallSchema } from "./terrace-walls.js";
+import { clearingSchema } from "./vegetation.js";
 
 /**
  * TERRAFORM — editing a world recipe as atomic, invertible batches.
@@ -71,6 +73,8 @@ export const FEATURE_KINDS = [
   "landmarks",
   "groundPaints",
   "rockSets",
+  "terraceWalls",
+  "clearings",
 ] as const;
 
 export type FeatureKind = (typeof FEATURE_KINDS)[number];
@@ -93,6 +97,8 @@ const FEATURE_SCHEMAS: Record<FeatureKind, z.ZodType> = {
   landmarks: landmarkSchema,
   groundPaints: groundPaintSchema,
   rockSets: rockSetSchema,
+  terraceWalls: terraceWallSchema,
+  clearings: clearingSchema,
 };
 
 /** A feature after validation — every kind carries an `id`. */
@@ -255,6 +261,18 @@ export function featureFootprint(kind: FeatureKind, feature: unknown): Footprint
       return groundPaintBounds(f as never);
     case "rockSets":
       return rockSetBounds(f as never);
+    case "terraceWalls": {
+      // the doc itself (its derived tw-<id>* patch, passages and clearing carry their own bounds): pad outline + strip
+      const fp = (f["footprint"] as number[][] | undefined) ?? [];
+      return fp.length ? pointsBounds(fp, num(f["strip"], 2.5) + num(f["feather"], 8)) : null;
+    }
+    case "clearings": {
+      // vegetation only, but the cells it covers must re-cook their scatter
+      const poly = f["polygon"] as number[][] | undefined;
+      if (poly?.length) return pointsBounds(poly, num(f["feather"], 3));
+      const c = f["center"] as [number, number] | undefined;
+      return c ? pointsBounds([c], num(f["radius"], 0) + num(f["feather"], 3)) : null;
+    }
     case "kitWalls": {
       // the wall pieces and their face cuts (n reaches a few metres to the low side)
       const pts = ((f["pieces"] as { position: number[] }[] | undefined) ?? []).map((p) => [p.position[0]!, p.position[2]!]);

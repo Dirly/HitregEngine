@@ -35,6 +35,10 @@ export const PROGRAM_RULE = {
   wallShare: 0.5,
   /** a lot's setback from its street edge (town-layout's default) */
   setback: 1,
+  /** a street on a band's SEAWARD edge keeps this much flat ground (m) between its edge and the riser face below:
+   *  the lanterns' kerb (street-lights edgeOffset 0.5 + post + the riser's coping) — the band grows seaward by it, the
+   *  street and the lots stay (Saltharrow 10-29: streets hung 0.5-1.5 m over the riser drop, no lawful lantern spot) */
+  kerb: 2.5,
 } as const;
 
 /** tools/town-layout.mts DEFAULT_EXT: a lot with no measured envelope (cells beyond the requested footprint). */
@@ -398,6 +402,18 @@ export function bandStreet(band: Pick<PlannedBand, "a" | "b" | "depth">, downhil
   const left: V2 = [-axis[1], axis[0]];
   const sign = left[0] * downhill[0] + left[1] * downhill[1] >= 0 ? 1 : -1;
   return { axis, offset: r2(sign * (usable / 2 - street / 2)), width: street };
+}
+
+/**
+ * The band a TerraceDoc carries: an edge street (offset != 0) gets the kerb — the band's seaward edge moves `kerb` m
+ * further down the fall (centreline + kerb/2 seaward, depth + kerb), the street stays where it was in the world (its
+ * offset from the moved centreline - kerb/2) and so do the uphill edge and the lots. A middle street is unchanged.
+ */
+export function kerbedBand(a: V2, b: V2, depth: number, street: { axis: V2; offset: number; width: number }, kerb: number = PROGRAM_RULE.kerb): { a: V2; b: V2; depth: number; street: { axis: V2; offset: number; width: number } } {
+  if (!street.offset || kerb <= 0) return { a, b, depth, street };
+  const sign = Math.sign(street.offset), left: V2 = [-street.axis[1], street.axis[0]], m = (sign * kerb) / 2;
+  const sh = (p: V2): V2 => [r2(p[0] + left[0] * m), r2(p[1] + left[1] * m)];
+  return { a: sh(a), b: sh(b), depth: r2(depth + kerb), street: { ...street, offset: r2(street.offset - m) } };
 }
 
 // ---------------------------------------------------------------- the measure (and the gate)

@@ -478,6 +478,17 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
         const bad = (r.walls ?? []).filter((w) => w.bad > 0 || w.stale);
         return r.ok && !bad.length ? null : `${bad.map((w) => (w.stale ? `${w.id} stale bake` : `${w.id}: ${w.bad} segment(s) show daylight (worst ${w.worst} m)`)).join("; ") || "report not ok"}`;
       }, [{ file: p.recipe, authored: false, proj: (rc) => ({ ground: groundNear(t.id, 200, false)(rc), walls: (rc.features?.operators ?? []).filter((o: { id: string }) => wallOps.includes(o.id)) }) }]);
+      // wall line: the wall DEFENDS the town in the town's masonry (tools/town-wall-line.mts check, _town-wall-rules.mts):
+      // no town-owned wall on the zone cliff skin, no ground outside within 60 m over the wall top that sees in, no
+      // waterline run under the shelves, no curtain within 6 m of a road but at its gatehouse (Saltharrow, 2026-10-29).
+      // Re-judged after any ground change round the town, a wall/quay op edit, a road edit or a layout change.
+      const lineReport = path.join(towns, "survey", `${name}-wall-line.json`);
+      const nearTown = (o: { points?: number[][] }) => (o.points ?? []).some((q) => Math.hypot(q[0]! - t.center[0]!, q[1]! - t.center[1]!) <= t.radius + 120);
+      step("wall line", "procedural", `npx tsx tools/town-wall-line.mts check --project ${project} --town ${name}  (a failure: town-wall-line.mts draw, then worldgen op --apply + tools/landmark.mts per op)`, lineReport, () => {
+        const r = json<{ ok?: boolean; failures?: string[] }>(lineReport);
+        return r.ok ? null : `${(r.failures ?? []).length} fault(s): ${(r.failures ?? []).slice(0, 2).join("; ") || "report not ok"}`;
+      }, [{ file: layout, authored: false, proj: (l) => (l.buildings ?? []).map((b: { id: string; full?: unknown; corners?: unknown; door?: unknown }) => [b.id, b.full ?? b.corners, b.door]) },
+        { file: p.recipe, authored: false, proj: (rc) => ({ ground: groundNear(t.id, 200, false)(rc), walls: (rc.features?.operators ?? []).filter((o: { op: string; points?: number[][] }) => o.op === "wall" && nearTown(o)), roads: (rc.features?.roads ?? []).filter(nearTown) }) }], (r: { at?: unknown }) => ({ ...r, at: 0 }));
     }
     // paths: a footpath from every placed door to the nearest street, painted AFTER install (town-ground doors writes
     // <town>-paths.json); stale when the layout or the building models (manifest, .glb) change, so moved doors re-run it

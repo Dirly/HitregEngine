@@ -1754,3 +1754,78 @@ export function townTerraceWalls(
   }
   return { dropRoads, fits };
 }
+
+/**
+ * `worldgen terrace-kerb <world> --town <id> [--kerb 2.5] [--dry-run] [--inverse f.json]` — give an INSTALLED town's
+ * edge streets their kerb without re-planning it (the plan re-run reads a ground the town has since changed): each
+ * program band with an edge street is tagged `kerbed` (a second run does nothing; its frame stays, so the lots and
+ * the plan's lanes stay — a fresh plan gets the kerb from tools/worldgen-town-program.mts kerbedBand), each town
+ * riser's face edge moves seaward by the kerb (the street, the lots and the uphill edges stay), and the LOWEST riser stops where a town quay's deck meets its shelf (the quay
+ * is the sea face there: Saltharrow 10-29, the riser solved before the quay backfill left a 2.4 m trench between Net
+ * Street and the Net Quay). The risers are solved again bottom-up on the current ground (solveTerraceChain), keeping
+ * their inserts. The inverse (every recipe feature it changed) is kept for `worldgen op --undo`.
+ */
+export function kerbTownRisers(recipe: WorldRecipe, townId: string, kit: TerraceKit, opts: { kerb: number; band: (a: V2, b: V2, depth: number, street: { axis: V2; offset: number; width: number }, kerb: number) => { a: V2; b: V2; depth: number; street: { axis: V2; offset: number; width: number } }; shifted?: Map<string, number> }, log: (s: string) => void = console.log): TerraceFit[] {
+  const town = recipe.features.towns.find((t) => t.id === townId);
+  if (!town) throw new Error(`terrace-kerb: no town ${townId}`);
+  let bands = 0;
+  // the installed-town case: an INSTALLED town's bands keep their frame (lots, lanes); only the risers move
+  for (const t of town.terraces) {
+    const st = (t as { street?: { axis: V2; offset: number; width: number } }).street;
+    if (!t.tags.includes("program") || !st?.offset || t.tags.includes("kerbed") || t.points.length !== 2) continue;
+    // the band's FRAME stays (its centreline and radius place the lots and the plan's lanes: moving it moved the
+    // chapel and the vault 1.25 m and the town's GLBs no longer matched their lots); the kerb is the riser face moved
+    // seaward below, and the band is tagged so a second run does nothing (a fresh plan bakes it in: kerbedBand)
+    void opts.band;
+    t.tags = [...t.tags, "kerbed"];
+    bands++;
+  }
+  const risers = (recipe.features.terraceWalls ?? []).filter((w) => w.owner === townId && w.tags.includes("town-riser")).sort((a, b) => (a.topY ?? 0) - (b.topY ?? 0));
+  if (!bands) { log(`  ${townId}: every edge-street band already kerbed — risers left as they are`); return []; }
+  const quays = (recipe.features.operators ?? []).filter((o) => o.op === "wall" && (o as { variant?: string }).variant === "quay" && (o.id.startsWith(`${townId}-`) || ((o as { points?: V2[] }).points ?? []).some((p) => Math.hypot(p[0] - town.center[0]!, p[1] - town.center[1]!) <= town.radius + 20)));
+  const docs: TerraceWallDoc[] = risers.map((w, k) => {
+    const face = w.solved?.faces?.[0];
+    const edges = w.solved?.runs.flatMap((r) => r.edges) ?? [];
+    if (!face || edges.length !== 1) { log(`  ${w.id}: not one straight face — left as it is`); return { ...w, solved: undefined }; }
+    const e = edges[0]!, fp = w.footprint.map((p) => [p[0], p[1]] as V2), n = face.normal as V2;
+    const i0 = e, i1 = (e + 1) % fp.length;
+    for (const i of [i0, i1]) fp[i] = [r2(fp[i]![0] + n[0] * opts.kerb), r2(fp[i]![1] + n[1] * opts.kerb)];
+    let walls: number[] = [e], inserts = w.inserts;
+    // the lowest riser: no face along a quay's deck (the deck IS the shelf's sea edge there)
+    if (k === 0 && quays.length) {
+      const a = fp[i0]!, b = fp[i1]!, L = Math.hypot(b[0] - a[0], b[1] - a[1]), t: V2 = [(b[0] - a[0]) / L, (b[1] - a[1]) / L];
+      const ss = quays.flatMap((q) => ((q as { points: V2[] }).points).map((p) => (p[0] - a[0]) * t[0] + (p[1] - a[1]) * t[1]));
+      const lo = Math.min(...ss) - 4, hi = Math.max(...ss) + 4;
+      if (lo <= 8 && hi > 8 && hi < L - 12) {
+        // the face starts past the deck: a vertex on the face edge, the wall on the far part only
+        fp.splice(i0 + 1, 0, [r2(a[0] + t[0] * hi), r2(a[1] + t[1] * hi)]);
+        walls = [i0 + 1];
+        inserts = inserts.map((x) => (x.edge === e ? { ...x, edge: i0 + 1, at: Math.max(0, x.at - hi) } : x.edge > e ? { ...x, edge: x.edge + 1 } : x));
+        log(`  ${w.id}: no face along the quay deck (0..${hi.toFixed(1)} m of ${L.toFixed(1)}): the wall runs ${hi.toFixed(1)}..${L.toFixed(1)}`);
+      } else if (lo > 8 && hi >= L - 12) log(`  ${w.id}: a quay deck at the far end — not split (owed: the mirror case)`);
+    }
+    log(`  ${w.id}: face moved ${opts.kerb} m seaward (${n.map((v) => v.toFixed(2)).join(",")})`);
+    return terraceWallSchema.parse({ ...w, footprint: fp, walls, inserts, solved: undefined });
+  });
+  const fits = solveTerraceChain(recipe, docs, kit, () => {});
+  for (const f of fits) { const s = f.doc.solved!; log(`  ${f.doc.id}: ${s.style} ${s.height} m, pad ${s.topY}, faces ${s.faces.length}${s.warnings.length ? `; warnings: ${s.warnings.join("; ")}` : ""}`); }
+  log(`  ${townId}: ${bands} band(s) kerbed ${opts.kerb} m; ${fits.length} riser(s) re-solved`);
+  return fits;
+}
+
+/** Recipe features diffed by id per kind: the edits that take `after` back to `before` (an op-format inverse). */
+export function recipeInverse(before: WorldRecipe, after: WorldRecipe): { edit: string; kind: string; id?: string; feature?: unknown }[] {
+  const edits: { edit: string; kind: string; id?: string; feature?: unknown }[] = [];
+  const kinds = new Set([...Object.keys(before.features), ...Object.keys(after.features)]);
+  for (const kind of kinds) {
+    const b = (before.features as Record<string, unknown>)[kind], a = (after.features as Record<string, unknown>)[kind];
+    if (!Array.isArray(b) && !Array.isArray(a)) continue;
+    const bm = new Map(((b ?? []) as { id: string }[]).map((f) => [f.id, f])), am = new Map(((a ?? []) as { id: string }[]).map((f) => [f.id, f]));
+    for (const [id] of am) if (!bm.has(id)) edits.push({ edit: "remove-feature", kind, id });
+    for (const [id, f] of bm) {
+      if (!am.has(id)) edits.push({ edit: "add-feature", kind, feature: f });
+      else if (JSON.stringify(am.get(id)) !== JSON.stringify(f)) edits.push({ edit: "update-feature", kind, id, feature: f });
+    }
+  }
+  return edits;
+}
