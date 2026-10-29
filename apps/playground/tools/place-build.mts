@@ -530,6 +530,24 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
   write(WF, w2);
   if (remove) { console.log(`removed ${poi} from ${p}/${w}: ${removes.length} entity roots, ${ownOps.length} operators, own patches + clearings`); return; }
   if (operators.length) wg("op-apply", ["op", w, "--project", p, "--apply", path.join(JOB, "operators.json")]);
+  if (operators.length && p === lab) { // L (KNUCKLECROWN 2026-10-29): a retaining wall's backfill regrades the treads AFTER the plan seated the
+    // pieces on them (cairns buried in the tread): re-seat the place's pieces (not the leaning set pieces) on the lab ground as built, seats carried into ops.json
+    const d0 = read(SF), ids = new Set(Object.keys(d0.entities).filter((id) => (d0.entities[id].tags ?? []).includes(`poi:${poi}`) && !(d0.entities[id].tags ?? []).some((t: string) => /^lean:/.test(t))));
+    const st = seatPlaced(p, d0, ids), fb = createWorldField(worldRecipeSchema.parse(read(WF)));
+    // a piece the tread was raised OVER is buried (float never re-seats those): sink it to the lowest built ground round its foot (1.4 m ring: seated wants no daylight on its low side)
+    for (const r of st.rows as any[]) {
+      if (r.status !== "off" || Number.isFinite(r.gap) || r.kind !== "scene" || st.ops.some((o: any) => o.id === r.id)) continue;
+      const hs = [0, 1, 2, 3, 4, 5, 6, 7].map((k) => fb.height(r.x + 1.4 * Math.cos(k * Math.PI / 4), r.z + 1.4 * Math.sin(k * Math.PI / 4))), g = Math.min(...hs, fb.height(r.x, r.z)) - 0.03;
+      const e = d0.entities[r.id], t = e?.components?.transform; if (!t || !(g > r.y + 0.01)) continue;
+      const q = t.position ?? [0, 0, 0]; st.ops.push({ op: "set-component", id: r.id, component: "transform", data: { ...t, position: [q[0], Math.round((q[1] + g - r.y) * 1000) / 1000, q[2]] } });
+    }
+    if (st.ops.length) {
+      write(SF, applyOps(d0, st.ops as never, reg).doc);
+      const byId = new Map(st.ops.filter((o: any) => o.op === "set-component").map((o: any) => [o.id, o.data])), jops = read(path.join(JOB, "ops.json")) as any[];
+      for (const o of jops) if (o.op === "add-entity" && byId.has(o.id)) o.entity.components.transform = byId.get(o.id);
+      write(path.join(JOB, "ops.json"), jops); console.log(`  re-seated ${st.ops.length} piece(s) on the ground as built (operator backfill); ops.json updated`);
+    }
+  }
   if (!remove && p === lab) { // L: routes on the walk surface as BUILT (pads, raiseOnly, the footpaths' grade patches): re-measured on the lab ground AFTER the operators
     const f = createWorldField(worldRecipeSchema.parse(read(WF))), hand = read(path.join(JOB, "handoff.json"));
     const ribbons = (read(WF).features.ribbons ?? []) as any[]; // the footpath legs follow their ribbon as built (routeOnRibbon)

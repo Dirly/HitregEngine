@@ -509,7 +509,8 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
     const md = path.join(p.projectDir, "docs", "towns", `${name}.md`);
     step("residents", "sonnet", `${tool("town-place-npcs", `--town ${name}`)}  then  ${tool("town-npcs", `--town ${name}`)}  (town-npcs skill)`, md, () => {
       const placed = new Set((json<{ residents?: { id: string; place?: { at?: unknown } }[] }>(doc).residents ?? []).filter((r) => r.place?.at).map((r) => r.id));
-      const planned = exists(plan) ? (json<{ residents?: { id: string }[] }>(plan).residents ?? []) : [];
+      // ambient bodies (plan `body: "ambient"`, the skinned-budget rule) are not NPCs: town-npcs never places them
+      const planned = exists(plan) ? (json<{ residents?: { id: string; body?: string }[] }>(plan).residents ?? []).filter((r) => r.body !== "ambient") : [];
       const unplaced = planned.filter((r) => !placed.has(r.id));
       return unplaced.length ? `${unplaced.length} planned resident(s) not placed: ${unplaced.slice(0, 3).map((r) => r.id).join(", ")}` : null;
     }, [{ file: doc, authored: true, proj: (d) => d.residents ?? [] }, { file: plan, authored: true, proj: (x) => x.residents ?? [] }, { file: layout, authored: false }]);

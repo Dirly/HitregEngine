@@ -145,6 +145,11 @@ export const placeWallSchema = z.object({
       .describe("Each shell's outline [width, depth] in metres, per size tier."),
   }).strict().optional().describe("square only: a ROW of N shells (a croft row, a line of huts) along x through `at`, doors on `gateSide`; the pocket radius grows to hold the row. L (shielings 2026-10-20): ONE 4 m shell read as a lone gate where the brief promised five huts."),
   points: z.array(xz).min(2).max(12).optional().describe("`line` only: plan points, metres in the pocket frame."),
+  retain: z.object({
+    face: z.enum(["right", "left"]).describe("The exposed (downhill) side, right/left of travel from the first point; the other side is the tread."),
+    backfill: z.number().min(6).max(30).default(8).describe("Metres of tread raised behind the wall to just under its coping (>= 6: the 6 m rule)."),
+    feather: z.number().min(4).max(40).default(6).describe("Metres the tread eases back to the natural ground."),
+  }).strict().optional().describe("`line` only: a RETAINING wall (wall operator `retaining` + `backfill`): one face shown, the ground behind raised into a level tread, so a run of lines down a slope reads as stepped terraces, not field walls on a lawn. Height = the drop to the next tread. L (KNUCKLECROWN 2026-10-29: five free 3.5 m walls on the levelled crown read as one field wall)."),
   height: z.number().min(0.5).max(40).default(1.4).describe("Height above the ground (dry-stone dyke 1.2-1.6, yard wall 2, a beacon tower 9; kind wall <= 12, built kinds <= 40: curtain 7-10, tower 12-30, keep 18-26). L: over 3 m the tool adds buttresses (not to a small ring: a round tower braces itself; not to towers, keeps, gatehouses)."),
   thickness: z.number().min(0.4).max(4).default(0.8).describe("Wall thickness at the top (kind wall <= 3; a crenellated walk wants >= 1.8: two 0.45 m parapets and a 0.9 m walk)."),
   gate: z.number().min(0).max(12).default(3.5).describe("ring/square: a gap this wide on the approach side (0 = none)."),
@@ -1216,6 +1221,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       // L (zfight, hags-garth 2026-10-21): a low dyke's footing step follows the terrain smoothed and its top met the meshed ground
       // coplanar (0.08 m2); a dry-stone dyke has no footing step: the body still runs its depth into the ground
       if (wl.height < 3.2) doc.footing = null;
+      if (wl.retain) { if (wl.shape !== "line") faults.push(`wall ${p.id}.${wl.id}: retain is for line walls`); doc.variant = "retaining"; doc.face = wl.retain.face; doc.backfill = { width: wl.retain.backfill, feather: wl.retain.feather }; }
       const built = wl.kind !== "wall";
       if (wearsCliffTile(doc.materials)) faults.push(`wall ${p.id}.${wl.id}: no face material and no zone built stone (place-build zone defaults builtStone): it would wear the terrain cliff tile`);
       if (wl.landmark) { doc.fog = { fogReach: wl.landmark.fogReach, silhouette: wl.landmark.silhouette }; landmark = { at: toWorld(pk.at, front, wl.at), foot: y, top: y + wl.landmark.height, fogReach: wl.landmark.fogReach }; }
@@ -1293,6 +1299,9 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       if (occupied > 0) notes.push(`${p.id} dressing: ${occupied} m2 of the area is layout pieces (filler counted on the rest)`);
       const laid = arrangeFirstPlan(firstPlanItems(p.dressing.props, p.id, dr, p.dressing.role, fillOk({ ...a, id: a.id }, inp.propInfo), p.dressing.density, { filler: p.dressing.filler ?? a.filler, dropped, why, occupiedM2: occupied }), p.dressing.role, p.id, p.structures, p.id);
       // L (TOOLS-PB 2026-10-23, silent drop): what was asked of the plan, exact counts, and why any did not make it (dress gate)
+      // L (KNUCKLECROWN 2026-10-29: 29 top-up boulders strewn over a set-piece ring floor): under a layout, more filler than
+      // listed props means the dressing area spans ground the composition leaves open on purpose: say so (shrink it)
+      { const nf = laid.items.filter((it) => /^fill-/.test(it.id)).length, nl = laid.items.length - nf; if (L && nf > Math.max(4, nl)) notes.push(`WARN: ${p.id} dressing: ${nf} top-up filler vs ${nl} listed props: the area (r ${dr + DRESS_RIM_M} m) spans open composition ground; set ${p.id}.dressing.radius to the ground the props belong to`); }
       requested[id] = (asked.get(p.id) ?? []).map((q) => { const d = dropped.find((x) => x.prop === q.prop); return { prop: q.prop, count: q.count, ...(d ? { why: d.why } : {}) }; });
       for (const d of dropped) notes.push(`${p.id} dressing: ${d.prop} x${d.count ?? 1} not placed (${d.why})`);
       if (laid.items.length) plans.push({ id, map: id, lights: a.lights, rooms: { [p.id]: { role: p.dressing.role, also: ROOM_ALSO[p.dressing.role] ?? [p.dressing.role] } }, space: { kind: "site", scale: "human", cultures: a.culture }, items: laid.items, ...(laid.arrangements.length ? { arrangements: laid.arrangements } : {}) });

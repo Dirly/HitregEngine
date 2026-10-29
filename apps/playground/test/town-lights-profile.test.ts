@@ -52,3 +52,19 @@ test("a town keeps the full standard, which a poor village's lanterns would fail
   const poor = planTownLights(input, resolveStreetLighting(raw, { tier: "village", wealth: "poor" }).rule);
   assert.ok(!checkTownLights(input, rule, poor.lanterns).ok);
 });
+
+test("a town-layout street (`<town>-lane-*`, 5 m) on a terrace brow is lit as a street, and never from down the riser", () => {
+  // the street runs along z = 0; the ground drops 6 m one metre past its seaward kerb (z < -3.5)
+  const brow: TownLightInput = {
+    ...input,
+    town: { ...input.town, gates: [] },
+    roads: [{ id: "town-9-lane-lane-net-street", points: [[-40, 0], [40, 0]], width: 5 }],
+    buildings: [],
+    ground: { height: (_x: number, z: number) => (z < -3.5 ? -6 : 0), waterY: () => null },
+  };
+  const plan = planTownLights(brow, resolveStreetLighting(raw, { tier: "town" }).rule);
+  const mine = plan.lanterns.filter((l) => l.ref === "town-9-lane-lane-net-street");
+  assert.ok(mine.length > 0, "the lane-named street gets lanterns");
+  assert.ok(mine.every((l) => l.kind === "street"), "5 m wide: a street, not a lane");
+  assert.ok(mine.every((l) => l.at[1] > -1), `none down the riser: ${mine.map((l) => l.at[1]).join(", ")}`);
+});
