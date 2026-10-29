@@ -16,6 +16,8 @@ Also read `docs/world-standards/process.md` (or the `world-standards` skill). Re
 `docs/world-standards/review-rubric.md`. Load other standards only for the task in hand.
 Before choosing the place roster or writing quests, read `docs/world-standards/adventure-design.md`.
 Fantasy discoveries and worthwhile adventures lead; a list of medieval trades with grim names does not qualify.
+Every dated owner ban on premises (no ships as places, ...) is a row in `authoring/zonegen/rulings.json`; `zonegen brief`
+errors `banned-premise` on a hit. Add the row the day the ruling is given.
 
 Before launching agents in a conversation with the owner, say what will start, how many agents and on which models,
 and wait for the go. Keep the ledger (`zones/<z>/RUN.md`) current after every launch and install.

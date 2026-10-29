@@ -304,7 +304,26 @@ if (targets.length) {
     center: [px, pz], radius: Math.max(c.compiled.max[0], -c.compiled.min[0], c.compiled.max[2], -c.compiled.min[2]) * params.scale, ground: (x, z) => field.height(x, z),
     anchors: targets.map((t) => [t.w[0], t.w[2], t.w[1]] as Vec3), caves: [], exact: targets.map((t) => t.opening),
   });
-  targets.forEach((t, k) => { const ok = reach.withCaves[k]; console.log(`reach ${ok ? "ok   " : "FAULT"} ${t.name} at ${t.w.map((v) => v.toFixed(1)).join(",")}`); if (!ok) faults.push(t.name); });
+  // L (Wristgate 2026-10-28: three bakes to find why a target was unreached): a FAULT names what it can see — the ground
+  // over the target (a collider surface under the terrain is never walked) and a solid in the 1.8 m above it (no headroom)
+  const why = (w: [number, number, number]): string => {
+    const out: string[] = [], g = field.height(w[0], w[2]);
+    if (g > w[1] + 0.3) out.push(`buried: ground ${g.toFixed(2)} over the target (cut the ground there)`);
+    const P = all.positions, I = all.indices, ox = w[0] - px, oy = w[1] - footY, oz = w[2] - pz;
+    let hit = Infinity;
+    for (let t = 0; t < I.length; t += 3) { // vertical ray up: barycentric test in XZ, height at the hit
+      const a = I[t]! * 3, b = I[t + 1]! * 3, c = I[t + 2]! * 3;
+      const x1 = P[a]!, z1 = P[a + 2]!, x2 = P[b]!, z2 = P[b + 2]!, x3 = P[c]!, z3 = P[c + 2]!;
+      const d = (z2 - z3) * (x1 - x3) + (x3 - x2) * (z1 - z3); if (Math.abs(d) < 1e-9) continue;
+      const l1 = ((z2 - z3) * (ox - x3) + (x3 - x2) * (oz - z3)) / d, l2 = ((z3 - z1) * (ox - x3) + (x1 - x3) * (oz - z3)) / d, l3 = 1 - l1 - l2;
+      if (l1 < 0 || l2 < 0 || l3 < 0) continue;
+      const y = l1 * P[a + 1]! + l2 * P[b + 1]! + l3 * P[c + 1]!;
+      if (y > oy + 0.15 && y < hit) hit = y;
+    }
+    if (hit - oy < 1.8) out.push(`no headroom: a surface ${(hit - oy).toFixed(2)} m above the target`);
+    return out.length ? ` — ${out.join("; ")}` : " — not buried, headroom clear: the way to it has a step > 0.4 m or a too-steep slope (--reach-map)";
+  };
+  targets.forEach((t, k) => { const ok = reach.withCaves[k]; console.log(`reach ${ok ? "ok   " : "FAULT"} ${t.name} at ${t.w.map((v) => v.toFixed(1)).join(",")}${ok ? "" : why(t.w)}`); if (!ok) faults.push(t.name); });
   if (faults.length) process.exitCode = 1;
   // --reach-map: print the reach level map round the targets (1 m; letter = level, UPPER = reached, * = target)
   if (argv.includes("--reach-map")) {

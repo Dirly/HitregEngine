@@ -555,6 +555,22 @@ export const townSchema = z.object({
         "writes it; `worldgen town-pins` sets or clears it without re-siting anything; `--release <ids|all>` lets a town move again. " +
         "Unlike the `pinned` tag it does not stop `worldgen terrace` from re-cutting the town's shelves.",
     ),
+  coastal: z
+    .boolean()
+    .optional()
+    .describe(
+      "A coastal / harbour town: it stands at SHORE LEVEL on a sheltered landing, not on the hill above one. `worldgen towns` " +
+        "sites it only where (1) the centre is at most 12 m over `seaLevel` (a quay, a slip and a beach road reach the water " +
+        "without a climb), (2) the centre is at most 90 m from the shoreline (the coast plan's segment polylines), (3) that " +
+        "nearest shoreline is a coast-plan segment typed `cove` or `sand-beach` with `exposure: \"sheltered\"` (a landing a boat " +
+        "can use), and (4) the pad is ground `worldgen terrace` can step with its own defaults: relief (p05..p95 across the pad) " +
+        "at most maxTerraces x stepHeight = 5 x 6 = 30 m, mean slope at most stepHeight / (2 x minShelf + riser) = 6 / 23 = " +
+        "0.26 rise/run, steepest face at most stepHeight / riser = 1.2 (one riser's face) — and dry (the pad's inner 85 % " +
+        "above the sea). Its gate (`land-gate`, written by `towns`) faces LANDWARD, away from the nearest shoreline point. " +
+        "`towns` refuses a coastal town it cannot site that way and prints why; the `towns` status row and `worldgen gates` " +
+        "fail a coastal town above the limit, off the shore, on the wrong coast or with a seaward gate. Set by " +
+        "`worldgen towns --coastal <ids>`.",
+    ),
   center: z.tuple([z.number(), z.number()]),
   radius: z.number().positive().default(45),
   falloff: z.number().min(0).default(35).describe("Distance beyond `radius` over which the pad blends into natural terrain."),

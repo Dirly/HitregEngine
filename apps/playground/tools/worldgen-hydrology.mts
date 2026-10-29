@@ -473,7 +473,7 @@ export function simplifyLoop(points: [number, number][], tolerance: number, maxP
  * boundary edges between member and non-member cells, chain them into loops,
  * keep the longest loop. Corner (ix, iz) is the top-left corner of cell (ix, iz).
  */
-function traceOutline(n: number, member: Uint8Array): [number, number][] {
+export function traceOutline(n: number, member: Uint8Array): [number, number][] {
   const edges = new Map<string, [number, number][]>(); // from-corner -> to-corners
   const add = (ax: number, az: number, bx: number, bz: number): void => {
     const key = `${ax},${az}`;

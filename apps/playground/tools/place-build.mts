@@ -796,7 +796,7 @@ async function shots() {
   // tree (vite, the browser) killed on expiry and the stage FAILED with the reason; --shots-timeout <min> (default
   // max(15, spots x 2 x 50 s): the cap grows with the views, shotsCapMs); one stalled spot is skipped after 90 s (light-shots --spot-timeout)
   const nViews = (() => { try { return (read(path.join(JOB, "views.json")) as unknown[]).length; } catch { return 0; } })();
-  const r = await toolTimed("shots", opt("shots-timeout") ? +opt("shots-timeout")! * 60_000 : shotsCapMs(nViews), ["tools/light-shots.mts", "--scene", labWorld, "--spots", path.join(JOB, "views.json"), "--times", "12,20", "--no-refs", "--weather-settle", "4", "--out", path.join(JOB, "evidence"), "--port", port]);
+  const r = await toolTimed("shots", opt("shots-timeout") ? +opt("shots-timeout")! * 60_000 : shotsCapMs(nViews), ["tools/light-shots.mts", "--scene", labWorld, "--spots", path.join(JOB, "views.json"), "--times", "12,20", "--no-refs", "--weather-settle", "4", "--out", path.join(JOB, "evidence"), "--port", port, ...(opt("spot-timeout") ? ["--spot-timeout", opt("spot-timeout")!] : [])]); // --spot-timeout <s>: far read spots stream a lot of world (Wristgate 2026-10-28: 90 s timed out every trail view)
   const errLine = r.out.split("\n").map((l) => l.trim()).filter((l) => /^(\w*Error|STOP):/.test(l)).slice(-1).join(" | ");
   const reason = r.timedOut ? `TIMEOUT after ${r.s} s (--shots-timeout <min>; the run and its vite/browser killed)` : r.status ? (errLine || r.out.trim().split("\n").slice(-1)[0] || `exit ${r.status}`).slice(0, 300) : "";
   write(path.join(JOB, "reports", "shots.json"), { ok: !r.status, at: new Date().toISOString(), seconds: r.s, reason, log: "reports/shots.log" });
@@ -808,11 +808,14 @@ async function shots() {
 function recordReadShot() {
   const views = (read(path.join(JOB, "views.json")) as any[]).map((v) => v.name as string), dir = path.join(JOB, "evidence", labWorld);
   // a bridge job's views are its contract cameras (no read-*/core-front): the first declared one with a picture
-  const pick = [...views.filter((v) => v.startsWith("read-")), "core-close", "core-front", ...views].find((v) => fs.existsSync(path.join(dir, `${v}-12.png`)));
+  // L (Wristgate 2026-10-28): a scene with no day-night clock shoots one `-interior` column (light-shots: no time axis);
+  // the noon picture is then that one, never "no picture" (the stage could not leave blockout on a lab without a clock)
+  const shotOf = (v: string) => [`${v}-12.png`, `${v}-interior.png`].find((f) => fs.existsSync(path.join(dir, f)));
+  const pick = [...views.filter((v) => v.startsWith("read-")), "core-close", "core-front", ...views].find((v) => shotOf(v));
   if (!pick) { console.log(`readShot: no read or core-front picture in ${dir} (run shots)`); return; }
   const pf = path.join(JOB, "progress.json"), prog = fs.existsSync(pf) ? read(pf) : { version: 1, poiId: poi, ownerAgentId: "place-build", stage: "blockout", mode: "build" };
   prog.viewpoints = [...new Set([...(prog.viewpoints ?? []).filter((v: any) => typeof v === "string"), ...views])];
-  prog.evidence = { ...(prog.evidence ?? {}), readShot: { file: path.relative(JOB, path.join(dir, `${pick}-12.png`)).split(path.sep).join("/"), viewpoint: pick } };
+  prog.evidence = { ...(prog.evidence ?? {}), readShot: { file: path.relative(JOB, path.join(dir, shotOf(pick)!)).split(path.sep).join("/"), viewpoint: pick } };
   write(pf, prog); console.log(`readShot: ${prog.evidence.readShot.file} (${pick}) -> progress.json`);
 }
 

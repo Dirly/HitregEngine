@@ -794,6 +794,11 @@ const report = {
 };
 fs.writeFileSync(path.join(OUT, `${stem}.json`), JSON.stringify(report, null, 1) + "\n");
 console.log(`saved ${sheetFile}\nsaved ${path.join(OUT, `${stem}.json`)} — ${shots.length} frames in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
+// L (Wristgate 2026-10-28: after a spot timeout the reloaded page drew 4 of 5 frames black, luma 14, and the run passed):
+// a frame whose whole-picture luma is under BLACK_FRAME_LUMA is a failed render, never evidence; the run exits 1 naming them
+const BLACK_FRAME_LUMA = 20;
+const black = shots.map((s, i) => ({ s, m: result.measures[i] })).filter(({ m }) => typeof m?.frame === "number" && m.frame < BLACK_FRAME_LUMA);
+if (black.length) { console.error(`STOP: ${black.length} black frame(s) (luma < ${BLACK_FRAME_LUMA}: a failed render, not a dark scene): ${black.map(({ s, m }) => `${s.spot}${s.time === null ? "" : `@${s.time}`} (${m.frame.toFixed(0)})`).join(", ")} — re-run those spots`); process.exitCode = 1; }
 } finally {
   await browser.close().catch(() => {});
   stopVite();

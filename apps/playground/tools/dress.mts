@@ -202,7 +202,7 @@ function loadPlan(file: string): { plan: DressingPlan; raw: string } {
 
 /** Prop declarations and sets, cached, with every file read recorded for the staleness hash. */
 function sources(proj: string) {
-  const builderPolicy=propPolicy(PROJECTS,proj);
+  const builderPolicy=propPolicy(PROJECTS,path.basename(proj));
   const overlay = opt("props");
   const used = new Map<string, string>();
   const problems: string[] = [];

@@ -87,7 +87,9 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
   for(const g of built.filter(g=>g.paint)){
     const origin=origins[g.name],scale=scales.find(s=>s.id===origin?.scale);
     if(!origin||!scale)throw Error(`${g.name}: missing source origin or scale`);
-    const faults=gateFaults(g,{name:g.name,culture:origin.culture,scale:{id:scale.id,height:scale.height},worldKit},scales);
+    // a LANDMARK request (request add --landmark <m>) is gated at its full height, as its design run was (L KNUCKLECROWN 2026-10-28: a 24 m finger-pillar designed as a landmark was refused at install as a 20 m giant-scale prop)
+    const reqFile=path.join(worldKit,'..',origin.project,'authoring/dressing/prop-requests.json'),reqs=fs.existsSync(reqFile)?readJson(reqFile):[],lm=(Array.isArray(reqs)?reqs:reqs.requests??[]).find((r:any)=>r?.id===origin.request)?.landmark;
+    const faults=gateFaults(g,{name:g.name,culture:origin.culture,scale:{id:scale.id,height:scale.height},worldKit,...(lm?{landmark:lm}:{})},scales);
     if(faults.length)throw Error(`${g.name}: ${faults.join('; ')}`);
   }
 

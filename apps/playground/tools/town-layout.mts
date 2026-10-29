@@ -380,7 +380,7 @@ let whyCount = 0;
 const areaOf = (b: { id: string; request: { size: [number, number] } }): number => { const e = extOf(b.id).ground; return (b.request.size[0] + e.left + e.right) * (b.request.size[1] + e.front + e.back); };
 for (const b of [...plan.buildings].sort((p, q) => (Number(!!(p as { optional?: boolean }).optional) - Number(!!(q as { optional?: boolean }).optional)) || areaOf(q) - areaOf(p))) {
   const asked = evaluate(b, b.u, b.side, b.setback ?? 1, b.terrace);
-  if (!asked) { problems.push(`${b.id}: no terrace ${b.terrace}`); continue; }
+  if (!asked) { problems.push(b.terrace ? `${b.id}: no terrace ${b.terrace}` : `${b.id}: not placed: the plan gives it no terrace/u/side (the town master writes them; see town-planner skill)`); continue; }
   const clash = (c: Placed): boolean => placed.some((q) => overlaps(c.ground, q.ground, 1) || overlaps(c.full, q.full, 0));
   // judged on THIS lot: its own door must be reachable and it may not cut off a door that was reachable before it
   // (a building that already failed must not poison every lot after it)
@@ -474,7 +474,8 @@ if (keptFloors) console.log(`  kept the written floor height of ${keptFloors} un
 for (const p of placed) console.log(`  ${p.problems.length ? "FAIL" : "ok  "} ${p.id.padEnd(22)} ${p.size.join("x")} at [${p.centre.map((v) => v.toFixed(1))}] y ${p.groundY.toFixed(1)} faces ${(p.yaw * 180 / Math.PI).toFixed(0)}°${p.problems.length ? "  — " + p.problems.join("; ") : ""}`);
 
 // ---- the plan map: the survey picture with the lots drawn and labelled (SVG -> PNG through Playwright) ----
-if (!argv.includes("--no-map")) {
+if (!argv.includes("--no-map") && placed.length === 0) console.log("plan map skipped: no lot was placed (nothing to draw)");
+if (!argv.includes("--no-map") && placed.length > 0) {
   const surveyJson = JSON.parse(fs.readFileSync(path.join(townsDir, "survey", `${townName}.json`), "utf8"));
   const { x0, z0, n, scale } = surveyJson.map as { x0: number; z0: number; n: number; scale: number };
   const px = (p: P): string => `${((p[0] - x0) * scale).toFixed(1)},${((p[1] - z0) * scale).toFixed(1)}`;

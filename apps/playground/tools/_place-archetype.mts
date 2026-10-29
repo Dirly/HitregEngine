@@ -307,9 +307,20 @@ export const placeLayoutSchema = z.object({
     at: xz.describe("Place frame centre."),
     radius: z.number().min(0.5).max(30).default(GROUND_MIN_RADIUS_M).describe("Metres; raised to GROUND_MIN_RADIUS_M (4) when smaller (a smaller disc does not read)."),
     texture: z.string().optional().describe("A recipe surface name (recipe.surfaces[].name) instead of the kind's default."),
+    faces: z.boolean().default(false).describe("Also paint the steep faces in the disc (groundPaints `faces`): a pad's cut bank otherwise draws the zone cliff tile at its 20 m scale beside 40 tx/m work (art gate texel). L (KNUCKLECROWN 2026-10-28)."),
     strength: z.number().min(0).max(1).default(0.85),
     breakup: z.number().min(0).max(0.9).default(0.3),
   }).strict()).default([]).describe("Ground WEAR as data (the pocket `floor` path: groundPaints, no geometry): trodden earth round the fire, mud at the horse lines, ash."),
+  pools: z.array(z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    element: z.string().optional().describe("The design element the pool belongs to (checked like a piece's)."),
+    at: xz.describe("Place frame centre."),
+    radius: z.number().min(6).max(40).describe("Water radius, metres (>= 6: the 6 m rule)."),
+    sink: z.number().min(0.3).max(5).default(1.5).describe("Metres the still water stands BELOW the pad (padY - sink): a sunken pool in its own hollow, never a sheet on the pad."),
+    depth: z.number().min(0.5).max(8).default(2.5).describe("Deepest water below the surface, metres."),
+    bank: z.number().min(6).max(30).default(8).describe("Metres the shore eases from the waterline back to the pad (>= 6: the 6 m rule; no lip)."),
+    material: z.string().optional().describe("Water material for this pool (recipe lake `material`): a still black pool, a murky tarn."),
+  }).strict()).max(4).default([]).describe("STILL WATER as data: a hand-placed recipe lake (carve: true) of ONE level sunk below the pad in its own hollow. L (KNUCKLECROWN 2026-10-28): a landmark ringing a pool had no way to say the pool; a basin kerb is a square tank."),
 }).strict().superRefine((l, ctx) => {
   const ids = l.pieces.map((p) => p.id);
   for (const id of new Set(ids)) if (ids.filter((x) => x === id).length > 1) ctx.addIssue({ code: "custom", path: ["pieces"], message: `piece id ${id} repeats` });
@@ -401,7 +412,7 @@ export function layoutCoverage(design: { elements?: { id: string; madeOf?: strin
   for (const e of els) {
     const props = (e.madeOf ?? []).filter((m) => !exempt.test(m) && m.includes("/") && (o.catalogued?.(m) ?? true));
     if (!props.length || props.every((m) => (o.questProps ?? []).includes(m))) continue;
-    if (!l.pieces.some((p) => p.element === e.id) && !l.ground.some((q) => q.element === e.id)) out.push(`element ${e.id} has no layout piece`);
+    if (!l.pieces.some((p) => p.element === e.id) && !l.ground.some((q) => q.element === e.id) && !(l.pools ?? []).some((q) => q.element === e.id)) out.push(`element ${e.id} has no layout piece`);
   }
   return out;
 }
@@ -1297,8 +1308,14 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       }
       const surface = q.texture ? (inp.surfaces && !inp.surfaces.includes(q.texture) ? null : q.texture) : inp.surfaces ? wearSurface(q.kind, inp.surfaces, inp.world, inp.zone, inp.surfaceColors) : WEAR_SURFACES[q.kind].at(-1)!;
       if (!surface) { faults.push(`LAYOUT: ground ${q.id}: no ${q.kind} surface in the world palette (${q.texture ? `texture ${q.texture} is not a recipe surface` : `tried ${WEAR_SURFACES[q.kind].map((x) => x.replace("{w}", inp.world).replace("{z}", inp.zone)).join(", ")}`})`); continue; }
-      worldOps.push({ edit: "add-feature", kind: "groundPaints", feature: { id: `pb-${poi}-ground-${q.id}`, surface, center: [r2(c[0]), r2(c[1])], radius, feather: GROUND_FEATHER_M, edgeNoise: 0.6, strength: q.strength, breakup: q.breakup } });
+      worldOps.push({ edit: "add-feature", kind: "groundPaints", feature: { id: `pb-${poi}-ground-${q.id}`, surface, center: [r2(c[0]), r2(c[1])], radius, feather: GROUND_FEATHER_M, edgeNoise: 0.6, strength: q.strength, breakup: q.breakup, ...(q.faces ? { faces: true } : {}) } });
     }
+  }
+  // the layout's POOLS: hand-placed recipe lakes, one still level sunk below the pad (L KNUCKLECROWN 2026-10-28)
+  if (L) for (const q of L.pools ?? []) {
+    const c = toWorld(core.at, front, q.at);
+    worldOps.push({ edit: "add-feature", kind: "lakes", feature: { id: `pb-${poi}-pool-${q.id}`, center: [r2(c[0]), r2(c[1])], radius: q.radius, waterY: r2(padY - q.sink), depth: q.depth, bank: q.bank, carve: true, ...(q.material ? { material: q.material } : {}) } });
+    notes.push(`LAYOUT: pool ${q.id}: still water r ${q.radius} m at y ${r2(padY - q.sink)} (pad ${r2(padY)} - ${q.sink}), bank ${q.bank} m`);
   }
   // THE RING (archetype `ring`): a ground band round an anchor, as data: a groundPaints feature and catalogued ground
   // props spread round it. L (weep-well 2026-10-20): the brief's set piece (a white salt-killed reed ring round the

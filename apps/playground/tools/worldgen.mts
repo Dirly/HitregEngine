@@ -21,7 +21,7 @@
  * Usage:
  *   pnpm -F playground worldgen init <world> [--project <name>] [--seed N] [--scene]
  *   pnpm -F playground worldgen rivers <world> [--count 8] [--extent 3000]
- *   pnpm -F playground worldgen towns  <world> [--count 6]
+ *   pnpm -F playground worldgen towns  <world> [--count 6]   [--coastal <ids>] [--only <id>] (coastal towns at the shore: tools/worldgen-coastal-towns.mts)
  *   pnpm -F playground worldgen paths  <world>
  *   pnpm -F playground worldgen pois   <world> [--count 12]
  *   pnpm -F playground worldgen canyons <world> [--count 4]
@@ -30,6 +30,7 @@
  *   pnpm -F playground worldgen zones  <world> [--count N] [--force] [--towns-only]   (draft the named zones + a zone per town; after towns)
  *   pnpm -F playground worldgen barriers <world> [--dry]  (ridges over open zone borders, passes where paths cross; after paths)
  *   pnpm -F playground worldgen regions <world>        (audit the zones and measure every border — docs/world-editing/zones.md)
+ *   pnpm -F playground worldgen regions <world> --rename <old>=<new> [--name "..."]   (rename a nested place region + its inverse)
  *   pnpm -F playground worldgen scatter <world>       (audit every rule against its model + the REALIZED density per biome)
  *   pnpm -F playground worldgen scatter-float <world> [--near x,z,r] [--list]  (fails if any plant or cover stands over air/an opening)
  *   pnpm -F playground worldgen lips <world> [--near x,z,r] [--list] [--json] [--allow ids]  (fails on sawtooth/wall/rim the 2 m lattice draws at patch edges and road cuts)
@@ -85,7 +86,7 @@ import {
   type RiverPathDoc,
   RIVER_FALL_MIN,
 } from "@hitreg/core";
-import { basinFootprint, computeHydrology, extractBasins, extractChannels, simplifyLoop, type Channel, type HydroGrid } from "./worldgen-hydrology.mts";
+import { basinFootprint, computeHydrology, extractBasins, extractChannels, simplifyLoop, traceOutline, type Channel, type HydroGrid } from "./worldgen-hydrology.mts";
 import { nearestRouteCell, routeBetween, smoothRoute, solveProfile, type RouteGrid, type RouteOptions } from "./worldgen-routing.mts";
 import { auditWorld } from "./worldgen-audit.mts";
 import { modelBounds } from "./_gltf-bounds.mjs";
@@ -110,6 +111,8 @@ import { COAST_COLOURS, coastStageCheck, commandCoast, commandCoastTop } from ".
 import { riverWaterDoc } from "./_river-water.mts";
 import { commandTerracePlace, loadTerraceKit, removeTownTerraceWalls, townTerraceWalls, type TownRiserLink } from "./worldgen-terrace-walls.mts";
 import { commandBridgePlace } from "./worldgen-bridge-spans.mts";
+import { CLIMB_NEEDS_PLACE, PLACE_REACH } from "./zonegen/commands/_site-finder.mts";
+import { COASTAL_TOWN, TERRACE_DEFAULTS, coastalTownFindings, findCoastalSites, landGate, terraceReach } from "./worldgen-coastal-towns.mts";
 import { commandVegetation } from "./worldgen-vegetation.mts";
 import { commandRoad } from "./worldgen-road.mts";
 import { commandFine, commandOp, commandOpPreview, fineStatusLine, stampGateStage } from "./worldgen-operators.mts";
@@ -2620,6 +2623,16 @@ function commandFallSite(): void {
  */
 function commandLandformCalm(): void {
   const { recipe, file } = loadRecipe();
+  // --clear: drop every calm disc (2026-10-28 s1e: run on firstshore for the first time after its places were grey-boxed,
+  // the place-region discs (wrackmoor-dry r809, wristgate r210) re-shaped the lake shores and the Wristgate approach under
+  // the owners' labs: 7 perched lake sheets + 3 lifted shore rocks. A world calms when its places install, not after.)
+  if (flag("clear")) {
+    const had = recipe.features.landformCalm?.length ?? 0;
+    recipe.features.landformCalm = [];
+    writeRecipe(recipe, file);
+    console.log(`landform-calm: cleared ${had} disc(s)`);
+    return;
+  }
   const falloff = option("falloff", 120);
   const margin = option("margin", 30);
   const discs: { id: string; center: [number, number]; radius: number; falloff: number }[] = [];
@@ -3320,6 +3333,81 @@ function commandTowns(): void {
   if (scored.length === 0) fail("no buildable ground found — widen --extent or soften the terrain");
   scored.sort((a, b) => b.score - a.score);
 
+  // ---- COASTAL towns (`coastal: true`, `--coastal <ids>` sets it): sited at SHORE level on a sheltered cove or
+  // sand-beach, never on the hill above one (2026-10-28 s1e: Saltharrow stood 100 m over its cove and needed a banned
+  // switchback stair to reach the water). The rule and its limits: tools/worldgen-coastal-towns.mts + townSchema.coastal.
+  for (const id of stringOption("coastal", "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const t = recipe.features.towns.find((x) => x.id === id);
+    if (!t) fail(`--coastal ${id}: no such town (have ${recipe.features.towns.map((x) => x.id).join(", ")})`);
+    t.coastal = true;
+  }
+  const separationFor = (a: number, b: number): number => minSeparation * ((a + b) / (radius * 2));
+  /** Site one coastal town (keeps id, tier, tags, pin, walled-ness); refuses with the reasons when no shore site exists. */
+  const siteCoastal = (old: TownDoc, others: readonly TownDoc[]): TownDoc => {
+    const atSpec = stringOption("at", "");
+    const atXZ = atSpec ? atSpec.split(",").map(Number) : null;
+    const atRadius = option("at-radius", 150);
+    const found = findCoastalSites(field, recipe, old.radius, (x, z) =>
+      others.every((t) => Math.hypot(t.center[0] - x, t.center[1] - z) > separationFor(t.radius, old.radius)) &&
+      (!atXZ || Math.hypot(x - atXZ[0]!, z - atXZ[1]!) <= atRadius),
+    );
+    if (found.sites.length === 0) {
+      const why = [...found.reasons.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} x${v}`).join("; ");
+      const miss = found.nearMiss ? `\n  nearest miss [${round(found.nearMiss.site.x)}, ${round(found.nearMiss.site.z)}] on ${found.nearMiss.site.segment?.id ?? "?"}: ${found.nearMiss.faults.join("; ")}` : "";
+      fail(`${old.id} is coastal and no shore site exists for a r${old.radius} pad (${found.tried} candidates on ${COASTAL_TOWN.exposure} ${COASTAL_TOWN.types.join("/")} segments${atXZ ? ` within ${atRadius} m of --at` : ""}): ${why}${miss}\n  REFUSED: a coastal town is never sited on the hill above its landing — free a cove (--release, move a neighbour) or drop the flag`);
+    }
+    // A RE-SITED town keeps its neighbourhood: its zone story, roads and premise were written for where it was, so the
+    // shore site nearest the old centre wins unless a far one is much better (`--stay-weight`, score points per km;
+    // 2026-10-28 s1e: unweighted, Saltharrow "on the south cove" jumped 1.8 km to the north-east beach).
+    const stay = option("stay-weight", 1);
+    const moved = (c: { x: number; z: number }) => Math.hypot(c.x - old.center[0], c.z - old.center[1]) / 1000;
+    found.sites.sort((p, q) => q.score - stay * moved(q) - (p.score - stay * moved(p)));
+    const s = found.sites[0]!;
+    const reach = terraceReach();
+    console.log(
+      `  ${old.id} (coastal, ${tierOf(old)}, r${old.radius}): [${round(s.x)}, ${round(s.z)}] ${s.altitude.toFixed(1)} m over the sea, ${s.shore.toFixed(0)} m from ` +
+        `${s.segment!.id} (${s.segment!.type}, ${s.segment!.exposure}); relief ${s.relief.toFixed(1)}/${reach.maxRelief} m, slope ${s.meanSlope.toFixed(2)}/${reach.maxSlope.toFixed(2)}, ` +
+        `face ${s.steepest.toFixed(2)}/${reach.maxFace.toFixed(2)}; landward [${s.landward.map((v) => v.toFixed(2)).join(", ")}]  (${found.sites.length} of ${found.tried} candidates pass)`,
+    );
+    const walled = old.gates.length > 0 || flag("walled");
+    const ground = field.height(s.x, s.z);
+    const doc: TownDoc = {
+      ...old,
+      center: [round(s.x), round(s.z)],
+      groundY: round(ground),
+      flatten: 0.95,
+      terraces: [],
+      gates: walled ? [landGate(s, old.radius, option("gate-width", 6), option("gate-approach", 30))] : [],
+      coastal: true,
+    };
+    if (walled) console.log(`    land-gate at [${doc.gates[0]!.at.join(", ")}] facing ${compassOf(doc.gates[0]!.facing)} (landward)`);
+    return doc;
+  };
+
+  // ---- --only <id>: re-site ONE town; every other town stays exactly as it is (no pin written on them)
+  const onlyId = stringOption("only", "");
+  if (onlyId) {
+    const old = recipe.features.towns.find((t) => t.id === onlyId);
+    if (!old) fail(`--only ${onlyId}: no such town (have ${recipe.features.towns.map((t) => t.id).join(", ")})`);
+    const others = recipe.features.towns.filter((t) => t !== old);
+    let doc: TownDoc;
+    if (old.coastal) doc = siteCoastal(old, others);
+    else {
+      const pick = scored.find((s) => others.every((t) => Math.hypot(t.center[0] - s.x, t.center[1] - s.z) > separationFor(t.radius, old.radius)));
+      if (!pick) fail(`--only ${onlyId}: no buildable site clear of the other towns`);
+      doc = { ...old, center: [round(pick.x), round(pick.z)], groundY: round(pick.ground), flatten: 0.95, terraces: [], gates: [] };
+      console.log(`  ${old.id} (${tierOf(old)}): [${doc.center.join(", ")}] ground ${doc.groundY}`);
+    }
+    // the town's own ramps/stairs belong to the old site; `terrace` cuts new ones
+    recipe.features.roads = recipe.features.roads.filter((r) => !r.id.startsWith(`${old.id}-ramp-`) && !r.id.startsWith(`${old.id}-stair-`));
+    removeTownTerraceWalls(recipe, old.id);
+    recipe.features.towns = recipe.features.towns.map((t) => (t === old ? doc : t));
+    writeRecipe(recipe, file);
+    console.log(`re-sited ${old.id} from [${old.center.join(", ")}] to [${doc.center.join(", ")}] (${Math.hypot(doc.center[0] - old.center[0], doc.center[1] - old.center[1]).toFixed(0)} m); ${others.length} other town(s) untouched`);
+    console.log(`  next: worldgen terrace ${worldName} --town ${old.id}, then zones --towns-only, paths, gates, barriers …`);
+    return;
+  }
+
   // Towns something has already been BUILT on are not re-sited. A baked WFC
   // town, its walls and its gate are pinned to a place; move the pad out from
   // under them and the buildings stand on a hillside. They keep their ids, they
@@ -3370,6 +3458,21 @@ function commandTowns(): void {
       const want = minSeparation * ((t.radius + tier.radius) / (radius * 2));
       return Math.hypot(t.center[0] - site.x, t.center[1] - site.z) > want;
     });
+
+  // ---- coastal towns FIRST (they need a landing, and landings are few): every unpinned town flagged coastal keeps
+  // its id and tier and is re-sited at the shore; a pinned coastal town is measured and its faults printed
+  for (const old of recipe.features.towns.filter((t) => t.coastal)) {
+    if (pins.kept(old)) {
+      const faults = coastalTownFindings({ ...recipe, features: { ...recipe.features, towns: [old] } }, field);
+      if (faults.length > 0) console.warn(`  ! pinned ${faults.join("\n  ! pinned ")}\n    (re-site it: worldgen towns ${worldName} --only ${old.id})`);
+      continue;
+    }
+    const doc = siteCoastal(old, towns);
+    taken.add(doc.id);
+    towns.push(doc);
+    tierByTown.push(tierOf(doc));
+    masses.add(landmass[grid.nearest(doc.center[0], doc.center[1])]!);
+  }
 
   // ---- --at x,z: ONE town where the plan says (a cove the coast plan marked, a site-finder pick), on the best
   // buildable cell within --at-radius; its tier is --tier (default "town"). Counted against --count like a pin.
@@ -3765,12 +3868,12 @@ function commandTerrace(): void {
   const rampWidth = option("ramp-width", 7);
   const dramatic = option("dramatic", 2.5);
   const base = {
-    stepHeight: option("step-height", 6),
-    riser: option("riser", 5),
-    minShelf: option("min-shelf", 9),
+    stepHeight: option("step-height", TERRACE_DEFAULTS.stepHeight),
+    riser: option("riser", TERRACE_DEFAULTS.riser),
+    minShelf: option("min-shelf", TERRACE_DEFAULTS.minShelf),
     maxShelf: option("max-shelf", 0), // 0 = from the town's own radius
-    maxTerraces: Math.max(2, Math.round(option("max-terraces", 5))),
-    rampGrade: option("ramp-grade", 0.12),
+    maxTerraces: Math.max(2, Math.round(option("max-terraces", TERRACE_DEFAULTS.maxTerraces))),
+    rampGrade: option("ramp-grade", TERRACE_DEFAULTS.rampGrade),
     minRelief,
     share: option("terrace-share", 0.65),
   };
@@ -3908,7 +4011,8 @@ function commandTerrace(): void {
     // give it one, and the road network will come to it instead of to the
     // middle of the hill (see `townGateSchema`). Only when nothing has said
     // otherwise: a builder's own gate always wins.
-    if (town.gates.length === 0) {
+    // (not a COASTAL town: its lowest shelf is the seaward one; its gate is the landward `land-gate` `towns` writes)
+    if (town.gates.length === 0 && !town.coastal) {
       const line = terraces[0]!.points;
       let mouth = line[0]!;
       let far = -1;
@@ -5093,7 +5197,11 @@ function townZones(wilderness: readonly RegionDoc[], towns: readonly TownDoc[], 
       landmarks: [town.id],
       cap,
       within: parent.id,
-      tags: ["town", "safe", "draft"],
+      // the look moves with the name (2026-10-28 s1e: re-siting Saltharrow redrew its zone and dropped its mood)
+      ...(old?.mood ? { mood: old.mood } : {}),
+      ...(old?.ground ? { ground: old.ground } : {}),
+      ...(old?.vegetation ? { vegetation: old.vegetation } : {}),
+      tags: old && !old.tags.includes("draft") ? [...new Set(["town", "safe", ...old.tags])] : ["town", "safe", "draft"],
     });
   });
   return out;
@@ -6407,6 +6515,49 @@ function commandPaths(): void {
   console.log(`  ${auditWorld(recipe, createWorldField(recipe)).summary}`);
 }
 
+/** Dungeon doors reserved by zonegen (`authoring/zonegen/<world>/zones/<zone>/reservations.json`, a reservation with an
+ *  `entrance`), as trail targets standing `stand` m in front of the door along its yaw. */
+/** Every zonegen reservation of the world as a disc (centre + radius); empty when the world has no zonegen plan. */
+function reservationDiscs(world: string): { x: number; z: number; radius: number }[] {
+  if (!project) return [];
+  const zones = path.join(path.dirname(assetsRoot()), "authoring", "zonegen", world, "zones");
+  if (!fs.existsSync(zones)) return [];
+  const out: { x: number; z: number; radius: number }[] = [];
+  for (const zone of fs.readdirSync(zones)) {
+    const file = path.join(zones, zone, "reservations.json");
+    if (!fs.existsSync(file)) continue;
+    try {
+      for (const r of (JSON.parse(fs.readFileSync(file, "utf8")).reservations ?? []) as { center: [number, number]; radius: number }[]) out.push({ x: r.center[0], z: r.center[1], radius: r.radius });
+    } catch { /* unreadable: reservedDoors says so */ }
+  }
+  return out;
+}
+
+function reservedDoors(world: string, stand: number): { id: string; kind: string; position: [number, number, number]; from: string }[] {
+  if (!project) return [];
+  const zones = path.join(path.dirname(assetsRoot()), "authoring", "zonegen", world, "zones");
+  if (!fs.existsSync(zones)) return [];
+  const out: { id: string; kind: string; position: [number, number, number]; from: string }[] = [];
+  for (const zone of fs.readdirSync(zones)) {
+    const file = path.join(zones, zone, "reservations.json");
+    if (!fs.existsSync(file)) continue;
+    let doc: { reservations?: { location: string; entrance?: { position: [number, number, number]; yaw?: number }; approach?: { points?: [number, number][] } }[] };
+    try { doc = JSON.parse(fs.readFileSync(file, "utf8")); } catch { console.warn(`  ${file}: unreadable, its doors get no trail`); continue; }
+    for (const r of doc.reservations ?? []) {
+      if (!r.entrance) continue;
+      const [x, y, z] = r.entrance.position, yaw = r.entrance.yaw ?? 0;
+      const handover = (r.approach?.points ?? [])
+        .map((pt) => ({ pt, d: Math.hypot(pt[0] - x, pt[1] - z) }))
+        .filter((c) => c.d >= 10)
+        .sort((a, b) => a.d - b.d)[0];
+      out.push(handover
+        ? { id: r.location, kind: "dungeon-door", position: [handover.pt[0], y, handover.pt[1]], from: `${zone} reservation approach point ${handover.d.toFixed(0)} m from the door` }
+        : { id: r.location, kind: "dungeon-door", position: [x + Math.sin(yaw) * stand, y, z + Math.cos(yaw) * stand], from: `${zone} reservation, ${stand} m out along the door's yaw` });
+    }
+  }
+  return out;
+}
+
 /**
  * Trails: footpaths from the path network up to the peaks (and other POIs).
  * This is what makes a mountain climbable on purpose — the ridge you can
@@ -6434,6 +6585,18 @@ function commandTrails(): void {
     .filter((p) => kinds.includes(p.kind))
     .sort((a, b) => b.position[1] - a.position[1])
     .slice(0, Math.round(option("max", 40)));
+  // every reserved dungeon door gets its approach trail in the same run (2026-10-28 z1b: the Wristgate's ~500 m approach
+  // had no way to exist — trails only climbed recipe POIs, a hand-cut trail would be erased by the next `trails`, and a
+  // ribbon is banned): zonegen reservations with an `entrance` become targets. The trail ends where the door's own
+  // approach hands over to the place (the stair top / plaza foot the owner builds the last leg from): the reservation's
+  // `approach.points` point nearest the door that is at least 10 m from it, else `--door-stand` m out along the door's
+  // yaw. (First run aimed along the yaw: the Wristgate faces E across river-2, so the end fell IN the river, the route
+  // walked the river bed and the lip pass cut its last 80 m.) `--no-doors` leaves them out.
+  const doorTargets = flag("no-doors") ? [] : reservedDoors(recipe.name, option("door-stand", 15));
+  for (const d of doorTargets) console.log(`  door target ${d.id}: [${d.position[0].toFixed(0)}, ${d.position[2].toFixed(0)}] (${d.from})`);
+  // doors FIRST: a door trail sets off from the road network, not from a peak trail cut earlier in this run (2026-10-28:
+  // pushed last, the Wristgate trail attached to trail-peak-x 1 km west at 176 m and came down to the gorge from it)
+  targets.unshift(...(doorTargets as unknown as typeof targets));
   if (targets.length === 0) fail(`no POIs of kind ${kinds.join("/")} — run: worldgen pois <world>`);
   const field = createWorldField(recipe);
   const extent = extentFor(recipe);
@@ -6480,6 +6643,11 @@ function commandTrails(): void {
   );
   if (network.every((r) => r.length === 0)) fail("no paths or towns to start a trail from");
 
+  // places a climbing trail may end at, in a zonegen world (reservations exist): towns and reservations
+  const reservedPlaces = reservationDiscs(recipe.name);
+  const places = reservedPlaces.length > 0
+    ? [...reservedPlaces, ...recipe.features.towns.map((t) => ({ x: t.center[0], z: t.center[1], radius: t.radius + t.falloff }))]
+    : null;
   const trails: RoadDoc[] = [];
   for (const poi of targets) {
     const goal = grid.nearest(poi.position[0], poi.position[2]);
@@ -6558,6 +6726,34 @@ function commandTrails(): void {
         `(${trails.length} -> ${passed.trails.length} tread pieces, ${((performance.now() - t0) / 1000).toFixed(1)}s)`,
     );
     trails.splice(0, trails.length, ...passed.trails);
+  }
+  // A zonegen world's rule (`zonegen sites` path-leads-nowhere): a path piece whose free end climbs CLIMB_NEEDS_PLACE m
+  // or more over its last 600 m must reach a place (a town or a reservation within PLACE_REACH). A bare summit is the
+  // Skelmorrow climb-to-nothing, so in such a world that trail is not cut until a place is reserved at its top
+  // (2026-10-28 s1e: re-routing after the Saltharrow re-site left trail-peak-1 climbing 78 m to a bare peak and the
+  // sites row failed). Measured like the site-finder: per tread piece, on the tread heights. --bare-peaks keeps them.
+  if (places && !flag("bare-peaks")) {
+    const drop = new Set<string>();
+    for (const piece of trails) {
+      const base = piece.id.replace(/(\.s?\d+)+$/, "");
+      if (doorTargets.some((d) => `trail-${d.id}` === base)) continue;
+      const pts = piece.points, ys = piece.surfaceY ?? pts.map((q) => field.height(q[0], q[1]));
+      if (pts.length < 2) continue;
+      let run = 0, k = pts.length - 1;
+      while (k > 0 && run < 600) { run += Math.hypot(pts[k]![0] - pts[k - 1]![0], pts[k]![1] - pts[k - 1]![1]); k--; }
+      const climb = ys[ys.length - 1]! - Math.min(...ys.slice(k));
+      const [ex, ez] = pts[pts.length - 1]!;
+      const near = places.some((pl) => Math.hypot(pl.x - ex, pl.z - ez) - pl.radius <= PLACE_REACH);
+      if (climb >= CLIMB_NEEDS_PLACE && !near) {
+        drop.add(base);
+        console.log(`  ${base}: not cut — ${piece.id} climbs ${climb.toFixed(0)} m to a bare summit at [${Math.round(ex)}, ${Math.round(ez)}] (>= ${CLIMB_NEEDS_PLACE} m needs a place within ${PLACE_REACH} m: reserve one there, or --bare-peaks)`);
+      }
+    }
+    if (drop.size) {
+      const keep = trails.filter((t) => !drop.has(t.id.replace(/(\.s?\d+)+$/, "")));
+      trails.splice(0, trails.length, ...keep);
+      for (let j = trailBridges.length - 1; j >= 0; j--) if ([...drop].some((d) => trailBridges[j]!.id.startsWith(`bridge-${d}`))) trailBridges.splice(j, 1);
+    }
   }
   const fords = trails.reduce((n, r) => n + liftFords(r, field), 0);
   if (fords) console.log(`  lifted ${fords} ford point(s) the simplified line had dipped under the water`);
@@ -6755,6 +6951,14 @@ function commandGates(): void {
       if (arriving.length === 0) problems.push(`${town.id}/${gate.id}: no path arrives within ${tolerance} m`);
     }
     for (const road of crossing) problems.push(`${road.id} crosses ${town.id}'s pad instead of using a gate`);
+  }
+  // coastal towns: at the shore, on a sheltered landing, gate facing landward (tools/worldgen-coastal-towns.mts)
+  if (recipe.features.towns.some((t) => t.coastal)) {
+    const coastal = coastalTownFindings(recipe, createWorldField(recipe));
+    problems.push(...coastal);
+    for (const t of recipe.features.towns.filter((x) => x.coastal)) {
+      if (!coastal.some((f) => f.startsWith(`${t.id} `))) console.log(`  ${t.id}: coastal — at the shore, gate landward`);
+    }
   }
   for (const p of problems) console.log(`  ! ${p}`);
   console.log(
@@ -6958,7 +7162,14 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
           : null;
       },
     },
-    { name: "towns", after: ["rivers"], by: "procedural", how: "worldgen towns <world>", check: (r) => has(r.features.towns.length) },
+    {
+      name: "towns",
+      after: ["rivers"],
+      by: "procedural",
+      how: "worldgen towns <world>   (a coastal town off its shore: worldgen towns <world> --only <id>)",
+      // a COASTAL town stands at the shore with a landward gate (tools/worldgen-coastal-towns.mts, 2026-10-28 s1e)
+      check: (r) => has(r.features.towns.length) ?? (r.features.towns.some((t) => t.coastal) ? coastalTownFindings(r, statusField(r)).join("; ") || null : null),
+    },
     {
       name: "terrace",
       after: ["towns"],
@@ -7989,6 +8200,39 @@ function commandPois(): void {
     }
   }
 
+  // IDS ARE STABLE across reruns: a point within --keep-id m of the last run's point of the same kind keeps that id,
+  // the rest take numbers the last run did not use. Numbering by score order renumbered the whole island whenever one
+  // candidate came or went (2026-10-28 s1e: re-siting Saltharrow moved peak-3 from the Knucklecrown to the north-west,
+  // and the zone's reservations name `trail-peak-3` as an approach).
+  const previous = recipe.features.pois.filter((p) => p.kind in QUOTA);
+  if (previous.length > 0) {
+    const keepId = option("keep-id", 60);
+    const pairs: { o: PoiDoc; p: PoiDoc; d: number }[] = [];
+    for (const o of out) for (const p of previous) {
+      if (p.kind !== o.kind) continue;
+      const d = Math.hypot(p.position[0] - o.position[0], p.position[2] - o.position[2]);
+      if (d <= keepId) pairs.push({ o, p, d });
+    }
+    pairs.sort((a, b) => a.d - b.d);
+    const done = new Set<PoiDoc>(), used = new Set<string>();
+    for (const { o, p } of pairs) {
+      if (done.has(o) || used.has(p.id)) continue;
+      o.id = p.id;
+      done.add(o);
+      used.add(p.id);
+    }
+    const taken = new Set([...previous.map((p) => p.id), ...out.filter((o) => done.has(o)).map((o) => o.id)]);
+    let renamed = 0;
+    for (const o of out) {
+      if (done.has(o)) continue;
+      let k = 1;
+      while (taken.has(`${o.kind}-${k}`)) k++;
+      o.id = `${o.kind}-${k}`;
+      taken.add(o.id);
+      renamed++;
+    }
+    console.log(`  ids: ${done.size} kept from the last run (within ${keepId} m), ${renamed} new, ${previous.length - done.size} of the last run's gone`);
+  }
   recipe.features.pois = [...kept, ...out];
   stampPoiZones(recipe);
   writeRecipe(recipe, file);
@@ -9147,6 +9391,8 @@ function commandMap(): void {
  * border, overlaps, and towns nobody claims. Exit 1 on findings, like audit.
  */
 function commandRegions(): void {
+  if (stringOption("rename", "")) return commandRegionRename();
+  if (stringOption("fit", "")) return commandRegionFit();
   const { recipe } = loadRecipe();
   if (recipe.regions.length === 0) {
     console.log(`no regions in ${recipe.name} — see docs/world-editing/zones.md to draw them`);
@@ -9177,6 +9423,132 @@ function commandRegions(): void {
     for (const f of findings) console.log(`  - ${f}`);
     process.exitCode = 1;
   } else console.log("\nno findings — every border is a barrier or a pass");
+}
+
+/**
+ * `worldgen regions <world> --rename <old>=<new> [--name "New name"]` — rename a nested place region (its mood, ground,
+ * vegetation and polygon kept) when the place it was made for is renamed (2026-10-28: the look agent made `highwrack`
+ * and `tidecallers-gate` regions for premises Derek then rejected; the mood row looks regions up by reservation id, so
+ * a hand rename or a second region would leave an orphan). Moves the region's zone-textures inverse with it
+ * (`authoring/terrain/<world>.<id>.inverse.json`, its `region` field rewritten) so `--undo` still finds it, and
+ * refuses a top-level zone (zone ids are read by every zonegen file), an unknown id, or a new id already taken.
+ * Writes no stage stamp: a rename moves no ground.
+ */
+/**
+ * `worldgen regions <world> --fit <id> [--cell 6]` — redraw a nested PLACE region (tag `place`) so it lies wholly inside
+ * its parent and clear of every town zone (2026-10-28 s1e: the look pass drew `wrackmoor-dry` over Tawnstrand's zone and
+ * past the coast border, and `regions` failed on both). Rasterises the region on a `--cell` m grid, keeps the cells whose
+ * four corners are inside the parent and a cell clear of any town zone, keeps the largest piece, traces and simplifies
+ * it. Mood, ground, vegetation and story are kept; a town zone or a top-level zone is refused.
+ */
+function commandRegionFit(): void {
+  const id = stringOption("fit", "");
+  const { recipe, file } = loadRecipe();
+  const region = recipe.regions.find((r) => r.id === id);
+  if (!region) fail(`no region "${id}" (have: ${recipe.regions.map((r) => r.id).join(", ")})`);
+  if (!region.within || !region.tags.includes("place")) fail(`"${id}" is not a nested place region — --fit redraws only those`);
+  const parent = recipe.regions.find((r) => r.id === region.within);
+  if (!parent) fail(`"${id}" is within "${region.within}", which does not exist`);
+  const towns = recipe.regions.filter((r) => r.tags.includes("town") && r !== region);
+  const cell = option("cell", 6);
+  const xs = region.polygon.map((p) => p[0]), zs = region.polygon.map((p) => p[1]);
+  const x0 = Math.min(...xs) - cell, z0 = Math.min(...zs) - cell;
+  const n = Math.ceil(Math.max(Math.max(...xs) - x0, Math.max(...zs) - z0) / cell) + 2;
+  const inside = (poly: readonly (readonly [number, number])[], x: number, z: number) => pointInPolygon(poly, x, z);
+  const nearTown = (x: number, z: number) => towns.some((t) => inside(t.polygon, x, z));
+  const member = new Uint8Array(n * n);
+  let kept = 0, dropped = 0;
+  for (let iz = 0; iz < n; iz++) for (let ix = 0; ix < n; ix++) {
+    const cx = x0 + (ix + 0.5) * cell, cz = z0 + (iz + 0.5) * cell;
+    if (!inside(region.polygon, cx, cz)) continue;
+    const corners: [number, number][] = [[cx - cell / 2, cz - cell / 2], [cx + cell / 2, cz - cell / 2], [cx - cell / 2, cz + cell / 2], [cx + cell / 2, cz + cell / 2]];
+    const ok = corners.every(([x, z]) => inside(parent.polygon, x, z)) && !corners.some(([x, z]) => nearTown(x, z)) &&
+      ![[-cell, 0], [cell, 0], [0, -cell], [0, cell]].some(([dx, dz]) => nearTown(cx + dx!, cz + dz!));
+    if (ok) { member[ix + iz * n] = 1; kept++; } else dropped++;
+  }
+  if (kept === 0) fail(`"${id}": nothing of it lies inside "${parent.id}" clear of the town zones`);
+  // A town zone wholly INSIDE the region is a hole, and a simple polygon cannot hold one (the outline keeps the outer
+  // loop and swallows the town): open a slit from the town zone to the nearest ground outside the region instead.
+  const outsideCells: number[] = [];
+  for (let iz = 0; iz < n; iz++) for (let ix = 0; ix < n; ix++) if (!inside(region.polygon, x0 + (ix + 0.5) * cell, z0 + (iz + 0.5) * cell)) outsideCells.push(ix + iz * n);
+  for (const t of towns) {
+    if (!t.polygon.every(([x, z]) => inside(region.polygon, x, z))) continue;
+    const hub = t.hub ?? t.polygon[0]!;
+    const hx = (hub[0] - x0) / cell, hz = (hub[1] - z0) / cell;
+    let best = -1, bestD = Infinity;
+    for (const c of outsideCells) { const d = Math.hypot((c % n) + 0.5 - hx, ((c / n) | 0) + 0.5 - hz); if (d < bestD) { bestD = d; best = c; } }
+    if (best < 0) continue;
+    const bx = (best % n) + 0.5, bz = ((best / n) | 0) + 0.5;
+    const steps = Math.ceil(bestD * 2);
+    for (let s = 0; s <= steps; s++) {
+      const px = hx + ((bx - hx) * s) / steps, pz = hz + ((bz - hz) * s) / steps;
+      for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+        const ix = Math.floor(px) + dx, iz = Math.floor(pz) + dz;
+        if (ix >= 0 && iz >= 0 && ix < n && iz < n) member[ix + iz * n] = 0;
+      }
+    }
+    console.log(`  ${t.id} lies inside ${id}: a ${(bestD * cell).toFixed(0)} m slit opens it to the outside`);
+  }
+  // largest 4-connected piece
+  const label = new Int32Array(n * n);
+  let bestLabel = 0, bestSize = 0, next = 0;
+  for (let s = 0; s < n * n; s++) {
+    if (!member[s] || label[s]) continue;
+    next++;
+    let size = 0;
+    const stack = [s];
+    label[s] = next;
+    while (stack.length) {
+      const i = stack.pop()!;
+      size++;
+      const ix = i % n, iz = (i / n) | 0;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        const jx = ix + dx, jz = iz + dz;
+        if (jx < 0 || jz < 0 || jx >= n || jz >= n) continue;
+        const j = jx + jz * n;
+        if (member[j] && !label[j]) { label[j] = next; stack.push(j); }
+      }
+    }
+    if (size > bestSize) { bestSize = size; bestLabel = next; }
+  }
+  for (let i = 0; i < n * n; i++) member[i] = label[i] === bestLabel ? 1 : 0;
+  const loop = simplifyLoop(traceOutline(n, member), 1, 160).map(([gx, gz]): [number, number] => [round(x0 + gx * cell), round(z0 + gz * cell)]);
+  const before = region.polygon.length;
+  region.polygon = loop;
+  currentStage = "";
+  writeRecipe(recipe, file);
+  console.log(`fitted ${id}: ${before} -> ${loop.length} vertices; ${kept} cells kept (${bestSize} in the largest piece), ${dropped} outside "${parent.id}" or on a town zone (${(bestSize * cell * cell / 1e6).toFixed(2)} km²)`);
+  const report = auditRegions(recipe.regions, recipe.features);
+  console.log(report.findings.length ? `  findings:\n    ${report.findings.join("\n    ")}` : "  regions: 0 findings");
+}
+
+function commandRegionRename(): void {
+  const spec = stringOption("rename", "");
+  const [from, to] = spec.split("=");
+  if (!from || !to || !/^[a-z0-9][a-z0-9-]*$/.test(to)) fail(`--rename wants <old>=<new> (new id lower-case kebab), got "${spec}"`);
+  const { recipe, file } = loadRecipe();
+  const region = recipe.regions.find((r) => r.id === from);
+  if (!region) fail(`no region "${from}" (have: ${recipe.regions.map((r) => r.id).join(", ")})`);
+  if (!region.within) fail(`"${from}" is a top-level zone; zone ids are referenced by every zonegen file — rename refused`);
+  if (recipe.regions.some((r) => r.id === to)) fail(`a region "${to}" already exists`);
+  for (const r of recipe.regions) if (r.within === from) r.within = to;
+  region.id = to;
+  const name = stringOption("name", "");
+  if (name) region.name = name;
+  currentStage = "";
+  writeRecipe(recipe, file);
+  console.log(`renamed region ${from} -> ${to}${name ? ` ("${name}")` : ""}`);
+  const terrainDir = path.join(path.dirname(assetsRoot()), "authoring", "terrain");
+  const invOld = path.join(terrainDir, `${recipe.name}.${from}.inverse.json`);
+  const invNew = path.join(terrainDir, `${recipe.name}.${to}.inverse.json`);
+  if (fs.existsSync(invOld)) {
+    if (fs.existsSync(invNew)) fail(`${invNew} exists; the old inverse ${invOld} was left in place`);
+    const inv = JSON.parse(fs.readFileSync(invOld, "utf8"));
+    inv.region = to;
+    fs.writeFileSync(invNew, JSON.stringify(inv, null, 1));
+    fs.rmSync(invOld);
+    console.log(`inverse moved -> ${path.relative(process.cwd(), invNew)}`);
+  }
 }
 
 /** The ridge/path geometry the barriers stage and the audit agree on, from the flags and the recipe's own paths. */

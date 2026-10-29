@@ -40,6 +40,9 @@ import path from "node:path";
 import { visibleWorldGround, wallSeat, type WallSeatReport } from "./_wall-seated.mts";
 import {
   createWorldField,
+  createVolume,
+  compileLandmarkSpec,
+  type CsgNode,
   measureTerrainLips,
   seatReport,
   fieldSolidProbe,
@@ -210,6 +213,39 @@ export function terraceRiserBand(recipe: WorldRecipe): (x: number, z: number) =>
  * see, so a patch is not charged for a step the passage carves away (a path ribbon ending in a cut court mouth). A
  * tunnel (ceiling under the ground) does not open the cell. Footprint + one lattice step.
  */
+/**
+ * L (Wristgate 2026-10-28: a 20 m bastion retaining face between a rim walk and the court it overlooks is architecture,
+ * and no terrain slope can draw it): a lattice cell whose whole drawn rise (lowest to highest ground within 2 m) stands
+ * INSIDE the solid of a BUILT landmark operator (`kind: "built"`, an inline `csg` source, noise stripped so rock is never
+ * credited with its outward growth) is drawn by that landmark, like a terrace wall's riser. A step any part of which
+ * shows above or below the mass is still a fault.
+ */
+export function builtMassBand(recipe: WorldRecipe, height: (x: number, z: number) => number): (x: number, z: number) => boolean {
+  const vols = ((recipe.features as { operators?: unknown[] }).operators ?? []).flatMap((raw) => {
+    const o = raw as { op?: string; kind?: string; at?: [number, number]; y?: number; yaw?: number; scale?: number; voxel?: number; source?: { csg?: unknown } };
+    if (o.op !== "landmark" || o.kind !== "built" || !o.source?.csg || !o.at || typeof o.y !== "number") return [];
+    try {
+      const c = compileLandmarkSpec(o.source.csg, { voxel: o.voxel ?? 0.5, yaw: o.yaw ?? 0, scale: o.scale ?? 1, skipThin: true });
+      const nodes = c.nodes.map((n) => { const { noise: _n, ...rest } = n as CsgNode & { noise?: unknown }; return rest as CsgNode; });
+      return [{ at: o.at, y: o.y, min: c.min, max: c.max, vol: createVolume({ voxelSize: 1, nodes, palette: ["stone"] }) }];
+    } catch { return []; }
+  });
+  if (!vols.length) return () => false;
+  return (x, z) => {
+    const hs = [height(x, z), height(x + 2, z), height(x - 2, z), height(x, z + 2), height(x, z - 2)];
+    const lo = Math.min(...hs), hi = Math.max(...hs);
+    if (hi - lo < 1) return false;
+    for (const v of vols) {
+      const lx = x - v.at[0], lz = z - v.at[1];
+      if (lx < v.min[0] || lx > v.max[0] || lz < v.min[2] || lz > v.max[2]) continue;
+      let inside = true;
+      for (let y = lo + 0.3; y <= hi - 0.3 && inside; y += 0.5) if (!(v.vol.density(lx, y - v.y, lz) < 0)) inside = false;
+      if (inside) return true;
+    }
+    return false;
+  };
+}
+
 export function openCutBand(recipe: WorldRecipe, height: (x: number, z: number) => number): (x: number, z: number) => boolean {
   const cuts = (recipe.features.passages ?? []).filter((p) => (p.footprint ?? "box") === "box").map((p) => {
     const along = p.axis === "x" ? 0 : 1, dir = p.direction ?? 1;
@@ -237,6 +273,9 @@ export function openCutBand(recipe: WorldRecipe, height: (x: number, z: number) 
  */
 export interface LipsException { id: string; reason: string; cells: [number, number][] }
 
+/** A road piece's base id: `path-a-b.2.s3` -> `path-a-b` (non-road owners are returned unchanged). */
+export const pieceBase = (id: string): string => id.replace(/(\.s?\d+)+$/, "");
+
 export function lipsExceptionsFile(recipeFile: string): string {
   // beside the world: <project>/authoring/terrain/ (as worldgen-operators.mts sideDir, the fine-legacy list)
   const parts = path.resolve(recipeFile).split(/[\\/]/), at = parts.lastIndexOf("assets");
@@ -261,9 +300,12 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
   const allow = new Set(opts.allow ?? []);
   // documented exceptions: single lattice cells of one owner, reported as excepted, never counted
   const excCells = new Map<string, Set<string>>();
-  for (const e of opts.exceptions ?? []) { const set = excCells.get(e.id) ?? new Set<string>(); for (const [cx, cz] of e.cells) set.add(`${Math.round(cx)},${Math.round(cz)}`); excCells.set(e.id, set); }
+  // keyed by the road's BASE id: piece numbers (`.s2`, `.2.s3`) shift whenever routing upstream changes (2026-10-28 s1e: the
+  // river-1 abutment cell stayed put while its piece went from .s3 to .s2 and the gate failed on a documented cell)
+  for (const e of opts.exceptions ?? []) { const key = pieceBase(e.id); const set = excCells.get(key) ?? new Set<string>(); for (const [cx, cz] of e.cells) set.add(`${Math.round(cx)},${Math.round(cz)}`); excCells.set(key, set); }
   let excepted = 0;
   const riser = terraceRiserBand(recipe);
+  const built = builtMassBand(recipe, (x, z) => field.height(x, z));
   const cut = openCutBand(recipe, (x, z) => field.height(x, z));
   const withoutTerrace = (fid: string) => createWorldField({
     ...recipe,
@@ -300,12 +342,13 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
         const mine = o.band(x, z);
         if (mine > 0) return false;
         if (riser(x, z)) return false;
+        if (built(x, z)) return false;
         if (cut(x, z)) return false;
         for (const q of others) if (q.band(x, z) < mine) return false;
         return true;
       },
     });
-    const exc = excCells.get(o.id);
+    const exc = excCells.get(pieceBase(o.id));
     if (exc) {
       const kept = rep.faults.filter((f) => !exc.has(`${Math.round(f.x)},${Math.round(f.z)}`));
       for (const f of rep.faults) if (!kept.includes(f)) { excepted++; rep.counts[f.kind as keyof typeof rep.counts]--; }

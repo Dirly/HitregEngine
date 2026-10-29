@@ -11,7 +11,7 @@ import fs from "node:fs";
  * other, on a site of a fitting kind, reached from something that exists. Whether a walking body can actually get
  * there is NOT proven here: that is the POI owner's traversal gate (tools/poi-review), run on the real ground.
  */
-import { exists, finish, load, loadRecipe, readJson, type Ctx, type Finding } from "../lib.mts";
+import { exists, finish, load, loadRecipe, readJson, writeJson, type Ctx, type Finding } from "../lib.mts";
 import { questGraphSchema, reservationsSchema, zoneBriefSchema } from "../schemas.mts";
 import { distToPolyline, err, inZone, requireZone, warn } from "./_shared.mts";
 import { hostileOnMainRoads, travelRoads, type Content } from "./_site-finder.mts";
@@ -67,6 +67,30 @@ export async function run(ctx: Ctx): Promise<number> {
     const jobIds = fs.existsSync(jobsDir) ? fs.readdirSync(jobsDir) : [];
     const builtBy = (id: string): boolean => jobIds.some((j) => id === j || id.startsWith(`${j}-`)) || g.locations.some((l) => id.startsWith(`${l.id}-`));
 
+    // --prune-approaches: drop the SECONDARY approaches (`approaches[]`) whose `from` no longer exists in the world — a
+    // trail the trails stage stopped cutting, a road renamed away (2026-10-28 s1e: re-siting Saltharrow put a border pass
+    // on peak-3, so trail-peak-3 was never cut again and two reservations named it). The primary `approach` is never
+    // pruned (a place must be reached from something: re-plan it). Writes reservations.json, schema-validated.
+    if (ctx.flag("prune-approaches")) {
+      const base = (id: string) => id.replace(/(\.s?\d+)+$/, "");
+      const exists = (from: string) =>
+        roads.some((x) => x.id === from || base(x.id) === base(from)) || rivers.some((x) => x.id === from) || towns.some((t) => t.id === from) ||
+        pois.has(from) || res.reservations.some((x) => x.location === from) || locations.has(from);
+      let pruned = 0;
+      for (const r of res.reservations) {
+        const before = r.approaches.length;
+        r.approaches = r.approaches.filter((a) => {
+          if (exists(a.from)) return true;
+          console.log(`  pruned ${r.location} approach "${a.from}": no such road, river, town, POI or location in the world any more`);
+          return false;
+        });
+        pruned += before - r.approaches.length;
+      }
+      if (pruned > 0) {
+        writeJson(p.reservations(zone), reservationsSchema.parse(res));
+        console.log(`  wrote ${p.reservations(zone)} (${pruned} approach(es) pruned)`);
+      }
+    }
     for (const l of g.locations) if (l.kind !== "town" && !res.reservations.some((r) => r.location === l.id)) err(f, "unreserved", `location ${l.id} has no reservation`, l.id);
 
     // a SUB-SITE (location `place` = a brief place: its camp, pool, hold, dungeon door) lies INSIDE that place's
@@ -79,6 +103,25 @@ export async function run(ctx: Ctx): Promise<number> {
       const up = parentRes(r);
       return [r.approach, ...r.approaches, ...(up ? [up.approach, ...up.approaches] : [])].map((a) => a.from);
     };
+    // --adopt-roads: a generated road or trail that now runs through a reservation (a re-cut network, a renumbered peak
+    // trail) is named as one of its approaches instead of failing `on-road` — what an owner did by hand before
+    // (2026-10-28 s1e: the Knucklecrown's peak trail came back as trail-peak-6). Writes reservations.json, schema-validated.
+    if (ctx.flag("adopt-roads")) {
+      let adopted = 0;
+      for (const r of res.reservations) {
+        for (const road of roads) {
+          if (builtBy(road.id) || namedWays(r).includes(road.id)) continue;
+          if (distToPolyline(r.center[0], r.center[1], road.points) >= r.radius + road.width / 2) continue;
+          r.approaches.push({ from: road.id, points: [] } as (typeof r.approaches)[number]);
+          console.log(`  adopted ${road.id} as an approach of ${r.location}`);
+          adopted++;
+        }
+      }
+      if (adopted > 0) {
+        writeJson(p.reservations(zone), reservationsSchema.parse(res));
+        console.log(`  wrote ${p.reservations(zone)} (${adopted} approach(es) adopted)`);
+      }
+    }
     for (const r of res.reservations) {
       const ref = r.location;
       const loc = locations.get(r.location);
@@ -131,13 +174,20 @@ export async function run(ctx: Ctx): Promise<number> {
       // within APPROACH_REACH of this reservation's edge
       for (const a of [r.approach, ...r.approaches]) {
         const from = a.from;
-        const line = roads.find((x) => x.id === from) ?? rivers.find((x) => x.id === from);
+        const exact = roads.find((x) => x.id === from) ?? rivers.find((x) => x.id === from);
+        // a road PIECE id (`path-a-b.s3`) is renumbered whenever the road is re-cut upstream: when the exact piece is gone,
+        // the road's other pieces answer for it (2026-10-28 s1e: re-siting Saltharrow renumbered path-town-1-site-crown)
+        const base = from.replace(/(\.s?\d+)+$/, "");
+        const pieces = exact ? [] : roads.filter((x) => x.id.replace(/(\.s?\d+)+$/, "") === base);
+        const line = exact ?? (pieces.length > 0 ? { id: from, points: pieces.flatMap((x) => x.points) } : undefined);
+        if (!exact && pieces.length > 0) warn(f, "approach-renumbered", `${ref}: approach "${from}" is no longer a piece id; measured on ${base}'s ${pieces.length} piece(s) — rename it to one of ${pieces.map((x) => x.id).join(", ")}`, ref);
         const town = towns.find((t) => t.id === from);
         const poi = pois.get(from);
         const other = res.reservations.find((x) => x.location === from);
         // metres from `from` to the disc (px, pz, pr): its line, town pad, POI or reservation edge
         const gapAt = (px: number, pz: number, pr: number): number | null => {
-          if (line) return distToPolyline(px, pz, line.points) - pr;
+          if (exact) return distToPolyline(px, pz, exact.points) - pr;
+          if (line) return Math.min(...pieces.map((x) => distToPolyline(px, pz, x.points))) - pr;
           if (town) return Math.hypot(town.center[0] - px, town.center[1] - pz) - pr - town.radius - town.falloff;
           if (poi) return Math.hypot(poi.position[0] - px, poi.position[2] - pz) - pr;
           if (other) return Math.hypot(other.center[0] - px, other.center[1] - pz) - pr - other.radius;
