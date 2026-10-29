@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fallFace, columnReachesPool, fieldSolidProbe, measureFallLip, fitFall, curtainFit, curtainColumns, shoreFoamOnBank, foamLinedBank, type RiverFall } from "../src/index.js";
+import { fallColumn, fallFace, columnReachesPool, fieldSolidProbe, measureFallLip, fitFall, curtainFit, curtainColumns, shoreFoamOnBank, foamLinedBank, type RiverFall } from "../src/index.js";
 
 /** A river at 10 m on a bed at 7 m, ending at a cliff at x = lip; the pool below at 1 m on a floor at 0. */
 function cliff(lip: number, overhang?: { below: number; back: number }) {
@@ -128,5 +128,20 @@ describe("shore foam on steep banks (the pale strips along river banks)", () => 
     expect(foamLinedBank({ foamWidth: 0.6, shoreFoam: { steep: [0, 0] } }, banks)).toBe(20);
     expect(foamLinedBank({ foamWidth: 0.6 }, banks)).toBe(0);
     expect(foamLinedBank({ foamWidth: 0, shoreFoam: { steep: [0, 0] } }, banks)).toBe(0);
+  });
+});
+
+describe("fallColumn", () => {
+  it("climbs the solid above a heightfield that rounds the brink off (the profile is the rock the chunk is meshed from)", () => {
+    // a cliff edge at s = 0: rock to y 10 behind it, 0 past it; the heightfield ramps 1.5 m low over the last metre
+    const field = {
+      density: (x: number, y: number) => y - (x < 0 ? 10 : 0),
+      ground: (x: number) => (x < -1 ? 10 : x < 0 ? 8.5 : 0),
+    };
+    const col = fallColumn(field, { dirX: 1, dirZ: 0 }, 0, 0, 0, -3, 2);
+    const at = (s: number): number => col.g[Math.round((s - col.from) / col.step)]!;
+    expect(at(-2)).toBe(10);
+    expect(at(-0.5)).toBeGreaterThan(9.7); // within one climb step of the rock top
+    expect(at(1)).toBe(0);
   });
 });

@@ -55,6 +55,14 @@ describe("seatObject", () => {
     expect(flat.y).toBeCloseTo(-ROCK_EMBED * 1.5, 2);
     expect(seatObject(probe, { x: 3, z: 3, y: -0.3, halfX: 1, halfZ: 1, height: 1.5 }, "embed").status).toBe("ok");
   });
+  it("embed: a rock mostly on the upper side of a step deeper than its reach is unsupported (the low side is not left out)", () => {
+    // 70 % of the footprint on the 6 m top, reach 2.1 m (the placer reaches twice the rock): the low samples find no ground
+    const r = seatObject(probe, { x: 10.6, z: 2, y: 6, halfX: 1, halfZ: 1, height: 1 }, "embed", { reachDown: 2.1 });
+    expect(r.status).toBe("unsupported");
+    expect(r.reason).toMatch(/straddles a step deeper/);
+    // wholly on the top it seats as before
+    expect(seatObject(probe, { x: 12, z: 2, y: 6.2, halfX: 1, halfZ: 1, height: 1 }, "embed", { reachDown: 2.1 }).status).toBe("off");
+  });
   it("embed means EMBEDDED: a rock merely touching the ground is off; one 10% in is ok; the fix sinks it 15%", () => {
     const touching = seatObject(probe, { x: 3, z: 3, y: 0.02, halfX: 0.5, halfZ: 0.5, height: 1 }, "embed");
     expect(touching.status).toBe("off");

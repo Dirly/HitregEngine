@@ -387,6 +387,11 @@ export function rockSkinsGate(opts: { project: string; recipe: WorldRecipe; fiel
       if (stone !== "*" && !names.includes(stone)) rows.push({ kind: "recipe", fault: "recipe", what: "rockSkins", id: stone, detail: `rockSkins names ${stone}, no surface of ${recipe.name} (inherited from another world?): rock-skins install drops it` });
       else if (slice >= mainMaterial.tones.length) rows.push({ kind: "recipe", fault: "recipe", what: "rockSkins", id: stone, detail: `rockSkins maps ${stone} to slice ${slice}; ${mainMaterial.id ?? "the rock material"} has ${mainMaterial.tones.length} bases` });
     }
+    // a rule's own cliff->slice map naming stones the recipe does not have (copied with the rule from another world)
+    for (const rule of recipe.scatter) {
+      const foreign = Object.keys(rule.rockBaseByCliff ?? {}).filter((k) => k !== "*" && !names.includes(k));
+      if (foreign.length) rows.push({ kind: "recipe", fault: "recipe", what: "rule", id: rule.id, detail: `rockBaseByCliff names ${foreign.join(", ")}, no surface of ${recipe.name} (inherited from another world?): rock-skins install drops it` });
+    }
     for (const r of regions.filter((q) => !q.within)) {
       const cliff = cliffOf(r);
       const ci = cliff ? names.indexOf(cliff) : -1;
@@ -633,13 +638,23 @@ function pngWidth(file: string | null): number {
 /** The fields rock-skins install owns, laid onto a FRESH read of the recipe (rockSkins + each scatter rule's small/large material by
  *  id). install plans for seconds on its own read; writing that stale copy back dropped every feature another tool added meanwhile
  *  (widows-arch's 551 passages/operators/paints, 2026-10-21). Mutates and returns `fresh`. */
+/**
+ * A rule's `rockBaseByCliff` with the stones this world does not have taken out; undefined (the rule follows the world's
+ * `rockSkins`) when what is left names none of its own stones, only "*" or the generic "cliff": a map copied from
+ * another world sent every rock of the rule to its "*" slice (redstrand cliff-buttress: proving's map, 2026-10-29).
+ */
+export function ownRockBaseByCliff(map: Record<string, number> | undefined, names: readonly string[]): Record<string, number> | undefined {
+  if (!map) return undefined;
+  const kept = Object.fromEntries(Object.entries(map).filter(([k]) => k === "*" || names.includes(k)));
+  return Object.keys(kept).some((k) => k !== "*" && k !== "cliff") ? kept : undefined;
+}
 export function mergeRockSkinFields(fresh: any, mine: any): any {
   fresh.rockSkins = mine.rockSkins;
   const byId = new Map<string, any>((mine.scatter ?? []).map((r: any) => [r.id, r]));
   for (const r of fresh.scatter ?? []) {
     const m = byId.get(r.id);
     if (!m) continue;
-    for (const k of ["smallMaterial", "largeMaterial"]) { if (m[k] === undefined) delete r[k]; else r[k] = m[k]; }
+    for (const k of ["smallMaterial", "largeMaterial", "rockBaseByCliff"]) { if (m[k] === undefined) delete r[k]; else r[k] = m[k]; }
   }
   return fresh;
 }
@@ -872,7 +887,16 @@ function main(argv: string[]): void {
     const planDoc = { ...material.doc, rockCap: { ...material.doc.rockCap, bases: plan.bases } };
     const smallSame = before.smallMaterial === variantMaterialText(planDoc, plan.smallBases) && (raw.scatter ?? []).every((r: any) => r.material !== material.id || r.smallMaterial === smallId);
     const largeSame = before.largeMaterial === variantMaterialText(planDoc, plan.largeBases) && (raw.scatter ?? []).every((r: any) => r.material !== material.id || (r.cliff ? r.largeMaterial === undefined : r.largeMaterial === largeId));
-    const same = JSON.stringify(raw.rockSkins ?? null) === JSON.stringify(plan.rockSkins) && JSON.stringify(before.bases) === JSON.stringify(plan.bases) && smallSame && largeSame;
+    const surfaceNames = recipe.surfaces.map((q) => q.name);
+    let byCliffChanged = 0;
+    for (const r of raw.scatter ?? []) {
+      const own = ownRockBaseByCliff(r.rockBaseByCliff, surfaceNames);
+      if (JSON.stringify(own) === JSON.stringify(r.rockBaseByCliff)) continue;
+      byCliffChanged++;
+      console.log(`  ${r.id}: rockBaseByCliff ${own ? `-> ${JSON.stringify(own)}` : "dropped (follows rockSkins)"}`);
+      if (own) r.rockBaseByCliff = own; else delete r.rockBaseByCliff;
+    }
+    const same = !byCliffChanged && JSON.stringify(raw.rockSkins ?? null) === JSON.stringify(plan.rockSkins) && JSON.stringify(before.bases) === JSON.stringify(plan.bases) && smallSame && largeSame;
     if (same && !skin.ops.length) { console.log("  nothing to do (already installed)"); return; }
     if (argv.includes("--dry")) { console.log("  DRY RUN: nothing written"); return; }
     raw.rockSkins = plan.rockSkins;

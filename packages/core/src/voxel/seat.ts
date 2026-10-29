@@ -199,6 +199,11 @@ export function seatObject(probe: SolidProbe, fp: SeatFootprint, contact: SeatCo
 
   if (contact === "embed") {
     if (support < o.minSupport) return res("unsupported", null, fp.y - bottom, `ground under ${Math.round(support * 100)}% of the footprint`);
+    // a sample with no ground within reachDown is a drop deeper than the reach: when the reach is at least the rock's
+    // height that is a step taller than the rock, so it straddles an edge. Left out of the gap/rise below it let a 19.8 m
+    // hoodoo stand over a 41 m step with its footprint 70 % on the upper side (redstrand 2026-10-29, reach 39.6 m)
+    if (fp.height > 0 && found.length < g.length && o.reachDown >= fp.height * 1.05)
+      return res("unsupported", null, fp.y - bottom, `straddles a step deeper than ${o.reachDown.toFixed(1)} m (rock ${fp.height.toFixed(1)} m)`);
     // the underside follows `align` of the ground's slope (a scatter rock tilted to the normal): compare each sample
     // with that tilted base plane, so a rock bedded on a smooth slope is not mistaken for one over an edge
     const tilt = baseTilt(pts, g, fp, Math.max(0, Math.min(1, fp.align ?? 0)));

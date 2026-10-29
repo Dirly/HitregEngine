@@ -40,6 +40,8 @@ export const FALL_LIP_SEARCH = 30;
 export const FALL_FACE_CLEAR = 0.3;
 /** The measure's step along the current (m). */
 const STEP = 0.25;
+/** fallColumn's climb up the solid above the heightfield's top (m per step, 16 steps at most). */
+const COLUMN_CLIMB = 0.25;
 
 /** The probe height under the upper water: under any bed, above any real drop's floor. */
 export function fallProbeDepth(fall: Pick<RiverFall, "top" | "bottom">): number {
@@ -160,8 +162,14 @@ export function fallColumn(field: FallFitField, fall: Pick<RiverFall, "dirX" | "
     const s = from + i * STEP;
     const x = lx + fall.dirX * s + px * across;
     const z = lz + fall.dirZ * s + pz * across;
-    if (ground) g[i] = ground(x, z);
-    else {
+    if (ground) {
+      // the heightfield rounds a crisp brink off at lattice scale: the solid can stand 1.5 m above ground() at a
+      // cliff's edge (firstshore/redstrand river-1: the curtain was thrown 1.1 m off a face it read as air). Climb the
+      // solid from the heightfield's top so the profile is the rock the chunk is meshed from.
+      let top = ground(x, z);
+      for (let k = 0; k < 16 && field.density(x, top + COLUMN_CLIMB, z) < 0; k++) top += COLUMN_CLIMB;
+      g[i] = top;
+    } else {
       // no ground(): bisect the density column (tests)
       let lo = -200, hi = 400;
       for (let k = 0; k < 30; k++) { const m = (lo + hi) / 2; if (field.density(x, m, z) < 0) lo = m; else hi = m; }
