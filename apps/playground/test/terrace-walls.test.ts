@@ -19,6 +19,10 @@ import {
   townShelfOutlines,
   townTerraceWalls,
   trimShelfTo,
+  normaliseFootprint,
+  stepTierHeights,
+  steppedFootprints,
+  TIER_STEP,
 } from "../tools/worldgen-terrace-walls.mts";
 
 const KIT = path.resolve(import.meta.dirname, "../projects/world-kit/authoring/retaining-wall/lookup.json");
@@ -289,7 +293,7 @@ test("townTerraceWalls: a drop too tall for one wall is split into two stacked t
     ],
   } as never];
   const lines: string[] = [];
-  const { fits } = townTerraceWalls(recipe, recipe.features.towns[0]!, kit, [], (s) => lines.push(s), 6);
+  const { fits } = townTerraceWalls(recipe, recipe.features.towns[0]!, kit, [], (s) => lines.push(s), 6, "kit");
   const log = lines.join("\n");
   assert.match(log, /split, new shelf town-x-terrace-3/, log);
   assert.equal(recipe.features.towns[0]!.terraces.length, 3);
@@ -300,4 +304,89 @@ test("townTerraceWalls: a drop too tall for one wall is split into two stacked t
     const g = terraceGates(recipe, f.doc, { field, faults: true });
     assert.ok(g.ok, `${f.doc.id}\n${g.lines.join("\n")}\n${log}`);
   }
+});
+
+// ------------------------------------------------------------------ stepped risers (s1g)
+
+test("stepTierHeights: a tall riser splits into low walls on kit heights, evenly, tallest at the foot", () => {
+  const kit = [0.8, 1.5, 2, 2.4, 3, 4.5, 6];
+  assert.deepEqual(stepTierHeights(6, 3, kit), [2, 2, 2]);
+  assert.deepEqual(stepTierHeights(4.4, 2, kit), [2.4, 2]);
+  assert.deepEqual(stepTierHeights(4.5, 2, kit), [1.5, 1.5, 1.5], "no 2-wall split of 4.5 m on the courses: one more tier");
+  for (const hs of [stepTierHeights(5.2, 3, kit)!, stepTierHeights(3.6, 2, kit)!]) assert.ok(hs.every((h) => h <= 2.5) && hs.every((h, i) => i === 0 || h <= hs[i - 1]!), JSON.stringify(hs));
+});
+
+test("steppedFootprints: the lowest wall stays on the one-wall line, each wall above 2.6 m into the pad, bands between", () => {
+  // pad 0..20 x -10..0, wall on the +Z edge (normalised: pad on the left walking the wall)
+  const { poly } = normaliseFootprint([[0, 0], [20, 0], [20, -10], [0, -10]]);
+  const wall = poly.findIndex((p, i) => { const q = poly[(i + 1) % poly.length]!; return p[1] === 0 && q[1] === 0; });
+  const tiers = steppedFootprints(poly, [wall], 3);
+  assert.equal(tiers.length, 3);
+  assert.equal(TIER_STEP, 2.6);
+  const zsOf = (fp: [number, number][]) => [...new Set(fp.map((p) => p[1]))].sort((a, b) => b - a);
+  assert.deepEqual(zsOf(tiers[0]![0]!.footprint), [0, -2.6], "band 1: from the one-wall face to tier 2's face");
+  assert.deepEqual(zsOf(tiers[1]![0]!.footprint), [-2.6, -5.2]);
+  assert.deepEqual(zsOf(tiers[2]![0]!.footprint), [-5.2, -10], "the top tier: the rest of the pad");
+  for (const t of tiers) for (const p of t) {
+    const n = normaliseFootprint(p.footprint, false);
+    assert.equal(n.reversed, false, "same winding: wall indices need no mapping");
+    for (const w of p.walls) { const a = n.poly[w]!, b = n.poly[(w + 1) % n.poly.length]!; assert.equal(a[1], b[1], "a wall edge runs along the contour"); }
+  }
+});
+
+test("townTerraceWalls: a 6 m riser is built STEPPED (three 2 m walls, 2 m treads), every tier passes its gates", { skip: !haveKit && "world-kit retaining-wall kit not installed" }, () => {
+  const recipe = hillside();
+  const kit = loadTerraceKit("proving", () => {});
+  // ground 20 - 0.35 z: a shelf at z = 30 (9.5 m) and one 6 m higher at z = 12 (natural 15.8 m)
+  recipe.features.towns = [{
+    id: "town-x", tier: "town", center: [0, 20], radius: 45, falloff: 20, groundY: 9.5, flatten: 0, gates: [], tags: [],
+    terraces: [
+      { id: "town-x-terrace-1", points: [[-30, 32], [30, 32]], radius: 9, falloff: 4, groundY: 9.5, flatten: 1, tags: [] },
+      { id: "town-x-terrace-2", points: [[-30, 10], [30, 10]], radius: 9, falloff: 4, groundY: 15.5, flatten: 1, tags: [] },
+    ],
+  } as never];
+  const lines: string[] = [];
+  const { fits } = townTerraceWalls(recipe, recipe.features.towns[0]!, kit, [], (s) => lines.push(s), 6, "kit");
+  const log = lines.join("\n");
+  assert.match(log, /town-x-riser-2: STEPPED 6 m as 2 \+ 2 \+ 2 m/, log);
+  const tiers = fits.filter((f) => /^town-x-riser-2(-step|$)|^town-x-riser2-step/.test(f.doc.id)).sort((a, b) => a.doc.solved!.topY - b.doc.solved!.topY);
+  assert.deepEqual(tiers.map((f) => f.doc.solved!.height), [2, 2, 2], log);
+  for (let j = 1; j < tiers.length; j++) {
+    assert.equal(tiers[j]!.doc.solved!.baseY, tiers[j - 1]!.doc.solved!.topY, "each wall stands on the tread of the one below");
+    const fa = tiers[j]!.doc.solved!.faces[0]!, fb = tiers[j - 1]!.doc.solved!.faces[0]!;
+    assert.ok(Math.abs(Math.abs(fa.a[1] - fb.a[1]) - TIER_STEP) < 0.6, `faces ${TIER_STEP} m apart: ${fa.a[1]} vs ${fb.a[1]}`);
+    assert.ok(tiers[j]!.doc.tags.includes("tread"));
+  }
+  assert.equal(recipe.features.towns[0]!.terraces.find((t) => t.id === "town-x-terrace-2")!.riser?.tiers, 3);
+  // the treads grow ground cover; the top pad does not
+  const cl = (id: string) => recipe.features.clearings!.find((c) => c.id === `tw-${id}`)!;
+  assert.equal(cl(tiers[0]!.doc.id).cover, false);
+  assert.equal(cl("town-x-riser-2").cover, true);
+  const field = createWorldField(recipe);
+  for (const f of tiers) {
+    const g = terraceGates(recipe, f.doc, { field, faults: true });
+    assert.ok(g.ok, `${f.doc.id}\n${g.lines.join("\n")}\n${log}`);
+  }
+});
+
+test("townTerraceWalls: by the rule a 6 m riser with nothing at its top edge is a DC riser (benches), not kit walls", { skip: !haveKit && "world-kit retaining-wall kit not installed" }, () => {
+  const recipe = hillside();
+  const kit = loadTerraceKit("proving", () => {});
+  recipe.features.towns = [{
+    id: "town-x", tier: "town", center: [0, 20], radius: 45, falloff: 20, groundY: 9.5, flatten: 0, gates: [], tags: [],
+    terraces: [
+      { id: "town-x-terrace-1", points: [[-30, 32], [30, 32]], radius: 9, falloff: 4, groundY: 9.5, flatten: 1, tags: [] },
+      { id: "town-x-terrace-2", points: [[-30, 10], [30, 10]], radius: 9, falloff: 4, groundY: 15.5, flatten: 1, tags: [] },
+    ],
+  } as never];
+  const lines: string[] = [];
+  townTerraceWalls(recipe, recipe.features.towns[0]!, kit, [], (s) => lines.push(s), 6);
+  const log = lines.join("\n");
+  assert.match(log, /town-x-riser-2: WALL — .*-> DC riser/, log);
+  const dc = (recipe.features.dcRisers ?? []).find((r) => r.id === "town-x-riser-2");
+  assert.ok(dc, log);
+  assert.equal(dc!.top - dc!.foot, 6);
+  assert.equal(dc!.steps?.tiers, 3);
+  assert.equal((recipe.features.terraceWalls ?? []).filter((w) => w.id.startsWith("town-x-riser-2")).length, 0);
+  assert.equal(recipe.features.towns[0]!.terraces.find((t) => t.id === "town-x-terrace-2")!.riser?.face, "dc");
 });

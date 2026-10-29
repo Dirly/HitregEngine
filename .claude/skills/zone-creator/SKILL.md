@@ -21,3 +21,8 @@ errors `banned-premise` on a hit. Add the row the day the ruling is given.
 
 Before launching agents in a conversation with the owner, say what will start, how many agents and on which models,
 and wait for the go. Keep the ledger (`zones/<z>/RUN.md`) current after every launch and install.
+
+Siting is an AGENT step, never the score's rank 1: towns by `worldgen towns --propose` -> a fresh siting agent
+(`zonegen brief-for site-towns`) -> `towns --pick`; each hero place and dungeon entrance by `zonegen sites --role <r>
+--for <place> --propose` -> `brief-for site-places` -> `reserve --pick`. A place's ground must carry its idea (site
+needs: `site-finder` skill); a shortfall is asked of the generator (recipe `needs`, `worldgen needs`), not hand-dug.

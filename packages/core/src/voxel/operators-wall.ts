@@ -133,6 +133,12 @@ export const wallParamsSchema = z.object({
   materialBand: z.union([num.min(2).max(500), z.literal("leg")]).default(16).describe("Variant materials (a list in `materials`): the band length along the line, metres, rounded so the line divides into whole cycles and every variant covers the same length. Sweeps (face, cap, footing, deck slab, parapet...) are split square at band edges (never inside a corner's mitre zone); single solids (treads, buttresses, merlons) take the band under their middle. `leg` (straight legs, `smooth: false`): the variant changes at the corners, one per LEG as built (a leg shorter than 2 x `thickness` + 2 m, a landing or a jog, keeps the leg before it's), so a switchback's legs differ and no band runs across a face."),
   materialOffset: z.number().int().min(0).max(7).default(0).describe("Variant materials: start the cycle at this entry (lines that continue one another, e.g. a stair split into several ops, carry on where the last one ended)."),
   targets: z.array(z.object({ name: z.string(), at: xyz.describe("WORLD walkable point.") })).max(32).default([]).describe("Walkable points the baked collider must reach (tools/landmark.mts reach loop). Ramp: foot, middle and head of the deck are added automatically."),
+  handmade: z.object({
+    run: z.tuple([num.min(1), num.min(1)]).default([4, 10]).describe("Top runs: min and max length (m). Each run of the top is laid at its own height (follow / level modes; step mode keeps its blocks)."),
+    rise: num.min(0).max(2).default(0.4).describe("Metres a raised or lowered run of the top stands off the line (a course)."),
+    share: num.min(0).max(1).default(0.35).describe("Share of top runs laid a course up or down."),
+    drops: num.min(0).max(0.5).default(0.1).describe("Share of top runs with a dropped coping stone (a gap in the coping one block long; never over an opening or a corner)."),
+  }).strict().nullable().default(null).describe("HAND-MADE top (2026-10-29, Derek: walls must feel hand made): `{}` = the top steps by a course in short seeded runs and a few coping stones are missing, so no long run is ruler-flat (`handmade check` fails a town wall without it). Town walls pass `{}`; null (default, so existing bakes keep their bytes) = the machine top (irregularity only)."),
   seed: z.number().int().default(1).describe("Irregularity seed (combined with the world seed and the id)."),
   fog: landmarkComponentSchema.optional().describe("As the landmark operator's `fog`: stands as a darker silhouette through zone fog."),
 }).strict();
@@ -642,7 +648,23 @@ export function buildWall(input: unknown, reader: OperatorFieldReader, ctx: { id
       if (p.heightMode === "step") return stepTop(s);
       return gS[i]! + p.height + knot(s, 2) * jH;
     };
-    const tops = stations.map((s, i) => topAt(s, i));
+    // HAND-MADE runs: seeded run boundaries along the line, each run up / down a course or on the line
+    const hm = p.handmade, runEdges: number[] = [];
+    if (hm) for (let s = s0, k = 0; s < s1 + 1e-6; k++) { runEdges.push(s); s += hm.run[0] + hash01(seed, k, 21) * Math.max(0, hm.run[1] - hm.run[0]); }
+    const runOf = (s: number) => { let k = 0; while (k + 1 < runEdges.length && runEdges[k + 1]! <= s) k++; return k; };
+    const runRise = (s: number) => {
+      if (!hm || p.heightMode === "step" || closed) return 0; // a closed ring keeps its top meeting itself
+      const k = runOf(s), u = hash01(seed, k, 22);
+      return u < hm.share ? (u < hm.share / 2 ? 1 : -1) * hm.rise : 0;
+    };
+    const dropped = (s: number) => {
+      if (!hm || !p.cap || hm.drops <= 0) return false;
+      const k = runOf(s);
+      if (hash01(seed, k, 23) >= hm.drops) return false;
+      const a = runEdges[k]!, b = runEdges[k + 1] ?? s1, c = a + (b - a) * (0.3 + 0.4 * hash01(seed, k, 24));
+      return Math.abs(s - c) < segLen / 2 && !curve.corners.some((q) => Math.abs(q.s - s) < W0 + 1) && s > 1 && s < L - 1;
+    };
+    const tops = stations.map((s, i) => topAt(s, i) + runRise(s));
     const sec = (s: number, i: number, top = tops[i]!) => {
       const W = Math.max(0.3, W0 + knot(s, 1) * jT);
       // the foot stays >= 0.5 m under the body top: where the ground climbs over the top (a level / step block on a
@@ -672,7 +694,7 @@ export function buildWall(input: unknown, reader: OperatorFieldReader, ctx: { id
     };
     const blockOf = (s: number) => Math.floor(clampS(s) / stepLen);
     // (a block edge is itself a station: the run breaks AT it, b + 1e-4 being in the next block; b - 1e-4 never broke)
-    const stepBreak = (a: number, b: number) => p.heightMode === "step" && blockOf(a + 1e-4) !== blockOf(b + 1e-4);
+    const stepBreak = (a: number, b: number) => (p.heightMode === "step" && blockOf(a + 1e-4) !== blockOf(b + 1e-4)) || runRise(a + 1e-4) !== runRise(b - 1e-4);
     // body: a quad section [right foot, right top, left top, left foot]; in step mode each block its own solid at its top
     const bodyTop = (q: ReturnType<typeof sec>) => q.top - capH;
     const footTop = (q: ReturnType<typeof sec>) => Math.max(q.yb + 0.3, q.gF + plinth);
@@ -684,8 +706,9 @@ export function buildWall(input: unknown, reader: OperatorFieldReader, ctx: { id
       const q = (i: number) => (blockTop !== undefined ? sec(stations[i]!, i, blockTop) : secs[i]!);
       // (with a footing the body STANDS ON it: no face of one lies on a face of the other, mitres included)
       B.sweep("face", sts, (_s, k) => { const c = q(run[k]!); const t = bodyTop(c), y = p.footing ? Math.min(footTop(c), t - 0.3) : c.yb; return [[c.rB, y], [c.rT, t], [c.lT, t], [c.lB, y]]; });
-      if (p.cap) B.sweep("cap", sts, (_s, k) => {
-        const c = q(run[k]!), t = bodyTop(c), oR = twoFaced || f > 0 ? capO : 0, oL = twoFaced || f < 0 ? capO : 0;
+      // the coping in pieces: a dropped stone (handmade.drops) leaves the body top bare for one block
+      if (p.cap) for (const capRun of runs((s) => !inOpening(s) && !dropped(s), stepBreak).map((r) => r.filter((i) => run.includes(i))).filter((r) => r.length > 1)) B.sweep("cap", capRun.map((i) => stations[i]!), (_s, k) => {
+        const c = q(capRun[k]!), t = bodyTop(c), oR = twoFaced || f > 0 ? capO : 0, oL = twoFaced || f < 0 ? capO : 0;
         return chamferRect(c.lT - oL, c.rT + oR, t, c.top, bevel, [false, false, oR > 0, oL > 0]);
       });
     }

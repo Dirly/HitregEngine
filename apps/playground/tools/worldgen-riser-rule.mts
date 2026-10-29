@@ -13,13 +13,22 @@
  *   when a bank runs onto it; a laid shelf keeps its pads, plots and streets (a);
  * - a built riser over tallBank is planned as `tiers` low walls (each <= 2.5 m) with planted `tread` m treads between
  *   them, never one sheer wall.
+ *
+ * DC OR KIT, PER BUILT RISER (2026-10-29, Derek: "i feel like you could do this with a DC much better", "they dont feel
+ * hand made"): a built riser is a DC RISER (core `features.dcRisers`: the ground itself as planes, no seam, a crest laid
+ * in short stepped runs) by default. A KIT retaining wall only where a street or a building stands closer to the top
+ * edge than a DC crest holds a clean walkable edge:
+ * - dcEdge 2: metres behind the top edge a DC crest may step down or drop a stone (`rough.crest` 2, the deepest of the
+ *   crest and the panel joint; measured on the field by `measureDcCrest`, held by test/worldgen-riser-rule.test.ts);
+ * - stand 0.5: what a street kerb or a wall foot needs beyond that edge, so a street or building within dcEdge + stand
+ *   (2.5 m) of the top edge gets the kit wall's straight coping; further back (3 m is the rule's (b) reach) a DC riser.
  */
 import { createWorldField, terraceWallFeatureId, type WorldField, type WorldRecipe } from "@hitreg/core";
 
 type V2 = [number, number];
 type RoadDoc = WorldRecipe["features"]["roads"][number];
 
-export const RISER_RULE = { bankRun: 2, street: 5, tallBank: 2.5, topEdge: 3, keepHalf: 9, tierMax: 2.5, tread: 2 } as const;
+export const RISER_RULE = { bankRun: 2, street: 5, tallBank: 2.5, topEdge: 3, keepHalf: 9, tierMax: 2.5, tread: 2, dcEdge: 2, stand: 0.5 } as const;
 
 export interface RiserMeasure {
   /** `<town>-riser-<k+1>`, k = the shelf's index bottom-up */
@@ -33,9 +42,13 @@ export interface RiserMeasure {
   blocker: string | null;
   /** a street or building within topEdge of the top edge */
   top: string | null;
+  /** metres from the top edge to that street's or building's edge (the closest sample); absent = not measured (kit) */
+  topGap?: number | null;
 }
 export interface RiserVerdict extends RiserMeasure {
   kind: "bank" | "wall";
+  /** a wall's build: a DC riser (the default) or a kit retaining wall (a street/building too close to its top edge) */
+  face?: "dc" | "kit";
   why: string;
   /** a wall: how many low walls it is built as (1 = one wall <= tierMax), with `tread` m planted treads between */
   tiers: number;
@@ -49,7 +62,15 @@ export function riserRule(m: RiserMeasure): RiserVerdict {
   if (m.top) reasons.push(`(b) ${m.top} within ${R.topEdge} m of its top edge`);
   if (m.clear !== null && m.clear < m.need - 1e-9) reasons.push(`(a) the bank needs ${m.need.toFixed(1)} m of run, ${m.clear.toFixed(1)} m clear before ${m.blocker ?? "something"}`);
   const tiers = Math.max(1, Math.ceil(m.height / R.tierMax - 1e-9));
-  if (reasons.length) return { ...m, kind: "wall", tiers, why: `${reasons.join("; ")}${tiers > 1 ? ` -> ${tiers} low walls with ${R.tread} m planted treads` : ""}` };
+  if (reasons.length) {
+    // DC by default; a kit wall only where something stands on the crest a DC riser steps (or the gap was not measured)
+    const need = R.dcEdge + R.stand;
+    const kit = m.top !== null && (m.topGap === undefined || m.topGap === null || m.topGap < need - 1e-9);
+    const how = kit
+      ? `KIT wall: ${m.top} ${m.topGap === undefined || m.topGap === null ? "at" : `${m.topGap.toFixed(1)} m from`} the top edge, inside the ${need} m a DC crest needs to hold a clean walkable edge`
+      : `DC riser${m.top ? ` (${m.top} ${(m.topGap ?? 0).toFixed(1)} m back, clear of the ${need} m crest)` : ""}`;
+    return { ...m, kind: "wall", face: kit ? "kit" : "dc", tiers, why: `${reasons.join("; ")}${tiers > 1 ? ` -> ${tiers} low ${kit ? "walls" : "faces"} with ${R.tread} m planted treads` : ""} -> ${how}` };
+  }
   return { ...m, kind: "bank", tiers: 0, why: `${m.height.toFixed(2)} m drop, its ${m.need.toFixed(1)} m bank (1 : ${R.bankRun}) fits (${m.clear === null ? "nothing in its run" : `${m.clear.toFixed(1)} m clear`}), nothing at its top edge` };
 }
 
@@ -177,12 +198,19 @@ export function measureTownRisers(recipe: WorldRecipe, townId: string, drops: re
     }
     height = r2(height);
     const need = r2(R.bankRun * height);
-    let clear: number | null = null, blocker: string | null = null, top: string | null = null;
+    let clear: number | null = null, blocker: string | null = null, top: string | null = null, topGap: number | null = null;
     for (const { p, n, facing } of samples) {
       const e: V2 = [p[0] + n[0] * sh.radius, p[1] + n[1] * sh.radius];
-      if (!top) for (const r of [...roads, ...bandStreets]) if (Math.abs(r.level - sh.groundY) < 1.5 && distToPolyline(r.points, e[0], e[1]) - r.half <= R.topEdge) { top = `street ${r.id}`; break; }
-      if (!top) for (const pd of pads) if (Math.abs(pd.groundY - sh.groundY) < 0.6 && distToPolyline(pd.points, e[0], e[1]) - pd.radius <= R.topEdge) { top = `building ${pd.id.replace(`${townId}-pad-`, "")}`; break; }
-      if (!top) for (const pl of plots) if (inPoly(pl.poly, e[0] - n[0] * R.topEdge, e[1] - n[1] * R.topEdge)) { top = `plot ${pl.id}`; break; }
+      // what stands at the top edge, and how close (the gap decides DC or kit): the closest sample over the whole edge
+      const near = (gap: number, what: string) => { if (topGap === null || gap < topGap) { topGap = r2(Math.max(0, gap)); top = what; } };
+      for (const r of [...roads, ...bandStreets]) { const g = distToPolyline(r.points, e[0], e[1]) - r.half; if (Math.abs(r.level - sh.groundY) < 1.5 && g <= R.topEdge) near(g, `street ${r.id}`); }
+      for (const pd of pads) { const g = distToPolyline(pd.points, e[0], e[1]) - pd.radius; if (Math.abs(pd.groundY - sh.groundY) < 0.6 && g <= R.topEdge) near(g, `building ${pd.id.replace(`${townId}-pad-`, "")}`); }
+      for (const pl of plots) {
+        if (!inPoly(pl.poly, e[0] - n[0] * R.topEdge, e[1] - n[1] * R.topEdge)) continue;
+        let g = R.topEdge;
+        for (let q = 0; q < R.topEdge; q += 0.25) if (inPoly(pl.poly, e[0] - n[0] * q, e[1] - n[1] * q)) { g = q; break; }
+        near(g, `plot ${pl.id}`);
+      }
       if (!facing) continue;
       const f = k === 0 ? bareField() : null;
       for (let s = 0.5; s <= need + 1e-9; s += 0.5) {
@@ -195,7 +223,29 @@ export function measureTownRisers(recipe: WorldRecipe, townId: string, drops: re
         }
       }
     }
-    out.push({ id: `${townId}-riser-${k + 1}`, k, height, need, clear, blocker, top });
+    out.push({ id: `${townId}-riser-${k + 1}`, k, height, need, clear, blocker, top, topGap });
   }
   return out;
+}
+
+/**
+ * MEASURED on the field: how far behind its top edge a DC riser's crest leaves the shelf (the deepest point along the
+ * edge where the ground stands more than `tol` under `top`, sampled every 0.25 m). What RISER_RULE.dcEdge must cover.
+ */
+export function measureDcCrest(field: WorldField, riser: { points: readonly (readonly [number, number])[]; top: number }, tol = 0.1): number {
+  let worst = 0;
+  for (let i = 0; i + 1 < riser.points.length; i++) {
+    const a = riser.points[i]!, b = riser.points[i + 1]!, len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const d: V2 = [(b[0] - a[0]) / len, (b[1] - a[1]) / len], right: V2 = [-d[1], d[0]];
+    for (let s = 0; s <= len; s += 0.5) {
+      // walk back from the edge onto the shelf until the ground holds at the top
+      let lost = 0;
+      for (let q = 0; q <= 6; q += 0.25) {
+        const x = a[0] + d[0] * s - right[0] * q, z = a[1] + d[1] * s - right[1] * q;
+        if (field.ground(x, z) < riser.top - tol) lost = q + 0.25;
+      }
+      worst = Math.max(worst, lost);
+    }
+  }
+  return worst;
 }

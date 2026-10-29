@@ -55,7 +55,7 @@ describe("findZFights", () => {
     expect(r.clusters).toHaveLength(1);
     expect(r.clusters[0]!.area).toBeGreaterThan(390);
     expect(r.ms).toBeLessThan(15000);
-  });
+  }, 20_000); // its own budget is r.ms < 15 s; the 5 s runner default cut it short under a parallel suite
 });
 
 describe("decalCoverage", () => {

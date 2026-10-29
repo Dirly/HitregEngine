@@ -194,6 +194,12 @@ export function terraceRiserBand(recipe: WorldRecipe): (x: number, z: number) =>
     faces.push({ a: c.origin, b: [c.origin[0] + c.dir[0] * c.s[1], c.origin[1] + c.dir[1] * c.s[1]], normal: [-c.dir[1], c.dir[0]], reach: c.n[1] + 0.5 });
   }
   faces.push(...wallOperatorFaces(recipe));
+  // a DC riser (`features.dcRisers`): its face is the drawn riser, from the top edge (n = 0, low side on the right) to past its
+  // lowest foot (batter, benches and panel offsets: 1.5 m per metre of drop covers them)
+  for (const r of recipe.features.dcRisers ?? []) for (let i = 0; i + 1 < r.points.length; i++) {
+    const a = r.points[i]!, b = r.points[i + 1]!, l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    faces.push({ a, b, normal: [-(b[1] - a[1]) / l, (b[0] - a[0]) / l], reach: (r.top - r.foot) * 1.5 + (r.steps ? r.steps.tread * r.steps.tiers : 0) + 1 });
+  }
   if (!faces.length) return () => false;
   return (x, z) => {
     for (const f of faces) {

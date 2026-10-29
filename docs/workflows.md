@@ -66,6 +66,15 @@ before repeating a style or major asset group.
   buckets), `portals` (veil, cover/--fit, trip, real-client play, loading art). Design bars: `site-standards`,
   `dungeon-standards`, `interior-standards`, `encounter-standards`, `world-standards`; towns: `town-planner`
   (wall, settle, wear, lights). New lessons go into a skill or a check, not `docs/zone-creation-lessons.md`.
+- **Laying out a town (terraces, streets, lots):** design before the cut — `tools/town-design.mts propose` ->
+  a designer agent (`apps/playground/tools/zonegen/briefs/town-design.md`) iterates `town-design check` -> the plan
+  picture is approved -> `worldgen terrace <w> --from-plan <design.json>` -> `town-layout --from-plan <design.json>`.
+  Order and rules: the `town-planner` skill; schema: `town-design schema`.
+- **Where towns, hero places and dungeon entrances go:** propose -> agent pick, judged on SITE NEEDS (the ground a
+  role must have, measured: `apps/playground/tools/site-needs.mts`). Towns: `worldgen towns --propose` -> a fresh siting
+  agent (`zonegen brief-for site-towns`) -> `worldgen towns --pick`. Places: `zonegen sites --role <r> --for <place>
+  --propose` -> `brief-for site-places` -> `zonegen reserve --pick`. Ground no candidate has: recipe `needs` +
+  `worldgen needs` (cliff-face, walled-neck). The `site-finder` skill has the commands and failures.
 - **Small/medium outdoor places** (camp, croft row, shrine, graveyard, landing, work yard, den, watch ruin, halt
   yard, cuttings): `tools/place-build.mts all` from a place archetype; read `docs/place-builder.md`. Hero places below.
 - **Complete POI creation/revision:** use `tools/poi-review/creator/SKILL.md` for
@@ -115,6 +124,10 @@ before repeating a style or major asset group.
   `apps/playground/tools/image-request.mjs gen` drives the Codex CLI headlessly
   and verifies size/alpha before installing the PNG, so an agent gets its own
   art inside one turn. Never run `codex exec` by hand in a project folder.
+- **A place's concept frames** (gate 16 `concept[]`, rubric P5) are painted ON its bare site, never from text:
+  `node node_modules/tsx/dist/cli.mjs tools/zonegen.mts concept <world> --project <p> --zone <z> --poi <id>` (apps/playground; `--town <name>` for a town) renders the site,
+  repaints it through `image-request.mjs gen-set --paint` and prints the fit numbers beside the frames
+  (`concept/<id>-sheet.png`). Rule and check: `tools/poi-review/concept-site.mjs`.
 - **Texturing a mob or a weapon:** read `docs/mob-atlas.md` for a creature
   (the unwrap-to-atlas process, what each recipe setting is for, and the prompt
   rules that make artwork land) and `docs/weapon-atlas.md` for a modular

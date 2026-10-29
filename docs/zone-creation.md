@@ -111,6 +111,13 @@ Before anything is built, so no builder falls back to a kit default (a missing t
   footprints are `features.clearings`. Example installer: `authoring/zonegen/proving/zones/zone-3/look/vegetation-install.mts`.
 - Gate: the zone row `mood` (zone mood set, every place mood applied, the scene runs `zone-mood`). A fresh world's
   scene gets the `zone-mood` entity only if `authoring/zonegen/scene-systems.json` copies it: check before a run.
+- **Concept frames ON THE SITE** (Wristgate 2026-10-29: text-only concepts invented a 50 m cliff on a 40 m gorge): per
+  reserved place and dungeon door, `node node_modules/tsx/dist/cli.mjs tools/zonegen.mts concept <world> --project <p> --zone <z> --poi <id>` (apps/playground; `--town <name>` for a town)
+  renders the BARE site (approach at player height from first sight on its road, a far view from the read distance,
+  a plan crop), has Codex repaint each render with the ground fixed, and prints the fit numbers (face height, apron,
+  read distance, wall overlook for walled towns) beside them in `concept/<id>-sheet.png`. Point the brief's
+  `places[].concept` and the owner's design.json `concept[]` at `concept/<id>-approach.png` / `-far.png`. Gate 16
+  refuses a new job's text-only frame, and a frame whose reservation or ground changed since its render.
 - Creature skins for rares and named creatures are asset-manifest rows (art only); bodies are not this phase's work.
   An oversized one (a giant croc, a hulking troll) is the base body with a bestiary `scale` — no new body needed;
   docs/zone-pipeline.md says what populate sizes with it.

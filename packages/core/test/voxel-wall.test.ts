@@ -524,3 +524,21 @@ describe("a crenellated top seen, not walked (LANDMARKS 2026-10-21: keep and tow
     expect(buildWall({ ...doc, parapet: { ...doc.parapet, walked: false } }, r, { id: "b" }).deckTargets.some((t) => t.name === "walk-mid")).toBe(false);
   });
 });
+
+describe("wall operator: hand-made top", { timeout: 30_000 }, () => {
+  it("steps the top a course in short seeded runs and drops a few coping stones; null keeps the machine top", () => {
+    const base = { points: [[-40, -10], [40, -10]], height: 4, thickness: 1.2, smooth: false, irregularity: { thickness: 0, height: 0, lean: 0 }, ends: { start: "none", end: "none" } };
+    const plain = bake(base).mesh, hand = bake({ ...base, handmade: { share: 0.5, drops: 0.3 } }).mesh, again = bake({ ...base, handmade: { share: 0.5, drops: 0.3 } }).mesh;
+    const tops = (m: typeof plain) => Array.from({ length: 77 }, (_, i) => topAt(m.groups, -38 + i, 0) ?? NaN);
+    expect(tops(hand)).toEqual(tops(again));
+    const p = tops(plain), h = tops(hand);
+    expect(new Set(p.map((y) => y.toFixed(2))).size).toBe(1);
+    // some runs a course up or down (0.4 m), never more
+    expect(h.some((y, i) => Math.abs(y - p[i]!) > 0.35)).toBe(true);
+    expect(h.every((y, i) => Math.abs(y - p[i]!) < 0.41 + 0.31)).toBe(true);
+    // the longest flat run of the top is short
+    let run = 0, best = 0;
+    for (let i = 1; i < h.length; i++) { run = Math.abs(h[i]! - h[i - 1]!) < 0.01 ? run + 1 : 0; best = Math.max(best, run); }
+    expect(best).toBeLessThan(20);
+  });
+});

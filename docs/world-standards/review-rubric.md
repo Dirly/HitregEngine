@@ -38,8 +38,8 @@ against. The reviewer answers from the frames, reading the design text only to c
   particular payoff. Generic pests or a commodity chore alone do not establish that adventure.
   Fine-but-forgettable is a fault, even when layout and quest mechanics pass.
 - P5 Finished to the bar: the finished area (at the final review, every area) stands beside the reference frames the
-  design names at the same craft (prop choice, wear, light) and beside its concept frame (drawn from the premise before
-  the build) with the same composition and set pieces. Not as crafted, or not the place the concept shows, is a fault.
+  design names at the same craft (prop choice, wear, light) and beside its concept frame (painted on the bare site before
+  the build, `zonegen concept`; open its `concept/<id>-sheet.png` fit numbers too) with the same composition and set pieces. Not as crafted, or not the place the concept shows, is a fault.
 - P6 Made of the world (owner ruling 2026-10-23): at least 60% of the props and pieces in the frames are the catalogue's
   reusable props and kits — tents, huts, lean-tos, racks, carts, boats, barrels, hurdles, bone piles, a kin's dwellings
   — placed to the story; props custom to this place are the few that carry the one thing the story cannot say

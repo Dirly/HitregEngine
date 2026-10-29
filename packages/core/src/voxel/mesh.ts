@@ -53,13 +53,15 @@ export type VoxelMesher = "mc" | "dc" | "nets";
 /** A mesher, or `"auto"`: per cell, DC where planar cliffs reach it (plus `planarCliffs.dcMargin`), MC elsewhere. */
 export type VoxelMesherChoice = VoxelMesher | "auto";
 
+/** Metres beyond a DC riser's influence box the auto mesher still builds with DC (the MC/DC border on smooth ground). */
+export const DC_RISER_MARGIN = 4;
 const autoCache = new WeakMap<WorldField, Map<string, VoxelMesher>>();
 /**
  * The mesher one cell is built with. `"auto"` is a pure function of the
  * world and the cell (never of the LOD or the host), so the server, the
  * client, the HLOD bake and every tool choose alike: dual contouring where a
- * planar-cliff mask lies within the cell plus `dcMargin` metres, marching
- * cubes elsewhere. The margin is what keeps every MC/DC border on smooth
+ * planar-cliff mask lies within the cell plus `dcMargin` metres, or a DC riser
+ * (`features.dcRisers`) reaches it plus DC_RISER_MARGIN, marching cubes elsewhere. The margin is what keeps every MC/DC border on smooth
  * ground (measured: a border inside the cliff band opens holes; on smooth
  * ground the two meshers meet within a skirt). A world without
  * `terrain.planarCliffs` is MC everywhere.
@@ -67,14 +69,17 @@ const autoCache = new WeakMap<WorldField, Map<string, VoxelMesher>>();
 export function resolveCellMesher(field: WorldField, cx: number, cz: number, choice: VoxelMesherChoice | undefined): VoxelMesher {
   if (choice !== "auto") return choice ?? "mc";
   const pc = field.recipe.terrain.planarCliffs;
-  if (!pc) return "mc";
+  const risers = (field.recipe.features.dcRisers?.length ?? 0) > 0;
+  if (!pc && !risers) return "mc";
   let cache = autoCache.get(field);
   if (!cache) autoCache.set(field, (cache = new Map()));
   const key = cx + "," + cz;
   let m = cache.get(key);
   if (m === undefined) {
-    const S = field.recipe.cellSize, g = pc.dcMargin;
-    m = field.planarMaskIn(cx * S - g, cz * S - g, (cx + 1) * S + g, (cz + 1) * S + g) ? "dc" : "mc";
+    const S = field.recipe.cellSize, g = pc?.dcMargin ?? 0;
+    const x0 = cx * S, z0 = cz * S, x1 = x0 + S, z1 = z0 + S;
+    // a DC riser's cells too: its whole influence (band + feather) plus DC_RISER_MARGIN, so the MC/DC border is on smooth ground
+    m = (pc && field.planarMaskIn(x0 - g, z0 - g, x1 + g, z1 + g)) || (risers && field.dcRiserIn(x0, z0, x1, z1, DC_RISER_MARGIN)) ? "dc" : "mc";
     if (cache.size > 100000) cache.clear();
     cache.set(key, m);
   }

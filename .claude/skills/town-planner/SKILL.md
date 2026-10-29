@@ -11,7 +11,27 @@ For engine installation, also read [the shared town-baking policy](../../../docs
 Plan exterior shells and independent room/floor visibility units before export;
 keep interactive entities separate and retain the editable town plan.
 
-## Order
+**Risers and town walls must read hand-made:** a built riser is a DC riser unless a street or building stands within 2.5 m of its top edge (then a kit wall, whose copings vary at every wear level); town walls (wall operator) pass `handmade: {}`. `npx tsx tools/handmade-check.mts <world.json>` fails a top flat for 12 m or a one-tile face.
+
+## Order: site -> design -> approve -> cut -> build
+The ground is cut TO THE DESIGN, never the other way round (2026-10-29: Saltharrow's lots were squeezed onto shelves
+cut from a radius and read as rows). From apps/playground:
+- **Site**: the town is sited by the siting step (`worldgen towns --propose` -> agent pick, site needs).
+- **Design**: a fresh designer agent (`tools/zonegen/briefs/town-design.md`) runs `npx tsx tools/town-design.mts
+  propose --project <p> --town <id> --name <stem> --world <w>`, reshapes `authoring/towns/<stem>-design.json`
+  (platform polygons at levels, streets, squares, stairs/ramps, every building at a kit-proven size facing its street,
+  the landmark) and iterates `town-design check` to `TOWN DESIGN <stem>: ok` (fit, doors, reach <= 12 % ramps / 50 %
+  stairs, cut/fill <= 6 m, the per-riser rule, landmark sightline, square at the gate or harbour, not rows, kit-fit).
+- **Approve**: the coordinator or Derek opens `authoring/towns/survey/<stem>-design.png` (+ the concept on the site)
+  and sets `status: "approved"` + `approval`. A draft is never cut.
+- **Cut**: `npx tsx tools/worldgen.mts terrace <w> --project <p> --from-plan authoring/towns/<stem>-design.json` (one
+  masked patch, banks 1 : 2, kit walls / stepped walls with 4.5 m treads, stairs and ramps; prints each wall's gates
+  and the level share of every platform; writes an undo inverse); `town-design render --built` redraws on the cut.
+- **Lots**: `npx tsx tools/town-layout.mts --project <p> --from-plan <file>`: exactly as designed, no solver; a lot off
+  its level means the cut is wrong, never move the lot. Then build (below) and install.
+The old radius / program-band path (`worldgen terrace` without `--from-plan`) is only the designer's starting draft.
+
+### Program and requests
 1. **Program**: list what the town needs by its story and size: a bank, guilds (fighters, mages, merchants), a market,
    a chapel, taverns and inns, workshops, houses. If the town has an NPC story (`town-npcs`), the buildings its residents
    work in come first.

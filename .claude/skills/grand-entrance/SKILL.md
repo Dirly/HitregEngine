@@ -10,8 +10,11 @@ One owner, about 1% of the week's target. Pair with `site-standards` (the site),
 "Landmark stamp" and "Built landmarks".
 
 ## 1. Concept first
-- Generate 1-2 concept frames before any geometry (`node tools/image-request.mjs gen`, docs/image-generation.md,
-  `--ref` the zone's concept set): one far frame (silhouette over its land), one at the door.
+- Paint the concept frames ON THE SITE before any geometry: `node node_modules/tsx/dist/cli.mjs tools/zonegen.mts concept <world> --project <p> --zone <z> --poi <id>` (apps/playground)
+  renders the bare site (approach at player height, far view from >= 300 m), Codex repaints each with the ground fixed,
+  and the sheet prints the face height under the door, the apron and the read distance. A front taller than the
+  measured face does not fit: move the site (`zonegen sites` needs) rather than paint a taller cliff. Text-only
+  frames are refused by gate 16 (Wristgate 2026-10-29).
 - Judge every later picture against these frames. Name them in the report.
 
 ## 2. Size

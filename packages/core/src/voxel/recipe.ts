@@ -5,6 +5,7 @@ import { regionSchema } from "./regions.js";
 import { clearingSchema } from "./vegetation.js";
 import { NATURAL_SURFACE_ROLES } from "./roles.js";
 import { terraceWallSchema } from "./terrace-walls.js";
+import { dcRiserSchema } from "./dc-risers.js";
 import { bridgeSpanSchema } from "./bridge-spans.js";
 import { planarCliffsSchema } from "./planar-cliffs.js";
 import { seaCliffsSchema } from "./sea-cliffs.js";
@@ -511,9 +512,11 @@ export const terraceSchema = z.object({
     ),
   riser: z
     .object({
-      kind: z.enum(["bank", "wall"]).describe("`bank` = a graded earth bank (the shelf carves its own falloff at 1 : 2) with ground cover; `wall` = a kit retaining wall (`features.terraceWalls` `<town>-riser-<n>`)."),
+      kind: z.enum(["bank", "wall"]).describe("`bank` = a graded earth bank (the shelf carves its own falloff at 1 : 2) with ground cover; `wall` = a built face, made as `face` says."),
+      face: z.enum(["dc", "kit"]).optional().describe("A `wall`'s build: `dc` = planar DC terrain (`features.dcRisers` `<town>-riser-<n>`; the default built face: no seam, hand-made crest); `kit` = a kit retaining wall (`features.terraceWalls` `<town>-riser-<n>`), only where a street or building stands closer to the top edge than a DC crest holds a clean walkable edge (RISER_RULE.dcEdge, measured). Absent = kit (written before the DC riser)."),
       height: z.number().describe("The riser's drop (m): to the shelf below, or for the lowest shelf to the natural ground beyond its downhill edge."),
       why: z.string().describe("The rule's reason, as `worldgen terrace` printed it."),
+      tiers: z.number().int().min(2).max(4).optional().describe("A wall built STEPPED: this many low walls (each <= 2.5 m) with 2 m planted treads between them (`<town>-riser<n>-step<j>` below the top one). Absent = one wall."),
     })
     .optional()
     .describe(
@@ -561,6 +564,54 @@ export const heightPatchSchema = z.object({
 });
 export type HeightPatchDoc = z.infer<typeof heightPatchSchema>;
 
+/**
+ * The ROLE a town was sited for. What ground each role needs (a walled town: cliff flanks or a neck to wall and no
+ * ground overlooking the enclosure; a harbour town: the coastal rule; a capital: a crossroads...) is data in
+ * apps/playground/tools/site-needs.mts, measured by `worldgen towns --propose` and the `towns` status row.
+ */
+export const TOWN_SITE_ROLES = ["town", "capital", "walled-town", "harbour-town", "hill-town", "crossroads-town"] as const;
+
+/**
+ * GROUND NEEDS: ground the world stages are asked to MAKE because no site has it (2026-10-29: the Wristgate's 52 m
+ * carved front went on a 40 m gorge; Saltharrow's wall had no defensible line). Written by the coordinator after
+ * `worldgen towns --propose` / `zonegen sites --propose` reported a shortfall; solved by `worldgen needs <world>`.
+ */
+export const groundNeedSchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "lower-case letters, digits and dashes").describe("Need id; the generated height patch is `need-<id>`."),
+  kind: z
+    .enum(["cliff-face", "walled-neck"])
+    .describe(
+      "cliff-face: a rock face at least `minHeight` m from foot to top, `width` m long, with a flat apron `apron` m deep at its foot " +
+        "(a grand dungeon entrance carved into it). walled-neck: a town pad of `radius` m whose flanks fall at least `flankDrop` m " +
+        "within 30 m of the pad edge on every side except one neck `neck` m wide (the one short wall), with no ground within 60 m " +
+        "higher than the wall top.",
+    ),
+  for: z.string().default("").describe("The place, location, town or role it is asked for (`wristgate`, `town-2`, `walled-town`)."),
+  near: z
+    .union([z.tuple([z.number().finite(), z.number().finite()]), z.string().min(1)])
+    .describe("Where to look: world [x, z], or \"<zone-id> <side>\" with side north/south/east/west/ne/nw/se/sw/centre (\"zone-1 west\")."),
+  within: z.number().positive().default(400).describe("Metres round `near` (or into the zone side) the generator may choose the spot in."),
+  minHeight: z.number().positive().default(55).describe("cliff-face: metres from the face's foot to its top. A grand entrance asks 1.1 x its carved front's height."),
+  width: z.number().positive().default(90).describe("cliff-face: metres of face along its foot."),
+  apron: z.number().positive().default(40).describe("cliff-face: metres of level apron kept in front of the foot (the plaza and stair)."),
+  radius: z.number().positive().default(45).describe("walled-neck: the town pad radius, m."),
+  neck: z.number().positive().default(60).describe("walled-neck: metres of wall across the one way in."),
+  flankDrop: z.number().positive().default(12).describe("walled-neck: metres the ground falls away on every other side."),
+  faces: z.number().optional().describe("Compass bearing (0 = north/-Z, 90 = east/+X) the face's front or the neck looks toward; omitted = the open/downhill side."),
+  solved: z
+    .object({
+      at: z.tuple([z.number(), z.number()]).describe("cliff-face: the foot's centre; walled-neck: the pad centre."),
+      faces: z.number().describe("Bearing the front / neck looks toward."),
+      height: z.number().describe("cliff-face: face height made; walled-neck: the pad's top Y."),
+      patch: z.string().describe("The height patch id written (`need-<id>`)."),
+      raised: z.number().describe("Most metres the patch lifts the ground."),
+      ran: z.string().describe("ISO time it was solved."),
+    })
+    .optional()
+    .describe("Written by `worldgen needs`; never hand-edited. Re-running replaces the patch."),
+});
+export type GroundNeedDoc = z.infer<typeof groundNeedSchema>;
+
 export const townSchema = z.object({
   id: z.string().default("town"),
   excludeScatter: z.boolean().optional().describe("When omitted or true, exclude scatter and ground cover across the whole town pad. Set false for landscaped towns whose roads and building foundations provide local clearances."),
@@ -598,6 +649,15 @@ export const townSchema = z.object({
         "`towns` refuses a coastal town it cannot site that way and prints why; the `towns` status row and `worldgen gates` " +
         "fail a coastal town above the limit, off the shore, on the wrong coast or with a seaward gate. Set by " +
         "`worldgen towns --coastal <ids>`.",
+    ),
+  siteRole: z
+    .enum(TOWN_SITE_ROLES)
+    .optional()
+    .describe(
+      "The role this town was sited for (`worldgen towns --pick`). Its ground needs (apps/playground/tools/site-needs.mts: " +
+        "walled-town = flanks or a neck to wall + no overlooking ground; harbour-town = the coastal rule; capital / crossroads-town = " +
+        "open ways in; hill-town = standing over its surroundings; every role a pad terrace can step) are measured by the `towns` " +
+        "status row, which fails a town whose ground no longer meets them.",
     ),
   center: z.tuple([z.number(), z.number()]),
   radius: z.number().positive().default(45),
@@ -2460,6 +2520,14 @@ export const worldRecipeSchema = z.object({
         "it (unknown biome/surface names, missing textures, realized density per biome).",
     ),
 
+  needs: z
+    .array(groundNeedSchema)
+    .optional()
+    .describe(
+      "GROUND NEEDS the world stages must make (a cliff face for a grand entrance, a walled-town neck) where no site has them; " +
+        "`worldgen needs <world>` solves each into a `need-<id>` height patch and stamps `solved`; the `needs` status row fails " +
+        "an unsolved one or one whose ground no longer measures. Omitted = none.",
+    ),
   pipeline: z
     .record(z.string(), z.string())
     .default({})
@@ -2594,6 +2662,15 @@ export const worldRecipeSchema = z.object({
             "fits each to the ground and writes its `solved` pieces plus the derived `tw-<id>*` height patch, passages and " +
             "clearing; `--refit` re-solves them after the terrain changes. `worldgen terrace` writes the `<town>-riser-*` ones " +
             "where a town shelf's riser rule says wall (`terraceSchema.riser`).",
+        ),
+      dcRisers: z
+        .array(dcRiserSchema)
+        .optional()
+        .describe(
+          "Terrace risers built as PLANAR DC TERRAIN (core dc-risers.ts): a top-edge polyline, shelf and foot levels, batter, optional " +
+            "benches with planted treads, hand-made roughness and face paint. The field owns the shelf, face and foot as one density " +
+            "(no kit seam; render, physics and placement read the same surface) and the auto mesher builds those cells with DC. " +
+            "`worldgen terrace` writes the `<town>-riser-*` ones where the riser rule builds a wall with `face: dc` (`terraceSchema.riser`).",
         ),
       floaterClears: z
         .array(

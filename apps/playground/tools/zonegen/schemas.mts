@@ -21,6 +21,7 @@
  */
 import { z } from "zod";
 import { tierSummary } from "../../../../tools/poi-review/size-tiers.mjs";
+import { needRulingSchema, siteNeedOverridesSchema, siteRoleSchema } from "../site-needs.mts";
 
 const id = z.string().min(1).regex(/^[a-z0-9][a-z0-9-]*$/, "lower-case letters, digits and dashes");
 const xz = z.tuple([z.number().finite(), z.number().finite()]);
@@ -272,6 +273,10 @@ export const placeSchema = z.object({
     })
     .optional()
     .describe("The GROUND this place was chosen from, picked from `zonegen sites` before the place was written: places come from the land and the player's path, not from text. Reserve checks the reservation stands on it."),
+  archetype: siteRoleSchema
+    .optional()
+    .describe("What the ground must carry (tools/site-needs.mts SITE_NEEDS): `zonegen sites --role` scores candidates against it and `reserve` FAILS a reservation whose ground misses a need (unless the reservation carries a dated `needRulings` entry). A location of kind dungeon-entrance is held to grand-entrance (this place's dungeon entrance \"landmark\") or dungeon-door (\"hidden\") without it."),
+  siteNeeds: siteNeedOverridesSchema.optional().describe("Overrides of the archetype's needs for this place: the Wristgate's 52 m front is { \"rock-face\": { frontHeight: 52 } }."),
 });
 export type Place = z.infer<typeof placeSchema>;
 
@@ -573,6 +578,7 @@ export const reservationSchema = z.object({
     .describe("Further ways in, beyond `approach`. Each must actually reach the reservation."),
   entrance: z.object({ position: z.tuple([z.number(), z.number(), z.number()]), yaw: z.number().default(0) }).optional(),
   interior: z.enum(["none", "embedded", "instanced"]).default("none").describe("embedded reserves the underground volume too; instanced only needs the entrance."),
+  needRulings: z.array(needRulingSchema).default([]).describe("Dated coordinator rulings excepting a site need this reservation's ground misses ({ need: \"rock-face\", ruling: \"2026-10-29 ...\" }); reserve fails every other unmet need."),
 });
 export type Reservation = z.infer<typeof reservationSchema>;
 

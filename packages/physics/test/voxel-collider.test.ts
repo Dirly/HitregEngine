@@ -221,4 +221,25 @@ describe("voxel terrain colliders", () => {
     expect(sim.raycast([16, 1600, 16], [0, -1, 0], 400)).toBeNull();
     sim.free();
   });
+
+  it("collides with a DC riser exactly where it is drawn and where placement reads it (shelf, face, foot)", () => {
+    const id = "dc-riser-world", base = recipe, C = base.cellSize;
+    const plain = createWorldField(base);
+    const x = 2 * C + C / 2, z = 2 * C + C / 2, h = Math.round(plain.height(x, z));
+    const riserRecipe = worldRecipeSchema.parse({ ...base, features: { ...base.features, dcRisers: [{ id: "r", points: [[x - 14, z], [x + 14, z]], top: h + 3, foot: h - 3 }] } });
+    const f = registerVoxelField(id, riserRecipe);
+    const doc: SceneDoc = { version: 1, name: id, entities: {} };
+    for (let cz = 1; cz <= 3; cz++) for (let cx = 1; cx <= 3; cx++) {
+      const chunk = voxelChunkDoc(f, id, cx, cz, { scatter: false, mesher: "auto" });
+      Object.assign(doc.entities, chunkToSceneDoc(id, cx, cz, C, chunk).doc.entities);
+    }
+    const sim = new PhysicsSim(doc, [0, -9.81, 0]);
+    try {
+      for (const [dx, dz] of [[0, -1.5], [5, -3], [0, 0.4], [-4, 1.8], [3, 3]] as const) {
+        const hit = sim.raycast([x + dx, h + 40, z + dz], [0, -1, 0], 100);
+        expect(hit).not.toBeNull();
+        expect(Math.abs(hit!.point[1] - f.ground(x + dx, z + dz))).toBeLessThan(0.4);
+      }
+    } finally { sim.free(); }
+  });
 });

@@ -240,7 +240,7 @@ describe("graveyards: headstones in rows filling the yard", () => {
     // not a clump at the centre
     expect(ps.filter((p) => Math.hypot(p.position[0], p.position[2]) < 2).length).toBeLessThan(5);
     expect(ms).toBeLessThan(15000);
-  });
+  }, 30_000); // a full settlement dress: ~1.5 s alone, past the 5 s default under a parallel suite
 
   it("keeps the graves inside a walled yard: none on the ground between the wall and the site's rim", () => {
     const map = buildSiteSocketMap(

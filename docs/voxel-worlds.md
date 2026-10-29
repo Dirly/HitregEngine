@@ -3116,6 +3116,41 @@ What the fit has to get right, all found by measuring:
   and the stage logs the gate that failed. The stage ends with every remaining wall passing. Then run
   `worldgen paths`, `terrace-place --refit --all` and `--check --all` (paths cut the hill the walls sit in).
 
+### DC risers: the riser as terrain, not a panel against it
+
+Added 2026-10-29 (Derek: "those retaining walls just dont feel good... i feel like you could do this with a DC much
+better", "they dont feel hand made"). `features.dcRisers` (core `dc-risers.ts`, fields in the spec) is a terrace riser
+built AS THE GROUND: a top-edge polyline (shelf on the left), `top` / `foot`, `batter`, optional `steps` (benches with
+planted treads), hand-made `rough` and face `surfaces`. What holds it together:
+
+- **One density, three consumers.** Within `back` m behind the edge and `apron` m past the foot the riser's planes ARE the
+  density; over `feather` m (and past the polyline's ends) it blends back into the heightfield. The weight is a function of
+  (x, z) only, so `height()` is the same blend of the riser's exact column top and the heightfield, `ground()` /
+  `surfaceCast` march it, `planarNear` and `carveSpan` report it (scatter goes through `editedGround`), and the band is
+  calm (no overhang noise). Render, physics and placement agree (core `voxel-dc-risers.test.ts`, physics
+  `voxel-collider.test.ts`: raycasts land on `ground()` within 0.4 m on shelf, face and foot).
+- **The mesher.** `mesher: "auto"` builds every cell the riser's influence box reaches (+ `DC_RISER_MARGIN` 4 m) with
+  DC; sampleBlock hands it exact Hermite data on the riser's samples (the blend over the bilinear column heights: bit-exact
+  at lattice points), so the crest and foot stay sharp edges on a 2 m lattice. All-DC the block is closed (0 open edges); as
+  shipped the only open edges are the MC/DC cell borders on smooth ground outside the influence, closed by the skirts (0
+  exposed). A block planar cliffs also reach keeps the planar exact data only (riser samples there take the sampled path).
+- **Hand-made, seeded per riser.** Panels (one plane each, `rough.panel` ~5 m, standing proud by up to `depth`, leaning by
+  `lean`, a planar V `joint` between), a crest laid in `rough.run` 4-10 m runs, `stepShare` of them a course or two
+  down, `dropShare` with a dropped stone; a run never carries one level past ~10 m. Keep every feature >= 1 voxel wide;
+  offsets may be any size.
+- **Painted, not splatted.** `surfaces.face / foot / top` take the face's weight (vertex steepness x blend): the riser tiles
+  in world-kit `textures/risers` (rubble body, damp mossy foot band, weathered crest band, image-request `riser-rubble*`,
+  256 px over 6.4 m = 40 texels/m) are registered as palette surfaces like zone tiles. Without them the face is the zone's
+  cliff splat and `handmade-check` fails it (one tile).
+- **The rule.** `tools/worldgen-riser-rule.mts`: a built riser (rule (a)/(b)/(c)) is `face: "dc"` by default; `"kit"` only
+  where a street, building or plot stands within `dcEdge + stand` (2 + 0.5 m) of the top edge, the crest a DC riser steps
+  (`measureDcCrest` measures it on the field; the test holds dcEdge to it). `worldgen terrace` writes `<town>-riser-<n>`
+  as a dcRiser (the shelf keeps carving its 1 : 2 bank, the riser owns it) and prints the choice and why; `--evaluate` says
+  what is built. `worldgen lips` exempts the riser band.
+- **Gate:** `npx tsx tools/handmade-check.mts <world.json>` fails a flat top over 12 m (kit copings, DC crests, wall-operator
+  town walls without `handmade`) and a one-tile face. The kit draws patched / raised copings at every wear level (raised in
+  1-3 module runs); the wall operator's `handmade: {}` steps the top a course in short runs and drops a few coping stones.
+
 ### A capital per continent, and towns that are not all the same town
 
 Added 2026-09-19, second pass, from walking the first rebuild:

@@ -2,6 +2,8 @@
  * zonegen brief-for <stage> <world> --project <p> [--zone <id>] — print an agent stage's brief with paths filled in.
  *
  *   stages: cast, zone-brief, zone-bestiary, town, quests, reserve   (templates: tools/zonegen/briefs/<stage>.md)
+ *           site-towns (one fresh Opus picks where the towns go from `worldgen towns --propose`; no --zone)
+ *           site-places --role <r> [--for <place>] (the zone master picks a POI / dungeon entrance site from `zonegen sites --propose`)
  *           dress-building --town <name> --building <id> [--map <id>]  (one fresh agent furnishes one building)
  *           dress-site --poi <id> --area <area id>  (one fresh Sonnet dresses one outdoor area of a place: tools/site-sockets.mts maps)
  *
@@ -36,7 +38,7 @@ function questObjectsFor(projectDir: string, world: string, location: string): s
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const briefsDir = path.join(here, "..", "briefs");
-const STAGES = ["cast", "zone-brief", "zone-bestiary", "town", "quests", "reserve", "dress-building", "dress-site"];
+const STAGES = ["cast", "site-towns", "site-places", "zone-brief", "zone-bestiary", "town", "quests", "reserve", "dress-building", "dress-site"];
 /** Stages that work on one building of one town rather than on a zone: `--town <name> --building <id> [--map <socket map id>]`. */
 const BUILDING_STAGES = ["dress-building"];
 
@@ -105,7 +107,7 @@ export async function run(ctx: Ctx): Promise<number> {
     console.error("brief-for dress-site: give --poi <id> --area <area id> (maps from tools/site-sockets.mts)");
     return 2;
   }
-  if (stage !== "cast" && stage !== "dress-site" && !BUILDING_STAGES.includes(stage) && !zone) {
+  if (stage !== "cast" && stage !== "site-towns" && stage !== "dress-site" && !BUILDING_STAGES.includes(stage) && !zone) {
     console.error(`brief-for ${stage}: give --zone <id>`);
     return 2;
   }
@@ -143,6 +145,11 @@ export async function run(ctx: Ctx): Promise<number> {
     reservations: zone ? r(p.reservations(zone)) : "",
     zoneDir: zone ? r(p.zoneDir(zone)) : "",
     townPlans,
+    siting: `projects/${ctx.project}/authoring/siting/${world}`,
+    siteRole: ctx.opt("role", "<role>"),
+    siteFor: ctx.opt("for"),
+    siteForFlag: ctx.opt("for") ? ` --for ${ctx.opt("for")}` : "",
+    siteFile: `${zone}-${ctx.opt("role", "<role>")}${ctx.opt("for") ? `-${ctx.opt("for")}` : ""}`,
     weather: blockFields("weather"),
     clock: blockFields("clock"),
     town: ctx.opt("town"),

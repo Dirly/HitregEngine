@@ -7,15 +7,43 @@ import fs from "node:fs";
  * 2026-10-03, a large place is 300-600 m): `under-tier` refuses it. The tier is the brief place's size when the
  * location IS a place, else the location's own.
  *
+ * SITE NEEDS (tools/site-needs.mts): a reservation whose location has a site role — its brief place's `archetype`, or
+ * a dungeon-entrance location (grand-entrance when its place's dungeon entrance is "landmark", else dungeon-door) — is
+ * measured on the natural ground at its entrance (else its centre); every unmet need FAILS (`site-need`) unless the
+ * reservation's `needRulings` carries a dated ruling for it. --pick <file> applies the zone master's choice from
+ * `zonegen sites --propose` ({ places: [{ location, candidate, why, rulings?, radius?, approach? }] }): re-measured,
+ * refused when it fails a need, else the reservation is centred there (its entrance at the face foot, facing the front)
+ * and the brief place's `site` recorded.
+ *
  * Plan-level geometry from the recipe only (no world field): inside the zone, clear of towns, roads, rivers and each
  * other, on a site of a fitting kind, reached from something that exists. Whether a walking body can actually get
  * there is NOT proven here: that is the POI owner's traversal gate (tools/poi-review), run on the real ground.
  */
 import { exists, finish, load, loadRecipe, readJson, writeJson, type Ctx, type Finding } from "../lib.mts";
-import { questGraphSchema, reservationsSchema, zoneBriefSchema } from "../schemas.mts";
+import { questGraphSchema, reservationSchema, reservationsSchema, zoneBriefSchema } from "../schemas.mts";
 import { distToPolyline, err, inZone, requireZone, warn } from "./_shared.mts";
 import { hostileOnMainRoads, travelRoads, type Content } from "./_site-finder.mts";
 import { reservationTierFault, tierFor } from "../../../../../tools/poi-review/size-tiers.mjs";
+import { z } from "zod";
+import { measureNeeds, needRulingSchema, unexcepted, type SiteNeedOverrides, type SiteRole } from "../../site-needs.mts";
+import { naturalField, needGround } from "../../worldgen-site-needs.mts";
+
+/** The zone master's choice file for `reserve --pick`. */
+export const placePickSchema = z.object({
+  from: z.string().optional().describe("The `zonegen sites --propose` file the candidates come from (default: the only <zone>-*.json beside the pick)."),
+  places: z
+    .array(
+      z.object({
+        location: z.string().min(1).describe("Quest-graph location id to reserve there."),
+        candidate: z.string().min(1).describe("Candidate id in the propose file (s07, foot-2)."),
+        why: z.string().min(1).describe("One line: why this ground carries the place (\"62 m face over a 2,000 m2 shelf, seen from the coast road\")."),
+        rulings: z.array(needRulingSchema).default([]),
+        radius: z.number().positive().optional().describe("A NEW reservation's radius (an existing one keeps its own)."),
+        approach: z.string().optional().describe("A NEW reservation's approach (road / town / location id)."),
+      }),
+    )
+    .min(1),
+});
 
 /** Metres an approach (road or river line, town pad, POI, other reservation) may stay from the reservation's edge. */
 const APPROACH_REACH = 150;
@@ -90,6 +118,10 @@ export async function run(ctx: Ctx): Promise<number> {
         writeJson(p.reservations(zone), reservationsSchema.parse(res));
         console.log(`  wrote ${p.reservations(zone)} (${pruned} approach(es) pruned)`);
       }
+    }
+    if (ctx.flag("pick")) {
+      const code = pickPlaces(ctx, res, recipe, locations, parsedBrief?.success ? parsedBrief.data.places : []);
+      if (code !== 0) return code;
     }
     for (const l of g.locations) if (l.kind !== "town" && !res.reservations.some((r) => r.location === l.id)) err(f, "unreserved", `location ${l.id} has no reservation`, l.id);
 
@@ -241,6 +273,33 @@ export async function run(ctx: Ctx): Promise<number> {
     ];
     for (const h of hostileOnMainRoads(content, travelRoads(recipe as never))) if (!h.lookout) err(f, "hostile-on-road", h.message, h.place);
 
+    // ---- site needs: the ground under each reservation that has a role
+    const briefPlaces = new Map((parsedBrief?.success ? parsedBrief.data.places : []).map((x) => [x.id, x] as const));
+    const roleOf = (r: (typeof res.reservations)[number]): { role: SiteRole; overrides: SiteNeedOverrides } | null => {
+      const loc = locations.get(r.location);
+      if (!loc) return null;
+      const own = briefPlaces.get(r.location);
+      const parent = loc.place ? briefPlaces.get(loc.place) : undefined;
+      if (own?.archetype) return { role: own.archetype, overrides: own.siteNeeds ?? {} };
+      if (loc.kind === "dungeon-entrance") return { role: (parent ?? own)?.dungeon?.entrance === "landmark" ? "grand-entrance" : "dungeon-door", overrides: own?.siteNeeds ?? parent?.siteNeeds ?? {} };
+      return null;
+    };
+    const roled = res.reservations.map((r) => [r, roleOf(r)] as const).filter(([, x]) => x !== null);
+    if (roled.length) {
+      const g = needGround(recipe, naturalField(recipe));
+      for (const [r, x] of roled) {
+        const at: [number, number] = r.entrance ? [r.entrance.position[0], r.entrance.position[2]] : r.center;
+        const rep = measureNeeds(g, x!.role, at[0], at[1], r.radius, x!.overrides);
+        for (const m of rep.results) {
+          if (m.met) continue;
+          const ruled = r.needRulings.find((q) => q.need === m.need);
+          if (ruled) warn(f, "site-need-ruled", `${r.location} (${x!.role}) ${m.need} unmet but ruled (${ruled.ruling}): ${m.message}`, r.location);
+          else err(f, "site-need", `${r.location} (${x!.role}) ${m.need} at [${at.map(Math.round).join(", ")}]: ${m.message}. Re-site it (zonegen sites --role ${x!.role} --propose, reserve --pick), ask the generator for the ground (recipe needs + worldgen needs), or a dated needRulings entry`, r.location);
+        }
+        if (rep.met) console.log(`  ${r.location} (${x!.role}): needs met — ${rep.results.map((m) => m.message).join("; ")}`);
+      }
+    }
+
     const list = res.reservations;
     for (let i = 0; i < list.length; i++)
       for (let j = i + 1; j < list.length; j++) {
@@ -262,4 +321,77 @@ export async function run(ctx: Ctx): Promise<number> {
     console.log(`reserve ${zone}: ${list.length} reservations; traversal NOT proven here (POI owner's walk gate)`);
   }
   return finish(ctx, "reserve", [p.reservations(zone), p.quests(zone), p.recipe, p.brief(zone)], f);
+}
+
+/**
+ * reserve --pick <file>: centre each picked location's reservation on its candidate (re-measured: refused when the
+ * ground fails a need of its role and no dated ruling excepts it) and record the pick as the brief place's `site`.
+ * Writes reservations.json (schema-validated) and the brief; nothing when any row is refused.
+ */
+function pickPlaces(
+  ctx: Ctx,
+  res: { zone: string; reservations: import("../schemas.mts").Reservation[] },
+  recipe: ReturnType<typeof loadRecipe>,
+  locations: Map<string, { id: string; kind: string; place: string }>,
+  places: readonly { id: string; dungeon?: { entrance: string }; archetype?: SiteRole; siteNeeds?: SiteNeedOverrides }[],
+): number {
+  const p = ctx.paths;
+  const pickFile = path.resolve(ctx.opt("pick"));
+  if (!exists(pickFile)) { console.error(`reserve --pick: no file ${pickFile}`); return 2; }
+  const parsed = placePickSchema.safeParse(readJson(pickFile));
+  if (!parsed.success) { console.error(`reserve --pick: ${pickFile} is not a choice file:\n${parsed.error.message}`); return 2; }
+  const dir = path.dirname(pickFile);
+  const fromFile = parsed.data.from ? path.resolve(dir, parsed.data.from) : fs.readdirSync(dir).filter((x) => x.startsWith(`${ctx.zone}-`) && x.endsWith(".json") && x !== path.basename(pickFile)).map((x) => path.join(dir, x))[0];
+  if (!fromFile || !exists(fromFile)) { console.error(`reserve --pick: no propose file (give "from"; zonegen sites --role <r> --propose writes it)`); return 2; }
+  const proposal = readJson(fromFile) as { zone: string; role: SiteRole; overrides?: SiteNeedOverrides; radius: number; candidates: { id: string; kind: string; at: [number, number]; y: number; view: number }[] };
+  if (proposal.zone !== ctx.zone) { console.error(`reserve --pick: ${path.basename(fromFile)} is for ${proposal.zone}, not ${ctx.zone}`); return 2; }
+  const g = needGround(recipe, naturalField(recipe));
+  const byPlace = new Map(places.map((x) => [x.id, x] as const));
+  const refused: string[] = [];
+  const plan: { row: (typeof parsed.data.places)[number]; c: (typeof proposal.candidates)[number] }[] = [];
+  for (const row of parsed.data.places) {
+    const c = proposal.candidates.find((x) => x.id === row.candidate);
+    const loc = locations.get(row.location);
+    if (!c) { refused.push(`${row.candidate}: not in ${path.basename(fromFile)}`); continue; }
+    if (!loc) { refused.push(`${row.location}: not a location of the quest graph`); continue; }
+    const place = byPlace.get(row.location) ?? byPlace.get(loc.place);
+    const overrides = { ...(proposal.overrides ?? {}), ...(place?.siteNeeds ?? {}) };
+    const rep = measureNeeds(g, proposal.role, c.at[0], c.at[1], proposal.radius, overrides);
+    const miss = unexcepted(rep, row.rulings);
+    if (miss.length) { refused.push(`${row.location} on ${row.candidate} (${proposal.role}) fails ${miss.map((m) => `${m.need}: ${m.message}`).join("; ")}`); continue; }
+    if (!res.reservations.some((r) => r.location === row.location) && (!row.radius || !row.approach)) { refused.push(`${row.location} has no reservation yet: give radius and approach in its row`); continue; }
+    plan.push({ row, c });
+  }
+  if (refused.length) {
+    console.error(`reserve --pick REFUSED (nothing written):\n  ${refused.join("\n  ")}`);
+    return 1;
+  }
+  const brief = exists(p.brief(ctx.zone)) ? (readJson(p.brief(ctx.zone)) as { places?: { id: string; site?: unknown }[] }) : null;
+  let touched = 0;
+  for (const { row, c } of plan) {
+    let r = res.reservations.find((x) => x.location === row.location);
+    if (!r) {
+      r = reservationSchema.parse({ location: row.location, site: "new", center: c.at, radius: row.radius, approach: { from: row.approach } });
+      res.reservations.push(r);
+    }
+    r.center = [c.at[0], c.at[1]];
+    if (locations.get(row.location)?.kind === "dungeon-entrance") {
+      // the door at the face foot, facing the front (yaw: radians about +Y, 0 = facing +Z)
+      const front = (c.view * Math.PI) / 180;
+      r.entrance = { position: [c.at[0], Math.round(g.height(c.at[0], c.at[1]) * 10) / 10, c.at[1]], yaw: Math.round(Math.atan2(Math.sin(front), -Math.cos(front)) * 1000) / 1000 };
+    }
+    r.needRulings = [...r.needRulings.filter((q) => !row.rulings.some((x) => x.need === q.need)), ...row.rulings];
+    const bp = brief?.places?.find((x) => x.id === row.location);
+    if (bp) touched++;
+    if (bp) bp.site = { candidate: c.id, kind: c.kind === "face-foot" ? "other (rock-face foot)" : c.kind, at: c.at, faces: row.why };
+    console.log(`  ${row.location} <- ${c.id} [${c.at.join(", ")}] (${proposal.role}): ${row.why}`);
+  }
+  writeJson(p.reservations(ctx.zone), reservationsSchema.parse(res));
+  console.log(`  wrote ${p.reservations(ctx.zone)}`);
+  if (brief && touched) {
+    const ok = zoneBriefSchema.safeParse(brief);
+    if (ok.success) { writeJson(p.brief(ctx.zone), brief); console.log(`  wrote ${p.brief(ctx.zone)} (places[].site)`); }
+    else console.warn(`  brief not updated (it does not validate: ${ok.error.issues[0]?.message})`);
+  }
+  return 0;
 }

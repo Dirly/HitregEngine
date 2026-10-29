@@ -458,8 +458,8 @@ export function applyRecipeEdits(recipe: WorldRecipe, edits: readonly RecipeEdit
     inverse.unshift({ edit: "update-feature", kind: edit.kind, id: previous.id, feature: previous });
   });
 
-  // the optional kinds (operators, ribbons, kitWalls) are dropped when empty: no `operators: []` noise, and undoing the first install restores the recipe exactly
-  for (const kind of ["operators", "ribbons", "kitWalls", "landmarks", "groundPaints", "rockSets"] as const) {
+  // the optional kinds (every kind whose recipe schema is `.optional()`) are dropped when empty: no `operators: []` noise, and undoing the first install restores the recipe exactly
+  for (const kind of ["operators", "ribbons", "kitWalls", "landmarks", "groundPaints", "rockSets", "terraceWalls", "clearings"] as const) {
     if (features[kind].length === 0) delete (features as Partial<Record<FeatureKind, AnyFeature[]>>)[kind];
   }
   return {

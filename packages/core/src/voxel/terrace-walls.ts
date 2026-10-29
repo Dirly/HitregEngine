@@ -122,7 +122,14 @@ export const terraceWallSchema = z
     feather: z.number().min(2).optional().describe("Minimum width (m) over which levelled ground blends back into the hill. Default: 1.6 x the height difference, at least 4."),
     wear: z.number().int().min(0).max(3).default(0).describe("0 kept, 1 weathered (drains), 2 run-down (buttresses, worn coping), 3 ruined (gaps in the coping)."),
     seed: z.string().optional(),
-    tags: z.array(z.string()).default([]),
+    tags: z
+      .array(z.string())
+      .default([])
+      .describe(
+        "`town-riser`: a town shelf's riser (`worldgen terrace`). `stepped`: one wall of a stepped riser (its footprint keeps its 2.6 m offsets, no 2 m world snap). " +
+          "`tread`: a stepped riser's upper wall standing on the planted tread of the one below (its foot strip is the tread: `strip` as written, no 4 m minimum; its clearing stops at its pad). " +
+          "`tread-band`: a stepped riser's lower wall, whose pad is a planted tread (its clearing keeps scatter off but lets ground cover grow).",
+      ),
     solved: terraceWallSolvedSchema.optional().describe("Written by `worldgen terrace-place`; never hand-edit. Absent = not fitted yet (nothing is built)."),
   })
   .describe("A terrace held up by retaining walls: pad outline + drop + inserts; solved by `worldgen terrace-place`.");

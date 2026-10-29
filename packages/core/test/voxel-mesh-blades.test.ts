@@ -118,7 +118,7 @@ describe("skirts stay inside the rendered rock on steep faces (pale blades)", ()
     expect(after.skirtExposed).toBe(0);
     expect(after.openEdges).toBe(before.openEdges);
     expect(after.skirtTriangles).toBeGreaterThan(before.skirtTriangles * 0.8);
-  });
+  }, 30_000); // two full DC audits: ~2 s alone, past the 5 s default under a parallel suite
 });
 
 /**

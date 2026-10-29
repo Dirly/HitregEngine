@@ -11,6 +11,9 @@ Decide where every planned location goes on the real ground. After the freeze a 
   how the player arrives at each. A place whose brief entry records `site` is reserved ON that ground (the reserve
   lint refuses a centre outside the radius); name the road the finder found as its approach.
 - `reservationSchema` in `{schemas}`.
+- SITE NEEDS: a location whose brief place has an `archetype`, and every dungeon-entrance location, is measured on the
+  ground it is reserved on (`tools/site-needs.mts`); `reserve` fails `site-need` when the ground cannot carry it. Pick
+  those through `{zonegen} sites {flags} --role <r> --for <place> --propose` and `reserve --pick` (brief `site-places`).
 
 **Write** `{reservations}`: one reservation per non-town location.
 

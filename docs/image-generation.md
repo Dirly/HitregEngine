@@ -83,7 +83,8 @@ folder. Project manifests reference request ids.
   alpha, not white, not a checkerboard" — the flag also makes the tool reject an opaque result.
 - **`--paint` repaints a screenshot.** The one `--ref` is then the COMPOSITION to keep (camera, layout, shapes), not a
   style sample, and the downsample is smooth (it is a painting). `tools/loading-art.mts` uses it for loading screens
-  (docs/hosting.md → "Loading art").
+  (docs/hosting.md → "Loading art"), and `zonegen concept` uses it for a place's concept frames: the bare-site renders
+  are the compositions, so the painting keeps the real ground (tools/zonegen/commands/concept.mts).
 - **Nearest-neighbour on the downsample** is in the shared brief already; it is what keeps pixel art crisp.
 
 ## Skin: the tint contract

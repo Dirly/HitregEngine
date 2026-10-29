@@ -29,6 +29,7 @@
 import type { Vec3 } from "../math.js";
 import { prepareHeightPatch, type PreparedHeightPatch } from "./height-patch.js";
 import type { HermiteSource } from "./dual-contouring.js";
+import { createDcRisers } from "./dc-risers.js";
 import { createPlanarCliffs, createPlanarSetup, planarBlock, planarHermite, planarPoint, type PlanarBlock, type PlanarPoint, type PlanarSetup, type PlanarLipHit, type PlanarFeatureSource } from "./planar-cliffs.js";
 import { createSeaCliffs, type SeaCliffs } from "./sea-cliffs.js";
 import { createButtes, type Buttes } from "./buttes.js";
@@ -782,13 +783,15 @@ export interface WorldField {
    * Always false without planarCliffs. What `voxelWorld.mesher: "auto"` decides a cell's mesher by.
    */
   planarMaskIn(x0: number, z0: number, x1: number, z1: number): boolean;
+  /** Does a DC riser's influence (`features.dcRisers`, + `margin` m) reach the rectangle? The auto mesher builds those cells with DC. */
+  dcRiserIn(x0: number, z0: number, x1: number, z1: number, margin?: number): boolean;
   /**
    * The real top surface where planar cliffs rebuild the ground (treads and walls are not the heightfield),
    * and exactly `height()` everywhere else — so worlds without planarCliffs read the same number as before.
    * What scatter stands props on.
    */
   ground(x: number, z: number): number;
-  /** True where planar cliffs can change the ground at (x, z): there `height()` is not the surface. */
+  /** True where planar cliffs or a DC riser can change the ground at (x, z): there `height()` is not the surface. */
   planarNear(x: number, z: number): boolean;
   /** Steepness (0 flat, 1 vertical; the units of `slope`) of the DENSITY surface at a point on it — a tread is flat here even where the heightfield under it is steep. */
   surfaceSlope(x: number, y: number, z: number): number;
@@ -1673,6 +1676,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const ex = c.origin[0] + c.dir[0] * c.s[1], ez = c.origin[1] + c.dir[1] * c.s[1], reach = c.n[1] + 1;
     calmRects.push([Math.min(c.origin[0], ex) - reach, Math.min(c.origin[1], ez) - reach, Math.max(c.origin[0], ex) + reach, Math.max(c.origin[1], ez) + reach]);
   }
+  // DC risers (`features.dcRisers`): the shelf, face and foot are built ground (calm) and the field's own planes
+  const risers = recipe.features.dcRisers?.length ? createDcRisers(recipe.features.dcRisers, seed) : null;
+  if (risers) for (const b of risers.bounds) calmRects.push([b[0], b[1], b[2], b[3]]);
   const calmBuckets = makeBuckets(calmRects, (r) => [r[0] - CALM_FADE, r[1] - CALM_FADE, r[2] + CALM_FADE, r[3] + CALM_FADE]);
   //  height patches (a wall-ramp stair's cut): built ground wherever the patch pulls the ground (1 - its blend weight),
   // so the noise cannot heave rock through the deck laid on the cut
@@ -3904,6 +3910,19 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return y + (top - y) * wallScratch.b;
   }
 
+  // DC riser face paint: the named surfaces (body, damp foot band, weathered crest band) take the face's weight
+  const riserSurfaces = risers
+    ? recipe.features.dcRisers!.map((r) => ({ face: surfaceIndex(r.surfaces.face ?? ""), foot: surfaceIndex(r.surfaces.foot ?? r.surfaces.face ?? ""), top: surfaceIndex(r.surfaces.top ?? r.surfaces.face ?? "") }))
+    : [];
+  function riserPaint(x: number, y: number, z: number, steep: number, out: Float32Array, offset: number): void {
+    const p = risers!.paint(x, y, z, steep);
+    if (!p) return;
+    const target = riserSurfaces[p.riser]![p.band];
+    if (target < 0) return;
+    const a = Math.min(1, p.amount);
+    for (let i = 0; i < surfaceCount; i++) out[offset + i] = out[offset + i]! * (1 - a) + (i === target ? a : 0);
+  }
+
   function splatAt(x: number, y: number, z: number, normalY: number, out: Float32Array, offset: number): void {
     const steep = seaRock(x, y, z, steepnessFromNormalY(normalY));
     const py = paintY(x, y, z);
@@ -3912,6 +3931,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     memberships(py + heightOffset, temperature, moisture, steep, scratchMembership);
     blendSurface(scratchMembership, steep, out, offset);
     decorate(x, y, z, steep, scratchMembership, out, offset);
+    if (risers) riserPaint(x, y, z, steep, out, offset);
   }
 
   /** Blend the biome tints already resolved into `scratchMembership`. */
@@ -3969,6 +3989,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     memberships(py + heightOffset, temperature, moisture, steep, scratchMembership);
     blendSurface(scratchMembership, steep, out, offset);
     decorate(x, y, z, steep, scratchMembership, out, offset);
+    if (risers) riserPaint(x, y, z, steep, out, offset);
     blendTint(out, offset + surfaceCount);
   }
 
@@ -4188,6 +4209,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       if (y >= lo && y <= hi) d = pp.base(x, y, z);
     }
     if (t.overhang.strength > 0 && ohScale > 0 && Math.abs(d) < overhangReach) d += overhangAt(x, y, z, steep) * ohScale;
+    // a DC riser owns its band: its planes replace (blend over) the ground resolved so far, in sampleBlock's order
+    if (risers) d = risers.blend(x, y, z, d);
     const cave = caveAt(x, y, z, h, steep);
     if (cave > 0) d = Math.max(d, cave);
     if (hasTunnels) {
@@ -4316,6 +4339,10 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const strideZ = nx * ny;
     // Per-column overhang weight, kept for the Hermite source (it interpolates it between columns).
     const ohw = active ? new Float32Array(columns) : null;
+    // DC risers reaching this block: per-sample exact flags (a block planar cliffs also reach keeps the planar exact data only)
+    const riserHere = risers !== null && risers.reaches(origin[0], origin[2], origin[0] + (nx - 1) * step, origin[2] + (nz - 1) * step);
+    const riserActive = riserHere && exact && !active ? new Uint8Array(nx * ny * nz) : null;
+    let riserCount = 0;
     for (let k = 0; k < nz; k++) {
       const wz = origin[2] + k * step;
       for (let i = 0; i < nx; i++) {
@@ -4328,6 +4355,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         const caveMin = caveMinDepth(steep);
         const caveTop = h - caveMin;
         if (ohw) ohw[c] = overhangMask * (pb ? 1 - planar!.spec.overhangSuppress * pb.m[c]! : 1);
+        const riserCol = riserHere && risers!.weight(wx, wz) > 0;
         for (let j = 0; j < ny; j++) {
           const wy = origin[1] + j * step;
           let d: number;
@@ -4341,6 +4369,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
             if (oh > 0 && Math.abs(d) < overhangReach) {
               d += fbm3(overhangSpec, wx, wy, wz, seed) * t.overhang.strength * oh;
             }
+            if (riserCol) d = risers!.blend(wx, wy, wz, d);
             const planarD = d;
             if (caveCorner && wy < caveTop && wy > t.caves.floorY) {
               const cave = caveShape(caveLerp(caveCorner, wx, wy, wz), wy, h, caveMin);
@@ -4355,7 +4384,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
             if (terraceCuts.length) d = terraceCutsAt(wx, wy, wz, d);
             if (wy < recipe.minY + 2) d = Math.min(d, wy - (recipe.minY + 2));
             if (d < 0 && clearedAt(wx, wy, wz)) d = voxelSize / 2;
-            if (active && flat && d === planarD) active[i + j * nx + k * strideZ] = 1;
+            if (active && flat && d === planarD && !riserCol) active[i + j * nx + k * strideZ] = 1;
+            if (riserActive && riserCol && d === planarD && !flat && !(overhangMask > 0)) { riserActive[i + j * nx + k * strideZ] = 1; riserCount++; }
           }
           values[i + j * nx + k * strideZ] = d;
         }
@@ -4378,6 +4408,18 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       };
       exact.active = active;
       exact.hermite = planarHermite(value, active, nx, ny, step);
+    }
+    if (riserActive && exact && riserCount > 0) {
+      // the exact function between samples: the riser blend over the bilinear of the block's own column heights
+      // (at a lattice point bit-for-bit the sample: y - h there, then the same blend)
+      const value = (x: number, y: number, z: number): number => {
+        const fx = Math.min(nx - 1, Math.max(0, (x - origin[0]) / step)), fz = Math.min(nz - 1, Math.max(0, (z - origin[2]) / step));
+        const i0 = Math.min(nx - 2, Math.floor(fx)), k0 = Math.min(nz - 2, Math.floor(fz)), tx = fx - i0, tz = fz - k0, c0 = i0 + k0 * nx;
+        const h = (columnHeight[c0]! * (1 - tx) + columnHeight[c0 + 1]! * tx) * (1 - tz) + (columnHeight[c0 + nx]! * (1 - tx) + columnHeight[c0 + nx + 1]! * tx) * tz;
+        return risers!.blend(x, y, z, y - h);
+      };
+      exact.active = riserActive;
+      exact.hermite = planarHermite(value, riserActive, nx, ny, step);
     }
     return values;
   }
@@ -4464,6 +4506,18 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   function surfaceCast(x: number, z: number, fromY?: number, toY?: number): number | null {
     const h = height(x, z);
     // A pure heightfield column has its answer already — no reason to march it
+    if (risers && fromY === undefined && toY === undefined && risers.weight(x, z) > 0) {
+      // a DC riser: march its span (planes: a 0.25 m step, then the linear crossing)
+      const sp = risers.span(x, z, x, z)!, steep = t.overhang.strength > 0 ? slope(x, z) : 0;
+      let prevY = Math.max(sp.max, h + 2), prev = densityAt(x, prevY, z, h, steep);
+      if (prev < 0) return prevY;
+      for (let y = prevY - 0.25; y >= Math.min(sp.min, h - 2); y -= 0.25) {
+        const d = densityAt(x, y, z, h, steep);
+        if (d < 0) return prevY + (y - prevY) * (prev / (prev - d));
+        prevY = y; prev = d;
+      }
+      return null;
+    }
     if (t.overhang.strength <= 0 && !planar && fromY === undefined && toY === undefined) return cutHeight(x, z, h);
     const steep = t.overhang.strength > 0 ? slope(x, z) : 0;
     // Planar cliffs (terrace): treads can open a riser BELOW the heightfield and lips stand above it, so the search
@@ -4537,6 +4591,10 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     for (let bz = bz0; bz <= bz1; bz++) {
       for (let bx = bx0; bx <= bx1; bx++) {
         const cx = bx * BUCKET + 1, cz = bz * BUCKET + 1;
+        if (risers) {
+          const sp = risers.span(Math.max(x0, bx * BUCKET), Math.max(z0, bz * BUCKET), Math.min(x1, (bx + 1) * BUCKET), Math.min(z1, (bz + 1) * BUCKET));
+          if (sp) { min = Math.min(min, sp.min); max = Math.max(max, sp.max); }
+        }
         if (terraceCuts.length) {
           for (const c of bucketAt(cutBuckets, cx, cz) as readonly TerraceCut[]) {
             const [ax0, az0, ax1, az1] = cutBounds(c);
@@ -6554,6 +6612,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   // again against the finished field.
   preparedPatches.length = 0;
   memoReady = true;
+  // public ground: in front of a terrace wall face the wall's foot; over a DC riser its shelf, face and foot
+  const cutGround = terraceCuts.length ? (x: number, z: number) => cutHeight(x, z, height(x, z)) : height;
+  const publicHeight = risers ? (x: number, z: number) => risers.column(x, z, cutGround(x, z)) : cutGround;
 
   return {
     recipe,
@@ -6563,7 +6624,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     surfaceCount,
     worldLimit,
     // public ground: in front of a terrace wall face this is the wall's foot (the berm the mesher keeps is carved)
-    height: terraceCuts.length ? (x: number, z: number) => cutHeight(x, z, height(x, z)) : height,
+    height: publicHeight,
     heightfield: height,
     naturalHeight,
     density,
@@ -6586,7 +6647,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     heightRange,
     surfaceCast,
     planarMaskIn: (x0, z0, x1, z1) => (planar ? planarAt().anyMask(x0, z0, x1, z1) : false),
-    planarNear: (x, z) => (planar && !(globalThis as any).__NOPLANAR ? planarAt().touches(x, z) : false),
+    planarNear: (x, z) => (planar && !(globalThis as any).__NOPLANAR ? planarAt().touches(x, z) : false) || (risers !== null && risers.weight(x, z) > 0),
+    dcRiserIn: (x0, z0, x1, z1, margin) => (risers ? risers.reaches(x0, z0, x1, z1, margin) : false),
     surfaceSlope: (x, y, z) => {
       const n = surfaceNormalAt(x, y, z);
       return Math.sqrt(n[0] * n[0] + n[2] * n[2]);
@@ -6601,12 +6663,12 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       }
       return true;
     },
-    ground: planar
+    ground: planar || risers
       ? (x, z) => {
-          const h = terraceCuts.length ? cutHeight(x, z, height(x, z)) : height(x, z);
-          return planarAt().touches(x, z) ? surfaceCast(x, z) ?? h : h;
+          const h = publicHeight(x, z);
+          return (planar && planarAt().touches(x, z)) || (risers && risers.weight(x, z) > 0) ? surfaceCast(x, z) ?? h : h;
         }
-      : terraceCuts.length ? (x, z) => cutHeight(x, z, height(x, z)) : height,
+      : cutGround,
     carveSpan,
     featureClearance,
     seaCliffs: () => (hasSeaCliffs ? seaOf() : null),

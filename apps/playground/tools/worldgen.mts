@@ -114,9 +114,11 @@ import { measureTownRisers, riserRule } from "./worldgen-riser-rule.mts";
 import { commandTerracePlace, kerbTownRisers, loadTerraceKit, recipeInverse, removeTownTerraceWalls, townTerraceWalls, type TownRiserLink } from "./worldgen-terrace-walls.mts";
 import { commandBridgePlace } from "./worldgen-bridge-spans.mts";
 import { CLIMB_NEEDS_PLACE, PLACE_REACH } from "./zonegen/commands/_site-finder.mts";
+import { commandTerraceFromPlan } from "./worldgen-terrace-from-plan.mts";
 import { PROGRAM_RULE, bandStreet, kerbedBand, loadTownProgram, measureShelfFlat, planProgramShelves, programFitFindings, programLandGate, type TownProgram } from "./worldgen-town-program.mts";
 import { COASTAL_TOWN, TERRACE_DEFAULTS, coastalTownFindings, findCoastalSites, landGate, terraceReach } from "./worldgen-coastal-towns.mts";
 import { commandVegetation } from "./worldgen-vegetation.mts";
+import { commandNeeds, commandTownsPick, commandTownsPropose, needsStageCheck, townNeedsFindings, type SiteNeedsHost } from "./worldgen-site-needs.mts";
 import { commandRoad } from "./worldgen-road.mts";
 import { commandFine, commandOp, commandOpPreview, fineStatusLine, stampGateStage } from "./worldgen-operators.mts";
 import { findAsset } from "./_closure.mjs";
@@ -347,8 +349,19 @@ const HELP = `worldgen — procedural world pipeline
                    town in every world stood on a table top — with QUOTAS for the places worth walking to:
                    --cliff-towns (15%, a face of --cliff-slope 0.7 inside the footprint) and --mountain-towns
                    (12%, over --mountain-height 110 m). "terrace" turns the fall into shelves
+                   SITING IS AN AGENT STEP: --propose [--roles walled-town,harbour-town,capital] [--per-role 6] [--out <dir>]
+                   [--no-renders] [--port 5297] writes authoring/siting/<world>/candidates.json (each candidate scored against
+                   its role's needs, tools/site-needs.mts, met/unmet with numbers; a SHORTFALL names the ground need to ask
+                   for) + plan-<id>.png + far-<id>.png (bare terrain); a fresh siting agent (tools/zonegen/briefs/site-towns.md)
+                   writes { towns: [{ role, candidate, why, town?, tier?, rulings? }] } and --pick <file> applies it (refuses
+                   a candidate failing a need of its role; stamps siteRole + keep)
+  needs  <world>   solve the recipe's needs[] (cliff-face for a grand entrance, walled-neck for a walled town) into need-<id>
+                   height patches [--only <id>] [--check]; the needs status row fails an unsolved or no-longer-met need
   town-pins <world> record which towns stay put (\`keep: true\`) without re-siting anything: --keep <ids|all>,
                    --release <ids|all>; lists every town as pinned (tag) / kept / free
+  terrace <world>  --from-plan <authoring/towns/<name>-design.json>: cut EXACTLY an approved town design (the
+                   designed platforms, 1 : 2 banks, walls / stepped walls, stairs and ramps; town-design skill
+                   order site -> design -> approve -> cut); --unapproved for a lab, --dry-run. Without it:
   terrace <world>  VERTICALITY: read the natural ground under each town and, where there is real fall across
                    it, cut it into contour shelves (terraces) joined by ramps that WIND — an ordinary route
                    search on a 4 m grid at a hard grade cap — or by a STAIR where no ramp fits. Every town
@@ -3225,6 +3238,23 @@ function commandTownPins(): void {
   console.log(`${kept} of ${recipe.features.towns.length} town(s) stay put on the next \`worldgen towns\`${changed ? "" : " (nothing changed)"}`);
 }
 
+/** The host the site-needs commands run under (tools/worldgen-site-needs.mts). */
+function siteNeedsHost(): SiteNeedsHost {
+  return {
+    argv,
+    world: worldName,
+    project,
+    loadRecipe: () => loadRecipe(),
+    writeRecipe,
+    fail,
+    tiers: townTiers(),
+    clearTownSite: (recipe, id) => {
+      recipe.features.roads = recipe.features.roads.filter((r) => !r.id.startsWith(`${id}-ramp-`) && !r.id.startsWith(`${id}-stair-`));
+      removeTownTerraceWalls(recipe, id);
+    },
+  };
+}
+
 function commandTowns(): void {
   const { recipe, file } = loadRecipe();
   const field = createWorldField(recipe);
@@ -3867,6 +3897,8 @@ function fitShelf(
  * character is seeded from the id, so nothing reshuffles.
  */
 function commandTerrace(): void {
+  // a DESIGNED town (tools/town-design-schema.mts) is cut exactly to its plan: tools/worldgen-terrace-from-plan.mts
+  if (stringOption("from-plan", "")) return commandTerraceFromPlan({ argv, project: project || "proving", loadRecipe: () => loadRecipe(), writeRecipe, fail, loadKit: () => loadTerraceKit(project || "proving") }, stringOption("from-plan", ""));
   const { recipe: original, file } = loadRecipe();
   const only = stringOption("town", "");
   if (flag("evaluate")) {
@@ -3875,8 +3907,8 @@ function commandTerrace(): void {
       const walls = new Map((original.features.terraceWalls ?? []).filter((w) => w.owner === t.id).map((w) => [w.id, w]));
       console.log(`  ${t.id}:`);
       for (const v of measureTownRisers(original, t.id).map(riserRule)) {
-        const built = walls.get(v.id);
-        console.log(`    ${v.id}: ${v.kind.toUpperCase()} — ${v.why}; built now: ${built ? `wall ${built.solved?.height ?? built.height ?? "?"} m` : "bank"}${built && v.kind === "bank" ? " (rule says bank)" : !built && v.kind === "wall" ? " (rule says wall)" : ""}`);
+        const built = walls.get(v.id), dcr = (original.features.dcRisers ?? []).find((r) => r.id === v.id);
+        console.log(`    ${v.id}: ${v.kind.toUpperCase()}${v.face ? ` (${v.face})` : ""} — ${v.why}; built now: ${built ? `kit wall ${built.solved?.height ?? built.height ?? "?"} m` : dcr ? `DC riser ${+(dcr.top - dcr.foot).toFixed(2)} m` : "bank"}${(built || dcr) && v.kind === "bank" ? " (rule says bank)" : !built && !dcr && v.kind === "wall" ? " (rule says wall)" : (built && v.face === "dc") || (dcr && v.face === "kit") ? ` (rule says ${v.face})` : ""}`);
       }
     }
     return;
@@ -7334,11 +7366,14 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
     // the coast PLAN: every shoreline segment typed (cliff / beach / cove ...) and the mix gated — tools/worldgen-coast.mts
     { name: "coast", after: ["continents", "relief"], by: "procedural", how: "worldgen coast <world>", check: (r) => coastStageCheck(r) },
     // landform key (image generator draws classes, the tool computes metres) — tools/worldgen-landforms.mts
+    // GROUND NEEDS the coordinator asked for (recipe `needs`: a cliff face for a grand entrance, a walled-town neck), made
+    // as need-<id> height patches before the rivers read the ground — tools/worldgen-site-needs.mts
+    { name: "needs", after: ["continents", "relief", "coast"], by: "procedural", how: "worldgen needs <world>   (asked for by towns --propose / zonegen sites --propose shortfalls)", optional: true, check: (r) => needsStageCheck(r) },
     { name: "landforms", after: ["continents", "relief"], by: "procedural", how: "worldgen landforms apply <world> --key <png>  (after: landforms base, landforms request)", optional: true, check: (r) => landformsStageCheck(r, findRecipeFile(r.name)) },
     { name: "canyons", after: ["continents"], by: "procedural", how: "worldgen canyons <world>", optional: true, check: (r) => has(r.features.canyons.filter((c) => c.id.startsWith("canyon-")).length) },
     {
       name: "rivers",
-      after: ["continents", "coast", "landforms", "canyons"],
+      after: ["continents", "coast", "needs", "landforms", "canyons"],
       by: "procedural",
       how: "worldgen rivers <world> (lakes, depth, catchment and the shortest river default from the land; traces without an authored river)",
       check: (r) => {
@@ -7359,7 +7394,8 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
       by: "procedural",
       how: "worldgen towns <world>   (a coastal town off its shore: worldgen towns <world> --only <id>)",
       // a COASTAL town stands at the shore with a landward gate (tools/worldgen-coastal-towns.mts, 2026-10-28 s1e)
-      check: (r) => has(r.features.towns.length) ?? (r.features.towns.some((t) => t.coastal) ? coastalTownFindings(r, statusField(r)).join("; ") || null : null),
+      // and every town sited for a ROLE (`siteRole`, worldgen towns --pick) still stands on ground that meets its needs
+      check: (r) => has(r.features.towns.length) ?? ((r.features.towns.some((t) => t.coastal) ? coastalTownFindings(r, statusField(r)).join("; ") : "") || townNeedsFindings(r).join("; ") || null),
     },
     {
       name: "terrace",
@@ -10674,7 +10710,14 @@ switch (command) {
     commandRivers();
     break;
   case "towns":
-    commandTowns();
+    // the town-siting step is an AGENT step (tools/worldgen-site-needs.mts): --propose writes the candidates with their
+    // needs scored and bare-terrain renders; a siting agent writes the choice file; --pick applies it
+    if (flag("propose")) await commandTownsPropose(siteNeedsHost());
+    else if (flag("pick")) commandTownsPick(siteNeedsHost());
+    else commandTowns();
+    break;
+  case "needs":
+    commandNeeds(siteNeedsHost());
     break;
   case "town-pins":
     commandTownPins();

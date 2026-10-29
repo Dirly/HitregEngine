@@ -38,12 +38,14 @@ import { spawnSync } from "node:child_process";
 import {
   createRockCapResolver,
   createWorldField,
+  dcRiserSchema,
   measureTerrainLips,
   prepareHeightPatch,
   seatReport,
   terraceWallSchema,
   terraceWallFeatureId,
   worldRecipeSchema,
+  type DcRiserDoc,
   type HeightPatchDoc,
   type PassageDoc,
   type TerraceWallDoc,
@@ -212,14 +214,103 @@ function edgesOf(poly: readonly V2[]): Edge[] {
  * grid (as before); any other outline keeps its vertices, and its wall runs are put on the RUN grid at fit time
  * (lengths on 2 m along each edge, turns on 5 deg: the same rule as plan.mjs).
  */
-export function normaliseFootprint(raw: readonly V2[]): { poly: V2[]; reversed: boolean } {
-  const axis = raw.every((p, i) => { const q = raw[(i + 1) % raw.length]!; return Math.abs(p[0] - q[0]) < 1e-6 || Math.abs(p[1] - q[1]) < 1e-6; });
+export function normaliseFootprint(raw: readonly V2[], snap = true): { poly: V2[]; reversed: boolean } {
+  const axis = snap && raw.every((p, i) => { const q = raw[(i + 1) % raw.length]!; return Math.abs(p[0] - q[0]) < 1e-6 || Math.abs(p[1] - q[1]) < 1e-6; });
   let poly = raw.map(([x, z]) => (axis ? [snapGrid(x), snapGrid(z)] : [r3(x), r3(z)]) as V2);
   poly = poly.filter((p, i) => { const q = poly[(i + 1) % poly.length]!; return Math.hypot(p[0] - q[0], p[1] - q[1]) > 1e-3; });
   if (poly.length < 3) throw new Error("footprint needs at least 3 distinct vertices");
   const reversed = signedArea(poly) > 0;
   if (reversed) poly = [poly[0]!, ...poly.slice(1).reverse()];
   return { poly, reversed };
+}
+
+/** A doc's footprint as the fitter reads it: a STEPPED riser's tiers keep their 2.6 m offsets (no 2 m world snap). */
+const footprintOf = (doc: Pick<TerraceWallDoc, "footprint" | "tags">) => normaliseFootprint(doc.footprint, !doc.tags.includes("stepped"));
+
+// ------------------------------------------------------------------ stepped risers (s1g)
+
+/**
+ * STEPPED RISER (s1g, Derek 2026-10-29: retaining walls "more gradual"): a built riser over RISER_RULE.tierMax is 2-3
+ * low walls with planted treads between them, never one sheer wall. The lowest wall stands where the one wall would
+ * (its foot strip on the shelf below is unchanged); each wall above stands TIER_STEP further into the shelf: the 0.6 m
+ * wall body plus a RISER_RULE.tread m planted tread (a kit stair along the face is 2 m deep, so it fits a tread).
+ * Tier docs carry the tag `stepped` (footprint not snapped to the 2 m world grid) and, above the lowest, `tread`
+ * (the foot strip is the tread: `strip`, no 4 m minimum; the feather gives way at once over the wall below).
+ */
+export const TIER_STEP = RISER_RULE.tread + 0.6;
+
+/**
+ * Split a riser's drop into `tiers` low walls (bottom-up heights summing to `total`), each <= tierMax and on the kit's
+ * 0.4 m courses or a height the kit already has; heights the kit has are preferred (each new height is ~40 built
+ * pieces), then the most even split. One more tier is tried when `tiers` cannot make the sum; null when neither can.
+ */
+export function stepTierHeights(total: number, tiers: number, kitHeights: readonly number[], tierMax: number = RISER_RULE.tierMax): number[] | null {
+  const have = new Set(kitHeights.map((h) => +h.toFixed(3)));
+  const courses = Array.from({ length: Math.floor(tierMax / 0.4 + 1e-9) - 1 }, (_, i) => 0.8 + 0.4 * i);
+  const cand = [...new Set([...kitHeights.filter((h) => h >= 0.8 - 1e-9 && h <= tierMax + 1e-9), ...courses].map((h) => +h.toFixed(3)))].sort((a, b) => b - a);
+  for (const n of [tiers, tiers + 1]) {
+    let best: { hs: number[]; score: number } | null = null as { hs: number[]; score: number } | null;
+    const walk = (left: number, k: number, maxH: number, hs: number[]) => {
+      if (k === 0) {
+        if (Math.abs(left) > 0.005) return;
+        const score = hs.filter((h) => !have.has(h)).length * 10 + (hs[0]! - hs[hs.length - 1]!);
+        if (!best || score < best.score - 1e-9) best = { hs: [...hs], score };
+        return;
+      }
+      for (const h of cand) if (h <= maxH + 1e-9 && h <= left + 0.005) walk(left - h, k - 1, h, [...hs, h]);
+    };
+    walk(total, n, tierMax, []);
+    // tallest at the foot (non-increasing): the low wall at the top edge is the one people stand beside
+    if (best) return best.hs;
+  }
+  return null;
+}
+
+/**
+ * The footprints of a stepped riser, bottom-up, from the one-wall footprint `poly` (normalised: pad on the left) and its
+ * wall edges. Tier j's face is the wall edges moved j x step into the pad (the open edges stay on their lines, the run's
+ * end vertices slide along them). The TOP tier is the whole pad moved in; each lower tier is a BAND per wall run between
+ * its own face line and the face line of the tier above (its pad is the tread; the tier above wins over the rest).
+ * `walls` index each footprint's own edges.
+ */
+export function steppedFootprints(poly: readonly V2[], wallEdges: readonly number[], tiers: number, step: number = TIER_STEP): { footprint: V2[]; walls: number[] }[][] {
+  const n = poly.length;
+  const walls = new Set(wallEdges);
+  const es = edgesOf(poly);
+  const offset = (d: number): V2[] => poly.map((_, i) => {
+    const p = es[(i + n - 1) % n]!, q = es[i]!;
+    const dp = walls.has(p.i) ? d : 0, dq = walls.has(q.i) ? d : 0;
+    // the two edge lines, each moved inward (against its outward normal) by its offset: their crossing
+    const a1: V2 = [p.a[0] - p.normal[0] * dp, p.a[1] - p.normal[1] * dp], a2: V2 = [q.a[0] - q.normal[0] * dq, q.a[1] - q.normal[1] * dq];
+    const cr = p.dir[0] * q.dir[1] - p.dir[1] * q.dir[0];
+    if (Math.abs(cr) < 1e-6) { const dd = Math.max(dp, dq); return [r3(q.a[0] - q.normal[0] * dd), r3(q.a[1] - q.normal[1] * dd)] as V2; }
+    const t = ((a2[0] - a1[0]) * q.dir[1] - (a2[1] - a1[1]) * q.dir[0]) / cr;
+    return [r3(a1[0] + p.dir[0] * t), r3(a1[1] + p.dir[1] * t)] as V2;
+  });
+  // the wall runs (consecutive wall edges), as vertex index lists
+  const runs: number[][] = [];
+  if (walls.size === n) runs.push([...Array(n + 1).keys()].map((i) => i % n));
+  else {
+    const start = es.findIndex((e) => !walls.has(e.i));
+    let cur: number[] = [];
+    for (let k = 1; k <= n; k++) {
+      const i = (start + k) % n;
+      if (walls.has(i)) { if (!cur.length) cur.push(i); cur.push((i + 1) % n); }
+      else if (cur.length) { runs.push(cur); cur = []; }
+    }
+    if (cur.length) runs.push(cur);
+  }
+  const out: { footprint: V2[]; walls: number[] }[][] = [];
+  for (let j = 0; j < tiers; j++) {
+    const here = offset(j * step);
+    if (j === tiers - 1) { out.push([{ footprint: here, walls: [...wallEdges].sort((a, b) => a - b) }]); continue; }
+    const up = offset((j + 1) * step);
+    out.push(runs.map((run) => {
+      const front = run.map((i) => here[i]!), back = run.map((i) => up[i]!).reverse();
+      return { footprint: [...front, ...back], walls: front.slice(1).map((_, k) => k) };
+    }));
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------ the fit
@@ -305,9 +396,12 @@ export function fitTerraceWall(recipe: WorldRecipe, input: TerraceWallDoc, kit: 
   const doc = terraceWallSchema.parse({ ...input, solved: undefined });
   // the levelled foot strip reaches past the berm and the raster samples it interpolates with (the cut and the
   // ground queries carve that far): never narrower than the cut
-  const strip = Math.max(doc.strip, CUT_FRONT + 0.5);
+  // a stepped riser's upper wall stands on the tread of the one below: its strip IS the tread (its cut, 3.5 m out, carves
+  // only above the tread level, where the lower wall's coping and air are)
+  const tread = doc.tags.includes("tread");
+  const strip = tread ? doc.strip : Math.max(doc.strip, CUT_FRONT + 0.5);
   const warnings: string[] = [];
-  const { poly, reversed } = normaliseFootprint(doc.footprint);
+  const { poly, reversed } = footprintOf(doc);
   const n = poly.length;
   let edges = edgesOf(poly);
   // edge indices in the caller's winding -> ours
@@ -563,7 +657,7 @@ export function fitTerraceWall(recipe: WorldRecipe, input: TerraceWallDoc, kit: 
       const front = Math.max(0, ...(info.plan ?? []).map((q) => q[1]!));
       // stairs, ramps and the dog-leg stand on low ground in front of the face: level their footprint + 1 m (a rock
       // face's lean at the foot is not a footprint: the ordinary strip covers it)
-      if (front > 1 && front + 1 > strip) stairStrips.push({ e, s0: s, s1: s + info.run, depth: front + 1 });
+      if (front > 1 && front + 1 > strip) stairStrips.push({ e, s0: s, s1: s + info.run, depth: tread ? Math.min(front + 1, strip) : front + 1 });
       if (p.role === "end-l") banks.push({ e, from: s, dirSign: 1, run: info.run });
       if (p.role === "end-r") banks.push({ e, from: s + info.run, dirSign: -1, run: info.run });
     }
@@ -743,7 +837,8 @@ export function fitTerraceWall(recipe: WorldRecipe, input: TerraceWallDoc, kit: 
         // held ground below gives the feather way, but only as it leaves this terrace's own edge (fully a third of the way out): at the
         // edge the weight is still 1, so the levelled ground and its feather meet without a seam
         const sm = smooth(0, fq, best);
-        w = (1 - sm) * (opts.hold ? 1 - opts.hold(x, z) * smooth(0, HOLD_TAKEOVER, sm) : 1);
+        // (a tread wall's feather gives way AT ONCE: its strip edge is the face of the wall below)
+        w = (1 - sm) * (opts.hold ? 1 - opts.hold(x, z) * (tread ? 1 : smooth(0, HOLD_TAKEOVER, sm)) : 1);
         v = tq;
       }
       heights[i + j * columns] = r2(v);
@@ -753,8 +848,11 @@ export function fitTerraceWall(recipe: WorldRecipe, input: TerraceWallDoc, kit: 
   fingerprint = groundFingerprint(recipe, ox, oz, columns, rows, spacing);
   const patch: HeightPatchDoc = { id: fid, origin: [ox, oz], size: [ex - ox, ez - oz], columns, rows, heights, weights, blend: 2, filter: 0 };
 
-  const cx0 = Math.min(bx0, rx0) - 1, cz0 = Math.min(bz0, rz0) - 1, cx1 = Math.max(bx1, rx1) + 1, cz1 = Math.max(bz1, rz1) + 1;
-  const clearing: ClearingDoc = { id: fid, polygon: [[cx0, cz0], [cx1, cz0], [cx1, cz1], [cx0, cz1]], feather: 3, keep: 0, scatter: true, cover: true, owner: doc.owner ?? doc.id };
+  // a stepped riser's treads are PLANTED: a tread wall's clearing stops at its own pad (its strip is the tread), and
+  // a lower tier (`tread-band`, whose pad is a tread) keeps scatter off but lets ground cover grow
+  const padOnly = doc.tags.includes("tread");
+  const cx0 = (padOnly ? bx0 : Math.min(bx0, rx0)) - 1, cz0 = (padOnly ? bz0 : Math.min(bz0, rz0)) - 1, cx1 = (padOnly ? bx1 : Math.max(bx1, rx1)) + 1, cz1 = (padOnly ? bz1 : Math.max(bz1, rz1)) + 1;
+  const clearing: ClearingDoc = { id: fid, polygon: [[cx0, cz0], [cx1, cz0], [cx1, cz1], [cx0, cz1]], feather: 3, keep: 0, scatter: true, cover: !doc.tags.includes("tread-band"), owner: doc.owner ?? doc.id };
 
   // NATURAL SHELVES wear the zone's rock cap exactly as the loose rocks do: the world's rock material (the one its
   // rock-kit scatter rules draw with: the rock-cap shader) and a per-placement `mesh.source.rockCap` resolved by the
@@ -864,7 +962,7 @@ export function terraceGates(recipe: WorldRecipe, doc: TerraceWallDoc, opts: { f
     }
   }
   // seated: the pad at topY, 2x2 slabs on a 4 m lattice at least 2.5 m from any face and 1.5 m from the outline
-  const { poly } = normaliseFootprint(doc.footprint);
+  const { poly } = footprintOf(doc);
   const es = edgesOf(poly);
   const faceSegs = s.faces.map((f) => [f.a, f.b] as [V2, V2]);
   let bx0 = Infinity, bz0 = Infinity, bx1 = -Infinity, bz1 = -Infinity;
@@ -1119,7 +1217,7 @@ export function solveTerraceChain(
 export function holdOf(fits: readonly TerraceFit[], voxelSize: number): ((x: number, z: number) => number) | undefined {
   void voxelSize;
   const strips = fits.flatMap((f) => {
-    const depth = Math.max(f.doc.strip, CUT_FRONT + 0.5);
+    const depth = f.doc.tags.includes("tread") ? f.doc.strip : Math.max(f.doc.strip, CUT_FRONT + 0.5);
     return (f.doc.solved?.faces ?? []).map((fc) => {
       const len = Math.hypot(fc.b[0] - fc.a[0], fc.b[1] - fc.a[1]);
       return { a: fc.a, dir: [(fc.b[0] - fc.a[0]) / len, (fc.b[1] - fc.a[1]) / len] as V2, n: fc.normal, len, depth };
@@ -1461,10 +1559,46 @@ export function splitShelf<T extends { id: string; points: readonly (readonly [n
   return { ...lower, id: `${townId}-terrace-${n}`, points: pts, radius: r2(Math.max(5.5, Math.min(lower.radius, gap / 3 + 1.5))), groundY: lower.groundY, flatten: lower.flatten, tags: [...lower.tags, "split"] };
 }
 
-/** Remove every terrace wall a town owns (and its derived features). */
+/** Remove every terrace wall a town owns (and its derived features), and the stage's own DC risers. */
 export function removeTownTerraceWalls(recipe: WorldRecipe, townId: string): void {
   // only the stage's own riser walls: a terrace someone else placed near the town (owner = the town) stays
   for (const t of [...(recipe.features.terraceWalls ?? [])]) if (t.owner === townId && t.tags.includes("town-riser")) removeTerrace(recipe, t.id);
+  if (recipe.features.dcRisers) {
+    const kept = recipe.features.dcRisers.filter((r) => !(r.owner === townId && r.id.startsWith(`${townId}-riser-`)));
+    if (kept.length) recipe.features.dcRisers = kept; else delete recipe.features.dcRisers;
+  }
+}
+
+/** The riser face tiles (world-kit textures/risers, image-request riser-rubble*): a DC riser paints with those the palette has. */
+export const RISER_SURFACES = { face: "riser-rubble", foot: "riser-rubble-damp", top: "riser-rubble-top" } as const;
+
+/**
+ * The TOP EDGE of a shelf's downhill riser from its outline: the outline edges whose outward normal is within 60 deg of
+ * `down` (or, with no shelf below, whose outside ground lies 1 m under the pad), chained into the longest run and
+ * walked with the shelf on the LEFT (a DC riser's convention). Null when no edge faces down.
+ */
+export function riserTopEdge(poly: readonly V2[], down: V2 | undefined, groundY: number, ground: (x: number, z: number) => number): V2[] | null {
+  const n = poly.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) { const a = poly[i]!, b = poly[(i + 1) % n]!; area += a[0] * b[1] - b[0] * a[1]; }
+  // walk so the shelf is on the LEFT: the right normal (-dz, dx) points out of the outline
+  const ring = area > 0 ? [...poly].reverse() : [...poly];
+  const faces = ring.map((a, i) => {
+    const b = ring[(i + 1) % n]!, l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, out: V2 = [-(b[1] - a[1]) / l, (b[0] - a[0]) / l];
+    if (down) return out[0] * down[0] + out[1] * down[1] >= Math.cos(Math.PI / 3);
+    const m: V2 = [(a[0] + b[0]) / 2 + out[0] * 6, (a[1] + b[1]) / 2 + out[1] * 6];
+    return ground(m[0], m[1]) < groundY - 1;
+  });
+  if (!faces.some(Boolean)) return null;
+  if (faces.every(Boolean)) return [...ring, ring[0]!];
+  // the longest run of facing edges (wrapping round the ring)
+  let best: V2[] = [], start = faces.findIndex((f) => !f);
+  for (let k = 1, run: V2[] = []; k <= n; k++) {
+    const i = (start + k) % n;
+    if (faces[i]) { if (!run.length) run.push(ring[i]!); run.push(ring[(i + 1) % n]!); }
+    if (!faces[i] || k === n) { if (run.length > best.length) best = run; run = []; }
+  }
+  return best.length >= 2 ? best : null;
 }
 
 /**
@@ -1481,6 +1615,8 @@ export function townTerraceWalls(
   links: readonly TownRiserLink[],
   log: (s: string) => void = () => {},
   maxStep = 6,
+  /** "rule": each built riser as the riser rule says (DC by default); "kit": every built riser a kit wall (tests, A/B) */
+  face: "rule" | "kit" = "rule",
 ): { dropRoads: string[]; fits: TerraceFit[] } {
   removeTownTerraceWalls(recipe, town.id);
   const style = townWallStyle(town);
@@ -1588,6 +1724,81 @@ export function townTerraceWalls(
     sh.riser = { kind: "bank", height: r2(drop), why: fallback ? `wanted a wall (${v?.why ?? "?"}) but none fits: graded voxel riser` : v!.why };
     restored = true;
   };
+  /**
+   * A DC RISER (the riser rule's default built face): the shelf carves its own flat ground again (its 1 : 2 bank) and the
+   * riser owns that bank as planar DC terrain: its top edge on the outline edges facing down, its foot the shelf below
+   * (or the measured drop), benches as the rule planned, the riser tiles where the palette has them.
+   */
+  const dcRiser = (k: number, footprint: V2[]) => {
+    const sh = shelves[k]!, v = verdicts.get(sh)!;
+    const below = k > 0 ? shelves[k - 1] : undefined;
+    let down: V2 | undefined;
+    if (below) {
+      const c = (pts: readonly (readonly [number, number])[]): V2 => [pts.reduce((t, q) => t + q[0], 0) / pts.length, pts.reduce((t, q) => t + q[1], 0) / pts.length];
+      const [ax, az] = c(below.points), [bx, bz] = c(sh.points), l = Math.hypot(ax - bx, az - bz) || 1;
+      down = [(ax - bx) / l, (az - bz) / l];
+    }
+    const edge = riserTopEdge(footprint, down, sh.groundY, (x, z) => shelfGround.heightfield(x, z));
+    const drop = below ? sh.groundY - below.groundY : v.height;
+    if (!edge || !(drop > 0.4)) { log(`    ${sh.id}: DC riser has no downhill edge - graded bank`); voxelRiser(k); return; }
+    sh.flatten = 1;
+    sh.falloff = r2(Math.max(sh.falloff, RISER_RULE.bankRun * drop));
+    const names = new Set(recipe.surfaces.map((x) => x.name));
+    const surfaces = Object.fromEntries(Object.entries(RISER_SURFACES).filter(([, n]) => names.has(n)));
+    const doc: DcRiserDoc = dcRiserSchema.parse({
+      id: v.id, owner: town.id, points: edge, top: sh.groundY, foot: r2(sh.groundY - drop),
+      ...(v.tiers > 1 ? { steps: { tiers: v.tiers, tread: RISER_RULE.tread } } : {}),
+      // the riser owns the shelf's whole bank: the apron runs to where the falloff would have met the ground below
+      apron: r2(Math.max(2, sh.falloff - drop * 0.12 * Math.max(1, v.tiers))), surfaces,
+    });
+    (recipe.features.dcRisers ??= []).push(doc);
+    sh.riser = { kind: "wall", face: "dc", height: r2(drop), why: v.why, ...(v.tiers > 1 ? { tiers: v.tiers } : {}) };
+    log(`    ${v.id}: DC RISER ${r2(drop)} m${v.tiers > 1 ? ` as ${v.tiers} faces with ${RISER_RULE.tread} m treads` : ""}, top edge ${edge.length - 1} edge(s)${Object.keys(surfaces).length ? "" : " (no riser tiles in the palette: the zone cliff splat)"}`);
+  };
+  // the one-wall doc of every riser built STEPPED (the gates' fallback builds it as one wall again)
+  const oneWall = new Map<string, TerraceWallDoc>();
+  /**
+   * Build a fitted one-wall riser as `want` low walls (stepTierHeights / steppedFootprints), fitted and applied
+   * bottom-up (the chain's order: each tier's feather gives way over the strips below). The top tier keeps the riser's
+   * id; the walls below are `<town>-riser<n>-step<j>` (never `<id>-...`: a fit drops every `tw-<id>-*` feature as its own) (`-a`, `-b` per wall run). A stage stair link gets a stair on every tier
+   * (above the lowest only one that stands on a tread). On any failure the tiers are taken out again.
+   */
+  const stepRiser = (one: TerraceFit, want: number, lk: TownRiserLink | undefined): { fits: TerraceFit[]; heights: number[]; why?: string } => {
+    const s = one.doc.solved!;
+    if (s.runs.some((r) => r.closed)) return { fits: [], heights: [], why: "a closed wall ring" };
+    const heights = stepTierHeights(s.height, want, kitHeights);
+    if (!heights) return { fits: [], heights: [], why: `no split of ${s.height} m into ${want}-${want + 1} walls of <= ${RISER_RULE.tierMax} m on the 0.4 m courses` };
+    const parts = steppedFootprints(footprintOf(one.doc).poly, s.runs.flatMap((r) => r.edges), heights.length);
+    const out: TerraceFit[] = [];
+    let top = s.baseY;
+    try {
+      for (const [j, tier] of parts.entries()) {
+        top = r2(top + heights[j]!);
+        const last = j === parts.length - 1;
+        // the stair goes on the part nearest the link
+        const nearest = lk ? tier.map((p, r) => ({ r, d: Math.min(...p.footprint.map((q) => Math.hypot(q[0] - lk.at[0], q[1] - lk.at[1]))) })).sort((a, b) => a.d - b.d)[0]!.r : -1;
+        for (const [r, part] of tier.entries()) {
+          const id = last ? one.doc.id : `${one.doc.id.replace(/-riser-(?=[0-9]+$)/, "-riser")}-step${j + 1}${tier.length > 1 ? `-${String.fromCharCode(97 + r)}` : ""}`;
+          const d = terraceWallSchema.parse({
+            ...one.doc, id, footprint: part.footprint, walls: part.walls, facing: undefined, topY: last ? s.topY : top, height: heights[j],
+            inserts: [], strip: j === 0 ? one.doc.strip : TIER_STEP, tags: [...one.doc.tags.filter((t) => !["stepped", "tread", "tread-band"].includes(t)), "stepped", ...(j > 0 ? ["tread"] : []), ...(last ? [] : ["tread-band"])], solved: undefined,
+          });
+          let f = fitTerraceWall(recipe, d, kit, undefined, { hold: holdOf([...fits, ...out], voxel) });
+          if (lk && r === nearest) {
+            const placed = placeLink(d, f, lk, j > 0 ? RISER_RULE.tread : Infinity);
+            if (!placed) throw new Error(`no stair fits tier ${j + 1}`);
+            f = placed;
+          }
+          applyTerraceFit(recipe, f);
+          out.push(f);
+        }
+      }
+    } catch (e) {
+      for (const f of out) removeTerrace(recipe, f.doc.id);
+      return { fits: [], heights, why: (e as Error).message.replace(/^terrace [\w-]+: /, "") };
+    }
+    return { fits: out, heights };
+  };
   for (const [k, shelf] of shelves.entries()) {
     const footprint = footprints[k];
     // the walls below keep their foot strips: this pad's feather gives way over them
@@ -1595,6 +1806,7 @@ export function townTerraceWalls(
     if (!footprint) { log(`    ${shelf.id}: nothing 8 m wide fits inside the shelf - left as a voxel riser`); voxelRiser(k); continue; }
     if (tooTall.has(shelf)) { voxelRiser(k); continue; }
     if (isBank(shelf)) { voxelRiser(k, false); continue; }
+    if (face === "rule" && verdicts.get(shelf)?.face === "dc") { dcRiser(k, footprint); continue; }
     // walls on the edges that face DOWN the town (toward the shelf below); the lowest shelf decides by the ground
     const centroid = (pts: readonly (readonly [number, number])[]): V2 => [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
     const walls = "auto" as const;
@@ -1622,18 +1834,20 @@ export function townTerraceWalls(
     }
     // the stage's link from the shelf below up to this one becomes a wall insert
     const link = linkInto.get(shelf);
-    if (link) {
-      // nearest the link first; the planner refuses an insert inside a corner or a stepped end
-      const placeLink = (doc: TerraceWallDoc, onto: TerraceFit): TerraceFit | null => {
+    // nearest the link first; the planner refuses an insert inside a corner or a stepped end. `maxFront`: the deepest
+    // a piece may stand in front of its face (a stepped riser's upper wall stands on a 2 m tread)
+    const placeLink = (doc: TerraceWallDoc, onto: TerraceFit, link: TownRiserLink, maxFront = Infinity): TerraceFit | null => {
         const s = onto.doc.solved!;
-        const es = edgesOf(normaliseFootprint(doc.footprint).poly);
-        const runOf = (role: string) => {
+        const es = edgesOf(footprintOf(doc).poly);
+        const pieceOf = (role: string) => {
           const { lookup, key } = kit.resolve(style);
           const id = lookup.styles[key]?.[String(+s.height.toFixed(3))]?.[role];
-          return id ? lookup.pieces[id]!.run : Infinity;
+          return id ? lookup.pieces[id]! : null;
         };
+        const runOf = (role: string) => pieceOf(role)?.run ?? Infinity;
+        const frontOf = (role: string) => Math.max(0, ...(pieceOf(role)?.plan ?? []).map((q) => q[1]!));
         // the stage's kind first, then whatever else fits: a straight stair or a ramp before giving the riser up
-        const choices = (link.kind === "ramp" ? ["ramp", "stair", "stair-turn"] : ["stair-turn", "stair", "ramp"]).map((role) => ({ role, run: runOf(role) }));
+        const choices = (link.kind === "ramp" ? ["ramp", "stair", "stair-turn"] : ["stair-turn", "stair", "ramp"]).filter((role) => frontOf(role) <= maxFront + 1e-9).map((role) => ({ role, run: runOf(role) }));
         const near = (i: number) => segDist(link.at[0], link.at[1], es[i]!.a, es[i]!.b).d;
         for (const i of s.runs.flatMap((r) => r.edges).sort((p, q) => near(p) - near(q))) {
           const e = es[i]!;
@@ -1650,8 +1864,9 @@ export function townTerraceWalls(
           }
         }
         return null;
-      };
-      const placed = placeLink(base, fit);
+    };
+    if (link) {
+      const placed = placeLink(base, fit, link);
       if (placed) { fit = placed; dropRoads.push(...link.roads); }
       else {
         // no wall takes a stair: this riser stays the stage's voxel riser with its graded ramp (a road may not run
@@ -1661,6 +1876,22 @@ export function townTerraceWalls(
         restored = true;
         continue;
       }
+    }
+    // STEPPED (s1g): a wall over RISER_RULE.tierMax is built as 2-3 low walls with planted treads between them
+    const H = fit.doc.solved!.height;
+    const want = Math.ceil(H / RISER_RULE.tierMax - 1e-9);
+    if (want > 1) {
+      const one = fit;
+      const got = stepRiser(one, want, link);
+      if (got.fits.length) {
+        oneWall.set(one.doc.id, one.doc);
+        fits.push(...got.fits);
+        const v = verdicts.get(shelf);
+        shelf.riser = { kind: "wall", height: r2(H), tiers: got.heights.length, why: v?.why ?? "wall" };
+        log(`    ${one.doc.id}: STEPPED ${H} m as ${got.heights.join(" + ")} m low walls with ${RISER_RULE.tread} m planted treads (${got.fits.map((f) => f.doc.id.replace(`${town.id}-`, "")).join(", ")})`);
+        continue;
+      }
+      log(`    ${one.doc.id}: ${H} m wall NOT stepped (${got.why}) - one wall`);
     }
     applyTerraceFit(recipe, fit);
     fits.push(fit);
@@ -1688,7 +1919,9 @@ export function townTerraceWalls(
   // again, its stage link road comes back). The first trial that lowers the town's count of failing walls is kept,
   // the rest are undone; when none does, the worst riser falls back anyway, so the loop ends with every remaining
   // wall passing. Each change is logged with the gate that failed.
-  const shelfOfFit = (f: TerraceFit) => shelves.findIndex((_, k) => f.doc.id === `${town.id}-riser-${k + 1}`);
+  // a stepped riser's tiers (`<town>-riser<n>-step<j>[-a]`) belong to its shelf and fall back together
+  const riserOf = (id: string) => id.replace(/-riser(\d+)-step\d+(?:-[a-z])?$/, "-riser-$1");
+  const shelfOfFit = (f: TerraceFit) => shelves.findIndex((_, k) => riserOf(f.doc.id) === `${town.id}-riser-${k + 1}`);
   // BUILDING PLOTS (the town's `<name>-plot-<building>` clearings, one per plot): a wall, or the stair or foot strip in
   // front of it, never stands in one. A built town's buildings were laid on its ground before its shelves were cut;
   // a riser through a plot is a wall through a house. Counted as a failing gate, so the fallback shortens or drops it.
@@ -1728,8 +1961,20 @@ export function townTerraceWalls(
       const k = shelfOfFit(cand.f);
       const sh = k >= 0 ? shelves[k]! : null;
       const why = whyOf(cand.g);
-      // 1. shorten the shelf at the end nearest its faults
-      if (sh) {
+      const base = riserOf(cand.f.doc.id), group = docs.filter((d) => riserOf(d.id) === base);
+      // 0. a STEPPED riser that fails is built as its one wall again (before anything shortens or drops it)
+      const single = oneWall.get(base);
+      if (single) {
+        for (const d of group) removeTerrace(recipe, d.id);
+        if (solveOrUndo([...docs.filter((d) => riserOf(d.id) !== base), single])) {
+          const after = gateAll();
+          if (after.length < failing.length) { oneWall.delete(base); if (sh?.riser) delete sh.riser.tiers; done = { note: `${base}: its stepped walls fail their gates (${why}) - built as one wall`, after }; break; }
+        }
+        removeTerrace(recipe, base);
+        solveOrUndo(docs);
+      }
+      // 1. shorten the shelf at the end nearest its faults (one wall only: a stepped riser's tiers share its outline)
+      if (sh && !single) {
         const pts0 = sh.points.map((q) => [q[0], q[1]] as [number, number]);
         const at = faultXZ(cand.g);
         for (const cut of [4, 8]) {
@@ -1755,8 +2000,8 @@ export function townTerraceWalls(
         undo.back = (link?.roads ?? []).filter((id) => dropRoads.includes(id)).map((id) => linkRoads.get(id)).filter((r): r is RoadDoc => !!r);
         for (const r of undo.back) { dropRoads.splice(dropRoads.indexOf(r.id), 1); recipe.features.roads.push(r); }
       }
-      removeTerrace(recipe, cand.f.doc.id);
-      solveOrUndo(docs.filter((d) => d.id !== cand.f.doc.id));
+      for (const d of group) removeTerrace(recipe, d.id);
+      solveOrUndo(docs.filter((d) => riserOf(d.id) !== base));
       const after = gateAll();
       if (after.length < failing.length || cand === order[Math.min(2, order.length - 1)]) {
         // kept: it helped, or it is the last candidate and nothing else did (the worst of them goes instead)
@@ -1769,8 +2014,9 @@ export function townTerraceWalls(
             voxelRiser(kw);
             for (const id of (linkInto.get(shelves[kw]!)?.roads ?? []).filter((r) => dropRoads.includes(r))) { dropRoads.splice(dropRoads.indexOf(id), 1); const r = linkRoads.get(id); if (r) recipe.features.roads.push(r); }
           }
-          removeTerrace(recipe, w.f.doc.id);
-          solveOrUndo(docs.filter((d) => d.id !== w.f.doc.id));
+          const wb = riserOf(w.f.doc.id);
+          for (const d of docs.filter((d) => riserOf(d.id) === wb)) removeTerrace(recipe, d.id);
+          solveOrUndo(docs.filter((d) => riserOf(d.id) !== wb));
           done = { note: `${w.f.doc.id}: fails its gates (${whyOf(w.g)}) - fell back to a graded voxel riser`, after: gateAll() };
         } else done = { note: `${cand.f.doc.id}: fails its gates (${why}) - fell back to a graded voxel riser`, after };
         break;

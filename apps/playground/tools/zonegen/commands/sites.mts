@@ -14,6 +14,15 @@
  *
  * Options: --focus x,z,r draws one area close up (sites-<x>_<z>_<r>.png); --step the sample grid in metres.
  *
+ * SITE NEEDS (tools/site-needs.mts): --role <grand-entrance|dungeon-door|lookout|harbour|walled-town|...> [--for <place>]
+ * [--radius m] scores every candidate (and, for a rock-face role, the feet of the zone's tallest faces) against the
+ * role's needs - met / unmet per need with numbers - printed, and kept on each listed candidate as `needs`. --for takes
+ * the brief place's archetype and `siteNeeds` overrides (the Wristgate: { "rock-face": { frontHeight: 52 } }).
+ * --propose (with --role) is the zone master's AGENT step: writes authoring/siting/<world>/<zone>-<role>[-<for>].json
+ * with plan crops and far renders of the bare terrain (probe --port, default 5297; --no-renders), and a SHORTFALL with
+ * the recipe `needs` entry to ask the generator for when no candidate meets every need. The pick goes through
+ * `zonegen reserve --pick <file>`.
+ *
  * Writes  zones/<zone>/reports/sites.json            gate report (what `zonegen status` reads)
  *         zones/<zone>/reports/sites-candidates.json the ranked candidates, path findings, density
  *         zones/<zone>/reports/sites.png             the review map with the candidates drawn and labelled
@@ -26,7 +35,9 @@ import { exists, finish, loadRecipe, readJson, writeJson, type Ctx, type Finding
 import { collectMapData, DEFAULT_LAYERS, layerCounts, type LayerId } from "../../../src/map-layers.ts";
 import { err, requireZone, warn } from "./_shared.mts";
 import { findScene, gatherExtras, shootMap } from "./map.mts";
-import { AREA_CLAIM, claimFaults, CLIMB_NEEDS_PLACE, EMPTY_MAX, findSites, travelRoads, LANDFORM_COVER, LANDFORM_HA, type Content, type RoadLine, type SiteReport, type Vec2 } from "./_site-finder.mts";
+import { findFaceFeet, measureNeeds, needsFor, needsLine, siteRoleSchema, type NeedsReport, type SiteNeedOverrides, type SiteRole } from "../../site-needs.mts";
+import { naturalField, needGround, renderCandidates } from "../../worldgen-site-needs.mts";
+import { AREA_CLAIM, claimFaults, CLIMB_NEEDS_PLACE, EMPTY_MAX, findSites, travelRoads, LANDFORM_COVER, LANDFORM_HA, type Candidate, type Content, type RoadLine, type SiteReport, type Vec2 } from "./_site-finder.mts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type J = Record<string, any>;
@@ -223,6 +234,9 @@ export async function run(ctx: Ctx): Promise<number> {
     paths: report.paths,
     candidates: report.candidates.filter((c) => c.inZone),
   };
+  // ---- site needs: every candidate scored against the role asked for (--role, --propose)
+  const needsDone = ctx.opt("role") || ctx.opt("for") ? await siteNeeds(ctx, recipe, region, listing.candidates as (Candidate & { needs?: NeedsReport })[]) : 0;
+  if (needsDone !== 0) return needsDone;
   const listFile = path.join(reports, "sites-candidates.json");
   writeJson(listFile, listing);
   console.log(`\n  land ${report.landKm2} km2, ${report.places} places claim ${Math.round(report.claim.share * 100)}% of it (${AREA_CLAIM.min * 100}-${AREA_CLAIM.max * 100}%; medium+ ${Math.round(report.claim.bigShare * 100)}%, at least ${AREA_CLAIM.bigMin * 100}%): ${Object.entries(report.claim.byTier).filter(([, v]) => v.places).map(([t, v]) => `${t} ${v.places} ${Math.round(v.share * 100)}%`).join(", ")}; largest empty ${report.largestEmpty ? `${report.largestEmpty.radius} m at [${report.largestEmpty.at}]` : "none"}`);
@@ -269,3 +283,85 @@ export async function run(ctx: Ctx): Promise<number> {
   return finish(ctx, "sites", inputs, f);
 }
 
+
+const ROLE_RADIUS: Partial<Record<SiteRole, number>> = { "grand-entrance": 60, "dungeon-door": 20, lookout: 40, harbour: 60 };
+
+/** --role / --propose: the needs of one role measured on every candidate (and on the feet of the zone's tallest faces). */
+async function siteNeeds(ctx: Ctx, recipe: J, region: J, candidates: (Candidate & { needs?: NeedsReport })[]): Promise<number> {
+  const p = ctx.paths;
+  const forId = ctx.opt("for");
+  const brief = exists(p.brief(ctx.zone)) ? (readJson(p.brief(ctx.zone)) as J) : null;
+  const place = forId ? ((brief?.places ?? []) as J[]).find((x) => x.id === forId) : undefined;
+  if (forId && !place) console.warn(`  --for ${forId}: no such place in the brief (no overrides)`);
+  const parsed = siteRoleSchema.safeParse(ctx.opt("role") || place?.archetype);
+  if (!parsed.success) {
+    console.error(`zonegen sites: --role ${ctx.opt("role")}: ${parsed.error.issues[0]?.message}`);
+    return 2;
+  }
+  const role = parsed.data;
+  const overrides = (place?.siteNeeds ?? {}) as SiteNeedOverrides;
+  const radius = Number(ctx.opt("radius", String(ROLE_RADIUS[role] ?? 45)));
+  const t0 = performance.now();
+  const g = needGround(recipe as never, naturalField(recipe as never));
+  type Row = { id: string; kind: string; at: Vec2; y: number; radius: number; view: number; needs: NeedsReport; score: number; plan?: string; far?: string };
+  const rows: Row[] = [];
+  const faces = needsFor(role, overrides).find((n) => n.kind === "rock-face");
+  const viewOf = (rep: NeedsReport, fallback: number): number => {
+    const f = rep.results.find((r) => r.need === "rock-face");
+    return f && typeof f.numbers.faces === "number" ? f.numbers.faces : fallback;
+  };
+  for (const c of candidates) {
+    if (c.kind === "empty-land" || c.usedBy) continue;
+    const rep = measureNeeds(g, role, c.at[0], c.at[1], radius, overrides);
+    c.needs = rep;
+    rows.push({ id: c.id, kind: c.kind, at: c.at, y: c.y, radius, view: viewOf(rep, c.approach.faces), needs: rep, score: c.score });
+  }
+  if (faces && faces.kind === "rock-face") {
+    const want = faces.minHeight ?? faces.frontHeight * faces.ratio;
+    const poly = region.polygon as number[][];
+    const inside = (x: number, z: number): boolean => {
+      let k = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, zi] = [poly[i]![0]!, poly[i]![1]!];
+        const [xj, zj] = [poly[j]![0]!, poly[j]![1]!];
+        if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) k = !k;
+      }
+      return k;
+    };
+    const box: [number, number, number, number] = [Math.min(...poly.map((q) => q[0]!)), Math.min(...poly.map((q) => q[1]!)), Math.max(...poly.map((q) => q[0]!)), Math.max(...poly.map((q) => q[1]!))];
+    findFaceFeet(g, inside, box, want).forEach((ff, i) => {
+      const rep = measureNeeds(g, role, ff.at[0], ff.at[1], radius, overrides);
+      rows.push({ id: `foot-${i + 1}`, kind: "face-foot", at: ff.at, y: g.height(ff.at[0], ff.at[1]), radius, view: viewOf(rep, (ff.into + 180) % 360), needs: rep, score: ff.face / 10 });
+    });
+  }
+  const unmet = (r: Row) => r.needs.results.reduce((n, x) => n + x.faults.length, 0);
+  rows.sort((a, b) => Number(b.needs.met) - Number(a.needs.met) || unmet(a) - unmet(b) || b.score - a.score);
+  const met = rows.filter((r) => r.needs.met);
+  console.log(`\n  site needs for ${role}${forId ? ` (${forId})` : ""}: ${met.length} of ${rows.length} site(s) meet every need (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
+  for (const r of rows.slice(0, 12)) console.log(`    ${r.id.padEnd(8)} ${r.kind.padEnd(12)} [${r.at.join(", ")}] y${Math.round(r.y)}  ${needsLine(r.needs)}`);
+  let shortfall: J | null = null;
+  if (!met.length) {
+    const best = rows[0];
+    const want = faces && faces.kind === "rock-face" ? Math.ceil(faces.minHeight ?? faces.frontHeight * faces.ratio) : 0;
+    const ask = faces ? { id: `${forId || role}-face`, kind: "cliff-face", for: forId || role, near: best ? best.at : `${ctx.zone} centre`, within: 500, minHeight: want } : null;
+    shortfall = { best: best?.id ?? null, unmet: best ? best.needs.results.filter((x) => !x.met).map((x) => `${x.need}: ${x.message}`) : [], ask };
+    console.log(`    SHORTFALL: nothing in ${ctx.zone} meets every need of ${role}${best ? `; best ${best.id} misses ${(shortfall.unmet as string[]).join("; ")}` : ""}`);
+    if (ask) console.log(`    ask the generator: add to the recipe \`needs\` ${JSON.stringify(ask)}, then worldgen needs ${ctx.world} --project ${ctx.project}`);
+  }
+  if (!ctx.flag("propose")) return 0;
+  const dir = path.join(p.projectDir, "authoring", "siting", ctx.world);
+  fs.mkdirSync(dir, { recursive: true });
+  const kept = rows.slice(0, Number(ctx.opt("per-role", "8")));
+  if (!ctx.flag("no-renders") && kept.length) {
+    const host = { argv: process.argv.slice(2), world: ctx.world, project: ctx.project };
+    await renderCandidates(host, recipe as never, dir, kept, { readDistance: faces && faces.kind === "rock-face" ? Math.max(300, faces.readDistance) : 420, ground: g.height, prefix: `${ctx.zone}-${role}-` });
+  }
+  const file = path.join(dir, `${ctx.zone}-${role}${forId ? `-${forId}` : ""}.json`);
+  writeJson(file, {
+    world: ctx.world, zone: ctx.zone, role, for: forId || null, overrides, radius, at: new Date().toISOString(),
+    note: "Pick with `zonegen reserve --pick <file>` ({ places: [{ location, candidate, why, rulings? }] }); the pick is re-measured and refused when it fails a need.",
+    candidates: kept, shortfall,
+  });
+  console.log(`  wrote ${path.relative(process.cwd(), file)}`);
+  return 0;
+}

@@ -192,6 +192,9 @@ export {
   riverPathSchema,
   ridgeSchema,
   type RidgeDoc,
+  groundNeedSchema,
+  type GroundNeedDoc,
+  TOWN_SITE_ROLES,
 } from "./recipe.js";
 export {
   regionSchema,
@@ -338,6 +341,7 @@ export {
   type TerraceWallInsert,
   type TerraceWallCut,
 } from "./terrace-walls.js";
+export { dcRiserSchema, dcRiserRoughSchema, createDcRisers, dcRiserFeatureId, type DcRiserDoc, type DcRisers } from "./dc-risers.js";
 export {
   FINE_MIN,
   FINE_REMEDY,

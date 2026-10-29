@@ -22,6 +22,26 @@ Read `zones/<z>/reports/sites.png` (candidates, wall lines, empty discs, path fa
 seen from, facing bearing). Gate report: `sites.json`. `--out` = read-only look at a live world.
 Record each place's pick in the brief as `places[].site`; the reserve lint refuses a reservation centred off it.
 
+## Site needs: the ground must carry the idea (propose -> agent pick)
+Sites are not picked BY TYPE (an entrance at a falls). Every role declares measured needs (`tools/site-needs.mts`
+`SITE_NEEDS`; facts in the schema `.describe()`): grand-entrance = a rock face >= 1.1 x the front, a 1600 m2 apron, seen
+from 300 m; dungeon-door = rock >= 1.5 x an 8 m door; walled-town = cliff flanks or water round the ring and one neck
+(<= 260 m of wall) with no ground within 60 m over the wall top; harbour-town = the coastal rule; capital = open ways in.
+A place sets `archetype` and `siteNeeds` overrides in the brief (the Wristgate: `{ "rock-face": { "frontHeight": 52 } }`).
+```
+npx tsx tools/zonegen.mts sites <world> --project <p> --zone <z> --role grand-entrance --for <place> --propose
+npx tsx tools/zonegen.mts brief-for site-places <world> --project <p> --zone <z> --role grand-entrance --for <place>
+npx tsx tools/zonegen.mts reserve <world> --project <p> --zone <z> --pick authoring/siting/<world>/<z>-pick.json
+npx tsx tools/worldgen.mts towns <world> --project <p> --propose [--roles walled-town,harbour-town,capital]
+npx tsx tools/zonegen.mts brief-for site-towns <world> --project <p>
+npx tsx tools/worldgen.mts towns <world> --project <p> --pick authoring/siting/<world>/pick.json
+```
+`--propose` writes `authoring/siting/<world>/` (candidates with met / unmet per need and numbers, `plan-*.png`, bare
+`far-*.png` from a probe port, default 5297). The PICK is a fresh agent's (the brief), never the score's rank 1.
+Failures: `site-need` (reserve) -> re-site through propose/pick, or a dated `needRulings` entry from the coordinator;
+`towns` row "<town> (<role>) <need>" -> `towns --propose` + `--pick`; a SHORTFALL (nothing meets) -> add the printed
+entry to the recipe `needs` (cliff-face / walled-neck), run `worldgen needs <world>`, then propose again.
+
 ## Gates: failure -> fix
 - `path-leads-nowhere` / `dead-end` (a path climbing >= 25 m to nothing; a hairpin run topping out at nothing) ->
   put a place at its top, or cut the path. A generated peak trail ending at a peak POI still needs a place.
@@ -47,7 +67,8 @@ Record each place's pick in the brief as `places[].site`; the reserve lint refus
 - Survey slope at the creature's footprint scale; a coarse slope map hides shelves.
 - Sight-line a stated viewpoint against the natural ground (including beyond the radius) before the freeze.
 - Measure what a place depends on before the freeze (a conduit's source level; a trail's grade-capped length).
-- A dungeon door needs rock behind it along its facing, deep enough for its creatures' door height.
+- A dungeon door needs rock behind it along its facing, deep enough for its creatures' door height. Encoded: `reserve`
+  `site-need` (dungeon-door / grand-entrance rock-face).
 - Ranking is heuristic: rim perches on one cliff crowd the top; look at the picture, not only rank 1.
 - A big river or gorge wants a bridge where it splits two banks' roads/places. Encoded: `crossing` candidates (rim-to-rim
   gap 25-260 m between natural tops, bank height match, depth, view along the course, users on each bank, an existing

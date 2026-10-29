@@ -2,6 +2,7 @@
  * town-layout — stage 3 of the town pipeline: the plan's lots become world placements, checked against the ground.
  *
  *   npx tsx tools/town-layout.mts --project proving --town brinehold [--no-map] [--reground]
+ *   npx tsx tools/town-layout.mts --project <p> --from-plan authoring/towns/<name>-design.json   (a DESIGNED town: lots exactly as designed)
  *
  * Reads authoring/towns/<town>-plan.json. Each building sits on a terrace (or the town pad) at `u` metres
  * along the terrace's centreline, on the `east` (+v, the terrace's left) or `west` side of the street that
@@ -31,6 +32,11 @@ const opt = (name: string, fallback: string): string => {
 };
 const projectName = opt("project", "");
 const townName = opt("town", "");
+// --from-plan <design.json>: the lots EXACTLY as the approved town design has them (no solver; tools/town-layout-from-plan.mts)
+if (projectName && opt("from-plan", "")) {
+  const { layoutFromPlan } = await import("./town-layout-from-plan.mts");
+  process.exit(layoutFromPlan(argv, path.resolve("projects", projectName), opt("from-plan", "")));
+}
 if (!projectName || !townName) {
   console.error("usage: town-layout --project <p> --town <name>");
   process.exit(2);

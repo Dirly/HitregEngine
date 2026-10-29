@@ -45,7 +45,8 @@ its skill's Gates and delete it here.
 **Sites**
 - Reach check for a premise's landmarks from the road graph; slope survey at the creature's footprint scale.
 - Viewpoint sight-line against natural ground before the freeze; contrast of the defining read from that viewpoint.
-- Reserve lint: named features inside the reservation, water features find water, a dungeon door has rock behind it.
+- Reserve lint: named features inside the reservation, water features find water. (A dungeon door's rock and a grand
+  entrance's face: BUILT 2026-10-29 as `reserve` `site-need`.)
 - Pre-freeze measures (conduit source level vs crossings, grade-capped trail length).
 - Site finder flags: hostile place on a town-to-town road, islands in lakes, access devices for unreachable strong sites.
 - Route a place depends on as its own plan row; trail generator laying few wide hairpins (only maxCut/maxFill exist);
