@@ -113,6 +113,21 @@ export function findChimneys(root: THREE.Object3D, skip?: (material: THREE.Mater
       hit.area += t.area;
     } else patches.push({ y: t.y, x0, x1, z0, z1, area: t.area });
   }
+  // the greedy pass above is order-dependent: a cap's triangles can seed two patches before one grows into the other
+  // (a stack turned off the axes by its building's yaw). Two overlapping halves of ONE cap then read as a "row" of
+  // battlements and the stack never smokes (Saltharrow 2026-10-29: Bell Watch + smokehouse caps split 1.65 + 0.56 m2).
+  for (let merged = true; merged; ) {
+    merged = false;
+    for (let i = 0; i < patches.length && !merged; i++)
+      for (let j = i + 1; j < patches.length; j++) {
+        const p = patches[i]!, q = patches[j]!;
+        if (Math.abs(p.y - q.y) >= 0.03 || q.x0 > p.x1 + 0.02 || q.x1 < p.x0 - 0.02 || q.z0 > p.z1 + 0.02 || q.z1 < p.z0 - 0.02) continue;
+        p.x0 = Math.min(p.x0, q.x0); p.x1 = Math.max(p.x1, q.x1); p.z0 = Math.min(p.z0, q.z0); p.z1 = Math.max(p.z1, q.z1); p.area += q.area;
+        patches.splice(j, 1);
+        merged = true;
+        break;
+      }
+  }
 
   // highest surface over (x, z), or -Infinity: a vertical ray against every triangle
   const highestAt = (x: number, z: number, above = -Infinity): number => {

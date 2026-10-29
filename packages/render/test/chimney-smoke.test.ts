@@ -26,4 +26,25 @@ describe("findChimneys", () => {
     expect(tops[0]!.y).toBeCloseTo(9.6);
     expect(tops[0]!.z).toBeCloseTo(3);
   });
+
+  it("finds a stack whose cap triangles seed two patches before one grows over the other (one cap, not a row)", () => {
+    // Saltharrow 2026-10-29: the Bell Watch and smokehouse caps (turned off the axes by the lot's yaw) split into two
+    // overlapping patches, read as a row of battlements, and never smoked
+    const house = new THREE.Group();
+    house.add(box(10, 8, 10, 0, 0, 0));
+    const [x0, z0, x1, z1, y] = [2.25, 2.25, 3.75, 3.75, 9.6];
+    const cap = new THREE.BufferGeometry();
+    cap.setAttribute("position", new THREE.Float32BufferAttribute([
+      x0, y, z0, x0, y, z0 + 0.5, x0 + 0.5, y, z0, // one corner first…
+      x1, y, z1, x1, y, z1 - 0.5, x1 - 0.5, y, z1, // …then the far corner (disjoint: a second patch)
+      x0, y, z0, x0, y, z1, x1, y, z1, // then the whole square
+      x0, y, z0, x1, y, z1, x1, y, z0,
+    ], 3));
+    house.add(new THREE.Mesh(cap, new THREE.MeshBasicMaterial()));
+    house.add(box(1.5, 1.5, 1.5, 3, 8, 3)); // the stack under the cap
+    const tops = findChimneys(house);
+    expect(tops).toHaveLength(1);
+    expect(tops[0]!.x).toBeCloseTo(3);
+    expect(tops[0]!.z).toBeCloseTo(3);
+  });
 });
