@@ -39,6 +39,22 @@ import { simplifyOpen } from "./worldgen-hydrology.mts";
 
 // ------------------------------------------------------------------ shoreline
 
+/**
+ * Islets (w2-shape, 2026-10-29: `worldgen continents` lays 2-4 stacks / skerries off the capes): a loop shorter than
+ * this that is not the largest is judged WITH the largest loop's group — a 400 m stack is all cliff and cannot carry its
+ * own beach and share targets — and is exempt from the whole-loop max-run rule.
+ */
+export const ISLET_LOOP_M = 1500;
+
+/** loop index -> the loop whose group it joins (islets join the largest loop; every other loop is its own). */
+export function loopGroupOf(lengths: ReadonlyMap<number, number>): Map<number, number> {
+  let main = -1, best = -1;
+  for (const [i, m] of lengths) if (m > best) { best = m; main = i; }
+  const out = new Map<number, number>();
+  for (const [i, m] of lengths) out.set(i, i !== main && m < ISLET_LOOP_M ? main : i);
+  return out;
+}
+
 export interface ShoreLoop {
   points: [number, number][];
   length: number;
@@ -628,10 +644,11 @@ export function planCoast(recipe: WorldRecipe, opts: CoastPlanOptions = DEFAULT_
   // groups by zone rules (the region under the segment's midpoint; no regions yet = one group per loop)
   const groups = new Map<string, AssignGroup>();
   const regionOf = new Map<SegmentInfo, string | undefined>();
+  const loopGroup = loopGroupOf(new Map(loops.map((l, i) => [i, l.length] as const)));
   for (const loop of infos) for (const s of loop) {
     const mid = s.points[Math.floor(s.points.length / 2)]!;
     const r = rulesFor(recipe, mid[0], mid[1]);
-    const key = r.key || `loop-${s.loop}`;
+    const key = r.key || `loop-${loopGroup.get(s.loop) ?? s.loop}`;
     regionOf.set(s, r.region);
     (groups.get(key) ?? groups.set(key, { key, rules: r.rules, segs: [] }).get(key)!).segs.push(s);
   }
@@ -805,9 +822,12 @@ export function checkCoastPlan(recipe: WorldRecipe, opts: { measureTops?: boolea
   const flatTops: CoastGateReport["flatTops"] = [];
   if (docs.length === 0) return { ok: false, findings: [{ rule: "no-plan", detail: "no coast plan: run worldgen coast" }], shares, longestRun: null, segments: 0, flatTops };
   const groups = new Map<string, { rules: CoastRules; segs: CoastSegmentDoc[] }>();
+  const loopMetres = new Map<number, number>();
+  for (const s of docs) loopMetres.set(s.loop, (loopMetres.get(s.loop) ?? 0) + s.length);
+  const groupLoop = loopGroupOf(loopMetres);
   for (const s of docs) {
     const region = s.region ? recipe.regions.find((r) => r.id === s.region) : null;
-    const key = s.region ?? `loop-${s.loop}`;
+    const key = s.region ?? `loop-${groupLoop.get(s.loop) ?? s.loop}`;
     const rules = region?.coast ?? DEFAULT_COAST_RULES;
     (groups.get(key) ?? groups.set(key, { rules, segs: [] }).get(key)!).segs.push(s);
   }
@@ -833,10 +853,11 @@ export function checkCoastPlan(recipe: WorldRecipe, opts: { measureTops?: boolea
   let longestRun: CoastGateReport["longestRun"] = null;
   const byLoop = new Map<number, CoastSegmentDoc[]>();
   for (const s of docs) (byLoop.get(s.loop) ?? byLoop.set(s.loop, []).get(s.loop)!).push(s);
-  for (const loop of byLoop.values()) {
+  for (const [li, loop] of byLoop) {
     const n = loop.length;
     if (loop.every((s) => s.type === loop[0]!.type)) {
       const metres = loop.reduce((a, s) => a + s.length, 0);
+      if (groupLoop.get(li) !== li) continue; // an islet: one cliff ring is what it is
       const maxRun = maxRunFor(recipe, loop[0]!);
       if (metres > maxRun) findings.push({ rule: "max-run", detail: `the whole loop (${Math.round(metres)} m) is ${loop[0]!.type} (max run ${maxRun} m)` });
       if (!longestRun || metres > longestRun.metres) longestRun = { type: loop[0]!.type, metres: Math.round(metres), from: loop[0]!.id };

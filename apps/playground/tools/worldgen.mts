@@ -87,7 +87,7 @@ import {
   type RiverPathDoc,
   RIVER_FALL_MIN,
 } from "@hitreg/core";
-import { basinFootprint, computeHydrology, extractBasins, extractChannels, simplifyLoop, traceOutline, type Channel, type HydroGrid } from "./worldgen-hydrology.mts";
+import { adoptDroppedParents, basinFootprint, joinParentHeadLake, loopsBackToLake, splitClearOfLakes, runGradeNeed, computeHydrology, extractBasins, extractChannels, simplifyLoop, traceOutline, type Channel, type HydroGrid } from "./worldgen-hydrology.mts";
 import { nearestRouteCell, routeBetween, smoothRoute, solveProfile, type RouteGrid, type RouteOptions } from "./worldgen-routing.mts";
 import { auditWorld } from "./worldgen-audit.mts";
 import { modelBounds } from "./_gltf-bounds.mjs";
@@ -98,7 +98,10 @@ import { altitudeLadder, autoRelief, biomesGatedToMissingAnchors, commandRelief,
 import { decodePng } from "./_png.mjs";
 import { drawText } from "./_map-text.mts";
 import { commandDogfood } from "./worldgen-dogfood.mts";
-import { assignClimateSites, biomeFindings, climateCellSize, describeBiomes, zonesBiomeCheck } from "./worldgen-climate.mts";
+import { coastOutline, planCoastShape } from "./worldgen-coast-shape.mts";
+import { withEnvironment, type SceneEntityJson } from "./worldgen-scene-env.mts";
+import { COLD_COLOUR, DRY_COLOUR, RIPARIAN_COLOUR, TREE_KIND_COLOURS, harshness, landClassifier, treeKindOf, type TreeKind } from "./worldgen-biome-read.mts";
+import { CLIMATE_CELLS_HARSH, assignClimateSites, biomeFindings, climateCellSize, describeBiomes, zonesBiomeCheck } from "./worldgen-climate.mts";
 import { commandZoneTextures, zoneTexturesStageCheck } from "./worldgen-zone-textures.mts";
 import { stageStamp } from "./_stage-stamp.mts";
 import { commandScatterFloat } from "./worldgen-scatter-float.mts";
@@ -107,7 +110,7 @@ import { commandFloat } from "./float.mts";
 import { commandRockSkins, writeRockSkinTemplate } from "./rock-skins.mts";
 import { commandPalette, commandRockAudit } from "./worldgen-rock-audit.mts";
 import { commandWaterEdges } from "./water-edges.mts";
-import { commandWaterLogic } from "./worldgen-water-logic.mts";
+import { commandWaterLogic, lakeSettleLevels } from "./worldgen-water-logic.mts";
 import { COAST_COLOURS, coastStageCheck, commandCoast, commandCoastTop } from "./worldgen-coast.mts";
 import { riverWaterDoc } from "./_river-water.mts";
 import { measureTownRisers, riserRule } from "./worldgen-riser-rule.mts";
@@ -595,7 +598,7 @@ function commandInit(): void {
     if (writeRockSkinTemplate(project, recipe)) writeRecipe(recipe, file);
     console.log(`took the look of ${source.recipe.name}: ${recipe.surfaces.length} surfaces (${recipe.surfaces.filter((s) => s.map).length} textured), ${recipe.biomes.length} biomes, ${recipe.patches.length} patches, ${recipe.scatter.length} scatter rules, ${copied} material file(s) copied`);
   } else writeWaterMaterial(recipe, waterMaterial);
-  if (flag("scene")) writeScene(recipe);
+  if (flag("scene")) writeScene(recipe, source ? path.join(path.dirname(source.file), "..", "scenes", `${source.recipe.name}.scene.json`) : undefined);
   const limit = recipe.bounds?.limit;
   console.log(
     `\nworld: ${recipe.bounds ? `${recipe.bounds.continents.length} landmasses, limit ${limit}m` : "endless"}, ` +
@@ -1073,8 +1076,10 @@ function pickSpawn(field: WorldField, recipe: WorldRecipe): [number, number] {
   return [0, 0];
 }
 
-/** A minimal scene that streams the world: sun, sky, ocean, voxelWorld. */
-function writeScene(recipe: WorldRecipe): void {
+/** A minimal scene that streams the world: sun, sky, ocean, voxelWorld, and the ENVIRONMENT (sky + day-night, weather,
+ *  zone-mood) — taken from the look's own scene when `--from` has one (`lookScene`). Without the environment a probe
+ *  render had no clock, no /weather and no /mood and drew a night-blue sky (redstrand 2026-10-29 siting sheet). */
+function writeScene(recipe: WorldRecipe, lookScene?: string): void {
   const file = path.join(assetsRoot(), "scenes", `${recipe.name}.scene.json`);
   if (fs.existsSync(file) && !flag("force")) {
     console.log(`kept existing scene ${path.relative(process.cwd(), file)}`);
@@ -1189,6 +1194,7 @@ function writeScene(recipe: WorldRecipe): void {
       },
     },
   };
+  withEnvironment(doc.entities as Record<string, SceneEntityJson>, lookScene);
   writeJsonFile(file, doc, { label: "worldgen scene", allowRemovals: true }); // a new scene, or --force over the old one
   console.log(`wrote ${path.relative(process.cwd(), file)}`);
 }
@@ -1381,6 +1387,60 @@ const RUN_GRADE_FALL_WINDOW = 60;
 
 function commandRivers(): void {
   const { recipe, file } = loadRecipe();
+  // LAKE LEVELS SETTLED AFTER THE RIVERS (2026-10-29 w3-hydro, redstrand dogfood): a lake takes its level from the
+  // hydrology grid BEFORE any river is carved, and the rivers then cut its rim — a fall's gorge 15 m off the shore
+  // lowered the rim of seed 2130 lake-5 from 68.2 to 62.1 and its sheet stood 6 m over the cut; a shallow shelf the
+  // 16 m trace missed (lake-3) left the sheet's edge 0.7 m over dry ground. Each pass runs the whole stage on the
+  // source recipe, measures water-logic's perched sheets on the result, and caps every leaking lake's basin at the
+  // ground (or lower water) its edge stands over + 0.3 m (water-logic lakeSettleLevels); the next pass re-traces it there (the drained-lake
+  // path) and re-solves its rivers against the new level. The stage's console is the last pass's.
+  const source = structuredClone(recipe);
+  const caps = new Map<number, number>();
+  const notes: string[] = [];
+  for (let pass = 0; ; pass++) {
+    const r = pass === 0 ? recipe : structuredClone(source);
+    const lines: [boolean, unknown[]][] = [];
+    const log = console.log;
+    const warn = console.warn;
+    console.log = (...a: unknown[]): void => void lines.push([false, a]);
+    console.warn = (...a: unknown[]): void => void lines.push([true, a]);
+    let lakeBasin: Map<string, number>;
+    let leaks: { lake: LakeDoc; basin: number; level: number }[];
+    try {
+      lakeBasin = riversPass(r, caps).lakeBasin;
+      leaks = lakeSettleLevels(r, lakeBasin);
+    } finally {
+      console.log = log;
+      console.warn = warn;
+    }
+    const fresh = leaks.filter((k) => k.level < (caps.get(k.basin) ?? Infinity) - 0.05);
+    // --no-settle: one pass, leaks reported (what the stage did before 2026-10-29)
+    if (fresh.length === 0 || pass >= (flag("no-settle") ? 0 : LAKE_SETTLE_PASSES)) {
+      for (const [isWarn, a] of lines) (isWarn ? console.warn : console.log)(...a);
+      for (const n of notes) console.log(n);
+      if (fresh.length > 0) console.log(`  ! lake settle: ${fresh.length} lake(s) still leak after ${pass} pass(es): ${fresh.map((k) => k.lake.id).join(", ")}`);
+      writeRecipe(r, file);
+      const audit = auditWorld(r, createWorldField(r));
+      console.log(`  ${audit.summary}`);
+      if (audit.counts.townsUnderWater > 0) console.log("  lakes moved: re-run towns, paths, pois and trails (worldgen audit for the list)");
+      return;
+    }
+    for (const k of fresh) {
+      caps.set(k.basin, k.level);
+      const gone = k.lake.waterY - k.level > LAKE_SETTLE_MAX_DROP;
+      notes.push(`  lake settle pass ${pass + 1}: ${k.lake.id} ${k.lake.waterY} -> ${round(k.level)}${gone ? ': cut too far down, its basin filled' : ''} (its edge stood over lower ground once the rivers were carved)`);
+    }
+  }
+}
+
+/** Most a lake may be lowered by the settle and stay a lake (m); deeper cuts fill its basin instead. */
+const LAKE_SETTLE_MAX_DROP = 4;
+/** Most re-runs of the rivers stage that settle lake levels after the rivers (each: the whole stage + a water-logic sweep). */
+const LAKE_SETTLE_PASSES = 4;
+/** One run of the rivers stage on `recipe` (mutated), lake basins capped at `caps` (basin index -> level). */
+function riversPass(recipe: WorldRecipe, caps: ReadonlyMap<number, number>): { lakeBasin: Map<string, number> } {
+  meanderStats.requested = 0;
+  meanderStats.applied = 0;
   /**
    * LAKES ONLY, unless --trace. The traced network is what the hydrology
    * finds; it is not what a level designer draws. Rivers are AUTHORED now —
@@ -1553,6 +1613,8 @@ function commandRivers(): void {
     return -1;
   };
   const settled = new Map<number, number>();
+  /** Basins the lake settle lowered past LAKE_SETTLE_MAX_DROP: filled, not kept as lakes. */
+  const settledAway = new Set<number>();
   const settleLevel = (index: number, hops = 0): number => {
     const known = settled.get(index);
     if (known !== undefined) return known;
@@ -1570,6 +1632,15 @@ function commandRivers(): void {
       // never above its own spill level: a lake that cannot be drained
       // below what waits downstream simply is not drained
       waterY = Math.min(basin.level, Math.max(floor + lakeFill, floorLevel));
+    }
+    // settled after the rivers (commandRivers): never over the level that holds its edge once they are carved
+    const cap = caps.get(index);
+    if (cap !== undefined && cap < waterY) {
+      // a rim cut far down is no lake any more: a few metres under its old level the water left is a puddle in the
+      // corner of its bowl, its outlet channel no longer leaving it (redstrand dogfood 3039: 55.5 -> 46.0 left a 16 m
+      // pool a river ran into and none out). Past LAKE_SETTLE_MAX_DROP the basin is filled like any unkept hollow.
+      if (waterY - cap > LAKE_SETTLE_MAX_DROP) settledAway.add(index);
+      waterY = cap;
     }
     settled.set(index, waterY);
     return waterY;
@@ -1615,6 +1686,10 @@ function commandRivers(): void {
       return;
     }
     const waterY = settleLevel(index);
+    if (settledAway.has(index)) {
+      fillBasin(basin);
+      return;
+    }
     let footprint: { cells: number[]; outline: [number, number][]; centroid: [number, number] } | null = {
       cells: basin.cells,
       outline: basin.outline,
@@ -1791,6 +1866,14 @@ function commandRivers(): void {
   let snappedBy = 0;
   /** What became of each channel: the river id it was written as, or why it was dropped. */
   const channelFate = new Map<number, string>();
+  // 2026-10-29 (w2-hydro, redstrand dogfood 2231/2635/2837): a lake's river that JOINS a channel the lake-head rule
+  // drops (one that runs through no lake: it heads in a filled hollow or on a hillside) ended where that channel had
+  // been — 600 m from any water, a dangling reach. The river carries on down the dropped channel's cells instead.
+  if (traceRivers && lakeHeads) {
+    adoptDroppedParents(channels, (c) => wetOrRing[c]! >= 0 || inLake[c] === 1);
+    // and one joining a kept river ABOVE that river's first lake ends in that lake (w3-hydro, 2534)
+    joinParentHeadLake(channels, (c) => wetOrRing[c]! >= 0 || inLake[c] === 1);
+  }
 
   channels.forEach((channel, channelIndex) => {
     const authored = channel.authored;
@@ -2100,8 +2183,19 @@ function commandRivers(): void {
       if (head > 0) keep = keep.slice(head);
       let lowland = 0;
       for (let i = 1; i < keep.length; i++) lowland += Math.hypot(points[keep[i]!]![0] - points[keep[i - 1]!]![0], points[keep[i]!]![1] - points[keep[i - 1]!]![1]);
-      if (keep.length < 2 || lowland < minRiver) {
+      // 2026-10-29 (w2-hydro, redstrand dogfood 2635: a 2256-cell lake 226 m from the sea lost its outlet, and the
+      // river another lake drained into dangled 2.5 km from any water; 6 of 10 seeds had a lake "reached only by a
+      // mountain stream"): a LAKE'S OUTLET is a river however short — the minimum length is for rivers nobody needs
+      // (not a reach that leaves its lake only to run back into it: an arm round a headland, seed 2534)
+      const headLake = keep.length > 0 ? wetOrRing[cells[keep[0]!]!]! : -1;
+      const fromLake = keep.length > 0 && (headLake >= 0 || inLake[cells[keep[0]!]!] === 1) && (headLake < 0 || wetOrRing[cells[keep[keep.length - 1]!]!] !== headLake);
+      if (keep.length < 2 || (lowland < minRiver && !fromLake)) {
         channelFate.set(channelIndex, `a mountain stream (${lowland.toFixed(0)} m of lowland)`);
+        return;
+      }
+      // however long: out of a lake and back into it is the lake's arm, not a river (w3-hydro, 3241)
+      if (loopsBackToLake(keep.map((i) => cells[i]!), (c) => wetOrRing[c]!, (c) => basinOf[c]!)) {
+        channelFate.set(channelIndex, "runs back into its own lake");
         return;
       }
     }
@@ -2170,12 +2264,13 @@ function commandRivers(): void {
         along.push(length);
       }
       const level = (j: number): number => Math.max(recipe.seaLevel, bed[keep[j]!]!);
-      let fall = 0;
-      for (let a = 0, b = 0; a < keep.length; a++) {
-        while (b + 1 < keep.length && along[b + 1]! - along[a]! <= RUN_GRADE_FALL_WINDOW) b++;
-        fall = Math.max(fall, level(a) - level(b));
-      }
-      const need = length > 0 ? (level(0) - level(keep.length - 1) - fall) / length : 0;
+      // measured from the head AND from every lake on the way, not only as the whole length's average (2026-10-29)
+      const need = runGradeNeed(
+        keep.map((_, j) => level(j)),
+        along,
+        keep.map((i) => wetOrRing[cells[i]!]! >= 0 || inLake[cells[i]!] === 1),
+        RUN_GRADE_FALL_WINDOW,
+      );
       const grade = Math.min(RUN_GRADE_MAX, Math.round(need * RUN_GRADE_MARGIN * 1000) / 1000);
       if (grade > RUN_GRADE_LOWLAND) runGrade = grade;
     }
@@ -2291,7 +2386,6 @@ function commandRivers(): void {
   }
   const splits = splitFalls(recipe, option("split-falls", 0.4), option("split-min", 12));
   if (splits > 0) console.log(`  ${splits} falls split: a branch leaves above the lip and pours beside the main fall`);
-  writeRecipe(recipe, file);
   console.log(
     `  ${outlets} lake outlets start at their shore, ${snapped} mouths moved onto their swung parent ` +
       `(${snapped > 0 ? (snappedBy / snapped).toFixed(0) : 0} m avg), ${raised} drained lakes held up over the water downstream`,
@@ -2316,9 +2410,7 @@ function commandRivers(): void {
     console.log(`  ${lake.id}: at [${lake.center[0]}, ${lake.center[1]}] surface ${lake.waterY}m, ~${lake.radius}m across, ${lake.depth}m deep`);
   }
   if (lakes.length > 8) console.log(`  ... and ${lakes.length - 8} more`);
-  const audit = auditWorld(recipe, createWorldField(recipe));
-  console.log(`  ${audit.summary}`);
-  if (audit.counts.townsUnderWater > 0) console.log("  lakes moved: re-run towns, paths, pois and trails (worldgen audit for the list)");
+  return { lakeBasin: lakeIndexToBasin };
 }
 
 /**
@@ -6435,6 +6527,8 @@ function splitFalls(recipe: WorldRecipe, chance: number, minDrop: number): numbe
           [f.x + f.dirX * 24 + ox * 0.45, f.z + f.dirZ * 24 + oz * 0.45],
           mouth,
         ];
+        // never beside a lake: a branch leaving its river at the shore runs under the sheet (w3-hydro, 2029)
+        if (!splitClearOfLakes(pts, recipe.features.lakes)) continue;
         branches.push({
           id: `${f.river}-split`,
           points: pts.map((q) => [Math.round(q[0] * 100) / 100, Math.round(q[1] * 100) / 100] as [number, number]),
@@ -6451,9 +6545,45 @@ function splitFalls(recipe: WorldRecipe, chance: number, minDrop: number): numbe
       }
     }
   });
-  recipe.features.rivers = [...recipe.features.rivers, ...branches];
-  return branches.length;
+  if (branches.length === 0) return 0;
+  // 2026-10-29 (w2-hydro, redstrand dogfood 2534/2736): the branch is solved by the field against its parent — its head
+  // and mouth take the parent's level, its middle the bank beside the lip — and on a cliff top that rises beside the
+  // lip the solved water climbed 0.4-1.8 m before the pour (the rivers audit's uphill steps). A split whose solved water
+  // climbs anywhere is not written: the horsetail is decoration, the water running uphill is a fault.
+  const trial = createWorldField({ ...recipe, features: { ...recipe.features, rivers: [...recipe.features.rivers, ...branches] } });
+  // and one whose mouth is not ON its parent as the field solved it (the parent re-solved beside its branch ended
+  // 64-70 m away: the audit's dangling reach, seeds 2534/2837) is not written either
+  const offParent = (r: (typeof trial.rivers)[number]): boolean => {
+    const parent = trial.rivers.find((p) => p.id === r.id.slice(0, -"-split".length));
+    if (!parent) return true;
+    const end = r.points[r.points.length - 1]!;
+    let best = Infinity;
+    for (let k = 0; k + 1 < parent.points.length; k++) {
+      const a = parent.points[k]!;
+      const b = parent.points[k + 1]!;
+      const dx = b[0] - a[0];
+      const dz = b[1] - a[1];
+      const l = dx * dx + dz * dz;
+      const t = l < 1e-9 ? 0 : Math.max(0, Math.min(1, ((end[0] - a[0]) * dx + (end[1] - a[1]) * dz) / l));
+      best = Math.min(best, Math.hypot(end[0] - a[0] - dx * t, end[1] - a[1] - dz * t));
+    }
+    return best > 12;
+  };
+  const climbs = new Set(
+    trial.rivers
+      .filter((r) => r.id.endsWith("-split"))
+      .filter((r) => {
+        const lv = r.surfaceY && r.surfaceY.length === r.points.length ? r.surfaceY : r.bedY;
+        return (!!lv && lv.some((v, i) => i > 0 && v > lv[i - 1]! + 1e-6)) || offParent(r);
+      })
+      .map((r) => r.id),
+  );
+  const kept = branches.filter((b) => !climbs.has(b.id));
+  recipe.features.rivers = [...recipe.features.rivers, ...kept];
+  return kept.length;
 }
+/** Exported for the test: the split-falls stage on a recipe (mutates it, returns the branches written). */
+export { splitFalls as splitFallsForTest };
 
 function nearestRiverAt(
   rivers: readonly RiverDoc[],
@@ -7481,7 +7611,7 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
       after: ["paths", "zones"],
       by: "procedural",
       how: "worldgen barriers <world>",
-      check: (r) => (r.regions.length === 0 ? "no zones to wall" : r.features.ridges.length > 0 || r.features.pois.some((p) => p.tags.includes("pass")) ? null : "no ridges or passes"),
+      check: (r) => (r.regions.length === 0 ? "no zones to wall" : r.features.ridges.some((g) => !g.id.startsWith("cape-")) || r.features.pois.some((p) => p.tags.includes("pass")) ? null : "no ridges or passes"),
     },
     { name: "pois", after: ["towns", "paths"], by: "procedural", how: "worldgen pois <world>", check: (r) => has(r.features.pois.length) },
     {
@@ -8172,6 +8302,9 @@ function commandContinents(countOverride?: number): void {
     coastVariationScale: round(scale * 1.5),
     lobes: lobesFor(r, lobes),
     lobeBlend: round(r * 0.3),
+    capes: [],
+    inlets: [],
+    shapeBlend: 140,
   });
   if (count === 1) continents.push(make([0, 0], radius * 0.8, falloff, warpScale, lobeCount));
   else {
@@ -8184,7 +8317,7 @@ function commandContinents(countOverride?: number): void {
     }
   }
   // islands: out past the continents' coasts, spaced around the compass
-  const reachOf = (c: Continent): number => Math.max(c.radius, ...c.lobes.map((l) => Math.hypot(l[0], l[1]) + l[2]));
+  const reachOf = (c: Continent): number => Math.max(c.radius, ...c.lobes.map((l) => Math.hypot(l[0], l[1]) + l[2]), ...c.capes.map((cp) => Math.hypot(cp[2], cp[3]) + cp[5]));
   const outer = Math.max(...continents.map((c) => Math.hypot(c.center[0], c.center[1]) + reachOf(c) + c.falloff));
   for (let i = 0; i < islands; i++) {
     const r = radius * (0.2 + random() * 0.14);
@@ -8197,6 +8330,8 @@ function commandContinents(countOverride?: number): void {
   const limit = option("limit", Math.ceil((reach + 500) / 100) * 100);
 
   recipe.bounds = { continents, oceanFloor, landFloor, shelf: recipe.bounds?.shelf ?? 0.58, limit, limitFalloff: recipe.bounds?.limitFalloff ?? 600 };
+  // a re-run lays the land afresh: the last run's cape spines must not stand on the bare discs the outline is read from
+  recipe.features.ridges = recipe.features.ridges.filter((r) => !r.id.startsWith("cape-"));
   // the coast plan was traced on the old shoreline: drop it (its stretches too) so `coast` reads MISSING, not STALE-but-drawn
   const planned = recipe.features.coastSegments?.length ?? 0;
   if (planned) {
@@ -8212,7 +8347,24 @@ function commandContinents(countOverride?: number): void {
   if (!flag("no-relief")) {
     const stageBefore = currentStage;
     currentStage = "relief";
-    const relief = autoRelief(recipe, { log: (line) => console.log(line) });
+    let relief = autoRelief(recipe, { log: (line) => console.log(line) });
+    // the COAST SHAPE (2026-10-29 w2-shape, tools/worldgen-coast-shape.mts): capes where the upland meets the coast,
+    // inlets at the low valley mouths, islets off the tips — read from THIS land and its relief, then the relief is
+    // re-bisected at the SAME band scale (a wider bbox must not move the valleys the inlets were cut into). --no-shape skips it.
+    if (!flag("no-shape") && recipe.bounds) {
+      const main = recipe.bounds.continents[0]!;
+      const outline = coastOutline(recipe, createWorldField(recipe), relief.scaleKm * 1000);
+      const shape = planCoastShape(main, outline, mulberry32(recipe.seed ^ 0x5a0e5), main);
+      main.capes = shape.capes;
+      main.inlets = shape.inlets;
+      recipe.bounds.continents.push(...shape.islets);
+      recipe.features.ridges = [...recipe.features.ridges.filter((r) => !r.id.startsWith("cape-")), ...shape.ridges];
+      const reach2 = Math.max(...recipe.bounds.continents.map((c) => Math.hypot(c.center[0], c.center[1]) + reachOf(c) + c.falloff));
+      if (!flag("limit") || stringOption("limit", "") === "auto") recipe.bounds.limit = Math.max(recipe.bounds.limit, Math.ceil((reach2 + 300) / 100) * 100);
+      console.log("coast shape:");
+      for (const line of shape.lines) console.log(`  ${line}`);
+      relief = autoRelief(recipe, { scaleKm: relief.scaleKm, log: (line) => console.log(line) });
+    }
     // the climate cells follow the land too: a look's cell size (proving: 9000 m) is one cell on a 3 km island, so the
     // whole island was one anchor kind and woodland read 2 % or 91 % by seed (dogfood, 2026-10-28). Enough sites that
     // every anchor can show on the largest landmass: width / sqrt(2 x anchors). --keep-climate-size leaves it.
@@ -8220,7 +8372,7 @@ function commandContinents(countOverride?: number): void {
     if (zones && zones.anchors.length > 0 && !flag("keep-climate")) {
       // the cells from the land area (~3.5 on the largest landmass: several biomes, never one), then one anchor per
       // cell from the ground under it through the transition grammar (worldgen climate --auto)
-      const size = climateCellSize(relief.landKm2);
+      const size = climateCellSize(relief.landKm2, harshness(recipe).kind ? CLIMATE_CELLS_HARSH : undefined);
       if (size !== zones.size) {
         console.log(`  climate cells ${zones.size} -> ${size} m (${relief.landKm2} km² of land, ~3.5 cells on the landmass)`);
         zones.size = size;
@@ -9342,6 +9494,28 @@ function commandMap(): void {
   // woodland: expected tree density from the scatter rules + the vegetation plan, drawn as a canopy stipple
   const trees = flag("no-trees") ? null : treeSampler(recipe, field);
   const treeStep = Math.max(1, Math.round(12 / step));
+  // biomes that READ (2026-10-29 w2-shape): dry ground tinted its own colour, the riparian (oasis) ribbon drawn, and the
+  // canopy dots coloured pine / broadleaf / scrub — the dark green over everything told none of them apart. --no-biomes
+  // draws the plain splat; --base keeps the plain look for the in-game map.
+  const classes = !base && !byZone && !flag("no-biomes") ? landClassifier(recipe, field, trees ?? treeSampler(recipe, field)) : null;
+  const classStep = Math.max(1, Math.round(size / 300));
+  const coldWorld = harshness(recipe).kind === "cold";
+  const openColour = coldWorld ? COLD_COLOUR : DRY_COLOUR;
+  const classGrid = classes ? new Uint8Array(Math.ceil(size / classStep) ** 2) : null; // 0 none, 1 dry, 2 riparian
+  const cgw = Math.ceil(size / classStep);
+  if (classes && classGrid) {
+    for (let gy = 0; gy < cgw; gy++) for (let gx = 0; gx < cgw; gx++) {
+      const px = Math.min(size - 1, gx * classStep + (classStep >> 1)), py = Math.min(size - 1, gy * classStep + (classStep >> 1));
+      const h = heights[px + py * size]!;
+      if (h <= recipe.seaLevel) continue;
+      const x = cx - extent + px * step, z = cz - extent + py * step;
+      if (limit !== Infinity && x * x + z * z > limit * limit) continue;
+      const k = classes.at(x, z, h);
+      classGrid[gx + gy * cgw] = k.riparian ? 2 : k.dry ? 1 : 0;
+    }
+  }
+  const treeKinds = trees ? trees.trees.map((t) => treeKindOf(t.rule.id)) : [];
+  const perRule = new Float32Array(Math.max(1, treeKinds.length));
   const treeHash = (a: number, b: number): number => {
     let n = Math.imul(a, 374761393) + Math.imul(b, 668265263) + 0x9e3779b9;
     n = Math.imul(n ^ (n >>> 13), 1274126177);
@@ -9399,6 +9573,15 @@ function commandMap(): void {
             g += surfaces[i]![1] * w;
             b += surfaces[i]![2] * w;
           }
+          // dry ground ochre, the oasis ribbon green, before the shade (so the relief still reads through)
+          const cls = classGrid ? classGrid[Math.floor(px / classStep) + Math.floor(py / classStep) * cgw]! : 0;
+          if (cls) {
+            const tint = cls === 2 ? RIPARIAN_COLOUR : openColour;
+            const a = cls === 2 ? 0.6 : 0.4;
+            r = r * (1 - a) + (tint[0] / 255) * a;
+            g = g * (1 - a) + (tint[1] / 255) * a;
+            b = b * (1 - a) + (tint[2] / 255) * a;
+          }
           // hillshade from the north-west, the cartographic convention
           const shade = relief ? hillshade(px, py) : 0.72 + 0.55 * Math.max(0, 1 - slope * 1.7);
           r *= 255 * shade;
@@ -9423,8 +9606,16 @@ function commandMap(): void {
         const h = heights[px + py * size]!;
         if (h < recipe.seaLevel) continue;
         if (limit !== Infinity && x * x + z * z > limit * limit) continue;
-        const d = trees.density(x, z, h);
+        const d = trees.density(x, z, h, perRule);
         if (d <= 0) continue;
+        let dot: [number, number, number] = [38, 92, 44];
+        if (classes) {
+          const sum: Record<TreeKind, number> = { pine: 0, broadleaf: 0, scrub: 0 };
+          for (let k = 0; k < treeKinds.length; k++) sum[treeKinds[k]!] += perRule[k]!;
+          dot = TREE_KIND_COLOURS[(Object.keys(sum) as TreeKind[]).sort((a, b) => sum[b] - sum[a])[0]!];
+          // the ribbon's own woods in the ribbon colour: canopy dots hid the oasis tint under them
+          if (classGrid && classGrid[Math.floor(px / classStep) + Math.floor(py / classStep) * cgw] === 2) dot = [RIPARIAN_COLOUR[0] * 0.6, RIPARIAN_COLOUR[1] * 0.75, RIPARIAN_COLOUR[2] * 0.6];
+        }
         const expected = d * (treeStep * step) * (treeStep * step);
         const dots = Math.min(treeStep * treeStep, Math.floor(expected + treeHash(px, py)));
         for (let k = 0; k < dots; k++) {
@@ -9433,9 +9624,9 @@ function commandMap(): void {
           if (tx >= size || ty >= size || heights[tx + ty * size]! < recipe.seaLevel) continue;
           const to = (tx + ty * size) * 3;
           const shade = relief ? hillshade(tx, ty) : 1;
-          pixels[to] = clamp255(38 * shade);
-          pixels[to + 1] = clamp255(92 * shade);
-          pixels[to + 2] = clamp255(44 * shade);
+          pixels[to] = clamp255(dot[0] * shade);
+          pixels[to + 1] = clamp255(dot[1] * shade);
+          pixels[to + 2] = clamp255(dot[2] * shade);
           treeDots++;
         }
       }
@@ -9594,6 +9785,22 @@ function commandMap(): void {
       ly += 10;
     }
   }
+  // the biome legend, bottom-left (w2-shape): what the ground tints and canopy colours mean
+  if (classes) {
+    const rows: [string, [number, number, number]][] = [
+      ["PINE", TREE_KIND_COLOURS.pine],
+      ["BROADLEAF", TREE_KIND_COLOURS.broadleaf],
+      ["SCRUB TREES", TREE_KIND_COLOURS.scrub],
+      [coldWorld ? "TUNDRA AND SNOW" : "DRY GROUND", openColour],
+      ...(recipe.climate.zones?.riparian ? [[coldWorld ? "MELTWATER VALLEY" : "OASIS RIBBON", RIPARIAN_COLOUR] as [string, [number, number, number]]] : []),
+    ];
+    let ly = size - 6 - rows.length * 10;
+    for (const [label, c] of rows) {
+      for (let dy = 0; dy < 7; dy++) for (let dx = 0; dx < 10; dx++) plot(6 + dx, ly + dy, c);
+      drawText(pixels, size, 19, ly, label, [255, 255, 255], 1);
+      ly += 10;
+    }
+  }
   // Barriers: every OPEN run of a border in RED (a swap there shows two
   // worlds), every pass a white diamond with its number. A world is ready
   // for hosting when no red is left on any border.
@@ -9613,7 +9820,8 @@ function commandMap(): void {
   }
   // the ridges themselves, pale grey at their crest width: the hillshade alone
   // under-reads a 35 m wall at 18 m/px
-  for (const ridge of recipe.features.ridges) stroke(ridge.points, [225, 225, 235], Math.max(1, Math.round(ridge.width / (2 * step))));
+  // cape-* spines are coast-shape terrain (the hillshade draws them), not barriers
+  for (const ridge of recipe.features.ridges.filter((r) => !r.id.startsWith("cape-"))) stroke(ridge.points, [225, 225, 235], Math.max(1, Math.round(ridge.width / (2 * step))));
   const passes = recipe.features.pois.filter((p) => p.id.startsWith("pass-"));
   let passNo = 0;
   for (const poi of passes) {
@@ -10703,12 +10911,14 @@ function commandCover(): void {
 
 // ---------------------------------------------------------------- entry
 
-/** worldgen scene <world> [--force]: init --scene for a world that already has its recipe. */
+/** worldgen scene <world> [--force] [--from <look world>]: init --scene for a world that already has its recipe (the look's
+ *  scene supplies the environment: sky, day-night, weather, zone-mood). */
 function commandScene(): void {
   const { recipe } = loadRecipe();
   const file = path.join(assetsRoot(), "scenes", `${recipe.name}.scene.json`);
   if (fs.existsSync(file) && !flag("force")) fail(`${path.relative(process.cwd(), file)} exists — pass --force to replace it`);
-  writeScene(recipe);
+  const from = stringOption("from", "");
+  writeScene(recipe, from ? path.join(path.dirname(loadRecipe(from).file), "..", "scenes", `${from}.scene.json`) : undefined);
 }
 
 // `worldgen <command> --help`: that command's lines of HELP (no world needed), else the whole text

@@ -18,6 +18,7 @@
  */
 import type { WorldField, WorldRecipe } from "@hitreg/core";
 import { createWorldField, pointInPolygon } from "@hitreg/core";
+import { COLD_TEMPERATURE, DRY_MOISTURE, dryOpenMin, harshness } from "./worldgen-biome-read.mts";
 import { INTERIOR_SHORE_M, UPLAND_RISE_M, WOODLAND_DENSITY, WOODLAND_SHARE_MIN, altitudeLadder, interiorLakes, samplePoints, treeSampler, woodlandShare } from "./worldgen-relief.mts";
 
 /** Climate cells the largest landmass carries: 3.5 -> a 5 km² island reads three or four biomes. */
@@ -43,8 +44,17 @@ export const DRY_LEE_MIN = 0.5;
 type Anchor = NonNullable<WorldRecipe["climate"]["zones"]>["anchors"][number];
 type Transitions = WorldRecipe["climate"]["transitions"];
 
-export function climateCellSize(landKm2: number): number {
-  return Math.max(CLIMATE_CELL_MIN_M, Math.round((Math.sqrt(Math.max(landKm2, 0.01) / CLIMATE_CELLS_PER_LANDMASS) * 1000) / 50) * 50);
+/**
+ * A HARSH climate (dry or cold, tools/worldgen-biome-read.mts) draws its woodland anchor on the upland (dry) or under
+ * the treeline (cold): at 3.5 cells a landmass that anchor's one cell carried its woods over the lowland as well
+ * (redstrand dogfood 2026-10-29 w2-shape: 30-52 % of the woodland placed). Twice the cells put it on the ground it fits.
+ */
+export const CLIMATE_CELLS_HARSH = 7;
+/** Over the read rule's open share, the harsh anchors' extra measured share (the scrub / stunted trees they carry). */
+export const HARSH_MARGIN = 0.12;
+
+export function climateCellSize(landKm2: number, cellsPerLandmass = CLIMATE_CELLS_PER_LANDMASS): number {
+  return Math.max(CLIMATE_CELL_MIN_M, Math.round((Math.sqrt(Math.max(landKm2, 0.01) / cellsPerLandmass) * 1000) / 50) * 50);
 }
 
 export function isWet(a: Anchor, t: Transitions): boolean {
@@ -164,7 +174,10 @@ export function assignClimateSites(recipe: WorldRecipe, field: WorldField, log: 
     const lat = latitudeOf(recipe, s.x, s.z);
     const wantT = Math.max(0, Math.min(1, lat + 0.2 - 0.45 * s.alt01));
     // a dry climate (aridity) scales the wet trait down: on a small island every cell is near the sea
-    const wantM = s.wet01 * (1 - aridity);
+    // ...and the upland catches what rain there is (orographic): in a dry climate the moist anchor (redstrand's pine
+    // foothills) belongs on the high cells, not the low inland ones the wet trait favours (w2-shape 2026-10-29: 42-59 %
+    // of the woodland on the upland or by water)
+    const wantM = s.wet01 * (1 - aridity) + aridity * 0.9 * s.alt01;
     let c = (a.temperature - wantT) ** 2 + (a.moisture - wantM) ** 2;
     if (a.latitude !== undefined && zones.latitude) c += 0.25 * ((a.latitude - lat) / 0.3) ** 2;
     if (isWet(a, t) && !(s.alt01 < 0.35 && s.shore01 < 0.5)) c += 4;
@@ -257,8 +270,23 @@ export function assignClimateSites(recipe: WorldRecipe, field: WorldField, log: 
     for (const p of land) { const id = f.zone(p.x, p.z).id; m.set(id, (m.get(id) ?? 0) + 1 / land.length); }
     return m;
   };
+  // a HARSH climate (w2-shape 2026-10-29: "a dry-climate world is mostly dry/open ground"): its harsh anchors (dry:
+  // moisture < DRY_MOISTURE, cold: temperature < COLD_TEMPERATURE) must hold the open share the read rule asks plus a
+  // margin for the trees they carry themselves; the woodland anchors keep only the cells they fit best (dry: the high
+  // ones, cold: the low ones). Redstrand loop 3: the pine anchor held 40-50 % of the land, lowland and upland alike.
+  const harsh = harshness(recipe);
+  const isHarsh = (id: string): boolean => {
+    const a = anchors.find((q) => q.id === id);
+    return !!a && (harsh.kind === "cold" ? a.temperature < COLD_TEMPERATURE : a.moisture < DRY_MOISTURE);
+  };
+  const harshMin = harsh.kind && anchors.some((a) => isHarsh(a.id)) && anchors.some((a) => !isHarsh(a.id)) ? Math.min(0.85, dryOpenMin(harsh.severity) + HARSH_MARGIN) : 0;
   const miss = (m: Map<string, number>): number => {
     let d = 0;
+    if (harshMin > 0) {
+      let h = 0;
+      for (const [id, v] of m) if (isHarsh(id)) h += v;
+      d += Math.max(0, harshMin - h);
+    }
     for (const v of m.values()) d += Math.max(0, v - BIOME_SHARE_MAX);
     const ranked = [...m.values()].sort((a, b) => b - a);
     for (let k = 0; k < Math.min(BIOME_KINDS_MIN, anchors.length); k++) d += Math.max(0, BIOME_SHARE_MIN - (ranked[k] ?? 0));
@@ -266,16 +294,32 @@ export function assignClimateSites(recipe: WorldRecipe, field: WorldField, log: 
   };
   {
     let shares = measure();
-    for (let round = 0; round < 8 && miss(shares) > 0; round++) {
+    for (let round = 0; round < 12 && miss(shares) > 0; round++) {
       const ranked = [...shares.entries()].sort((a, b) => b[1] - a[1]);
       const top = ranked[0]![0];
       const counts = new Map<string, number>();
       for (const s of sites) counts.set(s.anchor, (counts.get(s.anchor) ?? 0) + 1);
       const moves: { i: number; to: string; c: number }[] = [];
       const needed = anchors.filter((a) => (shares.get(a.id) ?? 0) < BIOME_SHARE_MIN).map((a) => a.id);
+      let harshShare = 0;
+      for (const [id, v] of shares) if (isHarsh(id)) harshShare += v;
+      const harshShort = harshMin > 0 && harshShare < harshMin;
       for (let i = 0; i < sites.length; i++) {
         const cur = sites[i]!.anchor;
-        if (cur !== top || (counts.get(cur) ?? 0) <= 1) continue;
+        if ((counts.get(cur) ?? 0) <= 1) continue;
+        if (harshShort) {
+          // a woodland cell the harsh climate takes back: the one that fits woodland least (dry: low; cold: high)
+          if (isHarsh(cur)) continue;
+          const s = sites[i]!;
+          const misfit = harsh.kind === "cold" ? s.alt01 : 1 - s.alt01;
+          for (const a of anchors) {
+            if (!isHarsh(a.id)) continue;
+            if (neighbours(i).some((n) => !legalPair(a, anchors.find((q) => q.id === n.anchor)!, t).legal)) continue;
+            moves.push({ i, to: a.id, c: cost(a, i, false) - cost(anchors.find((q) => q.id === cur)!, i, false) - 2 * misfit });
+          }
+          continue;
+        }
+        if (cur !== top) continue;
         for (const to of [...needed, ...anchors.map((a) => a.id)]) {
           if (to === cur) continue;
           const a = anchors.find((q) => q.id === to)!;

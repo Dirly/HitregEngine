@@ -1734,6 +1734,26 @@ const continentSchema = z.object({
         "the land floor hold everywhere.",
     ),
   lobeBlend: z.number().min(0).default(500).describe("Metres over which lobes merge into one another instead of meeting at a crease. Wider = softer bays where they join."),
+  // coast shape (2026-10-29 w2-shape: every seed was the same rounded two-lobe blob — discs cannot make a headland
+  // or a sound). Written by `worldgen continents`' coast-shape step; hand-editable.
+  capes: z
+    .array(z.tuple([z.number(), z.number(), z.number(), z.number(), z.number().positive(), z.number().positive()]))
+    .default([])
+    .describe(
+      "Peninsulas / headlands [ax, az, bx, bz, rootHalfWidth, tipHalfWidth], relative to `center`: a tapered capsule " +
+        "from a root A inside the land to a tip B out at sea, UNIONED with the landmass. The half-widths are the " +
+        "LAND's half-width at the shoreline (the coast band is allowed for), so a 120 m tip is a 240 m wide point. " +
+        "The coast warp is calmed inside it so the neck does not break. `worldgen continents` writes 1-3 by seed.",
+    ),
+  inlets: z
+    .array(z.tuple([z.number(), z.number(), z.number(), z.number(), z.number().positive(), z.number().positive()]))
+    .default([])
+    .describe(
+      "Bays / sounds [ax, az, bx, bz, mouthHalfWidth, headHalfWidth], relative to `center`: a tapered capsule from " +
+        "the mouth A out at sea to the head B inland, CUT from the landmass (water half-width at the shoreline). " +
+        "`worldgen continents` writes 1-3 by seed, each at a valley mouth so a river can reach its head.",
+    ),
+  shapeBlend: z.number().min(0).default(140).describe("Metres over which capes and inlets blend into the coast (a smooth neck and bay shoulders rather than a crease)."),
 });
 
 /** Continents + the sea around them. See `worldRecipeSchema.bounds`. */

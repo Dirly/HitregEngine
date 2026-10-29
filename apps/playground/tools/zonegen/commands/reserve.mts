@@ -25,8 +25,21 @@ import { distToPolyline, err, inZone, requireZone, warn } from "./_shared.mts";
 import { hostileOnMainRoads, travelRoads, type Content } from "./_site-finder.mts";
 import { reservationTierFault, tierFor } from "../../../../../tools/poi-review/size-tiers.mjs";
 import { z } from "zod";
-import { measureNeeds, needRulingSchema, unexcepted, type SiteNeedOverrides, type SiteRole } from "../../site-needs.mts";
+import { measureNeeds, needRulingSchema, unexcepted, type SitedPlace, type SiteNeedOverrides, type SiteRole } from "../../site-needs.mts";
 import { naturalField, needGround } from "../../worldgen-site-needs.mts";
+
+/** Every reservation as a sited place (`place:<location>`): this zone's as they stand in memory, the other zones' from disk. */
+function placesFor(ctx: Ctx, own: readonly { location: string; center: [number, number]; radius: number }[]): SitedPlace[] {
+  const out: SitedPlace[] = own.map((r) => ({ id: r.location, kind: "place", at: [r.center[0], r.center[1]], radius: r.radius }));
+  const zonesDir = path.join(ctx.paths.worldDir, "zones");
+  if (exists(zonesDir))
+    for (const zone of fs.readdirSync(zonesDir)) {
+      if (zone === ctx.zone || !exists(ctx.paths.reservations(zone))) continue;
+      for (const r of ((readJson(ctx.paths.reservations(zone)) as { reservations?: { location: string; center: [number, number]; radius: number }[] }).reservations ?? []))
+        out.push({ id: r.location, kind: "place", at: [r.center[0], r.center[1]], radius: r.radius });
+    }
+  return out;
+}
 
 /** The zone master's choice file for `reserve --pick`. */
 export const placePickSchema = z.object({
@@ -286,10 +299,10 @@ export async function run(ctx: Ctx): Promise<number> {
     };
     const roled = res.reservations.map((r) => [r, roleOf(r)] as const).filter(([, x]) => x !== null);
     if (roled.length) {
-      const g = needGround(recipe, naturalField(recipe));
+      const g = needGround(recipe, naturalField(recipe), undefined, placesFor(ctx, res.reservations));
       for (const [r, x] of roled) {
         const at: [number, number] = r.entrance ? [r.entrance.position[0], r.entrance.position[2]] : r.center;
-        const rep = measureNeeds(g, x!.role, at[0], at[1], r.radius, x!.overrides);
+        const rep = measureNeeds(g, x!.role, at[0], at[1], r.radius, x!.overrides, { self: r.location });
         for (const m of rep.results) {
           if (m.met) continue;
           const ruled = r.needRulings.find((q) => q.need === m.need);
@@ -345,7 +358,7 @@ function pickPlaces(
   if (!fromFile || !exists(fromFile)) { console.error(`reserve --pick: no propose file (give "from"; zonegen sites --role <r> --propose writes it)`); return 2; }
   const proposal = readJson(fromFile) as { zone: string; role: SiteRole; overrides?: SiteNeedOverrides; radius: number; candidates: { id: string; kind: string; at: [number, number]; y: number; view: number }[] };
   if (proposal.zone !== ctx.zone) { console.error(`reserve --pick: ${path.basename(fromFile)} is for ${proposal.zone}, not ${ctx.zone}`); return 2; }
-  const g = needGround(recipe, naturalField(recipe));
+  const g = needGround(recipe, naturalField(recipe), undefined, placesFor(ctx, res.reservations));
   const byPlace = new Map(places.map((x) => [x.id, x] as const));
   const refused: string[] = [];
   const plan: { row: (typeof parsed.data.places)[number]; c: (typeof proposal.candidates)[number] }[] = [];
@@ -356,7 +369,7 @@ function pickPlaces(
     if (!loc) { refused.push(`${row.location}: not a location of the quest graph`); continue; }
     const place = byPlace.get(row.location) ?? byPlace.get(loc.place);
     const overrides = { ...(proposal.overrides ?? {}), ...(place?.siteNeeds ?? {}) };
-    const rep = measureNeeds(g, proposal.role, c.at[0], c.at[1], proposal.radius, overrides);
+    const rep = measureNeeds(g, proposal.role, c.at[0], c.at[1], proposal.radius, overrides, { self: row.location });
     const miss = unexcepted(rep, row.rulings);
     if (miss.length) { refused.push(`${row.location} on ${row.candidate} (${proposal.role}) fails ${miss.map((m) => `${m.need}: ${m.message}`).join("; ")}`); continue; }
     if (!res.reservations.some((r) => r.location === row.location) && (!row.radius || !row.approach)) { refused.push(`${row.location} has no reservation yet: give radius and approach in its row`); continue; }

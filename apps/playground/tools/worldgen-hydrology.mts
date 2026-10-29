@@ -282,6 +282,59 @@ export function extractChannels(grid: HydroGrid, hydro: HydroResult, threshold: 
   return channels;
 }
 
+/**
+ * A channel that runs through a lake (`wet(cell)` true somewhere on it; an authored channel always counts) but JOINS
+ * one that does not — the rivers stage drops that one ("does not start at a lake") — would end in the field where its
+ * parent used to be: a dangling reach (2026-10-29, redstrand dogfood 2231 river-4: 616 m from any water). It ADOPTS the
+ * dropped parent's cells from its join down to that parent's own mouth, and joins whatever the parent joined, until it
+ * reaches a channel that is kept or the sea. A second channel joining the same dropped parent stops at the first cell
+ * already adopted and joins the adopter. Mutates `channels` (cells, joins); returns how many channels were extended.
+ */
+export function adoptDroppedParents(channels: (Channel & { authored?: unknown })[], wet: (cell: number) => boolean): number {
+  const kept = channels.map((ch) => !!ch.authored || ch.cells.some(wet));
+  /** cell -> the channel that adopted it */
+  const claimed = new Map<number, number>();
+  const order = channels
+    .map((_, i) => i)
+    .filter((i) => kept[i] && channels[i]!.joins >= 0 && !kept[channels[i]!.joins]!)
+    .sort((a, b) => channels[b]!.size - channels[a]!.size);
+  let extended = 0;
+  for (const i of order) {
+    const ch = channels[i]!;
+    let guard = 0;
+    let grew = false;
+    while (ch.joins >= 0 && !kept[ch.joins]! && guard++ < channels.length) {
+      const mouth = ch.cells[ch.cells.length - 1]!;
+      const owner = claimed.get(mouth);
+      if (owner !== undefined && owner !== i) {
+        ch.joins = owner;
+        break;
+      }
+      const parent = channels[ch.joins]!;
+      const at = parent.cells.lastIndexOf(mouth);
+      if (at < 0) break;
+      let stopped = false;
+      for (let k = at + 1; k < parent.cells.length; k++) {
+        const c = parent.cells[k]!;
+        ch.cells.push(c);
+        const other = claimed.get(c);
+        if (other !== undefined && other !== i) {
+          ch.joins = other;
+          stopped = true;
+          break;
+        }
+        // the parent's last cell is its mouth: the sea, or a cell of the channel IT joins (not adopted)
+        if (k < parent.cells.length - 1) claimed.set(c, i);
+      }
+      grew = true;
+      if (stopped) break;
+      ch.joins = parent.joins;
+    }
+    if (grew) extended++;
+  }
+  return extended;
+}
+
 export interface Basin {
   /** Cell indices of the standing water, shallows included. */
   cells: number[];
@@ -569,4 +622,123 @@ function pointSegment(p: [number, number], a: [number, number], b: [number, numb
   const lenSq = dx * dx + dz * dz;
   const t = lenSq < 1e-12 ? 0 : Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / lenSq));
   return Math.hypot(p[0] - (a[0] + dx * t), p[1] - (a[1] + dz * t));
+}
+
+/**
+ * The grade a river's water needs (`runGrade` before the margin and the cap): what its profile must lose outside its
+ * ONE fall (the sharpest drop within `fallWindow` metres), per metre. The whole length's average was the old rule; it
+ * under-reads a river whose lake holds its head up over a steep run below — the field cut that run down at the average
+ * grade from the mouth up, and the cut reached the lake: a 7 m step at the outlet and the sheet hanging over it
+ * (2026-10-29, redstrand dogfood 2029 lake-3: 4.5 % average, 7.7 % needed below the lake). So every ANCHOR (the head and
+ * each lake point, `anchor[j]`) is also measured to every point at least `minRun` metres below it, with the fall
+ * credited only when its window lies between them. `level` and `along` are per point, head to mouth.
+ */
+export function runGradeNeed(level: readonly number[], along: readonly number[], anchor: readonly boolean[], fallWindow = 60, minRun = 60): number {
+  const n = level.length;
+  if (n < 2) return 0;
+  const length = along[n - 1]! - along[0]!;
+  let fall = 0;
+  let fallA = 0;
+  let fallB = 0;
+  for (let a = 0, b = 0; a < n; a++) {
+    if (b < a) b = a;
+    while (b + 1 < n && along[b + 1]! - along[a]! <= fallWindow) b++;
+    if (level[a]! - level[b]! > fall) {
+      fall = level[a]! - level[b]!;
+      fallA = a;
+      fallB = b;
+    }
+  }
+  let need = length > 0 ? (level[0]! - level[n - 1]! - fall) / length : 0;
+  for (let a = 0; a < n; a++) {
+    if (!(a === 0 || anchor[a])) continue;
+    // an anchor inside a run of anchors (a lake reach) is measured from its last point only
+    if (a + 1 < n && anchor[a + 1]) continue;
+    for (let b = a + 1; b < n; b++) {
+      const run = along[b]! - along[a]!;
+      if (run < minRun) continue;
+      const credit = fallA >= a && fallB <= b ? fall : 0;
+      need = Math.max(need, (level[a]! - level[b]! - credit) / run);
+    }
+  }
+  return need;
+}
+
+/**
+ * How many of a lake's banks a split-fall branch keeps between itself and the lake (2026-10-29 w3-hydro, redstrand
+ * dogfood 2029: a fall 30 m below its lake's outlet split, the branch left the river at the shore and ran 1.9 m under
+ * the sheet beside it — the lake's edge hung over the branch's water). Two banks = the reach of the lake's flood.
+ */
+export const SPLIT_LAKE_BANKS = 2;
+
+/**
+ * Does a split-fall branch keep clear of every lake: no point (its mouth excepted — it rejoins its river below the
+ * fall) inside a lake's outline or within SPLIT_LAKE_BANKS banks of it?
+ */
+export function splitClearOfLakes(
+  points: readonly (readonly [number, number])[],
+  lakes: readonly { polygon?: readonly (readonly [number, number])[]; center: readonly [number, number]; radius: number; bank: number }[],
+): boolean {
+  for (let k = 0; k + 1 < points.length; k++) {
+    const [x, z] = points[k]!;
+    for (const lake of lakes) {
+      const reach = lake.bank * SPLIT_LAKE_BANKS;
+      if (!lake.polygon || lake.polygon.length < 3) {
+        if (Math.hypot(x - lake.center[0], z - lake.center[1]) <= lake.radius + reach) return false;
+        continue;
+      }
+      let inside = false;
+      let best = Infinity;
+      const poly = lake.polygon;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, zi] = poly[i]!;
+        const [xj, zj] = poly[j]!;
+        if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
+        const dx = xi - xj;
+        const dz = zi - zj;
+        const l = dx * dx + dz * dz;
+        const t = l < 1e-9 ? 0 : Math.max(0, Math.min(1, ((x - xj) * dx + (z - zj) * dz) / l));
+        best = Math.min(best, Math.hypot(x - xj - dx * t, z - zj - dz * t));
+      }
+      if (inside || best <= reach) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * A kept channel (it runs through a lake) that joins a KEPT parent ABOVE the parent's first lake ends where nothing is
+ * written: the rivers stage starts the parent at that lake's shore and the parent's head above it is land (2026-10-29
+ * w3-hydro, redstrand dogfood 2534: river-6 out of lake-4 ended 253 m from river-3, which starts at lake-6 below the
+ * join — a dangling reach). The tributary carries on down the parent's head cells to the parent's first lake and ends
+ * in it. Run after adoptDroppedParents. Mutates `channels` (cells); returns how many were extended.
+ */
+export function joinParentHeadLake(channels: (Channel & { authored?: unknown })[], wet: (cell: number) => boolean): number {
+  let extended = 0;
+  for (const ch of channels) {
+    if (ch.joins < 0 || ch.authored || !ch.cells.some(wet)) continue;
+    const parent = channels[ch.joins]!;
+    if (parent.authored) continue;
+    const firstWet = parent.cells.findIndex(wet);
+    if (firstWet < 0) continue;
+    const at = parent.cells.lastIndexOf(ch.cells[ch.cells.length - 1]!);
+    if (at < 0 || at >= firstWet) continue;
+    for (let k = at + 1; k <= firstWet; k++) ch.cells.push(parent.cells[k]!);
+    extended++;
+  }
+  return extended;
+}
+
+/**
+ * Does a river that starts at a lake end back in that same lake (its water, its one-cell ring or its dry bowl)? Such a
+ * reach is an arm of the lake round a headland, never a river: written, it ended a hair outside the lake's outline and
+ * the audit read a dangling reach (2026-10-29 w3-hydro, redstrand dogfood 3241 river-5: 450 m out of lake-1 and back,
+ * 0.5 m off its shore). `wetOf` / `bowlOf`: the basin index a cell is under (or rings) / lies in, -1 for none.
+ */
+export function loopsBackToLake(cells: readonly number[], wetOf: (cell: number) => number, bowlOf: (cell: number) => number): boolean {
+  if (cells.length < 2) return false;
+  const head = wetOf(cells[0]!);
+  if (head < 0) return false;
+  const mouth = cells[cells.length - 1]!;
+  return wetOf(mouth) === head || bowlOf(mouth) === head;
 }

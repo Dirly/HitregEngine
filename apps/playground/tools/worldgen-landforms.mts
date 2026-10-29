@@ -179,7 +179,7 @@ function fitWindow(recipe: WorldRecipe, argv: string[]): { cx: number; cz: numbe
   if (continents.length === 0) return { cx: 0, cz: 0, extent: 3000 };
   let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
   for (const c of continents) {
-    const discs: [number, number, number][] = [[c.center[0], c.center[1], c.radius], ...c.lobes.map((l): [number, number, number] => [c.center[0] + l[0], c.center[1] + l[1], l[2]])];
+    const discs: [number, number, number][] = [[c.center[0], c.center[1], c.radius], ...c.lobes.map((l): [number, number, number] => [c.center[0] + l[0], c.center[1] + l[1], l[2]]), ...c.capes.map((cp): [number, number, number] => [c.center[0] + cp[2], c.center[1] + cp[3], cp[5]])];
     for (const [x, z, r] of discs) {
       const reach = r + c.falloff * 0.8;
       x0 = Math.min(x0, x - reach); x1 = Math.max(x1, x + reach);

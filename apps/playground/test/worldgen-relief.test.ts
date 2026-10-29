@@ -86,7 +86,7 @@ test("tree rules are the tall plants; the sampler finds woodland in a forest zon
   assert.ok(trees.includes("pine") && trees.includes("maple"), trees.join(", "));
   assert.ok(!trees.includes("shrub") && !trees.includes("rock-medium"), trees.join(", "));
   // one landmass, one forest anchor: every column is forest
-  recipe.bounds = { continents: [{ center: [0, 0], radius: 900, falloff: 300, warp: 0, warpScale: 1000, coastVariation: 0, coastVariationScale: 1000, lobes: [], lobeBlend: 100 }], oceanFloor: -45, landFloor: 4, shelf: 0.58, limit: 2000, limitFalloff: 300 };
+  recipe.bounds = { continents: [{ center: [0, 0], radius: 900, falloff: 300, warp: 0, warpScale: 1000, coastVariation: 0, coastVariationScale: 1000, lobes: [], lobeBlend: 100, capes: [], inlets: [], shapeBlend: 140 }], oceanFloor: -45, landFloor: 4, shelf: 0.58, limit: 2000, limitFalloff: 300 };
   recipe.climate.zones!.anchors = recipe.climate.zones!.anchors.filter((a) => a.id === "forest");
   recipe.biomes = recipe.biomes.filter((b) => !b.zones || b.zones.includes("forest"));
   recipe.terrain.mountains.amplitude = 0;

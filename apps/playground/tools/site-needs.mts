@@ -18,6 +18,7 @@ import { z } from "zod";
 import { TOWN_SITE_ROLES, type GroundNeedDoc, type HeightPatchDoc } from "@hitreg/core";
 import { OVERLOOK_RULE } from "./_town-wall-rules.mts";
 import { terraceReach } from "./worldgen-coastal-towns.mts";
+import { heightForPx, readPixels } from "./_place-quality.mts";
 
 export type V2 = [number, number];
 
@@ -31,56 +32,121 @@ export interface NeedGround {
   coastal?(x: number, z: number, radius: number): string[];
   /** Travel roads, when the world has them (a crossroads counts the roads that meet). */
   roads?: readonly { id: string; points: readonly (readonly number[])[] }[];
+  /** The biome id and the zone anchor id at (x, z) (`field.biome`): the `biome` need. */
+  biome?(x: number, z: number): { id: string; zone: string };
+  /** Places already sited (towns, reservations, a dogfood run's earlier picks): `distance-from`, `on-route`, `landmark-visible` from. */
+  places?: readonly SitedPlace[];
+}
+
+/** A sited place a need can refer to as `town:<id>`, `place:<id>` or a bare `<id>` (`town:*` = the nearest town). */
+export interface SitedPlace {
+  id: string;
+  kind: "town" | "place";
+  at: V2;
+  radius: number;
 }
 
 // ------------------------------------------------------------------ the schema (facts in .describe())
 
 const reach = terraceReach();
+/** Caps on the metres a need may ask (2026-10-29 t-needs): every measure loops over these (apron cells, pad samples, ring bands,
+ *  probe runs), so an unbounded number (an apron of 1e9 m2, a pad of radius 1e5) made a measurement run for hours. */
+export const MAX_M = { height: 400, reach: 400, apronM2: 40_000, distance: 3_000, band: 1_000, radius: 1_000 } as const;
 const rockFace = z.object({
   kind: z.literal("rock-face"),
-  frontHeight: z.number().positive().default(40).describe("Height of the carved / built front the face must carry, m."),
+  frontHeight: z.number().positive().max(MAX_M.height).default(40).describe("Height of the carved / built front the face must carry, m."),
   ratio: z.number().min(1).default(1.1).describe("The face must stand this many times the front's height (rock above the lintel)."),
-  minHeight: z.number().positive().optional().describe("Explicit face height, m (overrides frontHeight x ratio)."),
+  minHeight: z.number().positive().max(MAX_M.height).optional().describe("Explicit face height, m (overrides frontHeight x ratio)."),
   faceSlope: z.number().positive().default(1).describe("Rise/run counted as rock face (1 = 45 deg)."),
-  footReach: z.number().positive().default(40).describe("The face's foot must start within this many metres of the site point."),
-  apronM2: z.number().min(0).default(1600).describe("Flat apron at the foot (plaza, stair landing), m2: dry, within 3 m of the foot's height, slope <= apronSlope."),
+  footReach: z.number().positive().max(MAX_M.reach).default(40).describe("The face's foot must start within this many metres of the site point."),
+  apronM2: z.number().min(0).max(MAX_M.apronM2).default(1600).describe("Flat apron at the foot (plaza, stair landing), m2: dry, within 3 m of the foot's height, slope <= apronSlope."),
   apronSlope: z.number().positive().default(0.15).describe("Steepest rise/run counted as apron."),
-  readDistance: z.number().min(0).default(300).describe("The face must be seen (line of sight to its mid-height, eye 1.7 m) from at least this far in front of it; 0 = not measured."),
+  readDistance: z.number().min(0).max(MAX_M.distance).default(300).describe("The face must be seen (line of sight to its mid-height, eye 1.7 m) from at least this far in front of it; 0 = not measured."),
 });
 const defensible = z.object({
   kind: z.literal("defensible"),
-  margin: z.number().min(0).default(12).describe("The wall ring stands this far outside the pad radius, m."),
+  margin: z.number().min(0).max(MAX_M.reach).default(12).describe("The wall ring stands this far outside the pad radius, m."),
   maxWall: z.number().positive().default(260).describe("Most metres of wall the open (unprotected) ring may need: cliff flanks or a neck <= this to wall."),
   flankDrop: z.number().positive().default(8).describe("A bearing is PROTECTED when the ground within flankBand outside the ring falls this far under the pad, or is water."),
-  flankBand: z.number().positive().default(30).describe("Metres outside the ring a protecting drop must happen within."),
-  overlookBand: z.number().positive().default(OVERLOOK_RULE.band).describe("No ground within this many metres outside the ring may see over the wall top (the town-wall-line overlook rule, pre-layout)."),
+  flankBand: z.number().positive().max(MAX_M.band).default(30).describe("Metres outside the ring a protecting drop must happen within."),
+  overlookBand: z.number().positive().max(MAX_M.band).default(OVERLOOK_RULE.band).describe("No ground within this many metres outside the ring may see over the wall top (the town-wall-line overlook rule, pre-layout)."),
   wallHeight: z.number().positive().default(6).describe("Wall height over the pad, m (town-wall-line draw --height default)."),
   parapet: z.number().min(0).default(1.2).describe("Parapet over the wall top, m."),
 });
 const shore = z.object({ kind: z.literal("shore") }).describe("The coastal rule (tools/worldgen-coastal-towns.mts COASTAL_TOWN: <= 12 m over the sea, <= 90 m from a sheltered cove / sand-beach, steppable, dry).");
 const flatPad = z.object({
   kind: z.literal("flat-pad"),
+  radius: z.number().positive().max(MAX_M.radius).optional().describe("Pad radius measured, m (default the site's radius): a large place's core inside a wider site."),
   maxRelief: z.number().positive().default(reach.maxRelief).describe("Most relief (p05..p95) across the pad a terrace steps, m (worldgen terrace defaults)."),
   maxSlope: z.number().positive().default(Math.round(reach.maxSlope * 100) / 100).describe("Most mean rise/run across the pad a terrace steps."),
 });
 const highGround = z.object({
   kind: z.literal("high-ground"),
+  radius: z.number().positive().max(MAX_M.radius).optional().describe("Pad radius the rise is measured from, m (default the site's radius)."),
   minRise: z.number().positive().default(15).describe("The pad stands at least this far over the median ground on a ring `ring` m outside it."),
-  ring: z.number().positive().default(150).describe("Metres outside the pad edge the surroundings are read at."),
+  ring: z.number().positive().max(MAX_M.band).default(150).describe("Metres outside the pad edge the surroundings are read at."),
 });
 const crossroads = z.object({
   kind: z.literal("crossroads"),
   minWays: z.number().int().min(1).default(4).describe("Open ways in (of 8 compass sectors: walkable ground out to `reach` m) or roads meeting within 150 m of the pad edge."),
-  reach: z.number().positive().default(500).describe("Metres a way must run open."),
+  reach: z.number().positive().max(MAX_M.distance).default(500).describe("Metres a way must run open."),
   maxGrade: z.number().positive().default(0.2).describe("Steepest rise/run over a 12 m step a way may climb (two steps over it are allowed)."),
 });
 
+const placeRef = z
+  .string()
+  .min(1)
+  .describe("A sited place: `town:<id>` (a recipe town), `place:<id>` (a reservation's location, a dogfood run's earlier place) or a bare id; `town:*` = the nearest town.");
+const biome = z.object({
+  kind: z.literal("biome"),
+  any: z.array(z.string().min(1)).min(1).describe("Allowed biome ids or zone anchor ids (recipe `biomes[].id`, `climate.zones.anchors[].id`): a sample counts when its biome OR its anchor is listed."),
+  none: z.array(z.string().min(1)).default([]).describe("Forbidden biome / anchor ids (the riparian ribbon's anchor, say)."),
+  share: z.number().min(0).max(1).default(0.7).describe("Least share of the pad samples in an allowed biome/anchor."),
+  maxNone: z.number().min(0).max(1).default(0.05).describe("Most share of the pad samples in a forbidden biome/anchor."),
+  radius: z.number().positive().max(MAX_M.radius).optional().describe("Radius sampled, m (default the site's radius)."),
+});
+const landmarkVisible = z.object({
+  kind: z.literal("landmark-visible"),
+  height: z.number().positive().max(MAX_M.height).default(20).describe("Height of the BUILT landmark at the site centre over its ground, m (the Needle 36, a tilted stone 5)."),
+  distance: z.number().positive().max(MAX_M.distance).default(300).describe("It must show from at least this far out, m (a large place 300, small 150, roadside 120)."),
+  px: z.number().positive().default(16).describe("Least pixels of it showing over the ground between, in the 1280x720 / 60 deg evidence frame (tools/_place-quality.mts READ_PX_MIN: the place-read rule)."),
+  from: z
+    .string()
+    .default("any")
+    .describe("Where the eye stands (1.7 m over dry ground): `any` = the best of 16 bearings; `road` = on a travel road; or a place ref (`town:<id>`, `place:<id>`): along the bearing to it, +-30 deg."),
+});
+const distanceFrom = z.object({
+  kind: z.literal("distance-from"),
+  place: placeRef,
+  min: z.number().min(0).default(0).describe("Least metres to it."),
+  max: z.number().positive().optional().describe("Most metres to it."),
+  edges: z.boolean().default(true).describe("Measure edge to edge (centre distance less both radii); false = centre to centre."),
+});
+const onRoute = z.object({
+  kind: z.literal("on-route"),
+  from: placeRef.optional().describe("One end of the route (a place ref). With `to` omitted too: any travel road, or the straight line between any two sited places."),
+  to: placeRef.optional().describe("The other end of the route."),
+  along: z.tuple([z.number().min(0).max(1), z.number().min(0).max(1)]).default([0, 1]).describe("Fraction of the route's length (from `from`) the site's nearest point must fall in."),
+  offset: z.tuple([z.number().min(0), z.number().positive().max(MAX_M.band)]).default([0, 80]).describe("Metres from the route line to the site centre: [least, most]. The route is a road passing within 150 m of both ends' edges when one exists, else the straight line between the two places."),
+});
+const baseNeeds = [rockFace, defensible, shore, flatPad, highGround, crossroads, biome, landmarkVisible, distanceFrom, onRoute] as const;
+const subsite = z.object({
+  kind: z.literal("subsite"),
+  id: z.string().min(1).describe("The sub-site's name (sump, gate, camp)."),
+  within: z.tuple([z.number().min(0), z.number().positive().max(MAX_M.band)]).default([60, 200]).describe("Metres from the site centre the second point is searched in (an annulus, 16 bearings, 20 m steps)."),
+  below: z.number().min(0).default(0).describe("The second point's ground lies at least this far under the site centre's ground, m (a cave under the table lip)."),
+  radius: z.number().positive().max(MAX_M.radius).default(20).describe("Radius the inner need is measured with at the second point, m."),
+  need: z.discriminatedUnion("kind", [...baseNeeds]).describe("The need measured at the second point (any kind but subsite)."),
+});
+
 export const siteNeedSchema = z
-  .discriminatedUnion("kind", [rockFace, defensible, shore, flatPad, highGround, crossroads])
+  .discriminatedUnion("kind", [...baseNeeds, subsite])
   .describe("One measured requirement on the ground under a place or town.");
 export type SiteNeed = z.infer<typeof siteNeedSchema>;
 export type NeedKind = SiteNeed["kind"];
-export const NEED_KINDS = ["rock-face", "defensible", "shore", "flat-pad", "high-ground", "crossroads"] as const satisfies readonly NeedKind[];
+export const NEED_KINDS = [
+  "rock-face", "defensible", "shore", "flat-pad", "high-ground", "crossroads", "biome", "landmark-visible", "distance-from", "on-route", "subsite",
+] as const satisfies readonly NeedKind[];
 
 export const siteNeedOverridesSchema = z
   .object({
@@ -89,18 +155,28 @@ export const siteNeedOverridesSchema = z
     "flat-pad": flatPad.omit({ kind: true }).partial(),
     "high-ground": highGround.omit({ kind: true }).partial(),
     crossroads: crossroads.omit({ kind: true }).partial(),
+    biome: biome.omit({ kind: true }).partial(),
+    "landmark-visible": landmarkVisible.omit({ kind: true }).partial(),
+    "distance-from": distanceFrom.omit({ kind: true }).partial(),
+    "on-route": onRoute.omit({ kind: true }).partial(),
+    add: z.array(siteNeedSchema).describe("Further needs beyond the role's (a second distance-from, a subsite): appended whole."),
   })
   .partial()
-  .describe("Per-place overrides of its role's needs (tools/site-needs.mts SITE_NEEDS): { \"rock-face\": { frontHeight: 52 } }.");
+  .describe(
+    "Per-place overrides of its role's needs (tools/site-needs.mts SITE_NEEDS): { \"rock-face\": { frontHeight: 52 } }. An override of a kind the role " +
+      "does not have ADDS that need (it must then be complete: { \"biome\": { any: [\"badlands\"] } }); `add` appends further whole needs.",
+  );
 export type SiteNeedOverrides = z.infer<typeof siteNeedOverridesSchema>;
 
 /** Roles of places (POIs, dungeon doors) beside the town roles of the recipe (`townSchema.siteRole`). */
-export const PLACE_SITE_ROLES = ["grand-entrance", "dungeon-door", "lookout", "harbour"] as const;
+export const PLACE_SITE_ROLES = ["grand-entrance", "dungeon-door", "lookout", "harbour", "large-place", "roadside-place"] as const;
 export const SITE_ROLES = [...TOWN_SITE_ROLES, ...PLACE_SITE_ROLES] as const;
 export type SiteRole = (typeof SITE_ROLES)[number];
 export const siteRoleSchema = z.enum(SITE_ROLES).describe(
   "What the site is FOR, so its ground needs can be measured (tools/site-needs.mts SITE_NEEDS): grand-entrance = a rock face >= 1.1 x the front, " +
     "a 1600 m2 apron, seen from 300 m; dungeon-door = rock >= 1.5 x an 8 m door behind it; lookout = high ground; harbour = the shore rule; " +
+    "large-place = a steppable r60 core 15 m over the ground 150 m round it, 3 open ways in, a 20 m landmark seen from 300 m (site r150); " +
+    "roadside-place = a level r60 pad (relief <= 6 m) within 80 m of a road or the line between two sited places, a 5 m landmark seen from 120 m; " +
     "walled-town = flanks or a neck <= 260 m to wall and no ground within 60 m over the wall top; harbour-town = the coastal rule; " +
     "capital / crossroads-town = 4 open ways in; hill-town = 15 m over its surroundings; every town = a steppable pad.",
 );
@@ -111,6 +187,19 @@ export const SITE_NEEDS: Record<SiteRole, readonly Record<string, unknown>[]> = 
   "dungeon-door": [{ kind: "rock-face", frontHeight: 8, ratio: 1.5, apronM2: 150, readDistance: 0, footReach: 25 }],
   lookout: [{ kind: "high-ground", minRise: 25, ring: 120 }],
   harbour: [{ kind: "shore" }],
+  // a large place (300-600 m): the core steps, stands clear of its surroundings, is reached three ways and reads from 300 m
+  "large-place": [
+    { kind: "flat-pad", radius: 60 },
+    { kind: "high-ground", radius: 60, minRise: 15, ring: 150 },
+    { kind: "crossroads", minWays: 3, reach: 300 },
+    { kind: "landmark-visible", height: 20, distance: 300 },
+  ],
+  // a small place on or beside a route between two places: level, by the route, its landmark seen from the road
+  "roadside-place": [
+    { kind: "flat-pad", maxRelief: 6 },
+    { kind: "on-route" },
+    { kind: "landmark-visible", height: 5, distance: 120 },
+  ],
   town: [{ kind: "flat-pad" }],
   capital: [{ kind: "flat-pad" }, { kind: "crossroads" }],
   "walled-town": [{ kind: "flat-pad" }, { kind: "defensible" }],
@@ -119,13 +208,26 @@ export const SITE_NEEDS: Record<SiteRole, readonly Record<string, unknown>[]> = 
   "crossroads-town": [{ kind: "flat-pad" }, { kind: "crossroads", minWays: 5 }],
 };
 
-/** The needs of a role with a place's overrides merged, schema-parsed (defaults filled in). */
+/** The site radius a role is measured with when none is given (the place's reserved radius; towns: the tier's). */
+export const ROLE_RADIUS: Partial<Record<SiteRole, number>> = { "grand-entrance": 60, "dungeon-door": 20, lookout: 40, harbour: 60, "large-place": 150, "roadside-place": 60 };
+
+/** The needs of a role with a place's overrides merged, schema-parsed (defaults filled in). An override of a kind the
+ *  role lacks adds that need; `add` appends whole needs. */
 export function needsFor(role: SiteRole, overrides: SiteNeedOverrides = {}): SiteNeed[] {
-  return SITE_NEEDS[role].map((n) => {
+  const o = overrides as Record<string, object | undefined>;
+  const parse = (n: object, why: string): SiteNeed => {
+    const r = siteNeedSchema.safeParse(n);
+    if (!r.success) throw new Error(`site need ${why}: ${r.error.issues.map((i) => `${i.path.join(".") || "(need)"} ${i.message}`).join("; ")}`);
+    return r.data;
+  };
+  const kinds = new Set(SITE_NEEDS[role].map((n) => n.kind as string));
+  const out = SITE_NEEDS[role].map((n) => {
     const kind = n.kind as NeedKind;
-    const o = kind === "shore" ? {} : ((overrides as Record<string, object | undefined>)[kind] ?? {});
-    return siteNeedSchema.parse({ ...n, ...o });
+    return parse({ ...n, ...(kind === "shore" ? {} : (o[kind] ?? {})) }, `${kind} of ${role}`);
   });
+  for (const [kind, v] of Object.entries(o)) if (kind !== "add" && v && !kinds.has(kind)) out.push(parse({ kind, ...v }, `${kind} (added by the place's siteNeeds)`));
+  for (const n of overrides.add ?? []) out.push(parse(n, `${n.kind} (siteNeeds.add)`));
+  return out;
 }
 
 // ------------------------------------------------------------------ measuring
@@ -324,7 +426,7 @@ export function measureDefensible(g: NeedGround, n: Extract<SiteNeed, { kind: "d
 }
 
 function measureFlat(g: NeedGround, n: Extract<SiteNeed, { kind: "flat-pad" }>, x: number, z: number, radius: number): NeedResult {
-  const p = padStats(g, x, z, radius);
+  const p = padStats(g, x, z, n.radius ?? radius);
   const faults: string[] = [];
   if (p.relief > n.maxRelief) faults.push(`relief ${R1(p.relief)} m across the pad (terrace steps ${n.maxRelief})`);
   if (p.meanSlope > n.maxSlope) faults.push(`mean slope ${p.meanSlope.toFixed(2)} (terrace steps ${n.maxSlope})`);
@@ -332,7 +434,8 @@ function measureFlat(g: NeedGround, n: Extract<SiteNeed, { kind: "flat-pad" }>, 
   return { need: "flat-pad", met: !faults.length, numbers: { relief: R1(p.relief), meanSlope: Math.round(p.meanSlope * 100) / 100, wet: p.wet }, faults, message: faults.join("; ") || `relief ${R1(p.relief)} m, slope ${p.meanSlope.toFixed(2)}` };
 }
 
-function measureHigh(g: NeedGround, n: Extract<SiteNeed, { kind: "high-ground" }>, x: number, z: number, radius: number): NeedResult {
+function measureHigh(g: NeedGround, n: Extract<SiteNeed, { kind: "high-ground" }>, x: number, z: number, siteRadius: number): NeedResult {
+  const radius = n.radius ?? siteRadius;
   const padY = padStats(g, x, z, radius).median;
   const ring: number[] = [];
   for (let k = 0; k < 36; k++) { const [dx, dz] = dirOf(k * 10); ring.push(g.height(x + dx * (radius + n.ring), z + dz * (radius + n.ring))); }
@@ -383,7 +486,201 @@ function measureShore(g: NeedGround, x: number, z: number, radius: number): Need
   return { need: "shore", met: !faults.length, numbers: { faults: faults.length }, faults, message: faults.join("; ") || "a sheltered landing at shore level" };
 }
 
-export function measureNeed(g: NeedGround, n: SiteNeed, x: number, z: number, radius: number): NeedResult {
+// ------------------------------------------------------------------ the place-relative kinds (2026-10-29 redstrand)
+
+/** Options of one measurement: `self` = the place being sited (its own entry in `g.places` is not a neighbour). */
+export interface MeasureOpts { self?: string }
+
+const xzOf = (p: readonly number[]): V2 => [p[0]!, p[p.length >= 3 ? 2 : 1]!];
+const othersOf = (g: NeedGround, o: MeasureOpts): readonly SitedPlace[] => (g.places ?? []).filter((p) => !o.self || p.id !== o.self);
+
+/** Resolve a place ref (`town:<id>`, `place:<id>`, `<id>`, `town:*` = the nearest town to (x, z)). */
+export function resolvePlace(places: readonly SitedPlace[], ref: string, x = 0, z = 0): SitedPlace | null {
+  const m = /^(town|place):(.+)$/.exec(ref.trim());
+  const kind = m ? (m[1] as "town" | "place") : null;
+  const id = m ? m[2]! : ref.trim();
+  const pool = places.filter((p) => !kind || p.kind === kind);
+  if (id === "*") return pool.reduce<SitedPlace | null>((b, p) => (!b || Math.hypot(p.at[0] - x, p.at[1] - z) < Math.hypot(b.at[0] - x, b.at[1] - z) ? p : b), null);
+  return pool.find((p) => p.id === id) ?? null;
+}
+
+/** The nearest point of a polyline to (x, z): distance, and fraction of the polyline's length there. */
+export function nearestOnLine(line: readonly V2[], x: number, z: number): { d: number; t: number; length: number } {
+  let len = 0;
+  const segs: number[] = [];
+  for (let i = 1; i < line.length; i++) { const l = Math.hypot(line[i]![0] - line[i - 1]![0], line[i]![1] - line[i - 1]![1]); segs.push(l); len += l; }
+  let best = { d: Infinity, at: 0 };
+  let run = 0;
+  for (let i = 1; i < line.length; i++) {
+    const a = line[i - 1]!, b = line[i]!, L = segs[i - 1]!;
+    const dx = b[0] - a[0], dz = b[1] - a[1];
+    const u = L < 1e-9 ? 0 : Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / (L * L)));
+    const d = Math.hypot(x - a[0] - dx * u, z - a[1] - dz * u);
+    if (d < best.d) best = { d, at: run + u * L };
+    run += L;
+  }
+  return { d: best.d, t: len > 0 ? best.at / len : 0, length: len };
+}
+
+function measureBiome(g: NeedGround, n: Extract<SiteNeed, { kind: "biome" }>, x: number, z: number, radius: number): NeedResult {
+  if (!g.biome) return { need: "biome", met: false, numbers: {}, faults: ["no biome sampler on this ground (a world field gives one)"], message: "no biome sampler on this ground" };
+  const r = n.radius ?? radius;
+  const step = Math.max(6, r / 7);
+  const counts = new Map<string, number>();
+  let total = 0, ok = 0, bad = 0;
+  for (let dz = -r; dz <= r; dz += step)
+    for (let dx = -r; dx <= r; dx += step) {
+      if (dx * dx + dz * dz > r * r || g.wet(x + dx, z + dz)) continue;
+      const b = g.biome(x + dx, z + dz);
+      total++;
+      const key = b.zone && b.zone !== b.id ? `${b.id}/${b.zone}` : b.id;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (n.any.includes(b.id) || n.any.includes(b.zone)) ok++;
+      if (n.none.includes(b.id) || n.none.includes(b.zone)) bad++;
+    }
+  const share = total ? ok / total : 0, noneShare = total ? bad / total : 0;
+  const mix = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} ${Math.round((v / Math.max(1, total)) * 100)}%`).join(", ");
+  const faults: string[] = [];
+  if (!total) faults.push("no dry ground sampled");
+  if (share < n.share) faults.push(`${Math.round(share * 100)} % in ${n.any.join("/")} (needs ${Math.round(n.share * 100)} %; ground is ${mix})`);
+  if (noneShare > n.maxNone) faults.push(`${Math.round(noneShare * 100)} % in forbidden ${n.none.join("/")} (max ${Math.round(n.maxNone * 100)} %)`);
+  return { need: "biome", met: !faults.length, numbers: { share: Math.round(share * 100) / 100, noneShare: Math.round(noneShare * 100) / 100, mix }, faults, message: faults.join("; ") || `${Math.round(share * 100)} % ${n.any.join("/")} (${mix})` };
+}
+
+/** The travel roads as polylines in plan. */
+const roadLines = (g: NeedGround): { id: string; line: V2[] }[] => (g.roads ?? []).map((r) => ({ id: r.id, line: r.points.map(xzOf) }));
+
+function measureLandmark(g: NeedGround, n: Extract<SiteNeed, { kind: "landmark-visible" }>, x: number, z: number, radius: number, o: MeasureOpts): NeedResult {
+  const foot = g.height(x, z);
+  const target = { at: [x, z] as V2, foot, top: foot + n.height };
+  const eyes: { at: V2; d: number; b: number }[] = [];
+  const ring = [n.distance, n.distance * 1.25, n.distance * 1.5];
+  let fromNote = "16 bearings";
+  if (n.from === "any") {
+    for (let k = 0; k < 16; k++) for (const d of ring) { const [dx, dz] = dirOf(k * 22.5); eyes.push({ at: [x + dx * d, z + dz * d], d, b: k * 22.5 }); }
+  } else if (n.from === "road") {
+    fromNote = "the roads";
+    for (const r of roadLines(g))
+      for (let i = 1; i < r.line.length; i++) {
+        const a = r.line[i - 1]!, b = r.line[i]!, L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        for (let s = 0; s < L; s += 20) {
+          const p: V2 = [a[0] + ((b[0] - a[0]) * s) / L, a[1] + ((b[1] - a[1]) * s) / L], d = Math.hypot(p[0] - x, p[1] - z);
+          if (d >= n.distance && d <= n.distance * 1.5) eyes.push({ at: p, d, b: bearingOf(p[0] - x, p[1] - z) });
+        }
+      }
+    if (!eyes.length) return { need: "landmark-visible", met: false, numbers: { height: n.height, distance: n.distance }, faults: [`no road ${n.distance}-${Math.round(n.distance * 1.5)} m from the site to see it from`], message: `no road ${n.distance}-${Math.round(n.distance * 1.5)} m from the site to see it from` };
+  } else {
+    const p = resolvePlace(othersOf(g, o), n.from, x, z);
+    if (!p) return { need: "landmark-visible", met: false, numbers: {}, faults: [`${n.from} is not sited yet (site it first)`], message: `${n.from} is not sited yet` };
+    fromNote = `toward ${p.kind}:${p.id}`;
+    const toward = bearingOf(p.at[0] - x, p.at[1] - z), far = Math.max(0, Math.hypot(p.at[0] - x, p.at[1] - z) - p.radius);
+    for (const off of [0, -15, 15, -30, 30]) for (const d0 of ring) { const d = Math.min(d0, Math.max(far, radius)); const [dx, dz] = dirOf(toward + off); eyes.push({ at: [x + dx * d, z + dz * d], d, b: toward + off }); }
+  }
+  let best = { px: 0, d: 0, b: 0, visible: 0 };
+  let seenFrom = 0, seenB = 0;
+  for (const e of eyes) {
+    if (g.wet(e.at[0], e.at[1])) continue;
+    const r = readPixels(g, [e.at[0], g.height(e.at[0], e.at[1]) + 1.7, e.at[1]], target);
+    if (r.px >= n.px && e.d > seenFrom) { seenFrom = e.d; seenB = e.b; }
+    if (e.d >= n.distance - 1 && r.px > best.px) best = { px: r.px, d: e.d, b: e.b, visible: r.visible };
+  }
+  const faults = seenFrom >= n.distance - 1 ? [] : [`a ${n.height} m landmark shows ${best.px} px at best from ${n.distance} m (${fromNote}; needs ${n.px} px = ${R1(heightForPx(n.distance, n.px))} m clear of the ground between)`];
+  return {
+    need: "landmark-visible",
+    met: !faults.length,
+    numbers: { height: n.height, distance: n.distance, seenFrom: Math.round(seenFrom), px: best.px, visibleM: best.visible, bearing: seenFrom ? Math.round(seenB) : null },
+    faults,
+    message: faults.join("; ") || `a ${n.height} m landmark shows from ${Math.round(seenFrom)} m (${compassWord(seenB)}, ${fromNote})`,
+  };
+}
+
+function measureDistance(g: NeedGround, n: Extract<SiteNeed, { kind: "distance-from" }>, x: number, z: number, radius: number, o: MeasureOpts): NeedResult {
+  const p = resolvePlace(othersOf(g, o), n.place, x, z);
+  if (!p) return { need: "distance-from", met: false, numbers: { place: n.place }, faults: [`${n.place} is not sited yet (site it first)`], message: `${n.place} is not sited yet` };
+  const c = Math.hypot(p.at[0] - x, p.at[1] - z);
+  const d = n.edges ? c - radius - p.radius : c;
+  const what = `${Math.round(d)} m ${n.edges ? "edge to edge" : "centre to centre"} from ${p.kind}:${p.id}`;
+  const faults: string[] = [];
+  if (d < n.min) faults.push(`${what} (needs >= ${n.min})`);
+  if (n.max !== undefined && d > n.max) faults.push(`${what} (needs <= ${n.max})`);
+  return { need: "distance-from", met: !faults.length, numbers: { place: `${p.kind}:${p.id}`, metres: Math.round(d), min: n.min, max: n.max ?? null }, faults, message: faults.join("; ") || what };
+}
+
+/** The routes an on-route need is judged against. */
+function routesOf(g: NeedGround, n: Extract<SiteNeed, { kind: "on-route" }>, x: number, z: number, o: MeasureOpts): { routes: { name: string; line: V2[]; along: boolean }[]; missing: string | null } {
+  const places = othersOf(g, o);
+  if (n.from || n.to) {
+    if (!n.from || !n.to) return { routes: [], missing: "on-route takes both `from` and `to` (or neither)" };
+    const a = resolvePlace(places, n.from, x, z), b = resolvePlace(places, n.to, x, z);
+    if (!a || !b) return { routes: [], missing: `${!a ? n.from : n.to} is not sited yet (site it first)` };
+    // a road passing within 150 m of both ends' edges: the part of it between them
+    for (const r of roadLines(g)) {
+      const na = r.line.map((p, i) => [Math.hypot(p[0] - a.at[0], p[1] - a.at[1]), i] as const).sort((u, v) => u[0] - v[0])[0];
+      const nb = r.line.map((p, i) => [Math.hypot(p[0] - b.at[0], p[1] - b.at[1]), i] as const).sort((u, v) => u[0] - v[0])[0];
+      if (!na || !nb || na[0] > a.radius + 150 || nb[0] > b.radius + 150 || na[1] === nb[1]) continue;
+      const part = na[1] < nb[1] ? r.line.slice(na[1], nb[1] + 1) : r.line.slice(nb[1], na[1] + 1).reverse();
+      return { routes: [{ name: `road ${r.id} (${a.id} -> ${b.id})`, line: part, along: true }], missing: null };
+    }
+    return { routes: [{ name: `line ${a.id} -> ${b.id}`, line: [a.at, b.at], along: true }], missing: null };
+  }
+  const routes = roadLines(g).map((r) => ({ name: `road ${r.id}`, line: r.line, along: false }));
+  for (let i = 0; i < places.length; i++)
+    for (let j = i + 1; j < places.length; j++) routes.push({ name: `line ${places[i]!.id} -> ${places[j]!.id}`, line: [places[i]!.at, places[j]!.at], along: true });
+  return { routes, missing: routes.length ? null : "no route: no travel roads and fewer than two sited places" };
+}
+
+function measureOnRoute(g: NeedGround, n: Extract<SiteNeed, { kind: "on-route" }>, x: number, z: number, o: MeasureOpts): NeedResult {
+  const { routes, missing } = routesOf(g, n, x, z, o);
+  if (missing) return { need: "on-route", met: false, numbers: {}, faults: [missing], message: missing };
+  let best: { name: string; d: number; t: number; miss: number; along: boolean } | null = null;
+  for (const r of routes) {
+    const q = nearestOnLine(r.line, x, z);
+    const [a0, a1] = r.along ? n.along : [0, 1];
+    const miss = Math.max(0, n.offset[0] - q.d, q.d - n.offset[1]) + Math.max(0, a0 - q.t, q.t - a1) * q.length;
+    if (!best || miss < best.miss) best = { name: r.name, d: q.d, t: q.t, miss, along: r.along };
+  }
+  const b = best!;
+  const where = `${Math.round(b.d)} m off ${b.name}${b.along ? ` at ${Math.round(b.t * 100)} % of its length` : ""}`;
+  const faults = b.miss > 0 ? [`${where} (needs ${n.offset[0]}-${n.offset[1]} m off${b.along ? `, ${Math.round(n.along[0] * 100)}-${Math.round(n.along[1] * 100)} % along` : ""})`] : [];
+  return { need: "on-route", met: !faults.length, numbers: { route: b.name, offM: Math.round(b.d), along: Math.round(b.t * 100) / 100 }, faults, message: faults.join("; ") || where };
+}
+
+function measureSubsite(g: NeedGround, n: Extract<SiteNeed, { kind: "subsite" }>, x: number, z: number, o: MeasureOpts): NeedResult {
+  const y0 = g.height(x, z);
+  const pts: { at: V2; y: number }[] = [];
+  for (let d = n.within[0]; d <= n.within[1]; d += 20)
+    for (let k = 0; k < 16; k++) {
+      const [dx, dz] = dirOf(k * 22.5);
+      const px = x + dx * d, pz = z + dz * d;
+      if (g.wet(px, pz)) continue;
+      const y = g.height(px, pz);
+      if (y <= y0 - n.below) pts.push({ at: [px, pz], y });
+    }
+  if (!pts.length) {
+    const msg = `no dry ground ${n.within[0]}-${n.within[1]} m out lies ${n.below} m under the site (${R1(y0)} m) for the ${n.id}`;
+    return { need: "subsite", met: false, numbers: { id: n.id }, faults: [msg], message: msg };
+  }
+  // the lowest points first (a sump under the lip), then a spread of the rest; stop at the first that meets the need
+  pts.sort((a, b) => a.y - b.y);
+  const tried = [...pts.slice(0, 10), ...pts.slice(10).filter((_, i) => i % 6 === 0)].slice(0, 24);
+  let best: { at: V2; r: NeedResult } | null = null;
+  for (const p of tried) {
+    const r = measureNeed(g, n.need, p.at[0], p.at[1], n.radius, o);
+    if (r.met) { best = { at: p.at, r }; break; }
+    if (!best || r.faults.length < best.r.faults.length) best = { at: p.at, r };
+  }
+  const b = best!;
+  const where = `${n.id} at [${Math.round(b.at[0])}, ${Math.round(b.at[1])}] ${Math.round(Math.hypot(b.at[0] - x, b.at[1] - z))} m ${compassWord(bearingOf(b.at[0] - x, b.at[1] - z))}, ${R1(y0 - g.height(b.at[0], b.at[1]))} m under the site`;
+  return {
+    need: "subsite",
+    met: b.r.met,
+    numbers: { id: n.id, at: `${Math.round(b.at[0])},${Math.round(b.at[1])}`, inner: n.need.kind, ...Object.fromEntries(Object.entries(b.r.numbers).map(([k, v]) => [`${n.need.kind}.${k}`, v])) },
+    faults: b.r.met ? [] : b.r.faults.map((f) => `${n.id} (${n.need.kind}): ${f}`),
+    message: `${where}: ${b.r.met ? "" : "best of " + tried.length + " misses: "}${b.r.message}`,
+  };
+}
+
+export function measureNeed(g: NeedGround, n: SiteNeed, x: number, z: number, radius: number, o: MeasureOpts = {}): NeedResult {
   switch (n.kind) {
     case "rock-face": return measureRockFace(g, n, x, z);
     case "defensible": return measureDefensible(g, n, x, z, radius);
@@ -391,13 +688,93 @@ export function measureNeed(g: NeedGround, n: SiteNeed, x: number, z: number, ra
     case "high-ground": return measureHigh(g, n, x, z, radius);
     case "crossroads": return measureCrossroads(g, n, x, z, radius);
     case "shore": return measureShore(g, x, z, radius);
+    case "biome": return measureBiome(g, n, x, z, radius);
+    case "landmark-visible": return measureLandmark(g, n, x, z, radius, o);
+    case "distance-from": return measureDistance(g, n, x, z, radius, o);
+    case "on-route": return measureOnRoute(g, n, x, z, o);
+    case "subsite": return measureSubsite(g, n, x, z, o);
   }
 }
 
 /** Every need of `role` at (x, z) for a pad / site of `radius` m. */
-export function measureNeeds(g: NeedGround, role: SiteRole, x: number, z: number, radius: number, overrides: SiteNeedOverrides = {}): NeedsReport {
-  const results = needsFor(role, overrides).map((n) => measureNeed(g, n, x, z, radius));
+export function measureNeeds(g: NeedGround, role: SiteRole, x: number, z: number, radius: number, overrides: SiteNeedOverrides = {}, o: MeasureOpts = {}): NeedsReport {
+  const results = needsFor(role, overrides).map((n) => measureNeed(g, n, x, z, radius, o));
   return { role, met: results.every((r) => r.met), results };
+}
+
+/**
+ * Candidate points ON the routes an on-route need judges (the site finder's landforms rarely lie beside a road): every
+ * `step` m along each route inside its `along` window, on both sides at the middle of the `offset` window. Empty when
+ * the needs have no on-route or its places are not sited.
+ */
+export function routeCandidates(g: NeedGround, needs: readonly SiteNeed[], o: MeasureOpts & { step?: number } = {}): V2[] {
+  const n = needs.find((x): x is Extract<SiteNeed, { kind: "on-route" }> => x.kind === "on-route");
+  if (!n) return [];
+  const step = o.step ?? 40;
+  const { routes } = routesOf(g, n, 0, 0, o);
+  const off = (n.offset[0] + n.offset[1]) / 2;
+  const out: V2[] = [];
+  for (const r of routes) {
+    const [a0, a1] = r.along ? n.along : [0, 1];
+    let len = 0;
+    for (let i = 1; i < r.line.length; i++) len += Math.hypot(r.line[i]![0] - r.line[i - 1]![0], r.line[i]![1] - r.line[i - 1]![1]);
+    let run = 0;
+    for (let i = 1; i < r.line.length; i++) {
+      const a = r.line[i - 1]!, b = r.line[i]!, L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (L < 1e-6) continue;
+      const tx = (b[0] - a[0]) / L, tz = (b[1] - a[1]) / L;
+      for (let s = (step - (run % step)) % step; s < L; s += step) {
+        const t = (run + s) / Math.max(1e-6, len);
+        if (t < a0 || t > a1) continue;
+        for (const side of [-1, 1]) {
+          const px = a[0] + tx * s - tz * off * side, pz = a[1] + tz * s + tx * off * side;
+          if (!g.wet(px, pz)) out.push([Math.round(px), Math.round(pz)]);
+        }
+      }
+      run += L;
+    }
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ the designers' needs file (authoring/design/<place>/needs.json)
+
+/**
+ * A designer's needs file: the role a place is sited for, its site radius and its overrides. Other keys (why, the
+ * preferences the siting agent judges by eye, derived numbers) pass through untouched.
+ */
+export const placeNeedsFileSchema = z
+  .object({
+    place: z.string().min(1).optional().describe("The place's id (a POI / entrance location)."),
+    town: z.string().min(1).optional().describe("The town's id, for a town's needs file."),
+    siteRole: siteRoleSchema,
+    radius: z.number().positive().max(MAX_M.radius).optional().describe("Site radius it is measured with, m (default ROLE_RADIUS, towns the tier's)."),
+    siteNeeds: siteNeedOverridesSchema.default({}),
+  })
+  .passthrough()
+  .refine((f) => !!(f.place ?? f.town), { message: "a needs file names its `place` or `town`" })
+  .describe("authoring/design/<place>/needs.json: what ground a designed place needs, read by `zonegen sites --needs-file`, `worldgen towns --propose --needs-file` and `worldgen dogfood --needs @<design dir>`.");
+export type PlaceNeedsFile = z.infer<typeof placeNeedsFileSchema>;
+
+/** Parse a needs file and check its needs resolve (needsFor throws on an incomplete added need). */
+export function parsePlaceNeeds(raw: unknown, where = "needs file"): PlaceNeedsFile & { id: string; kind: "town" | "place"; needs: SiteNeed[] } {
+  const r = placeNeedsFileSchema.safeParse(raw);
+  if (!r.success) throw new Error(`${where}: ${r.error.issues.map((i) => `${i.path.join(".") || "(file)"} ${i.message}`).join("; ")}`);
+  const f = r.data;
+  const needs = needsFor(f.siteRole, f.siteNeeds);
+  return { ...f, id: (f.place ?? f.town)!, kind: f.town && !f.place ? "town" : "place", needs };
+}
+
+/** The place refs a needs list depends on (distance-from, on-route ends, landmark-visible from, inside subsites). */
+export function needRefs(needs: readonly SiteNeed[]): string[] {
+  const out: string[] = [];
+  for (const n of needs) {
+    if (n.kind === "distance-from") out.push(n.place);
+    else if (n.kind === "on-route") { if (n.from) out.push(n.from); if (n.to) out.push(n.to); }
+    else if (n.kind === "landmark-visible" && n.from !== "any" && n.from !== "road") out.push(n.from);
+    else if (n.kind === "subsite") out.push(...needRefs([n.need]));
+  }
+  return out;
 }
 
 /** A need excepted by a dated coordinator ruling ({ need, ruling: "2026-10-29 ..." }). */
@@ -418,11 +795,16 @@ export function needsLine(report: NeedsReport): string {
 
 // ------------------------------------------------------------------ the world field as a NeedGround
 
-export function needGroundOf(field: { height(x: number, z: number): number; ground?(x: number, z: number): number | null; waterY(x: number, z: number): number | null }, sea: number, extra: Partial<Pick<NeedGround, "coastal" | "roads">> = {}): NeedGround {
+export function needGroundOf(
+  field: { height(x: number, z: number): number; ground?(x: number, z: number): number | null; waterY(x: number, z: number): number | null; biome?(x: number, z: number): { id: string; zone: string } },
+  sea: number,
+  extra: Partial<Pick<NeedGround, "coastal" | "roads" | "places">> = {},
+): NeedGround {
   return {
     height: (x, z) => field.ground?.(x, z) ?? field.height(x, z),
     wet: (x, z) => field.waterY(x, z) !== null || field.height(x, z) < sea + 0.3,
     sea,
+    ...(field.biome ? { biome: (x: number, z: number) => { const b = field.biome!(x, z); return { id: b.id, zone: b.zone }; } } : {}),
     ...extra,
   };
 }

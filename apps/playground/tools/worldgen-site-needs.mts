@@ -2,7 +2,9 @@
  * worldgen — the site-needs commands (tools/site-needs.mts holds the needs; this file is the CLI and the files).
  *
  *   worldgen towns <world> --propose [--roles walled-town,harbour-town,capital] [--per-role 6] [--out <dir>]
- *                                    [--no-renders] [--port 5297] [--scene <id>]
+ *                                    [--no-renders] [--port 5297] [--scene <id>] [--needs-file <design/<town>/needs.json>]
+ *     --needs-file: a town designer's needs file (siteRole, radius, siteNeeds overrides; tools/site-needs.mts
+ *     placeNeedsFileSchema) gives the role, radius and overrides; the overrides ride in candidates.json to --pick.
  *     THE TOWN-SITING STEP IS AN AGENT STEP. Writes the candidate list per role, every candidate scored against its
  *     role's needs (met / unmet per need, with numbers), to authoring/siting/<world>/candidates.json, a plan-map crop
  *     (plan-<id>.png; needs assets/maps/<world>.base.png) and one far render of the BARE terrain per candidate
@@ -10,7 +12,7 @@
  *     meets gets a SHORTFALL with the ground need to ask the generator for (recipe `needs`, then `worldgen needs`).
  *     A fresh Opus siting agent reads it with tools/zonegen/briefs/site-towns.md and writes the choice file.
  *   worldgen towns <world> --pick <file> [--candidates <file>]
- *     Applies the choice file { towns: [{ role, candidate, why, town?, tier?, rulings? }] } (schema below): refuses a
+ *     Applies the choice file { towns: [{ role, candidate, why, town?, id?, tier?, rulings? }] } (schema below): refuses a
  *     candidate whose ground fails a need of its role (re-measured now) unless a dated ruling excepts that need;
  *     re-sites `town` (keeps id, tier, tags) or adds a new town; stamps `siteRole` and `keep: true`.
  *   worldgen needs <world> [--only <id>] [--check]
@@ -25,10 +27,13 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { createWorldField, TOWN_SITE_ROLES, type GroundNeedDoc, type TownDoc, type WorldField, type WorldRecipe } from "@hitreg/core";
+import { farCamera, FAR_MAX_M } from "./_far-camera.mts";
+import { decodePng, encodePng } from "./_png.mjs";
+import { drawText as drawGlyphs } from "./_map-text.mts";
 import { coastalFaults, findCoastalSites, measureCoastalSite } from "./worldgen-coastal-towns.mts";
 import {
   compassWord, measureNeeds, needArea, needGroundOf, needRulingSchema, needsLine, needStillMet, solveCliffFace, solveWalledNeck, unexcepted,
-  type NeedGround, type NeedsReport, type SiteRole, type V2,
+  parsePlaceNeeds, type NeedGround, type NeedsReport, type SitedPlace, type SiteNeedOverrides, type SiteRole, type V2,
 } from "./site-needs.mts";
 
 export interface SiteNeedsHost {
@@ -54,11 +59,19 @@ export function naturalField(recipe: WorldRecipe): WorldField {
 
 /** The needs ground. `shoreField` (default `field`) answers the shore rule: the coastal rule is judged with the pads in
  *  place, as `worldgen towns` and the towns row judge it (a quay pad meets the water by design). */
-export function needGround(recipe: WorldRecipe, field: WorldField, shoreField: WorldField = field): NeedGround {
+export function needGround(recipe: WorldRecipe, field: WorldField, shoreField: WorldField = field, places: readonly SitedPlace[] = []): NeedGround {
   return needGroundOf(field as never, recipe.seaLevel, {
     coastal: (x, z, r) => coastalFaults(measureCoastalSite(shoreField, recipe, x, z, r)),
     roads: recipe.features.roads.filter((r) => !/-(lane|ramp|stair)-/.test(r.id)).map((r) => ({ id: r.id, points: r.points })),
+    // the recipe's towns, then whatever the caller knows (every zone's reservations): distance-from / on-route refs
+    places: [...recipe.features.towns.map((t): SitedPlace => ({ id: t.id, kind: "town", at: [t.center[0], t.center[1]], radius: t.radius })), ...places],
   });
+}
+
+/** Read a designer's needs file (authoring/design/<place>/needs.json; tools/site-needs.mts placeNeedsFileSchema). */
+export function readNeedsFile(file: string): ReturnType<typeof parsePlaceNeeds> {
+  if (!fs.existsSync(file)) throw new Error(`no needs file ${file}`);
+  return parsePlaceNeeds(JSON.parse(fs.readFileSync(file, "utf8")), `${path.basename(path.dirname(file))}/${path.basename(file)}`);
 }
 
 /** The role a town is held to: its `siteRole`, else what its flags say. */
@@ -108,6 +121,7 @@ export const pickFileSchema = z
           candidate: z.string().min(1).describe("Candidate id from candidates.json (walled-town-2)."),
           why: z.string().min(1).describe("One line: why this ground carries the role (\"the only spur with cliff on three sides; the neck faces the coast road\")."),
           town: z.string().optional().describe("An existing town to re-site there (keeps id, tier, tags); omitted = a new town."),
+          id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).optional().describe("A NEW town's id (the design's name, so place refs like `town:thirstgate` resolve); default town-<n>."),
           tier: z.enum(["capital", "city", "town", "village", "hamlet"]).optional().describe("A new town's tier (default: capital for the capital role, else town)."),
           rulings: z.array(needRulingSchema).default([]).describe("Dated coordinator rulings excepting a need this pick misses."),
         }),
@@ -176,6 +190,40 @@ export function prescored(g: NeedGround, recipe: WorldRecipe, role: SiteRole, ra
   return out.sort((a, b) => b.pre - a.pre);
 }
 
+/**
+ * The largest landmass, as a predicate: a town stands on the island's main land, never on an islet or a stack
+ * (redstrand 2026-10-29: walled-town-1 / hill-town-2 and hill-town-1 were sited on offshore islets the coast-shape step
+ * makes, and their far renders "looked at an islet instead of the candidate"). Sampled every `step` m, 4-connected.
+ */
+export function mainLandOf(g: Pick<NeedGround, "height" | "sea">, limit: number, step = 24): (x: number, z: number) => boolean {
+  const n = Math.ceil((limit * 2) / step) + 1;
+  const land = new Uint8Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) { const x = -limit + i * step, z = -limit + j * step; if (g.height(x, z) > g.sea + 0.5) land[i + j * n] = 1; }
+  const comp = new Int32Array(n * n).fill(-1);
+  let best = -1, bestSize = 0, id = 0;
+  for (let s0 = 0; s0 < land.length; s0++) {
+    if (!land[s0] || comp[s0]! >= 0) continue;
+    const stack = [s0]; comp[s0] = id; let size = 0;
+    while (stack.length) {
+      const c = stack.pop()!; size++;
+      const ci = c % n, cj = (c - ci) / n;
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        const ni = ci + di, nj = cj + dj; if (ni < 0 || nj < 0 || ni >= n || nj >= n) continue;
+        const k = ni + nj * n; if (land[k] && comp[k]! < 0) { comp[k] = id; stack.push(k); }
+      }
+    }
+    if (size > bestSize) { bestSize = size; best = id; }
+    id++;
+  }
+  return (x, z) => {
+    const i = Math.round((x + limit) / step), j = Math.round((z + limit) / step);
+    if (i < 0 || j < 0 || i >= n || j >= n) return false;
+    // a shore pad's centre may sample as water at this step: any of the 3x3 cells on the main land counts
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) { const a = i + di, b = j + dj; if (a >= 0 && b >= 0 && a < n && b < n && comp[a + b * n] === best) return true; }
+    return false;
+  };
+}
+
 /** The open side to look at a site from: the bearing whose ground 300 m out is lowest (a far view over open land). */
 function viewBearing(g: NeedGround, x: number, z: number): number {
   let best = 0, low = Infinity;
@@ -188,7 +236,12 @@ export async function commandTownsPropose(host: SiteNeedsHost): Promise<void> {
   const { recipe } = host.loadRecipe();
   const field = naturalField(recipe);
   const g = needGround(recipe, field);
-  const asked = arg(argv, "roles", "").split(",").map((s) => s.trim()).filter(Boolean);
+  // --needs-file <design/<town>/needs.json>: the designer's role, radius and overrides (tools/site-needs.mts placeNeedsFileSchema)
+  const needsFileArg = arg(argv, "needs-file", "");
+  let designed: ReturnType<typeof readNeedsFile> | null = null;
+  if (needsFileArg) { try { designed = readNeedsFile(path.resolve(needsFileArg)); } catch (e) { host.fail((e as Error).message); } }
+  if (designed && !(TOWN_SITE_ROLES as readonly string[]).includes(designed.siteRole)) host.fail(`--needs-file: ${designed.id} is a ${designed.siteRole}, not a town role (site places with zonegen sites --needs-file)`);
+  const asked = (arg(argv, "roles", "") || (designed?.siteRole ?? "")).split(",").map((s) => s.trim()).filter(Boolean);
   for (const r of asked) if (!(TOWN_SITE_ROLES as readonly string[]).includes(r)) host.fail(`--roles ${r}: expected ${TOWN_SITE_ROLES.join(", ")}`);
   const roles = (asked.length ? asked : [...new Set(recipe.features.towns.map(roleOfTown))]) as SiteRole[];
   if (!roles.length) host.fail("no roles: give --roles walled-town,harbour-town,... (the world has no towns to read them from)");
@@ -197,9 +250,12 @@ export async function commandTownsPropose(host: SiteNeedsHost): Promise<void> {
   const dir = sitingDir(host);
   fs.mkdirSync(dir, { recursive: true });
   const tierRadius = (name: string) => host.tiers.find((t) => t.name === name)?.radius ?? 45;
-  const out: { role: SiteRole; radius: number; candidates: TownCandidate[]; shortfall: null | { best: string | null; unmet: string[]; ask: Partial<GroundNeedDoc> | null } }[] = [];
+  const onMain = mainLandOf(g, (recipe.bounds?.limit ?? 3000) + 1200);
+  const out: { role: SiteRole; radius: number; overrides: SiteNeedOverrides; candidates: TownCandidate[]; shortfall: null | { best: string | null; unmet: string[]; ask: Partial<GroundNeedDoc> | null } }[] = [];
   for (const role of roles) {
-    const radius = num(argv, "radius", role === "capital" ? tierRadius("capital") : tierRadius("town"));
+    const own = designed && designed.siteRole === role ? designed : null;
+    const overrides: SiteNeedOverrides = own?.siteNeeds ?? {};
+    const radius = num(argv, "radius", own?.radius ?? (role === "capital" ? tierRadius("capital") : tierRadius("town")));
     const others = recipe.features.towns.filter((t) => roleOfTown(t) !== role);
     const clear = (x: number, z: number) => others.every((t) => Math.hypot(t.center[0] - x, t.center[1] - z) > t.radius + radius + 100);
     let cells: { x: number; z: number; pre: number }[];
@@ -208,9 +264,12 @@ export async function commandTownsPropose(host: SiteNeedsHost): Promise<void> {
       cells = found.sites.map((s) => ({ x: s.x, z: s.z, pre: s.score }));
       if (!cells.length) console.log(`  ${role}: no shore site passes the coastal rule (${found.tried} tried): ${[...found.reasons.entries()].map(([k, v]) => `${k} x${v}`).join("; ")}`);
     } else cells = prescored(g, recipe, role, radius, num(argv, "step", 48)).filter((c) => clear(c.x, c.z));
+    const before = cells.length;
+    cells = cells.filter((c) => onMain(c.x, c.z));
+    if (cells.length < before) console.log(`  ${role}: ${before - cells.length} candidate cell(s) off the main landmass (islets, stacks) dropped`);
     const measured: (TownCandidate & { pre: number })[] = [];
     for (const c of cells.slice(0, num(argv, "measure", 80))) {
-      const needs = measureNeeds(g, role, c.x, c.z, radius);
+      const needs = measureNeeds(g, role, c.x, c.z, radius, overrides, { self: own?.id });
       measured.push({ id: "", role, at: [Math.round(c.x), Math.round(c.z)], y: r1(g.height(c.x, c.z)), radius, view: viewBearing(g, c.x, c.z), needs, pre: c.pre });
     }
     const unmetCount = (c: TownCandidate) => c.needs.results.reduce((n, r) => n + r.faults.length, 0);
@@ -229,8 +288,8 @@ export async function commandTownsPropose(host: SiteNeedsHost): Promise<void> {
       const ask: Partial<GroundNeedDoc> | null = role === "walled-town" ? { id: `${role}-ground`, kind: "walled-neck", for: role, near: best ? best.at : [0, 0], within: 500, radius } : null;
       shortfall = { best: best?.id ?? null, unmet, ask };
     }
-    out.push({ role, radius, candidates: kept, shortfall });
-    console.log(`\n  ${role} (pad r${radius}): ${kept.filter((c) => c.needs.met).length} of ${kept.length} candidate(s) meet every need (${measured.length} measured)`);
+    out.push({ role, radius, overrides, candidates: kept, shortfall });
+    console.log(`\n  ${role}${own ? ` (${own.id})` : ""} (pad r${radius}): ${kept.filter((c) => c.needs.met).length} of ${kept.length} candidate(s) meet every need (${measured.length} measured)`);
     for (const c of kept) console.log(`    ${c.id.padEnd(18)} [${c.at.join(", ")}] y${Math.round(c.y)}  ${needsLine(c.needs)}`);
     if (shortfall) {
       console.log(`    SHORTFALL: no candidate meets every need of ${role}; best ${shortfall.best ?? "-"} misses ${shortfall.unmet.join("; ")}`);
@@ -239,7 +298,7 @@ export async function commandTownsPropose(host: SiteNeedsHost): Promise<void> {
     }
   }
   const all = out.flatMap((r) => r.candidates);
-  if (!argv.includes("--no-renders") && all.length) await renderCandidates(host, recipe, dir, all, { ground: g.height });
+  if (!argv.includes("--no-renders") && all.length) await renderCandidates(host, recipe, dir, all, { ground: g.height, wet: g.wet });
   const doc = {
     world: host.world,
     at: new Date().toISOString(),
@@ -257,7 +316,7 @@ export async function commandTownsPropose(host: SiteNeedsHost): Promise<void> {
  * base picture) and ONE far render from the open side (tools/light-shots.mts, fixed cameras, no reference characters,
  * noon, its own vite on --port). Both are best effort: a missing base picture or scene is said, not fatal.
  */
-export async function renderCandidates(host: Pick<SiteNeedsHost, "argv" | "world" | "project">, recipe: WorldRecipe, dir: string, cands: { id: string; at: V2; y: number; radius: number; view: number; plan?: string; far?: string }[], o: { readDistance?: number; ground?: (x: number, z: number) => number; prefix?: string } = {}): Promise<void> {
+export async function renderCandidates(host: Pick<SiteNeedsHost, "argv" | "world" | "project">, recipe: WorldRecipe, dir: string, cands: { id: string; at: V2; y: number; radius: number; view: number; plan?: string; far?: string }[], o: { readDistance?: number; ground?: (x: number, z: number) => number; wet?: (x: number, z: number) => boolean; prefix?: string } = {}): Promise<void> {
   const pre = o.prefix ?? "";
   const { argv } = host;
   const projectDir = host.project ? path.join(PLAYGROUND, "projects", host.project) : PLAYGROUND;
@@ -296,11 +355,17 @@ for (const c of data.cands) {
   const port = arg(argv, "port", "5297");
   if (["5173", "5287", "5291", "5293"].includes(port)) { console.warn(`  no far renders: port ${port} is not a probe port of this tool (default 5297)`); return; }
   const read = o.readDistance ?? 420;
-  const spots = cands.map((c) => {
-    const [dx, dz] = dirOf(c.view);
-    const cx = c.at[0] + dx * read, cz = c.at[1] + dz * read;
-    return { name: `${pre}${c.id}`, x: c.at[0], z: c.at[1], facing: (c.view + 180) % 360, camera: [r1(cx), r1(Math.max(c.y + 45, (o.ground?.(cx, cz) ?? -Infinity) + 30)), r1(cz)], target: [c.at[0], r1(c.y + 8), c.at[1]] };
-  });
+  // a far camera ON LAND 300-400 m out (further only for a longer read distance), open side first, with a clear sight of
+  // the pad and a frame that is not mostly sea (tools/_far-camera.mts; redstrand 2026-10-29: cameras stood at sea)
+  const ground = o.ground ?? ((x: number, z: number) => createWorldField(recipe).height(x, z));
+  const placed = cands.map((c) => ({ c, cam: farCamera({ at: c.at, y: c.y, view: c.view, ground, wet: o.wet, seaLevel: recipe.seaLevel, max: Math.max(FAR_MAX_M, Math.min(read, 600)) }) }));
+  for (const { c, cam } of placed) {
+    const meta = c as { farCamera?: unknown };
+    meta.farCamera = cam ? { camera: cam.camera, bearing: cam.bearing, distance: cam.distance, water: cam.check.water } : { none: "no land point 300-400 m out sees the pad over mostly land" };
+    if (!cam) console.warn(`  far ${c.id}: no camera on land 300-400 m out sees the pad over mostly land (no far render)`);
+  }
+  const spots = placed.filter((p) => p.cam).map(({ c, cam }) => ({ name: `${pre}${c.id}`, x: c.at[0], z: c.at[1], facing: (cam!.bearing + 180) % 360, camera: cam!.camera, target: cam!.target }));
+  if (!spots.length) return;
   const shots = path.join(dir, `shots${pre ? `-${pre.replace(/-$/, "")}` : ""}`);
   fs.mkdirSync(shots, { recursive: true });
   const spotsFile = path.join(shots, "spots.json");
@@ -314,9 +379,27 @@ for (const c of data.cands) {
     const hit = fs.existsSync(frames) ? fs.readdirSync(frames).find((x) => x === `${pre}${c.id}-12.png` || x === `${pre}${c.id}-interior.png`) : undefined;
     if (!hit) continue;
     const frame = path.join(frames, hit);
-    fs.copyFileSync(frame, path.join(dir, `far-${pre}${c.id}.png`));
+    markFrame(frame, path.join(dir, `far-${pre}${c.id}.png`), c.id, (c as { farCamera?: { distance?: number; bearing?: number } }).farCamera);
     c.far = `far-${pre}${c.id}.png`;
   }
+}
+
+/** The far frame with the candidate marked: a ring at the frame centre (the camera aims at the pad) and its id + camera. */
+function markFrame(src: string, dst: string, id: string, cam?: { distance?: number; bearing?: number }): void {
+  const img = decodePng(fs.readFileSync(src));
+  const { width: w, height: h, data } = img;
+  const put = (x: number, y: number, c: [number, number, number]) => { if (x < 0 || y < 0 || x >= w || y >= h) return; const o = (y * w + x) * 4; data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255; };
+  const cx = Math.round(w / 2), cy = Math.round(h / 2);
+  for (let a = 0; a < 720; a++) { const t = (a / 720) * Math.PI * 2; for (const r of [22, 23, 24]) put(Math.round(cx + Math.cos(t) * r), Math.round(cy + Math.sin(t) * r), [255, 64, 64]); }
+  for (let k = -6; k <= 6; k++) { put(cx + k, cy, [255, 64, 64]); put(cx, cy + k, [255, 64, 64]); }
+  // label (the map font draws into an RGB buffer)
+  const label = `${id}  ${cam?.distance ?? "?"} m from ${cam?.bearing ?? "?"} deg`.toUpperCase();
+  const rgb = new Uint8Array(w * h * 3);
+  for (let i = 0; i < w * h; i++) { rgb[i * 3] = data[i * 4]!; rgb[i * 3 + 1] = data[i * 4 + 1]!; rgb[i * 3 + 2] = data[i * 4 + 2]!; }
+  for (let y = 8; y < 34; y++) for (let x = 8; x < Math.min(w, 20 + label.length * 13); x++) { const o = (y * w + x) * 3; rgb[o] = 0; rgb[o + 1] = 0; rgb[o + 2] = 0; }
+  drawGlyphs(rgb, w, 14, 14, label, [255, 255, 255], 2, h);
+  for (let i = 0; i < w * h; i++) { data[i * 4] = rgb[i * 3]!; data[i * 4 + 1] = rgb[i * 3 + 1]!; data[i * 4 + 2] = rgb[i * 3 + 2]!; }
+  fs.writeFileSync(dst, encodePng(w, h, data));
 }
 
 function findWorldScene(projectDir: string, world: string): string {
@@ -343,7 +426,9 @@ export function commandTownsPick(host: SiteNeedsHost): void {
   const pick = parsed.data;
   const candFile = path.resolve(path.dirname(pickPath), arg(argv, "candidates", "") || pick.candidates || "candidates.json");
   if (!fs.existsSync(candFile)) host.fail(`no candidates file ${candFile} (worldgen towns --propose writes it)`);
-  const cands = new Map<string, TownCandidate>((JSON.parse(fs.readFileSync(candFile, "utf8")) as { roles: { candidates: TownCandidate[] }[] }).roles.flatMap((r) => r.candidates).map((c) => [c.id, c]));
+  const roleRows = (JSON.parse(fs.readFileSync(candFile, "utf8")) as { roles: { role: SiteRole; overrides?: SiteNeedOverrides; candidates: TownCandidate[] }[] }).roles;
+  const cands = new Map<string, TownCandidate>(roleRows.flatMap((r) => r.candidates).map((c) => [c.id, c]));
+  const overridesOf = new Map(roleRows.map((r) => [r.role, r.overrides ?? {}] as const));
   const { recipe, file } = host.loadRecipe();
   const g = needGround(recipe, naturalField(recipe));
   const refused: string[] = [];
@@ -354,10 +439,11 @@ export function commandTownsPick(host: SiteNeedsHost): void {
     if (c.role !== row.role) { refused.push(`${row.candidate} was proposed for ${c.role}, picked as ${row.role}`); continue; }
     if (seen.has(row.candidate)) { refused.push(`${row.candidate} picked twice`); continue; }
     seen.add(row.candidate);
-    const rep = measureNeeds(g, row.role, c.at[0], c.at[1], c.radius);
+    const rep = measureNeeds(g, row.role, c.at[0], c.at[1], c.radius, overridesOf.get(row.role) ?? {}, { self: row.town ?? row.id });
     const miss = unexcepted(rep, row.rulings);
     if (miss.length) refused.push(`${row.candidate} (${row.role}) fails ${miss.map((r) => `${r.need}: ${r.message}`).join("; ")}`);
     if (row.town && !recipe.features.towns.some((t) => t.id === row.town)) refused.push(`${row.candidate}: town ${row.town} does not exist`);
+    if (row.id && !row.town && recipe.features.towns.some((t) => t.id === row.id)) refused.push(`${row.candidate}: town id ${row.id} is taken (give it as \`town\` to re-site it)`);
   }
   if (refused.length) host.fail(`REFUSED (nothing written):\n  ${refused.join("\n  ")}\n  pick a candidate that meets its role's needs, or ask the generator for the ground (recipe needs + worldgen needs), or add a dated ruling`);
   const taken = new Set(recipe.features.towns.map((t) => t.id));
@@ -372,10 +458,10 @@ export function commandTownsPick(host: SiteNeedsHost): void {
       doc = { ...old, center: [c.at[0], c.at[1]], groundY, flatten: 0.95, terraces: [], gates: [], siteRole: row.role, keep: true, ...(row.role === "harbour-town" ? { coastal: true } : {}) };
       recipe.features.towns = recipe.features.towns.map((t) => (t === old ? doc : t));
     } else {
-      while (taken.has(`town-${next}`)) next++;
+      if (!row.id) while (taken.has(`town-${next}`)) next++;
       const tier = row.tier ?? (row.role === "capital" ? "capital" : "town");
       const radius = host.tiers.find((t) => t.name === tier)?.radius ?? c.radius;
-      doc = { id: `town-${next}`, tier, center: [c.at[0], c.at[1]], radius, falloff: r1(radius * 0.8), groundY, flatten: 0.95, gates: [], terraces: [], tags: [tier], siteRole: row.role, keep: true, ...(row.role === "harbour-town" ? { coastal: true } : {}) } as TownDoc;
+      doc = { id: row.id ?? `town-${next}`, tier, center: [c.at[0], c.at[1]], radius, falloff: r1(radius * 0.8), groundY, flatten: 0.95, gates: [], terraces: [], tags: [tier], siteRole: row.role, keep: true, ...(row.role === "harbour-town" ? { coastal: true } : {}) } as TownDoc;
       taken.add(doc.id);
       recipe.features.towns.push(doc);
     }
@@ -424,4 +510,23 @@ export function commandNeeds(host: SiteNeedsHost): void {
   if (why) { console.error(`  needs check: ${why}`); process.exitCode = 1; }
   else if (!failed) console.log("  needs check: ok — re-run the stages downstream (rivers, towns --propose, zonegen sites)");
   if (failed) process.exitCode = 1;
+}
+
+// ------------------------------------------------------------------ check a designer's needs files (no world, no I/O beyond reading)
+/**
+ * `npx tsx tools/worldgen-site-needs.mts --check-needs <needs.json | design dir>`: validates every needs file (schema
+ * plus `needsFor`: an added need must be complete) and prints its role and needs. Instant. Write no ad-hoc script for this.
+ */
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href && process.argv.includes("--check-needs")) {
+  const target = path.resolve(process.argv[process.argv.indexOf("--check-needs") + 1] ?? ".");
+  const files = fs.statSync(target).isFile()
+    ? [target]
+    : [path.join(target, "needs.json"), ...fs.readdirSync(target).map((d) => path.join(target, d, "needs.json"))].filter((f) => fs.existsSync(f));
+  let bad = 0;
+  for (const f of files) {
+    try { const n = readNeedsFile(f); console.log(`ok   ${path.relative(process.cwd(), f)}: ${n.id} (${n.kind}) ${n.siteRole}${n.radius ? ` r${n.radius}` : ""} -> ${n.needs.map((x) => x.kind).join(", ")}`); }
+    catch (e) { bad++; console.error(`FAIL ${path.relative(process.cwd(), f)}: ${(e as Error).message}`); }
+  }
+  if (!files.length) { console.error(`no needs.json at ${target}`); bad++; }
+  process.exitCode = bad ? 1 : 0;
 }

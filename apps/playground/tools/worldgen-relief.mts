@@ -182,8 +182,11 @@ export function treeRules(recipe: WorldRecipe): { rule: ScatterRule; index: numb
 }
 
 export interface TreeSampler {
-  /** Expected trees per m² at (x, z) with ground `h`, before clumping; 0 under water, on a cleared plot, or too steep. */
-  density(x: number, z: number, h?: number): number;
+  /**
+   * Expected trees per m² at (x, z) with ground `h`, before clumping; 0 under water, on a cleared plot, or too steep.
+   * `perRule` (length trees.length) receives each tree rule's share (the map colours pine / broadleaf / scrub by it).
+   */
+  density(x: number, z: number, h?: number, perRule?: Float32Array): number;
   trees: { rule: ScatterRule; index: number }[];
 }
 
@@ -199,7 +202,8 @@ export function treeSampler(recipe: WorldRecipe, field: WorldField, veg: Vegetat
   const perRule = trees.map(({ rule }) => rule.biomes.map((id) => ({ i: biomeIndex.get(id) ?? -1, gain: rule.biomeDensity?.[id] ?? 1 })).filter((b) => b.i >= 0));
   return {
     trees,
-    density(x, z, h) {
+    density(x, z, h, out) {
+      if (out) out.fill(0);
       const ground = h ?? field.height(x, z);
       if (ground <= sea + 0.5) return 0;
       const water = field.waterY(x, z);
@@ -218,7 +222,9 @@ export function treeSampler(recipe: WorldRecipe, field: WorldField, veg: Vegetat
         if (mult <= 0) continue;
         let membership = 0;
         for (const b of perRule[k]!) membership += sample.weights[b.i]! * b.gain;
-        d += rule.density * membership * Math.min(1, mult) * keep;
+        const dk = rule.density * membership * Math.min(1, mult) * keep;
+        if (out) out[k] = dk;
+        d += dk;
       }
       return d;
     },

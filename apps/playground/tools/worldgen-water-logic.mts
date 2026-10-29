@@ -40,6 +40,9 @@ export interface WaterLogicFinding {
   /** Metres of river (runs) or sample cells (sheets). */
   extent: number;
   detail: string;
+  /** perched-sheet: the sheet's level and the lowest ground (or lower water) its edge stands over in this cell group. */
+  level?: number;
+  lower?: number;
 }
 
 export interface WaterLogicReport {
@@ -247,20 +250,40 @@ export function waterLogic(recipe: WorldRecipe, opts: Area & { step?: number; fi
           }
           if (steps) continue;
         }
+        // the lake ends AT a river (an outlet or inflow) within the hair or stepping down from it, and the dry sample
+        // beyond is that river's far bank, standing over the river's water: the river holds the lake's edge, nothing
+        // hangs (2026-10-29 w3-hydro, redstrand dogfood 2130 lake-1/lake-2, 2332 lake-2: lake 63.0 -> river 61.5 at
+        // 4 m -> bank 62.1 at 16 m was read as "sheet 63 over dry ground 62.1")
+        if (!wet) {
+          let prev = y;
+          let held = false;
+          for (let k = 1; k < 4; k++) {
+            const px = x + (dx * k) / 4;
+            const pz = z + (dz * k) / 4;
+            if (!field.waterSurface(px, pz, u)) break;
+            if (u.kind === "lake" && u.y === y) continue;
+            if (u.kind !== "river" || prev - u.y > OUTLET_STEP) break;
+            if (u.y >= y - RIVER_HAIR || prev === y) { held = ng >= u.y - 0.1; break; }
+            prev = u.y;
+          }
+          if (held) continue;
+        }
         if (wet && t.kind === "river" && field.falls.some((f) => Math.hypot(f.x - nx, f.z - nz) < 40)) continue;
         // under the sea is the sea: a lagoon over its own beach is the coast's business
         if (ny > -Infinity && ny <= recipe.seaLevel + 0.05 && t.kind !== "river" && t.kind !== "lake" && t.kind !== "marsh") continue;
         const why = wet ? `over ${t.kind} water ${r1(ny)}` : `over dry ground ${r1(ng)} (ends in the air)`;
         const key = `${Math.floor(x / 64)},${Math.floor(z / 64)}:${kind}:${wet ? t.kind : "dry"}`;
         const c = cells.get(key);
-        if (c) c.n++;
-        else cells.set(key, { n: 1, x, z, kind, y, lower: wet ? ny : ng, why });
+        if (c) {
+          c.n++;
+          c.lower = Math.min(c.lower, wet ? ny : ng);
+        } else cells.set(key, { n: 1, x, z, kind, y, lower: wet ? ny : ng, why });
         break;
       }
     }
   }
   for (const c of cells.values()) {
-    findings.push({ kind: "perched-sheet", id: c.kind, zone: zoneOf(c.x, c.z), x: c.x, z: c.z, extent: c.n, detail: `${c.kind} sheet ${r1(c.y)} ${c.why}` });
+    findings.push({ kind: "perched-sheet", id: c.kind, zone: zoneOf(c.x, c.z), x: c.x, z: c.z, extent: c.n, detail: `${c.kind} sheet ${r1(c.y)} ${c.why}`, level: c.y, lower: c.lower });
   }
   const counts: Record<string, number> = {};
   for (const f of findings) counts[f.kind] = (counts[f.kind] ?? 0) + 1;
@@ -317,4 +340,86 @@ export function commandWaterLogic(host: WaterLogicHost): WaterLogicReport {
   }
   if (!rep.ok) process.exitCode = 1;
   return rep;
+}
+
+/** A settled lake stands this much over the ground (or water) its edge leaked to: inside the perched rule's 0.5 m. */
+export const LAKE_SETTLE_RISE = 0.3;
+/** A settled lake stands at most this much over a river arriving under it (inside RIVER_HAIR). */
+export const LAKE_INFLOW_HAIR = 1;
+
+/**
+ * The lakes whose sheets perch (`perched-sheet`, kind lake) and the level that would hold each: the lowest ground or
+ * water its edge stands over + LAKE_SETTLE_RISE, never above its level less 0.1 m. `lakeBasin` maps a lake id to its
+ * hydrology basin index; a lake with none (a hand-placed lake, a marsh pool: -1 / missing) is not settled. The rivers
+ * stage settles lake levels after the rivers with it (2026-10-29 w3-hydro). A lake a river's solved water climbs into
+ * by more than RIVER_HAIR is also settled: to the arrival + LAKE_INFLOW_HAIR. Measured on `field` (default: the world's
+ * field without towns, roads and bridges, as the rivers stage samples it).
+ */
+export function lakeSettleLevels(
+  recipe: WorldRecipe,
+  lakeBasin: ReadonlyMap<string, number>,
+  field: WorldField = createWorldField({ ...recipe, features: { ...recipe.features, towns: [], roads: [], bridges: [] } }),
+): { lake: WorldRecipe["features"]["lakes"][number]; basin: number; level: number }[] {
+  const rep = waterLogic(recipe, { field });
+  const out = new Map<string, { lake: WorldRecipe["features"]["lakes"][number]; basin: number; level: number }>();
+  for (const f of rep.findings) {
+    if (f.kind !== "perched-sheet" || f.id !== "lake" || f.level === undefined || f.lower === undefined) continue;
+    let lake: WorldRecipe["features"]["lakes"][number] | null = null;
+    let best = Infinity;
+    for (const l of recipe.features.lakes) {
+      if (Math.abs(l.waterY - f.level) > 0.02) continue;
+      const d = l.polygon && l.polygon.length >= 3 ? polyDistance(l.polygon, f.x, f.z) : Math.max(0, Math.hypot(f.x - l.center[0], f.z - l.center[1]) - l.radius);
+      if (d < best) {
+        best = d;
+        lake = l;
+      }
+    }
+    if (!lake) continue;
+    const basin = lakeBasin.get(lake.id);
+    if (basin === undefined || basin < 0) continue;
+    const level = Math.min(lake.waterY - 0.1, f.lower + LAKE_SETTLE_RISE);
+    const known = out.get(lake.id);
+    if (!known || level < known.level) out.set(lake.id, { lake, basin, level });
+  }
+  // a river whose solved water CLIMBS more than the hair into a lake arrives under it: the lake's grid spill level
+  // stands over the ground the river found (2026-10-29 w3-hydro, redstrand dogfood 3443 river-1: 54.25 -> lake-2 57.42).
+  // The lake comes down to the arrival + LAKE_INFLOW_HAIR (the rivers audit's and this sweep's own hair)
+  for (const r of field.rivers) {
+    const lv = r.surfaceY && r.surfaceY.length === r.points.length ? r.surfaceY : r.bedY;
+    if (!r.water || !lv || lv.length !== r.points.length) continue;
+    for (let i = 0; i + 1 < lv.length; i++) {
+      if (lv[i + 1]! - lv[i]! <= RIVER_HAIR) continue;
+      const [x, z] = r.points[i + 1]!;
+      let lake: WorldRecipe["features"]["lakes"][number] | null = null;
+      for (const l of recipe.features.lakes) {
+        if (Math.abs(l.waterY - lv[i + 1]!) > 0.05) continue;
+        const d = l.polygon && l.polygon.length >= 3 ? polyDistance(l.polygon, x, z) : Math.max(0, Math.hypot(x - l.center[0], z - l.center[1]) - l.radius);
+        if (d <= l.bank) lake = l;
+      }
+      if (!lake) continue;
+      const basin = lakeBasin.get(lake.id);
+      if (basin === undefined || basin < 0) continue;
+      const level = Math.min(lake.waterY - 0.1, lv[i]! + LAKE_INFLOW_HAIR);
+      const known = out.get(lake.id);
+      if (!known || level < known.level) out.set(lake.id, { lake, basin, level });
+    }
+  }
+  return [...out.values()];
+}
+
+/** Distance to a polygon (0 inside). */
+function polyDistance(poly: readonly (readonly [number, number])[], x: number, z: number): number {
+  let inside = false;
+  let best = Infinity;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, zi] = poly[i]!;
+    const [xj, zj] = poly[j]!;
+    if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
+    const dx = xi - xj;
+    const dz = zi - zj;
+    const l = dx * dx + dz * dz;
+    const t = l < 1e-9 ? 0 : Math.max(0, Math.min(1, ((x - xj) * dx + (z - zj) * dz) / l));
+    best = Math.min(best, Math.hypot(x - xj - dx * t, z - zj - dz * t));
+  }
+  return inside ? 0 : best;
 }

@@ -12,6 +12,10 @@ front, with a plaza at its foot and a long sight line in front, not by type ("an
 - OPEN each candidate's `plan` and `far` pictures (`{siting}/plan-{zone}-{siteRole}-<id>.png`, `far-...`) for every candidate you consider: the far render is the
   bare terrain from the front at the read distance. Judge the rock, not the number alone.
 - `{reservations}` and `{quests}` (the location, its approach) and the place's read and landmark in `{brief}`.
+- A large or roadside place (`large-place`, `roadside-place`): its needs also read the places sited before it
+  (`distance-from`, `on-route`, `landmark-visible` from a town) and a `subsite` result names WHERE the second point
+  (the sump, the gate) was found: open the plan crop at that point too. A ref "not sited yet" means the order is wrong:
+  report it, do not pick around it.
 
 **Judge**
 - The face carries the front with rock over its lintel; the apron holds the plaza and the stair; the approach sees the

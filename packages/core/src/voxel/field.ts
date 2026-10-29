@@ -223,6 +223,15 @@ const HEAD_WET = 0.02;
 /** How far (m) an outlet's descent from its lake may stand over the bank cap before it gives way. */
 const OUTLET_RAMP = 6;
 
+/**
+ * How far (m) upstream a river arriving UNDER its lake's level is backwatered up to it (2026-10-29, redstrand dogfood:
+ * a bank cap read on ground the lake's basin had already lowered held the inflow 2-6 m under the sheet, and the water
+ * climbed into the lake — the rivers audit's uphill steps on most seeds).
+ */
+export const LAKE_BACKWATER_M = 600;
+/** The most a river's solved water may climb into a held point and be healed as backwater (m): the rivers audit's mouth hair. */
+const BACKWATER_HAIR = 1.6;
+
 /** How far (m) above and below a fall's lip the water is held to the bed's width. */
 const FALL_NARROW = 1.5;
 /** How far (m) above the lip and past it the cliffs beside a fall stand. */
@@ -2363,6 +2372,16 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return b + (a - b) * h + k * h * (1 - h);
   }
 
+  const NO_CAPSULES: readonly (readonly [number, number, number, number, number, number])[] = [];
+  /** Signed distance inside a tapered capsule [ax, az, bx, bz, ra, rb] (positive inside), the radius lerped along it. */
+  function taperedCapsule(px: number, pz: number, cp: readonly [number, number, number, number, number, number]): number {
+    const ex = cp[2] - cp[0], ez = cp[3] - cp[1];
+    const len2 = ex * ex + ez * ez;
+    const t = len2 > 0 ? clamp(((px - cp[0]) * ex + (pz - cp[1]) * ez) / len2, 0, 1) : 0;
+    const qx = px - cp[0] - ex * t, qz = pz - cp[1] - ez * t;
+    return cp[4] + (cp[5] - cp[4]) * t - Math.sqrt(qx * qx + qz * qz);
+  }
+
   const shoreScratch = { distance: -Infinity, band: 1 };
   function shoreAt(x: number, z: number): typeof shoreScratch {
     let best = -Infinity;
@@ -2379,13 +2398,32 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         const lz = dz - lobe[1];
         inland = smoothMax(inland, lobe[2] - Math.sqrt(lx * lx + lz * lz), c.lobeBlend);
       }
-      let d = c.radius - inland;
-      if (c.warp > 0) {
-        d += fbm2(coastWarpSpecs[i]!, x, z, seed) * c.falloff * c.warp;
-        d += fbm2(coastShapeSpecs[i]!, x, z, seed) * c.radius * 0.3 * c.warp;
-      }
       let falloff = c.falloff;
       if (c.coastVariation > 0) falloff *= 1 + fbm2(coastVarSpecs[i]!, x, z, seed) * c.coastVariation;
+      // coast shape (capes unioned, inlets cut): each capsule speaks in SHORE distance (its half-width is the land's /
+      // the water's at the shoreline), so it is offset by this point's band; the warp is calmed where a capsule rules
+      let calm = 0;
+      const capes = c.capes ?? NO_CAPSULES, inlets = c.inlets ?? NO_CAPSULES; // an unparsed recipe (a test fixture) has neither
+      if (capes.length > 0 || inlets.length > 0) {
+        const band = falloff * (1 - shelf);
+        const base = inland;
+        for (const cp of capes) {
+          const s = taperedCapsule(dx, dz, cp) - band;
+          inland = smoothMax(inland, s, c.shapeBlend ?? 140);
+          calm = Math.max(calm, clamp(0.5 + (s - base) / 160, 0, 1));
+        }
+        for (const cp of inlets) {
+          const s = -taperedCapsule(dx, dz, cp) - band;
+          inland = -smoothMax(-inland, -s, c.shapeBlend ?? 140);
+          calm = Math.max(calm, clamp(0.5 + (base - s) / 160, 0, 1));
+        }
+      }
+      let d = c.radius - inland;
+      if (c.warp > 0) {
+        const keep = 1 - 0.55 * calm;
+        d += fbm2(coastWarpSpecs[i]!, x, z, seed) * c.falloff * c.warp * keep;
+        d += fbm2(coastShapeSpecs[i]!, x, z, seed) * c.radius * 0.3 * c.warp * keep;
+      }
       // the shoreline sits `shelf` of the way through the band, counted from the sea
       const s = c.radius + falloff * (1 - shelf) - d;
       if (s > best) {
@@ -5890,6 +5928,34 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       }
     });
     raiseAboveHeld();
+    // A river ARRIVING in a lake never stands under it: the envelope upstream of the shore (a bank cap read beside the
+    // lake's own basin) could hold the inflow metres under the sheet, and the solved water climbed into the lake. The
+    // lake backs the river up instead — from the shore upstream, wherever the envelope is under the lake's level, the
+    // water is held AT it (held, like a weir's pool: fixed, no outlet ramp, no fall into it from the lake's side), up
+    // to LAKE_BACKWATER_M; the bed is cut under the held level below.
+    refs.forEach((run) => {
+      for (let idx = 1; idx < run.length; idx++) {
+        const [i, k] = run[idx]!;
+        const [pi, pk] = run[idx - 1]!;
+        if (inLake[i]![k] !== 1 || inLake[pi]![pk] !== 0) continue;
+        const level = levels[i]![k]!;
+        let reach = 0;
+        const held: [number, number][] = [];
+        let ok = true;
+        for (let j = idx - 1; j >= 0; j--) {
+          const [ji, jk] = run[j]!;
+          const [ni, nk] = run[j + 1]!;
+          reach += Math.hypot(docs[ni]!.points[nk]![0] - docs[ji]!.points[jk]![0], docs[ni]!.points[nk]![1] - docs[ji]!.points[jk]![1]);
+          if (inLake[ji]![jk] !== 0 || !(levels[ji]![jk]! < level - 1e-3)) break;
+          // all or nothing: a backwater cut short leaves the same climb further up, and one the banks cannot hold
+          // (the held water over the lowest bank by more than a built levee) would spill over the meadow
+          const bank = bankCap[ji] ? bankCap[ji]![jk]! + RIVER_FREEBOARD + SHORE_MAX_BUILD : Infinity;
+          if (reach > LAKE_BACKWATER_M || level > bank) { ok = false; break; }
+          held.push([ji, jk]);
+        }
+        if (ok) for (const [ji, jk] of held) { levels[ji]![jk] = level; inLake[ji]![jk] = 2; }
+      }
+    });
 
     // Where each tributary enters its trunk: the first of its points inside
     // the trunk's channel, and the trunk point there.
@@ -5993,6 +6059,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
           const hit = parentHit(docs[i]!.points[k]![0], docs[i]!.points[k]![1], ci);
           if (hit) fixed[idx] = levels[hit.i]![hit.k]!;
         }
+        // the nearest trunk point to a later sample can lie UPSTREAM of the one before it (the tributary crosses the
+        // trunk's channel at a slant): inside the trunk the water still only descends (2026-10-29, redstrand 2635)
+        for (let idx = join.from + 1; idx < n; idx++) {
+          if (!Number.isNaN(fixed[idx]!) && !Number.isNaN(fixed[idx - 1]!) && fixed[idx]! > fixed[idx - 1]!) fixed[idx] = fixed[idx - 1]!;
+        }
       }
       if (headParent[ci]! >= 0) {
         for (let idx = 0; idx < n; idx++) {
@@ -6059,6 +6130,19 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         }
         const limit = idx === fallAt ? Infinity : water[idx + 1]! + runGradeOf(run[idx + 1]![0]) * gaps[idx + 1]!;
         water[idx] = Math.min(env[idx]!, limit);
+      }
+      // A hair of climb into a held point (a tributary's last sample a few centimetres under its trunk's water, a
+      // river arriving a decimetre under its lake) is backwater: the reach above stands at that level until its own
+      // water is higher (2026-10-29, redstrand dogfood 2433/2635: 0.02-0.25 m rises the rivers audit counted uphill).
+      for (let idx = n - 2; idx >= 0; idx--) {
+        if (!Number.isNaN(fixed[idx]!)) continue;
+        const rise = water[idx + 1]! - water[idx]!;
+        if (rise > 0 && rise <= BACKWATER_HAIR) water[idx] = water[idx + 1]!;
+      }
+      // and a free point BELOW a held one never stands over it (a mouth sample past its trunk's reach kept its own
+      // envelope, 0.25 m over the trunk water it had just joined): it follows the held level down
+      for (let idx = 1; idx < n; idx++) {
+        if (Number.isNaN(fixed[idx]!) && water[idx]! > water[idx - 1]!) water[idx] = water[idx - 1]!;
       }
       run.forEach(([i, k], idx) => {
         levels[i]![k] = water[idx]!;

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { continentalWorldRecipe, createWorldField, worldRecipeSchema, type WorldRecipe } from "@hitreg/core";
-import { waterLogic } from "../tools/worldgen-water-logic.mts";
+import { lakeSettleLevels, waterLogic } from "../tools/worldgen-water-logic.mts";
 
 /** The marsh world of core's voxel-river-weir.test.ts: a river across a marsh (table +2) to the sea along z -2000. */
 function fenWorld(weirs?: unknown[]): WorldRecipe {
@@ -53,4 +53,75 @@ test("water-logic: a lake a river runs into with nothing running out should drai
   const f = rep.findings.find((x) => x.kind === "lake-no-outlet");
   assert.ok(f, JSON.stringify(rep.counts));
   assert.equal(f!.id, "closed");
+});
+
+/**
+ * A strip world along x (2026-10-29 w3-hydro): lake water at 10 over ground 5 for x < 2; then either an outlet river
+ * (water 8.6, 1.4 m under the lake: the rivers stage's hair) over ground 6 for 2 <= x < 10 and its dry far bank at 9.4,
+ * or (no river) dry ground at `dry` straight off the lake's edge.
+ */
+function stripField(recipe: WorldRecipe, opts: { river: boolean; dry: number }): ReturnType<typeof createWorldField> {
+  const field = createWorldField(recipe);
+  const fake = Object.create(field) as typeof field;
+  const ground = (x: number): number => (x < 2 ? 5 : opts.river && x < 10 ? 6 : opts.river ? 9.4 : opts.dry);
+  Object.defineProperty(fake, "rivers", { value: [], writable: true });
+  Object.defineProperty(fake, "falls", { value: [] });
+  Object.defineProperty(fake, "marshTable", { value: () => null });
+  Object.defineProperty(fake, "height", { value: (x: number) => ground(x) });
+  Object.defineProperty(fake, "waterSurface", {
+    value: (x: number, _z: number, out: { y: number; kind: string; flowX: number; flowZ: number; floor: number }) => {
+      if (x < 2) Object.assign(out, { y: 10, kind: "lake", flowX: 0, flowZ: 0, floor: -Infinity });
+      else if (opts.river && x < 10) Object.assign(out, { y: 8.6, kind: "river", flowX: 1, flowZ: 0, floor: 6 });
+      else return false;
+      return true;
+    },
+  });
+  return fake;
+}
+function stripRecipe(): WorldRecipe {
+  const raw = worldRecipeSchema.parse(continentalWorldRecipe());
+  return worldRecipeSchema.parse({
+    ...raw,
+    features: { ...raw.features, rivers: [], lakes: [{ id: "tarn", center: [-100, 0], radius: 100, waterY: 10, bank: 10, carve: false, polygon: [[-200, -100], [2, -100], [2, 100], [-200, 100]] }] },
+  });
+}
+const STRIP: [number, number, number, number] = [-64, -32, 64, 32];
+
+test("water-logic: a lake ending at its outlet river is not perched over the river's dry far bank", () => {
+  // before 2026-10-29 the bank (9.4, over the river's 8.6 but under the lake's 10 - 0.5) read as "sheet 10 over dry
+  // ground 9.4": redstrand dogfood 2130 lake-1/lake-2 and 2332 lake-2 failed water-logic on it
+  const recipe = stripRecipe();
+  const rep = waterLogic(recipe, { rect: STRIP, field: stripField(recipe, { river: true, dry: 0 }) });
+  assert.deepEqual(rep.findings.filter((f) => f.kind === "perched-sheet"), []);
+});
+
+test("water-logic: a lake edge over lower dry ground is perched, and lakeSettleLevels lowers it to hold", () => {
+  const recipe = stripRecipe();
+  const field = stripField(recipe, { river: false, dry: 8 });
+  const rep = waterLogic(recipe, { rect: STRIP, field });
+  const f = rep.findings.find((x) => x.kind === "perched-sheet");
+  assert.ok(f, JSON.stringify(rep.counts));
+  assert.equal(f!.level, 10);
+  assert.equal(f!.lower, 8);
+  const settle = lakeSettleLevels(recipe, new Map([["tarn", 3]]), field);
+  assert.equal(settle.length, 1);
+  assert.equal(settle[0]!.lake.id, "tarn");
+  assert.equal(settle[0]!.basin, 3);
+  assert.ok(Math.abs(settle[0]!.level - 8.3) < 1e-9, String(settle[0]!.level));
+  // a lake with no hydrology basin (hand-placed) is the author's: never settled
+  assert.deepEqual(lakeSettleLevels(recipe, new Map(), field), []);
+});
+
+test("lakeSettleLevels: a river whose water climbs into a lake brings the lake down to its arrival (2026-10-29 w3-hydro)", () => {
+  // redstrand dogfood 3443: river-1 arrived at 54.25 and its water climbed 3.2 m into lake-2 (57.42) — the rivers
+  // audit's uphill step; the lake's grid spill level stood over the ground the river found
+  const recipe = stripRecipe();
+  const field = stripField(recipe, { river: false, dry: 9.6 });
+  (field as unknown as { rivers: unknown[] }).rivers = [{ id: "in", water: true, points: [[-400, 0], [-210, 0], [-150, 0]], surfaceY: [9, 7.5, 10], bedY: [8, 6.5, 9], width: 6, bank: 6 }];
+  const settle = lakeSettleLevels(recipe, new Map([["tarn", 2]]), field);
+  assert.equal(settle.length, 1);
+  assert.ok(Math.abs(settle[0]!.level - 8.5) < 1e-9, String(settle[0]!.level));
+  // a step within the hair is the river's mouth by design: nothing to settle
+  (field as unknown as { rivers: unknown[] }).rivers = [{ id: "in", water: true, points: [[-400, 0], [-210, 0], [-150, 0]], surfaceY: [9, 8.6, 10], bedY: [8, 7.6, 9], width: 6, bank: 6 }];
+  assert.deepEqual(lakeSettleLevels(recipe, new Map([["tarn", 2]]), field), []);
 });

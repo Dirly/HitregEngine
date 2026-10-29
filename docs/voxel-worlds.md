@@ -1648,6 +1648,22 @@ disc reads as a disc. Three things fix that without losing the distance:
   so one stretch descends steeply (cliffs, relief reaching the water) and the
   next gently (a beach). Beach on one side of an island, cliffs on the other,
   from one knob.
+- **Coast shape: capes, inlets, islets** (2026-10-29). Discs and warps still
+  gave every seed the same rounded two-lobe blob. `capes` (tapered capsules
+  `[ax, az, bx, bz, rootHalfWidth, tipHalfWidth]` unioned) are peninsulas and
+  `inlets` (the same, cut) are bays and sounds; both are in SHORELINE terms
+  (the half-width is the land's / the water's at the waterline) and calm the
+  coast warp inside them so a neck does not break. `worldgen continents`
+  writes them by seed from the laid land (`tools/worldgen-coast-shape.mts`):
+  1-3 capes rooted where the upland meets the coast, each with a `cape-*`
+  ridge spine in `features.ridges` (a narrow 18-36 m crest that rises out of
+  the upland and runs out to the tip: a wide flat crest drew a racetrack ring); 1-3 inlets at the lowest coast (a valley
+  mouth); 2-4 islets as small extra landmasses. The relief is re-bisected at
+  the same band scale afterwards. `--no-shape` skips it. Dogfood's `shape` rule
+  measures the result (solidity, peninsula reach, bay depth, outline unlike
+  every other seed's); its `read` rule judges a dry climate's biomes from the
+  map classes (`tools/worldgen-biome-read.mts`), which `worldgen map` draws
+  with a legend (dry ground, oasis ribbon, pine / broadleaf / scrub canopy).
 
 `landFloor` (> 0) switches the continent from a height blend to a **shore
 profile**: the ground rises from `oceanFloor` through the waterline at a

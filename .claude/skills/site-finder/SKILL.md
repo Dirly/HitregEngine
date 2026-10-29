@@ -28,6 +28,13 @@ Sites are not picked BY TYPE (an entrance at a falls). Every role declares measu
 from 300 m; dungeon-door = rock >= 1.5 x an 8 m door; walled-town = cliff flanks or water round the ring and one neck
 (<= 260 m of wall) with no ground within 60 m over the wall top; harbour-town = the coastal rule; capital = open ways in.
 A place sets `archetype` and `siteNeeds` overrides in the brief (the Wristgate: `{ "rock-face": { "frontHeight": 52 } }`).
+large-place (site r150) = a steppable r60 core 15 m over its surroundings, 3 ways in, a 20 m landmark seen from 300 m;
+roadside-place (r60) = level pad by a road or the line between two sited places, a 5 m landmark seen from 120 m. Kinds a
+place adds: `biome` (anchor/biome ids), `landmark-visible` (a BUILT height seen from D m), `distance-from` and `on-route`
+(refs `town:<id>` / `place:<location>`: site the referenced place FIRST), `subsite` (a need at a second point: the cave
+under the table lip); repeat kinds go in `siteNeeds.add`. A designer's `authoring/design/<place>/needs.json` feeds
+`--needs-file` (sites / towns --propose) and `worldgen dogfood --needs @<design dir>` (one met/unmet column per place);
+validate it with `npx tsx tools/worldgen-site-needs.mts --check-needs <file|dir>` (instant), never an ad-hoc script.
 ```
 npx tsx tools/zonegen.mts sites <world> --project <p> --zone <z> --role grand-entrance --for <place> --propose
 npx tsx tools/zonegen.mts brief-for site-places <world> --project <p> --zone <z> --role grand-entrance --for <place>
