@@ -4,6 +4,29 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { artBlock, deliversArt, finalReviewBlock, footprintPoints, jobHandoff, jobParent, measureSize, ownerApproval, readReview, rubricCodes, sizeBlock, deliversMaterialModels, deliversStructures, flatArtBlock, installBlock, terrainFineBlock, fineExceptionsFile, isMonumentSite, monumentApproachBlock, ownerOverrideScenes, opsHash, recordFix, recordReview, requireFinalReview, seeThroughBlock, setStage, stageBlock, catalogueIds, designBlock, designCodes, designFaults, designHash, recordDesignReview } from "./job.mjs";
+import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership } from "./concept-site.mjs";
+
+// image-request records live in a scratch folder for the whole file (concept-site.mjs reads HITREG_IMAGE_REQUESTS)
+const REQUESTS = fs.mkdtempSync(path.join(os.tmpdir(), "poi-requests-"));
+process.env.HITREG_IMAGE_REQUESTS = REQUESTS;
+process.on("exit", () => fs.rmSync(REQUESTS, { recursive: true, force: true }));
+
+/** A concept frame as `zonegen concept` leaves it: the bare-site render, its manifest (ground fingerprint of a tiny
+ *  world) and the image-request record of the repaint naming the render as its ref. `textOnly`: a record with no ref. */
+function siteConcept(dir, file = "concept/01-shrine.png", { textOnly = false, poi = "t", reservation = { center: [100, 50], radius: 20, terrainRadius: 40 } } = {}) {
+  const frame = path.join(dir, file), cdir = path.dirname(frame), stem = path.basename(file, ".png");
+  fs.mkdirSync(cdir, { recursive: true });
+  fs.writeFileSync(frame, "png");
+  const render = path.join(cdir, `${stem}.site.png`);
+  fs.writeFileSync(render, `bare site of ${stem}`);
+  const worldFile = path.join(dir, "world.json");
+  if (!fs.existsSync(worldFile)) fs.writeFileSync(worldFile, JSON.stringify({ seed: 7, terrain: { amp: 40 }, pipeline: {}, features: { roads: [{ id: "road-1", points: [[60, 50], [140, 50]] }], pois: [{ id: "far-cave", position: [5000, 10, 5000] }], clearings: [{ id: "t-yard", center: [100, 50], radius: 10 }] } }));
+  const own = ownership(poi);
+  const fp = groundFingerprint(JSON.parse(fs.readFileSync(worldFile, "utf8")), { center: reservation.center, radius: reservation.terrainRadius }, own);
+  fs.writeFileSync(path.join(cdir, `${stem}.site.json`), JSON.stringify({ tool: CONCEPT_TOOL, poi, reservation, worldFile, ownership: own, fingerprint: fp.hash, renderedAt: "2026-10-29T00:00:00Z", renders: { approach: { file: path.basename(render), sha256: fileSha(render) } } }));
+  fs.writeFileSync(path.join(REQUESTS, `concept-${path.basename(dir)}-${stem}.json`), JSON.stringify({ id: `concept-${stem}`, status: "done", createdAt: new Date().toISOString(), target: frame, refs: textOnly ? [] : [render] }));
+  return { frame, render, worldFile };
+}
 
 function job({ designed = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "poi-job-"));
@@ -27,8 +50,7 @@ function designJson(dir, patch = {}) {
   fs.mkdirSync(path.join(dir, "evidence", "design"), { recursive: true });
   fs.writeFileSync(path.join(dir, "evidence", "design", "yard-12.png"), "png");
   fs.writeFileSync(path.join(dir, "evidence", "reference.png"), "png");
-  fs.mkdirSync(path.join(dir, "concept"), { recursive: true });
-  fs.writeFileSync(path.join(dir, "concept", "01-shrine.png"), "png");
+  siteConcept(dir);
   const design = {
     version: 1,
     premise: "A roadside shrine where carters leave a stone for a safe crossing of the moor.",
@@ -641,4 +663,66 @@ test("gate 12: a clearing outside the reservation never stretches the footprint;
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("gate 16 concept on site: a new job's text-only or hand-made concept frame is refused, naming the command", () => {
+  const dir = job({ designed: false });
+  try {
+    designJson(dir);
+    assert.deepEqual(designFaults(dir, undefined, { sample: false }).filter((f) => /concept/.test(f)), [], "a repaint of a site render counts");
+    siteConcept(dir, "concept/01-shrine.png", { textOnly: true });
+    const text = designFaults(dir, undefined, { sample: false }).filter((f) => /concept/.test(f));
+    assert.equal(text.length, 1);
+    assert.match(text[0], /TEXT only/);
+    assert.match(text[0], /zonegen\.mts concept/);
+    fs.writeFileSync(path.join(dir, "concept", "02-hand.png"), "png");
+    designJson(dir, { concept: ["concept/02-hand.png"] });
+    assert.ok(designFaults(dir, undefined, { sample: false }).some((f) => /02-hand\.png has no image-request record/.test(f)));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("gate 16 concept on site: the render must be this tool's, and the ground under the reservation unchanged (the place's own build excepted)", () => {
+  const dir = job({ designed: false });
+  try {
+    designJson(dir);
+    const { render, worldFile } = siteConcept(dir);
+    const faults = () => designFaults(dir, undefined, { sample: false }).filter((f) => /concept/.test(f));
+    const world = JSON.parse(fs.readFileSync(worldFile, "utf8"));
+    const save = (w) => fs.writeFileSync(worldFile, JSON.stringify(w));
+    // far away and the place's own clearing: never stale it
+    save({ ...world, features: { ...world.features, pois: [{ id: "far-cave", position: [5100, 10, 5000] }], clearings: [{ id: "t-yard", center: [101, 50], radius: 14 }] }, pipeline: { stamp: 2 } });
+    assert.deepEqual(faults(), []);
+    // a road moved under the site: stale
+    save({ ...world, features: { ...world.features, roads: [{ id: "road-1", points: [[60, 52], [140, 52]] }] } });
+    assert.ok(faults().some((f) => /world changed under the reservation/.test(f)), faults().join(" | "));
+    save(world);
+    assert.deepEqual(faults(), []);
+    // the render swapped for another picture: not this tool's
+    fs.writeFileSync(render, "a screenshot from somewhere else");
+    assert.ok(faults().some((f) => /not a render this tool made/.test(f)));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("gate 16 concept on site: a moved reservation stales the frame; a job whose design was reviewed keeps its frames", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "poi-zone-"));
+  const dir = path.join(root, "zones", "zone-1", "pois", "t");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = job({ designed: false });
+    for (const f of fs.readdirSync(tmp)) fs.cpSync(path.join(tmp, f), path.join(dir, f), { recursive: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+    const resFile = path.join(root, "zones", "zone-1", "reservations.json");
+    fs.writeFileSync(resFile, JSON.stringify({ zone: "zone-1", reservations: [{ location: "t", center: [100, 50], radius: 20, terrainRadius: 40 }] }));
+    designJson(dir);
+    assert.deepEqual(designFaults(dir, undefined, { sample: false }).filter((f) => /concept/.test(f)), []);
+    fs.writeFileSync(resFile, JSON.stringify({ zone: "zone-1", reservations: [{ location: "t", center: [180, 50], radius: 20, terrainRadius: 40 }] }));
+    assert.ok(designFaults(dir, undefined, { sample: false }).some((f) => /reservation moved/.test(f)));
+    // an already reviewed design (recorded before this rule) is not re-judged on its frames
+    siteConcept(dir, "concept/01-shrine.png", { textOnly: true });
+    fs.writeFileSync(path.join(dir, "design-review.md"), designReviewText(dir));
+    const p = progress(dir);
+    p.designReview = { verdict: "PASS", file: "design-review.md", designHash: designHash(dir), reviewer: "REV-D1" };
+    fs.writeFileSync(path.join(dir, "progress.json"), JSON.stringify(p));
+    assert.deepEqual(designFaults(dir, undefined, { sample: false }).filter((f) => /concept/.test(f)), []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

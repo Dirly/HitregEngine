@@ -66,7 +66,8 @@
  *      sample: { area, shots[] }, reference[], concept[] }: the one-line premise, the player's journey, the areas and their purpose,
  *      the story elements each made of named catalogue props / structures / creatures / decals (a prop id must exist in
  *      the project closure's catalogues), ONE area finished at player height (its frames) and the owner-approved
- *      reference frames it is judged against, and a CONCEPT frame drawn from the premise before the build (image-request.mjs gen). A fresh reviewer (gate 13's identity rules) answers the rubric's Place lines
+ *      reference frames it is judged against, and a CONCEPT frame drawn from the premise before the build ON ITS SITE: a repaint of a
+ *      bare-site render (`zonegen concept`, tools/poi-review/concept-site.mjs; a text-only frame is refused for a new job). A fresh reviewer (gate 13's identity rules) answers the rubric's Place lines
  *      P1..P5 on that sample — story read, every element seen, nothing random, worth visiting, finished to the bar —
  *      naming `Design hash: <job.mjs design>`; `job.mjs design-review <dir> --file <review>` records it. No stage past
  *      greybox-review (no detail: no repeated fences, graves, stalls), and no install, without that PASS; editing
@@ -94,6 +95,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { CONCEPT_COMMAND, conceptSiteFault, jobSite } from "./concept-site.mjs";
 import { aggregateMeasurement, measurementFaults, parentedTierFault, sizeMeasurementSchema, TIER_NAMES } from "./size-tiers.mjs";
 
 export const STAGES = ["briefed", "survey", "blockout", "greybox-review", "detail", "final-review", "installed"];
@@ -333,6 +335,12 @@ function resolveRef(dir, r) {
   return null;
 }
 
+/** A design review PASS is on record for the job (its concept frames were judged before the concept-on-site rule or on it). */
+function designReviewed(dir) {
+  const p = tryJson(progressFile(dir));
+  return !!p?.designReview && String(p.designReview.verdict).toUpperCase() === "PASS";
+}
+
 /**
  * What is wrong with design.json (gate 16), as a list; empty when it holds everything a design review needs.
  * `sample: false` checks the written design alone (what a builder needs BEFORE it builds anything: the sample frames
@@ -393,8 +401,16 @@ export function designFaults(dir, design = readDesign(dir), { sample = true } = 
   // premise BEFORE the build (image-request.mjs gen, the zone's concept frames as --ref); the build composes to it, the reviewer
   // holds the sample frames beside it (P5)
   const concepts = Array.isArray(design.concept) ? design.concept.filter((x) => typeof x === "string") : [];
-  if (!concepts.length) out.push("concept: at least one concept frame drawn from the premise before the build (apps/playground/tools/image-request.mjs gen, the zone's concept frames as --ref; under <job>/concept/)");
+  if (!concepts.length) out.push(`concept: at least one concept frame drawn from the premise before the build, painted on a render of the bare site (${CONCEPT_COMMAND}; it writes <zone>/concept/<id>-approach.png and -far.png)`);
   for (const c of concepts) if (!resolveRef(dir, c)) out.push(`concept frame ${c} does not exist`);
+  // L (Wristgate 2026-10-29: every firstshore concept was drawn from TEXT; Codex invented a cliff tall enough for a 50 m
+  // gate on a 40 m gorge and the owner built to it): a NEW job's concept frames (no design review PASS recorded yet) count
+  // only as repaints of a render of the bare site made by `zonegen concept` for the same reservation, on the ground as it
+  // is now (concept-site.mjs). A job whose design was already reviewed keeps its frames until the design re-opens.
+  if (concepts.length && !designReviewed(dir)) {
+    const site = jobSite(dir), { playground } = projectOf(dir);
+    for (const f of concepts.map((c) => resolveRef(dir, c)).filter(Boolean)) { const why = conceptSiteFault(f, site, playground ?? undefined); if (why) out.push(why); }
+  }
   // owner ruling 2026-10-23 ("not everything should be custom props... 60% should be leveraging reusable props"): of the catalogue
   // props the elements are made of, those made FOR THIS PLACE (prop-requests.json `for` = this poi, or not in any catalogue =
   // a request to come) are at most 40%; the rest is the world's reusable props and kits (tents, huts, racks, carts, boats, bones)
