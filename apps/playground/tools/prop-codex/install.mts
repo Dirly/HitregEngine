@@ -9,8 +9,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import os from 'node:os';
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { runBlender } from "../../../../tools/blender-lock.mjs";
 import { applyOps, createScene, ComponentRegistry, registerCoreComponents, dressingSchema, prefabFromSubtree, mergeVocabulary, type Op } from "@hitreg/core";
 import { BLENDER, blenderBuild, gateFaults, type GeometryRecord } from "./check.mts";
 import {paintingStatus} from './paint.mts';
@@ -175,7 +175,7 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
     if (opts.sheet) args.push("--sheet", opts.sheet, "--labels", (opts.sheetLabels ?? cardNames).join(","));
     log(`render ${cardNames.length} card(s)${opts.sheet ? " + sheet" : ""}`);
     for(const n of cardNames)for(const p of ['prop',...(painted.includes(n)?['clay','unlit']:[])])fs.rmSync(path.join(D,'reports',`${p}-${n}.png`),{force:true});
-    const r = spawnSync(BLENDER, args, { encoding: "utf8", maxBuffer: 1 << 26 });
+    const r = runBlender(BLENDER, args, { encoding: "utf8", maxBuffer: 1 << 26 }, "prop-codex render");
     if(painted.length&&(r.status!==0||painted.some(n=>['prop','clay','unlit'].some(p=>!fs.existsSync(path.join(D,'reports',`${p}-${n}.png`))))))throw Error('Painted prop review renders incomplete: '+String(r.stderr).slice(-600));
     for (const n of cardNames) { const c = path.join(D, "reports", `prop-${n}.png`); if (fs.existsSync(c)) cards.push(c); }
     if (cards.length !== cardNames.length) log(`  render: ${cards.length}/${cardNames.length} cards (exit ${r.status}) ${(r.stderr ?? "").slice(-600)}`);

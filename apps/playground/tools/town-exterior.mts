@@ -26,6 +26,7 @@
  * rewrites only the door-sign and window anchors of an existing exterior map (no boot, nothing else touched).
  */
 import fs from "node:fs";
+import { isTownStreet } from "./_town-streets.mts";
 import path from "node:path";
 import { doorSignAnchors, type BuildingAnchor } from "./_door-signs.mts";
 import {
@@ -65,7 +66,7 @@ const lights = readJ<{ lanterns: Array<{ id: string; at: number[] }> }>(path.joi
 const recipe = readJ<{ features: { roads: Array<{ id: string; width?: number; points: number[][] }>; towns: Array<{ id: string; center: P2 }> } }>(path.join(proj, "assets", "worlds", `${doc.world ?? scene}.json`));
 const tid = layout.townId;
 const roads = recipe.features.roads.filter((r) => r.id.startsWith(`${tid}-`)).map((r) => ({ id: r.id, width: r.width ?? 4, pts: r.points.map((p) => [p[0]!, p[p.length - 1]!] as P2) }));
-const streets = roads.filter((r) => r.id.startsWith(`${tid}-street-`));
+const streets = roads.filter((r) => isTownStreet(r.id, tid));
 const doorPaths = roads.filter((r) => r.id.startsWith(`${tid}-door-`));
 const square = streets.find((r) => /-square-/.test(r.id));
 const centre = recipe.features.towns.find((t) => t.id === tid)!.center;

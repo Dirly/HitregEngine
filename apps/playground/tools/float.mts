@@ -245,6 +245,61 @@ export function undersideOf(world: ArrayLike<number>): (x: number, z: number) =>
   };
 }
 
+/**
+ * BURIED (Wristgate 2026-10-29: a haul sledge and a chain coil stood INSIDE the raised terrace and both `dress` and
+ * `float` passed them — the seat found the cut ground under the built block). A set-down prop (contact base / legs) is
+ * buried when, at most of its inner footprint samples (centre + the 45% ring), it is INSIDE closed built mass (an odd
+ * number of built-surface crossings above its lower body line) or a solid surface (built or the voxel field) crosses its body
+ * between `base + max(0.3 m, 15 % of its height)` and 90 % of its height. `built` = the landmark bakes only (closed
+ * meshes). Returns the reason, or null when it stands clear.
+ */
+export function buriedReason(built: { crossings(x: number, z: number, above: number): number[] } | null, field: SolidProbe | null, fp: { x: number; z: number; y: number; halfX: number; halfZ: number; yaw?: number; height: number }): string | null {
+  const c = Math.cos(fp.yaw ?? 0), s = Math.sin(fp.yaw ?? 0);
+  const w = (lx: number, lz: number): [number, number] => [fp.x + lx * c + lz * s, fp.z - lx * s + lz * c];
+  const hx = fp.halfX * 0.45, hz = fp.halfZ * 0.45;
+  const pts: [number, number][] = [[fp.x, fp.z], w(-hx, -hz), w(hx, -hz), w(hx, hz), w(-hx, hz)];
+  const lo = fp.y + Math.max(0.3, fp.height * 0.15), hi = fp.y + fp.height * 0.9;
+  let inside = 0, through = 0;
+  for (const [x, z] of pts) {
+    // sunk less than the lower body line is seating, not burial: parity is read from that line up
+    const above = built ? built.crossings(x, z, lo) : [];
+    if (above.length % 2 === 1) inside++;
+    else if (above.some((h) => h <= hi) || (hi > lo && field && field.floor(x, z, hi, lo) !== null)) through++;
+  }
+  const need = Math.ceil(pts.length / 2);
+  if (inside >= need) return `buried: inside built mass at ${inside}/${pts.length} footprint samples (base ${r2(fp.y)})`;
+  if (inside + through >= need) return `buried: a solid surface crosses its body (${r2(lo)}..${r2(hi)}) at ${inside + through}/${pts.length} samples`;
+  return null;
+}
+
+/** Vertical crossings of a triangle soup above a height, bucketed on a 1 m plan grid. */
+export function crossingColumns(tris: ArrayLike<number>): { crossings(x: number, z: number, above: number): number[] } {
+  const buckets = new Map<string, number[]>();
+  for (let t = 0; t + 8 < tris.length; t += 9) {
+    const x0 = Math.min(tris[t]!, tris[t + 3]!, tris[t + 6]!), x1 = Math.max(tris[t]!, tris[t + 3]!, tris[t + 6]!);
+    const z0 = Math.min(tris[t + 2]!, tris[t + 5]!, tris[t + 8]!), z1 = Math.max(tris[t + 2]!, tris[t + 5]!, tris[t + 8]!);
+    for (let i = Math.floor(x0); i <= Math.floor(x1); i++)
+      for (let k = Math.floor(z0); k <= Math.floor(z1); k++) { const key = `${i},${k}`; const b = buckets.get(key); if (b) b.push(t); else buckets.set(key, [t]); }
+  }
+  return {
+    crossings(x, z, above) {
+      const out: number[] = [];
+      for (const t of buckets.get(`${Math.floor(x)},${Math.floor(z)}`) ?? []) {
+        const ax = tris[t]!, az = tris[t + 2]!, bx = tris[t + 3]!, bz = tris[t + 5]!, cx = tris[t + 6]!, cz = tris[t + 8]!;
+        const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+        if (Math.abs(d) < 1e-12) continue;
+        const u = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d, v = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d, ww = 1 - u - v;
+        if (u < -1e-9 || v < -1e-9 || ww < -1e-9) continue;
+        const y = u * tris[t + 1]! + v * tris[t + 4]! + ww * tris[t + 7]!;
+        if (y > above) out.push(y);
+      }
+      // a column through a shared edge or vertex meets the same crossing twice: merge crossings under 1 mm apart
+      out.sort((a, b) => a - b);
+      return out.filter((y, i) => i === 0 || y - out[i - 1]! > 1e-3);
+    },
+  };
+}
+
 /** Seat every prefab instance of a scene. `field` adds the voxel world's solid under it. */
 export function floatScene(assets: string, doc: SceneDoc, field: WorldField | null, area: Area, tol: number, only?: ReadonlySet<string>, seatOpts: SeatOptions = {}): { rows: FloatRow[]; checked: number; unsized: number; ms: number } {
   const t0 = performance.now();
@@ -262,6 +317,10 @@ export function floatScene(assets: string, doc: SceneDoc, field: WorldField | nu
     for (const v of g.world) soup.push(v);
   });
   const tris = triangleSolidProbe(soup, 1, owners);
+  // the built mass alone (landmark bakes: closed meshes) for the buried test
+  const builtSoup: number[] = [];
+  for (const g of geo) if (g.id.startsWith(LANDMARK_SUPPORT)) for (const v of g.world) builtSoup.push(v);
+  const built = builtSoup.length ? crossingColumns(builtSoup) : null;
   const fieldProbe = field ? fieldSolidProbe(field) : null;
   const rows: FloatRow[] = [];
   let checked = 0, unsized = 0;
@@ -298,7 +357,13 @@ export function floatScene(assets: string, doc: SceneDoc, field: WorldField | nu
     // a base keeps its own low faces (inner floor, barrel bottom) off the floor's plane: flats
     const r = seatObject(probe, contact === "seated" ? { ...fp, underside: undersideOf(g.world) } : contact === "base" ? { ...fp, flats: flatsOf(g.world, fp.y, fp.height) } : fp, contact, { tol, reachDown: big ? 8 : 4, ...seatOpts });
     checked++;
-    if (r.status === "ok") return;
+    if (r.status === "ok") {
+      if (contact !== "base" && contact !== "legs") return;
+      const why = buriedReason(built, fieldProbe, { ...fp, y: r.y ?? fp.y });
+      if (!why) return;
+      rows.push({ kind: "scene", id: g.id, what: g.prefabId, contact, x: r3(fp.x), y: r3(fp.y), z: r3(fp.z), status: "off", gap: Infinity, support: null as never, reason: `${why}: move it in its plan (never re-seat)`, fix: { y: null } });
+      return;
+    }
     rows.push({
       kind: "scene", id: g.id, what: g.prefabId, contact, x: r3(fp.x), y: r3(fp.y), z: r3(fp.z), status: r.status, gap: r2(r.gap), support: r.support,
       ...(r.reason ? { reason: r.reason } : {}),

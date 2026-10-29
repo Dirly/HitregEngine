@@ -24,7 +24,8 @@ import { createHash } from "node:crypto";
 import { GATES, gateInputs, gateReport } from "./quality.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const BLENDER = '"P:/Program Files/Blender Foundation/Blender 5.2/blender.exe"';
+// the build stage runs Blender through the machine-wide lock (tools/blender-lock.mjs: one headless Blender at a time)
+export const BLENDER = `node "${path.join(HERE, "..", "blender-lock.mjs").split(path.sep).join("/")}" run --label dungeon-pipeline -- "P:/Program Files/Blender Foundation/Blender 5.2/blender.exe"`;
 
 /** newest mtime of a file, or of any file under a directory; null when absent */
 export function mtimeOf(full) {

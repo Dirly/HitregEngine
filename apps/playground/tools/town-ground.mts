@@ -35,6 +35,7 @@
  *       apply the saved inverse (build also restores the plan saved before it).
  */
 import fs from "node:fs";
+import { isTownStreet } from "./_town-streets.mts";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -305,14 +306,20 @@ function doors(): void {
     const m = manifest.models?.[model];
     const row: any = { lot: b.id, model };
     results.push(row);
-    if (!m?.door) { row.status = "no-door"; row.why = `manifest has no door for model ${model}`; continue; }
+    // a per-building export (export_town.py `districts`) carries no model door: the LAYOUT's door (the visitor's
+    // point, 2.5 m past the front steps, on the building's facing) stands in for it
+    const layoutDoor = !m?.door && Array.isArray(b.door) && Array.isArray(b.facing);
+    if (!m?.door && !layoutDoor) { row.status = "no-door"; row.why = `manifest has no door for model ${model} and the layout none`; continue; }
+    const ext = envelopeOf(env, model), g = PRE[ext.door ?? "-y"]!(ext.full ?? ext.ground);
+    const steps = Math.max(0.5, g.front * c.cfg.cell); // the measured front extent: the entry steps
     // the door in the world: the lot's centre + the model's own door, turned by the building's rotation (yaw + preRot)
     const th = (b.yaw ?? 0) + (b.preRot ?? 0), cs = Math.cos(th), sn = Math.sin(th);
     const rot = (x: number, z: number): P => [x * cs + z * sn, -x * sn + z * cs];
-    const dp = rot(m.door.position[0], m.door.position[2]), df = rot(m.door.facing[0], m.door.facing[1]);
-    const door: P = [b.centre[0] + dp[0], b.centre[1] + dp[1]];
-    const ext = envelopeOf(env, model), g = PRE[ext.door ?? "-y"]!(ext.full ?? ext.ground);
-    const steps = Math.max(0.5, g.front * c.cfg.cell); // the measured front extent: the entry steps
+    const fl = layoutDoor ? Math.hypot(b.facing[0], b.facing[1]) || 1 : 1;
+    const df: P = layoutDoor ? [b.facing[0] / fl, b.facing[1] / fl] : rot(m.door.facing[0], m.door.facing[1]);
+    const door: P = layoutDoor ? [b.door[0] - df[0] * (steps + 2.5), b.door[1] - df[1] * (steps + 2.5)]
+      : ((dp: P): P => [b.centre[0] + dp[0], b.centre[1] + dp[1]])(rot(m.door.position[0], m.door.position[2]));
+    if (layoutDoor) row.doorFrom = "layout";
     const foot: P = [door[0] + df[0] * steps, door[1] + df[1] * steps];
     // the route starts where the door ray leaves the building's own envelope: a recessed door (under a jetty or a
     // porch) opens metres inside the full envelope, so the path runs straight out from the foot first
@@ -449,18 +456,20 @@ function doors(): void {
 function paving(): void {
   // paint role only, on the raw file read fresh: nothing else in the recipe is rewritten
   const raw = readJson(c.worldFile);
-  const prefix = `${c.cfg.townId}-street-`;
+  const T = c.cfg.townId, prefix = `${T}-`;
   const role = flag("off") ? "road" : "paving";
   const before: { id: string; role: string | null }[] = [];
-  for (const road of raw.features?.roads ?? []) {
-    if (typeof road.id !== "string" || !road.id.startsWith(prefix)) continue;
+  const mine = ((raw.features?.roads ?? []) as any[]).filter((r) => typeof r.id === "string" && isTownStreet(r.id, T));
+  // nothing to paint is a FAULT, not "already paved": a town whose streets carry another name was reported paved
+  if (!mine.length) { console.error(`${c.town}: no town street roads (${T}-street-* / ${T}-lane-*) in the recipe — nothing paved`); process.exitCode = 1; return; }
+  for (const road of mine) {
     if (road.role === role || (role === "road" && road.role === undefined)) continue;
     before.push({ id: road.id, role: road.role ?? null });
     if (role === "road") delete road.role;
     else road.role = role;
   }
   if (before.length === 0) {
-    console.log(`${c.town}: every ${prefix}* road already ${role === "paving" ? "paved" : "unpaved"} — nothing written`);
+    console.log(`${c.town}: every one of the ${mine.length} town street road(s) already ${role === "paving" ? "paved" : "unpaved"} — nothing written`);
     return;
   }
   worldRecipeSchema.parse(raw); // never leave a broken world on disk

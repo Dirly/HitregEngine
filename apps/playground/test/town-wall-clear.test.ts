@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { boxDistance, judgeTown, planBox, wallReach, yawOf, type Seg } from "../tools/_town-wall-clear.mts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { boxDistance, glbBounds, glbBoundsInFrame, judgeTown, planBox, wallReach, yawOf, type Seg } from "../tools/_town-wall-clear.mts";
 
 // a 10 x 20 m model whose local box is centred 2 m off its origin along z, placed at (100, 50, -200) turned 90 deg
 const lo: [number, number, number] = [-5, -0.5, -8], hi: [number, number, number] = [5, 9, 12];
@@ -46,4 +49,28 @@ test("yawOf reads a y-axis quaternion", () => {
   const q = [0, Math.sin(0.66), 0, Math.cos(0.66)];
   assert.ok(Math.abs(yawOf(q) - 1.32) < 1e-9);
   assert.equal(yawOf(undefined), 0);
+});
+
+test("glbBoundsInFrame: a model with its lot's turn baked into the vertices measures its true plan box, not the rotated AABB", () => {
+  // the corners of a 10 x 20 m building turned by yaw = 0.75 rad, as planBox turns (x' = c x + s z, z' = -s x + c z)
+  const yaw = 0.75, c = Math.cos(yaw), s = Math.sin(yaw);
+  const pts: number[] = [];
+  for (const [x, z] of [[-5, -10], [5, -10], [5, 10], [-5, 10]] as const) for (const y of [0, 8]) pts.push(c * x + s * z, y, -s * x + c * z);
+  const bin = Buffer.alloc(pts.length * 4);
+  pts.forEach((v, i) => bin.writeFloatLE(v, i * 4));
+  const json = Buffer.from(JSON.stringify({
+    asset: { version: "2.0" }, scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }], meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
+    buffers: [{ byteLength: bin.length }], bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: bin.length }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: pts.length / 3, type: "VEC3", min: [-99, 0, -99], max: [99, 8, 99] }],
+  }));
+  const jpad = Buffer.concat([json, Buffer.alloc((4 - (json.length % 4)) % 4, 0x20)]);
+  const head = Buffer.alloc(12), jh = Buffer.alloc(8), bh = Buffer.alloc(8);
+  head.writeUInt32LE(0x46546c67, 0); head.writeUInt32LE(2, 4); head.writeUInt32LE(12 + 8 + jpad.length + 8 + bin.length, 8);
+  jh.writeUInt32LE(jpad.length, 0); jh.writeUInt32LE(0x4e4f534a, 4); bh.writeUInt32LE(bin.length, 0); bh.writeUInt32LE(0x004e4942, 4);
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wallclear-")), "m.glb");
+  fs.writeFileSync(file, Buffer.concat([head, jh, jpad, bh, bin]));
+  const f = glbBoundsInFrame(file, yaw);
+  assert.ok(Math.abs(f.hi[0] - f.lo[0] - 10) < 1e-4 && Math.abs(f.hi[2] - f.lo[2] - 20) < 1e-4, `own frame ${f.lo} .. ${f.hi}`);
+  assert.ok(glbBounds(file).hi[0] > 50, "the accessor bounds are what the plain reader takes");
+  fs.rmSync(path.dirname(file), { recursive: true, force: true });
 });

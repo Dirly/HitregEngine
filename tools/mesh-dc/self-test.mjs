@@ -5,6 +5,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { runBlender } from "../blender-lock.mjs";
 import { convertMeshStamp, paletteMaterial, MAX_SOURCE_BYTES } from "./convert.mjs";
 import { run } from "./run.mjs";
 
@@ -294,7 +295,6 @@ test("decimateRough audits clean when indices are split at one exact position (m
 
 const BLENDER = process.env.BLENDER || "P:/Program Files/Blender Foundation/Blender 5.2/blender.exe";
 test("cave_tunnel: width/height per path point, full width (was half), mitred sharp bends without folds", { skip: !fs.existsSync(BLENDER) && "no Blender" }, async () => {
-  const { spawnSync } = await import("node:child_process");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tunnel-"));
   const script = path.join(dir, "t.py"), out = path.join(dir, "out.json");
   fs.writeFileSync(script, `import sys, json, bmesh
@@ -318,7 +318,7 @@ except ValueError:
     short = True
 json.dump({"mitreCross": crossings(mit), "smoothCross": crossings(smo), "shortRaises": short, "closed": all(e.is_manifold for e in bm.edges), "w0": max(ys(-0.01, 0.01)), "w10": max(ys(9.99, 10.01)), "w20": max(ys(19.99, 20.01)), "h0": max(zs(-0.01, 0.01)), "h10": max(zs(9.99, 10.01))}, open(${JSON.stringify(out)}, "w"))
 `);
-  const r = spawnSync(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script], { encoding: "utf8" });
+  const r = runBlender(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr || r.stdout);
   const m = JSON.parse(fs.readFileSync(out, "utf8"));
   assert.equal(m.closed, true);

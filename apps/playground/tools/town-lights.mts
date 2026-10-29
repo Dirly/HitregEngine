@@ -23,6 +23,7 @@ import path from "node:path";
 import { ComponentRegistry, applyOps, createWorldField, fieldSolidProbe, registerCoreComponents, worldRecipeSchema, type Op, type SceneDoc } from "@hitreg/core";
 import { checkTownLights, loadStreetLighting, planTownLights, streetLightingFile, townWealth, type Lantern, type LightKind, type TownLightInput } from "./town-lights-rule.mts";
 import { applyOpsToSceneFile } from "./_scene-write.mts";
+import { isTownStreet } from "./_town-streets.mts";
 
 type XZ = [number, number];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -56,6 +57,39 @@ const solid = fieldSolidProbe(field);
 const tag = `town-lights:${townName}`;
 const rootId = `town-${townName}-lights`;
 
+/** A plan dock built as a recipe quay operator (`wall` variant `quay`), as the light planner's dock. */
+function quayDockOf(structureId: string): TownLightInput["docks"][number] | null {
+  const op = ((raw.features.operators ?? []) as J[]).find((o) => o.op === "wall" && o.variant === "quay" && (o.id === `${townName}-${structureId}` || o.id === structureId));
+  if (!op || !Array.isArray(op.points) || op.points.length < 2) return null;
+  const a = op.points[0] as XZ, b = op.points[op.points.length - 1] as XZ;
+  let along: XZ = [b[0] - a[0], b[1] - a[1]];
+  const L = Math.hypot(along[0], along[1]) || 1;
+  along = [along[0] / L, along[1] / L];
+  const centre: XZ = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  // the planner's `across` is [along.z, -along.x] and it lights the +across edge of the deck: turn along so +across is the sea
+  const wet = (sg: number): number => { const x = centre[0] + along[1] * sg * 6, z = centre[1] - along[0] * sg * 6; const w = field.waterY(x, z); return w !== null && w > field.height(x, z) ? 1 : 0; };
+  if (wet(-1) > wet(1)) along = [-along[0], -along[1]];
+  const across: XZ = [along[1], -along[0]];
+  const bw = Math.max(4, Number(op.backfill?.width ?? 6));
+  const y = Number(op.height ?? 0);
+  const half = L / 2;
+  const at = (s: number, t: number): XZ => [centre[0] + along[0] * s + across[0] * t, centre[1] + along[1] * s + across[1] * t];
+  // the head: the landward deck edge nearest any town street's end
+  const T = (raw.features.towns as J[]).find((x) => x.id === townDoc.town)?.id;
+  const ends = ((raw.features.roads ?? []) as J[]).filter((r) => T && isTownStreet(r.id, T)).flatMap((r) => [r.points[0], r.points[r.points.length - 1]] as XZ[]);
+  let head: XZ | null = null, best = Infinity;
+  for (const e of ends) {
+    const s = Math.max(-half + 1, Math.min(half - 1, (e[0] - centre[0]) * along[0] + (e[1] - centre[1]) * along[1]));
+    const h = at(s, -(bw - 2)), dd = Math.hypot(e[0] - h[0], e[1] - h[1]);
+    if (dd < best) (best = dd), (head = h);
+  }
+  return {
+    id: structureId, corners: [at(-half, -bw), at(half, -bw), at(half, 0.5), at(-half, 0.5)], centre, along,
+    ...(head ? { head: { at: head, y } } : {}),
+    deck: { y, along: [-half, half], across: [-bw, 0] },
+  };
+}
+
 function inputFor(scene: SceneDoc): TownLightInput {
   const t = (raw.features.towns as J[]).find((x) => x.id === townDoc.town);
   if (!t) throw new Error(`town ${townDoc.town} is not in ${path.basename(recipeFile)}`);
@@ -66,7 +100,15 @@ function inputFor(scene: SceneDoc): TownLightInput {
   const docks: TownLightInput["docks"] = [];
   const dockIds = new Set<string>();
   for (const s of (plan.structures ?? []) as J[]) {
-    if (!["dock", "quay", "jetty", "harbour"].includes(s.kind) || !s.site?.corners) continue;
+    if (!["dock", "quay", "jetty", "harbour"].includes(s.kind)) continue;
+    if (!s.site?.corners) {
+      // a quay built as a recipe `wall` operator (variant quay: the face line, deck at `height`, backfill landward) and
+      // named `<town>-<structure>`: its deck is read from the operator, the head is where the nearest town street ends
+      const d = quayDockOf(s.id);
+      if (d) { dockIds.add(s.id); docks.push(d); }
+      else console.warn(`  dock ${s.id}: no site.corners in the plan and no quay operator ${townName}-${s.id} in the recipe: not lit`);
+      continue;
+    }
     const b = s.built ?? {};
     dockIds.add(s.id);
     docks.push({

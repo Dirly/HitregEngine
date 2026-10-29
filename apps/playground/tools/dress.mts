@@ -8,6 +8,8 @@
  *                                    the LAST line is `CHECK <plan>: N placements, V violations, W warnings -> ok|FAILED`;
  *                                    --quiet prints only the findings and that line (use it after the first full look)
  *   npx tsx tools/dress.mts apply    --project <p> --plan <file|id> --scene <name|file> --at x,y,z --yaw <deg> [--parent <entity>] [--poi <id>] [--no-batch] [--dry]
+ *                                    --lights-only: a plan of lit fixtures only (dress fixtures) in an unfurnished building; its
+ *                                    unfurnished-room violations are waived for the apply, its check still fails
  *                                    (every added entity is tagged poi:<id>: --poi, else the site socket map's job, else the
  *                                    <poi>-<area> plan id prefix of a POI job; tools/_dress-poi.mts)
  *   npx tsx tools/dress.mts retag    --project <p> --scene <name|file> [--plan <file|id>] [--poi <id>] [--dry]   tag dressing
@@ -735,10 +737,21 @@ function apply(): void {
   const proj = projectDir();
   const file = planFile(proj, need("plan"));
   const { plan, map, result, hash, src, owner, own } = resolvePlan(proj, file);
-  if (result.violations.length) {
-    printCheck(plan, map, result);
-    fail(`refused: the plan has ${result.violations.length} violation(s); fix them (dress check) before applying`);
+  // --lights-only: a building lit before it is furnished (town-lights: every house lit inside at night). The plan may
+  // hold ONLY lit fixtures, and the only violations it may carry are the unfurnished-room ones; its `dress check` still
+  // FAILS, so the town's `interiors` row stays MISSING until the rooms are furnished.
+  const LIGHTS_ONLY_CODES = new Set(["room-empty", "room-sparse", "room-missing"]);
+  const lightsOnly = flag("lights-only");
+  if (lightsOnly) {
+    const notLit = (plan.items ?? []).filter((i) => !/^fixtures\/|-lit\b|candle|lantern|lamp|torch|brazier|hearth|chandelier|sconce/i.test(String(i.prop ?? "")));
+    if (notLit.length) fail(`--lights-only: ${notLit.length} item(s) are not lit fixtures (${notLit.slice(0, 3).map((i) => `${i.id} ${i.prop}`).join(", ")})`);
   }
+  const blocking = result.violations.filter((v) => !(lightsOnly && LIGHTS_ONLY_CODES.has(v.code)));
+  if (blocking.length) {
+    printCheck(plan, map, result);
+    fail(`refused: the plan has ${blocking.length} violation(s); fix them (dress check) before applying`);
+  }
+  if (lightsOnly && result.violations.length) console.log(`lights-only: ${result.violations.length} unfurnished-room finding(s) waived for this apply; dress check still fails until the rooms are furnished`);
   const sceneRef = need("scene");
   const sceneFile = fs.existsSync(sceneRef) && sceneRef.endsWith(".json") ? path.resolve(sceneRef) : path.join(proj, "assets", "scenes", `${sceneRef}.scene.json`);
   if (!fs.existsSync(sceneFile)) fail(`no scene ${sceneFile}`);
@@ -1120,6 +1133,8 @@ async function walk(): Promise<void> {
  * `props` derives instance prop values from the anchor (a hearth's opening width picks the fire size); everything
  * else is the prefab's own defaults, so the look stays editable in one file (docs/prop-cataloging.md "Lit fixtures").
  */
+/** A fixture item id from its anchor id: kit markers are named `<model>:<kind>-<n>`, and a plan item id takes letters, digits, . _ - only. */
+const fxId = (anchor: string): string => `fx-${anchor.replace(/[^A-Za-z0-9._-]+/g, "-")}`;
 const FIXTURE_DEFAULTS: Record<string, { prop: string; props?: (a: SocketMap["anchors"][number]) => Record<string, unknown> | undefined } | null> = {
   hearth: { prop: "fixtures/hearth-fire", props: hearthSize },
   forge: { prop: "fixtures/hearth-fire", props: hearthSize },
@@ -1152,7 +1167,7 @@ function fixtures(): void {
   const items = [...(existing.items ?? [])];
   const ids = new Set(items.map((i) => i.id));
   const used = new Set(items.filter((i) => i.place?.kind === "anchor").map((i) => (i.place as { anchor: string }).anchor));
-  for (const a of map.anchors) if (ids.has(`fx-${a.id}`)) used.add(a.id); // a ceiling fixture is placed by a ceiling place named after it
+  for (const a of map.anchors) if (ids.has(fxId(a.id))) used.add(a.id); // a ceiling fixture is placed by a ceiling place named after it
   const added: string[] = [], skipped: string[] = [];
   for (const a of map.anchors) {
     if (!(a.kind in FIXTURE_DEFAULTS)) continue;
@@ -1160,8 +1175,8 @@ function fixtures(): void {
     if (used.has(a.id)) { skipped.push(`${a.id} (already placed)`); continue; }
     if (!def) { skipped.push(`${a.id} (${a.kind}: no default fixture)`); continue; }
     if (!fs.existsSync(prefabAt(proj, def.prop))) { skipped.push(`${a.id} (${def.prop} missing)`); continue; }
-    let id = `fx-${a.id}`;
-    for (let k = 2; ids.has(id); k++) id = `fx-${a.id}-${k}`;
+    let id = fxId(a.id);
+    for (let k = 2; ids.has(id); k++) id = `${fxId(a.id)}-${k}`;
     ids.add(id);
     const props = def.props?.(a);
     // A chandelier hangs by a `ceiling` place at the anchor (chain + headroom checked); the drop is ceiling - hook.

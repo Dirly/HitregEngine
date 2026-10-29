@@ -3,11 +3,11 @@
 // every solid closed (the exporter refuses otherwise), one group per room, the noise keys tagged, detail counted.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runBlender } from "../blender-lock.mjs";
 import { thinWallsGate, worldOf } from "../mesh-dc/thin-walls.mjs";
 
 const KIT = path.dirname(fileURLToPath(import.meta.url));
@@ -15,7 +15,7 @@ const BLENDER = process.env.BLENDER || "P:\\Program Files\\Blender Foundation\\B
 
 test("sample rooms build into closed, grouped, counted solids", { skip: !fs.existsSync(BLENDER) && "no Blender" }, () => {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), "roomkit-"));
-  const r = spawnSync(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", path.join(KIT, "kit/blender_build.py"), "--", path.join(KIT, "examples/sample-rooms.json"), out], { encoding: "utf8" });
+  const r = runBlender(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", path.join(KIT, "kit/blender_build.py"), "--", path.join(KIT, "examples/sample-rooms.json"), out], { encoding: "utf8" });
   assert.equal(r.status, 0, (r.stdout + r.stderr).slice(-2000));
   const audit = JSON.parse(fs.readFileSync(path.join(out, "source-audit.json"), "utf8"));
   assert.equal(audit.passed, true);
@@ -52,7 +52,7 @@ spec, room = k.plan_rooms(plan)[0]
 posts = [min(min(v[0] for v in s.verts), 99) for p in room.pieces if p["kind"] == "post" for s in p["solids"]
          if 16.9 - 6 < sum(v[1] for v in s.verts) / len(s.verts) < 16.9 + 6]
 json.dump({"near": posts}, open(${JSON.stringify(out.split(path.sep).join("/"))}, "w"))`;
-  const r = spawnSync(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python-expr", expr], { encoding: "utf8" });
+  const r = runBlender(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python-expr", expr], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr || r.stdout);
   const { near } = JSON.parse(fs.readFileSync(out, "utf8"));
   assert.ok(near.every((x) => x > 3), `a post stands in front of the west door: ${JSON.stringify(near)}`);

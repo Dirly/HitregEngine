@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { worldRecipeSchema } from "@hitreg/core";
 import { operatorReader } from "./worldgen-operators.mts";
-import { glbBounds, judgeTown, planBox, wallEdgesOf, yawOf, type PlanBox } from "./_town-wall-clear.mts";
+import { glbBounds, glbBoundsInFrame, judgeTown, planBox, wallEdgesOf, yawOf, type PlanBox } from "./_town-wall-clear.mts";
 
 const argv = process.argv.slice(2);
 const opt = (k: string, d?: string) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1] : d; };
@@ -45,10 +45,14 @@ for (const [eid, e] of Object.entries(ents)) {
   if (src?.kind !== "asset" || typeof src.assetId !== "string") continue;
   const file = path.join(projectDir, "assets", "models", src.assetId);
   if (!fs.existsSync(file)) { console.warn(`  ${id}: model ${src.assetId} not found, skipped`); continue; }
-  const b = glbBounds(file);
   const t = e.components?.transform ?? {};
-  boxes.push(planBox(id, t.position ?? [0, 0, 0], yawOf(t.rotation), b.lo, b.hi));
   const lb = layout?.buildings?.find((x: any) => x.id === id);
+  // an unturned entity whose model is ONE layout building (export_town.py per-building districts) has the layout's turn
+  // baked into its vertices: measure it in the building's own frame, not as a rotated AABB
+  const unturned = !t.rotation || Math.abs(yawOf(t.rotation)) < 1e-6;
+  const baked = unturned && lb && typeof lb.yaw === "number" ? (lb.yaw ?? 0) + (lb.preRot ?? 0) : null;
+  const b = baked !== null ? glbBoundsInFrame(file, baked) : glbBounds(file);
+  boxes.push(planBox(id, t.position ?? [0, 0, 0], baked ?? yawOf(t.rotation), b.lo, b.hi));
   const ev = env[id]?.full;
   const cell = layout?.cell ?? 3.2;
   const lay: [number, number] | null = lb && ev ? [lb.size[0] * cell + ev.left + ev.right, lb.size[1] * cell + ev.front + ev.back] : lb ? [lb.size[0] * cell, lb.size[1] * cell] : null;

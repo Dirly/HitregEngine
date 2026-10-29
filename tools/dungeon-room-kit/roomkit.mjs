@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runBlender } from "../blender-lock.mjs";
 
 const KIT = path.dirname(fileURLToPath(import.meta.url));
 const ENGINE = path.resolve(KIT, "../..");
@@ -23,7 +24,7 @@ const opt = (k, d) => (rest.includes(`--${k}`) ? rest[rest.indexOf(`--${k}`) + 1
 
 function build(rooms, out) {
   const t0 = Date.now();
-  const r = spawnSync(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", path.join(KIT, "kit/blender_build.py"), "--", path.resolve(rooms), path.resolve(out), ...(rest.includes("--blend") ? ["--blend"] : [])], { encoding: "utf8", maxBuffer: 64 << 20 });
+  const r = runBlender(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", path.join(KIT, "kit/blender_build.py"), "--", path.resolve(rooms), path.resolve(out), ...(rest.includes("--blend") ? ["--blend"] : [])], { encoding: "utf8", maxBuffer: 64 << 20 });
   const log = (r.stdout || "") + (r.stderr || "");
   for (const line of log.split(/\r?\n/)) if (/^(ROOM|KIT|Traceback|  File|\w*Error)/.test(line)) console.log(line);
   if (r.status !== 0) { console.error(log.slice(-3000)); process.exit(1); }

@@ -12,6 +12,7 @@
  * the dock builder recorded.
  */
 import fs from "node:fs";
+import { isTownStreet } from "./_town-streets.mts";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -99,6 +100,7 @@ export const streetLightingSchema = z
         landmark: z.number().min(0).default(4).describe("Minimum distance from a landmark/structure/quest-object root."),
         minApart: z.number().min(0).default(8).describe("Two lanterns never closer than this."),
         maxTilt: z.number().positive().default(0.35).describe("Largest ground drop (m) across a lantern's base; steeper spots are refused."),
+        level: z.number().positive().default(0.8).describe("A lantern lighting a road stands within this height of that road's ground at its nearest point (not down a riser or up a bank off a terrace street)."),
         groundTolerance: z.number().positive().default(0.3).describe("GATE: an installed lantern on land stands within this of the ground (no floating, no burial)."),
       })
       .prefault({}),
@@ -181,6 +183,21 @@ function segDist(p: XZ, a: XZ, b: XZ): number {
   const t = Math.max(0, Math.min(1, (ap[0] * ab[0] + ap[1] * ab[1]) / (ab[0] * ab[0] + ab[1] * ab[1] || 1)));
   return dist(p, add(a, ab, t));
 }
+/** The nearest point of a polyline to p. */
+function nearestOn(p: XZ, pts: XZ[]): XZ {
+  if (pts.length === 1) return pts[0]!;
+  let best: XZ = pts[0]!, bd = Infinity;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1]!, ab = sub(pts[i]!, a), ap = sub(p, a);
+    const t = Math.max(0, Math.min(1, (ap[0] * ab[0] + ap[1] * ab[1]) / (ab[0] * ab[0] + ab[1] * ab[1] || 1)));
+    const q = add(a, ab, t), d = dist(p, q);
+    if (d < bd) (bd = d), (best = q);
+  }
+  return best;
+}
+/** A `-lane-` road this wide or wider is a STREET (town-layout names every plan street `<town>-lane-*`; Saltharrow's
+ * 5-6 m Net Street is its high street, lit with posts at the kerb, not slim lane lanterns that need room off the edge). */
+export const LANE_MAX_WIDTH = 4.5;
 export function polyDist(p: XZ, pts: XZ[]): number {
   if (pts.length === 1) return dist(p, pts[0]!);
   let d = Infinity;
@@ -244,8 +261,8 @@ export function townNet(inp: TownLightInput, rule: StreetLighting): TownNet {
   const anyTown = /^town-\d+-/;
   const excluded = rule.roads.exclude.map((x) => new RegExp(x));
   const streets = inp.roads
-    .filter((r) => own(r) && r.id.startsWith(`${t.id}-street-`))
-    .map((r) => ({ ...r, kind: (/-(square|plaza)-/.test(r.id) ? "plaza" : /-lane-/.test(r.id) ? "lane" : "street") as "street" | "lane" | "plaza" }));
+    .filter((r) => own(r) && isTownStreet(r.id, t.id))
+    .map((r) => ({ ...r, kind: (/-(square|plaza)-/.test(r.id) ? "plaza" : /-lane-/.test(r.id) && r.width < LANE_MAX_WIDTH ? "lane" : "street") as "street" | "lane" | "plaza" }));
   const doors = inp.roads.filter((r) => r.id.startsWith(`${t.id}-door-`));
   const stairs = inp.roads.filter((r) => own(r) && /-(stair|ramp)-/.test(r.id));
   const world = inp.roads.filter((r) => !anyTown.test(r.id) && !excluded.some((x) => x.test(r.id)));
@@ -304,6 +321,12 @@ function refuse(c: Ctx, p: XZ, foot: XZ[], o: { self?: string; selfMin?: number;
     if (w !== null && w > g - 0.05) return "water";
     const hs = [[0.3, 0], [-0.3, 0], [0, 0.3], [0, -0.3]].map(([dx, dz]) => inp.ground.height(p[0] + dx!, p[1] + dz!));
     if (Math.max(...hs, g) - Math.min(...hs, g) > cl.maxTilt) return "steep";
+    // a street on a terrace's edge drops down the riser one step past its kerb: a lantern there lights nothing
+    const selfRoad = o.self ? [...net.streets, ...net.world].find((r) => r.id === o.self) : undefined;
+    if (selfRoad) {
+      const q = nearestOn(p, selfRoad.points), gq = inp.ground.height(q[0], q[1]);
+      if (Math.abs(g - gq) > cl.level) return `off the level of ${selfRoad.id} (${(g - gq).toFixed(1)} m)`;
+    }
   }
   return null;
 }

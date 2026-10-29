@@ -19,5 +19,12 @@ test("ground under the FULL footprint, not only the lot outline, is checked agai
   assert.equal(failures.length, 1);
   assert.match(failures[0]!, /terrain-through-floor house/);
   // a layout without `full` falls back to the lot outline (and here passes)
-  assert.equal(floorCheck([{ ...b, full: undefined }], top).failures.length, 0);
+  assert.equal(floorCheck([{ ...b, full: undefined }], top, 0).failures.length, 0);
+});
+
+test("a floor flush with the ground fails as not raised (Derek 10-02: ~0.6 m over the highest ground)", () => {
+  const top = (): number => 10;
+  const low = floorCheck([{ id: "flush", groundY: 10.15, ground: sq(0, 0, 5, 5) }], top);
+  assert.match(low.failures[0]!, /floor-not-raised flush/);
+  assert.equal(floorCheck([{ id: "raised", groundY: 10.6, ground: sq(0, 0, 5, 5) }], top).failures.length, 0);
 });

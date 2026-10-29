@@ -25,6 +25,7 @@ arrangement as `apps/playground/projects/`. No submodule, no gitlink.
 | `poi-review/` | `hitreg.poi-review` | Agent-agnostic POI work plans and construction handoffs; terrain access planning, meshed-terrain reachability, headroom, support and assembly checks. Requires a separate visual review. |
 | `armor-codex/` | `hitreg.armor` | One brief → a whole player armor set: Codex sheets, import gates, page bakes, items, icons, review sheet. Runner over `apps/playground/tools/armor.mts`; see `docs/armor-sets.md` → One command. |
 | `place-build/` | `hitreg.place-build` | Builds small/medium outdoor places from place archetypes (world-kit `authoring/place-archetypes/`): plan, lab build, every install gate, shots, install with inverse. Runner over `apps/playground/tools/place-build.mts`; see `docs/place-builder.md`. |
+| `blender-lock.mjs` | — | The machine-wide Blender lock (`.hitreg/blender.lock`): every headless Blender launcher takes it (`runBlender` / `withBlenderLock`, or `node tools/blender-lock.mjs run -- <blender> ...` in a command string); `status` names the holder. |
 
 These are tracked because they are the reference implementations of the
 contract and because the engine's own test and spec depend on them: root

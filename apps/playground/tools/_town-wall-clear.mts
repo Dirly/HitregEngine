@@ -45,6 +45,44 @@ export function glbBounds(file: string): { lo: [number, number, number]; hi: [nu
   return { lo, hi, prims };
 }
 
+/** The glb's POSITION bounds read in a frame turned by `yaw` (radians about +y): every vertex is turned by -yaw first.
+ * A per-building export bakes the layout's rotation into the vertices (the entity carries none), so its axis-aligned
+ * bounds are a rotated building's AABB, metres too big on a turned lot; read in the building's own frame they are its
+ * true plan box (then `planBox(..., yaw, ...)` stands it back as built). */
+export function glbBoundsInFrame(file: string, yaw: number): { lo: [number, number, number]; hi: [number, number, number]; prims: number } {
+  const b = fs.readFileSync(file);
+  if (b.readUInt32LE(0) !== 0x46546c67) throw new Error(`${file}: not a binary glTF`);
+  const len = b.readUInt32LE(12);
+  const g = JSON.parse(b.subarray(20, 20 + len).toString("utf8"));
+  const binAt = 20 + len + 8; // the BIN chunk's data (header: length + type)
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  const lo: [number, number, number] = [Infinity, Infinity, Infinity], hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  let prims = 0;
+  const visit = (ni: number, t: [number, number, number]) => {
+    const nd = g.nodes[ni]; const tr = nd.translation ?? [0, 0, 0];
+    const tt: [number, number, number] = [t[0] + tr[0], t[1] + tr[1], t[2] + tr[2]];
+    if (nd.mesh !== undefined) for (const p of g.meshes[nd.mesh].primitives) {
+      const a = g.accessors[p.attributes?.POSITION]; if (!a || a.componentType !== 5126 || a.bufferView === undefined) continue;
+      const bv = g.bufferViews[a.bufferView];
+      const stride = bv.byteStride ?? 12, off = binAt + (bv.byteOffset ?? 0) + (a.byteOffset ?? 0);
+      prims++;
+      for (let i = 0; i < a.count; i++) {
+        const o = off + i * stride;
+        const x = b.readFloatLE(o) + tt[0], y = b.readFloatLE(o + 4) + tt[1], z = b.readFloatLE(o + 8) + tt[2];
+        // the inverse of planBox's turn: world offset -> the building's own frame
+        const lx = c * x - s * z, lz = s * x + c * z;
+        if (lx < lo[0]) lo[0] = lx; if (lx > hi[0]) hi[0] = lx;
+        if (y < lo[1]) lo[1] = y; if (y > hi[1]) hi[1] = y;
+        if (lz < lo[2]) lo[2] = lz; if (lz > hi[2]) hi[2] = lz;
+      }
+    }
+    for (const ch of nd.children ?? []) visit(ch, tt);
+  };
+  for (const n of g.scenes?.[0]?.nodes ?? g.nodes.map((_: unknown, i: number) => i)) visit(n, [0, 0, 0]);
+  if (!prims) throw new Error(`${file}: no float POSITION data`);
+  return { lo, hi, prims };
+}
+
 /** Yaw (radians about +y) of a scene rotation quaternion [x, y, z, w]. */
 export function yawOf(q: number[] | undefined): number {
   if (!q || q.length < 4) return 0;

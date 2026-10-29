@@ -9,8 +9,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { runBlender } from "../../../../tools/blender-lock.mjs";
 import { DEFAULT_KIND_SIZES, realSizeIssue } from "../_prop-real-size.mts";
 import { CATEGORIES, LANDMARK_TRIANGLES, LIMITS, type ScaleInfo } from "./brief.mts";
 import {readReusePolicy,reuseFaults} from '../_prop-reuse.mts';
@@ -94,7 +94,7 @@ export function unpaintedMonolithFaults(rec: Pick<GeometryRecord, "parts" | "pai
 export function blenderBuild(worldKit: string, designs: string[], outDir: string, geometry: string, options: {paintMode?: 'plan'|'final'; paintRoot?: string} = {}): GeometryRecord[] {
   fs.mkdirSync(outDir, { recursive: true });
   fs.rmSync(geometry, {force:true});
-  const r = spawnSync(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", path.join(HERE, "build.py"), "--", "--world-kit", worldKit, "--designs", designs.join(","), "--out", outDir, "--geometry", geometry, "--paint-mode", options.paintMode ?? 'final', ...(options.paintRoot ? ['--paint-root', options.paintRoot] : [])], { encoding: "utf8", maxBuffer: 1 << 26 });
+  const r = runBlender(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", path.join(HERE, "build.py"), "--", "--world-kit", worldKit, "--designs", designs.join(","), "--out", outDir, "--geometry", geometry, "--paint-mode", options.paintMode ?? 'final', ...(options.paintRoot ? ['--paint-root', options.paintRoot] : [])], { encoding: "utf8", maxBuffer: 1 << 26 });
   if (r.status !== 0) throw Error(`Blender build failed (exit ${r.status}):\n${(r.stdout ?? '').slice(-1500)}\n${(r.stderr ?? '').slice(-1500)}`);
   if (!fs.existsSync(geometry)) throw Error(`blender build wrote no geometry (exit ${r.status}):\n${(r.stdout ?? "").slice(-1500)}\n${(r.stderr ?? "").slice(-1500)}`);
   return (JSON.parse(fs.readFileSync(geometry, "utf8")) as { props: GeometryRecord[] }).props;

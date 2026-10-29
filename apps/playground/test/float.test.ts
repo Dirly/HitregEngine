@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { applyOps, ComponentRegistry, createWorldField, defaultWorldRecipe, registerCoreComponents, worldRecipeSchema } from "@hitreg/core";
-import { commandFloat, fixOnCurrent, fixOps, floatScatter, floatScene, inverseState, LANDMARK_SUPPORT, sceneDigest, tautSpanEnds, withLandmarkSupport } from "../tools/float.mts";
+import { buriedReason, commandFloat, crossingColumns, fixOnCurrent, fixOps, floatScatter, floatScene, inverseState, LANDMARK_SUPPORT, sceneDigest, tautSpanEnds, withLandmarkSupport } from "../tools/float.mts";
 import { standardStages } from "../../../tools/dungeon-pipeline/pipeline.mjs";
 import { floatBlock } from "../../../tools/poi-review/job.mjs";
 
@@ -217,4 +217,20 @@ test("tautSpanEnds: a sloped 14 m span is held when both ends thread solid, not 
   // the next span of the run holds an end
   const next = [11, 3.5, 6.5, 13, 5, 8]; // two corners of the next span's bounds
   assert.ok(tautSpanEnds(w, probeOf([wrist]) as never, [next]).every((e) => e.held));
+});
+
+test("buriedReason: a prop inside a closed built block, or crossed by a built top, is buried; one standing on it is not", () => {
+  // a closed 10 x 6 x 10 m terrace block (y -3..3), 12 triangles
+  const box = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): number[] => {
+    const v = (i: number) => [i & 1 ? x1 : x0, i & 2 ? y1 : y0, i & 4 ? z1 : z0];
+    const quads = [[0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]];
+    return quads.flatMap(([a, b, c, d]) => [...v(a!), ...v(b!), ...v(c!), ...v(a!), ...v(c!), ...v(d!)]);
+  };
+  const built = crossingColumns(box(-5, -3, -5, 5, 3, 5));
+  const fp = (y: number, height = 1.2) => ({ x: 0.3, z: 0.2, y, halfX: 1.5, halfZ: 1, yaw: 0.4, height });
+  assert.match(buriedReason(built, null, fp(-0.4)) ?? "", /inside built mass/, "the sledge on the cut ground under the terrace");
+  assert.equal(buriedReason(built, null, fp(3)), null, "on the terrace top");
+  assert.equal(buriedReason(built, null, fp(2.8)), null, "sunk 0.2 m into the top is seating");
+  assert.match(buriedReason(built, null, fp(2, 4)) ?? "", /buried/, "a 4 m block with its lower half inside");
+  assert.equal(buriedReason(null, null, fp(-0.4)), null, "no built mass");
 });

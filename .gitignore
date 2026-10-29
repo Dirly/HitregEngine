@@ -46,6 +46,7 @@ apps/playground/projects/*
 # stays invisible to this repo the way projects/ does.
 tools/*
 !tools/README.md
+!tools/blender-lock.mjs
 !tools/atlas/
 !tools/wfc-3d/
 !tools/texture-intake/

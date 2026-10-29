@@ -39,7 +39,9 @@ Every stage can also be run alone (`brief lint`, `gen [--dry-run] [--force]`, `i
 - **gen** writes ONE `image-request gen-set` manifest in this doc's order (body over the key; the woman's
   sheet with `key-female.png` first and his art second; helm and shoulders with `key-labelled.png` first and
   the body second plus the match-the-body paragraph and the clean-read rule). The SUBJECT is composed from the
-  brief and carried word for word on all four prompts. Sheets that exist are skipped (`--force` redoes them),
+  brief and carried word for word on all four prompts. Sheets that exist are skipped (`--force` redoes them all;
+  `--redo helm` or `--redo body,…` redoes those sheets plus every sheet painted from them, which is what an import
+  gate's "regenerate this sheet" line asks for),
   so a set runs as two Codex sessions: the body, then everything painted to it. A session attaches each
   reference once, so each prompt is told which attachment is its FIRST and SECOND. Token counts go to
   `authoring/armor-sets/ledger.md`.

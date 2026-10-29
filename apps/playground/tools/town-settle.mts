@@ -5,7 +5,7 @@
  * ever pokes through a floor. Run after the pads, lanes and road-regrade are written; export with --lift 0 afterwards
  * (the height is in the layout).
  *
- *   npx tsx tools/town-settle.mts --project proving --town brinehold [--clear 0.15]   settle, then check
+ *   npx tsx tools/town-settle.mts --project proving --town brinehold [--clear 0.6]    settle, then check
  *   npx tsx tools/town-settle.mts --project proving --town brinehold --check [--out f]  check only (writes nothing but the report; --out puts it elsewhere)
  *
  * The CHECK (`terrain-through-floor`, docs/world-standards/towns.md "No terrain pokes through a floor"): after any
@@ -21,6 +21,10 @@ import { createWorldField, worldRecipeSchema } from "@hitreg/core";
 type P = [number, number];
 /** Ground may stand this far above a floor before it reads as poking through (a floor's own thickness hides it). */
 export const POKE_TOLERANCE = 0.02;
+/** Floors stand RAISED over the highest ground of their footprint (Derek 10-02, KIT-RULES 24.1: the kit's entry steps
+ * climb ~0.675 m): settle puts them CLEAR_DEFAULT up, the check fails one closer than MIN_RAISE (`floor-not-raised`). */
+export const CLEAR_DEFAULT = 0.6;
+export const MIN_RAISE = 0.45;
 
 /** Lattice points (about 1 m apart) over a quad given as 4 corners in order. */
 export function lattice(g: P[]): P[] {
@@ -33,7 +37,7 @@ export function lattice(g: P[]): P[] {
 
 export interface FloorRow { id: string; groundY: number; hi: number; lo: number; at: P; footprint: "full" | "ground"; poke: number }
 /** The ground under each building's full footprint against its floor. Pure: `top(x, z)` is the topmost solid. */
-export function floorCheck(buildings: { id: string; groundY: number; ground: P[]; full?: P[] }[], top: (x: number, z: number) => number): { rows: FloorRow[]; failures: string[] } {
+export function floorCheck(buildings: { id: string; groundY: number; ground: P[]; full?: P[] }[], top: (x: number, z: number) => number, minRaise = MIN_RAISE): { rows: FloorRow[]; failures: string[] } {
   const rows: FloorRow[] = [];
   const failures: string[] = [];
   for (const b of buildings) {
@@ -47,6 +51,7 @@ export function floorCheck(buildings: { id: string; groundY: number; ground: P[]
     const poke = +(hi - b.groundY).toFixed(2);
     rows.push({ id: b.id, groundY: b.groundY, hi: +hi.toFixed(2), lo: +lo.toFixed(2), at: [+at[0].toFixed(1), +at[1].toFixed(1)], footprint: fp === b.full ? "full" : "ground", poke });
     if (poke > POKE_TOLERANCE) failures.push(`terrain-through-floor ${b.id}: ground ${hi.toFixed(2)} at [${at[0].toFixed(1)}, ${at[1].toFixed(1)}] stands ${poke.toFixed(2)} m above its floor ${b.groundY.toFixed(2)} (re-run town-settle)`);
+    else if (-poke < minRaise) failures.push(`floor-not-raised ${b.id}: floor ${b.groundY.toFixed(2)} stands ${(-poke).toFixed(2)} m over the highest ground ${hi.toFixed(2)} (< ${minRaise} m; re-run town-settle, default --clear ${CLEAR_DEFAULT})`);
   }
   return { rows, failures };
 }
@@ -56,7 +61,7 @@ function main(): void {
   const opt = (n: string, f: string): string => { const i = argv.indexOf(`--${n}`); return i >= 0 && argv[i + 1] ? argv[i + 1]! : f; };
   const dir = path.resolve("projects", opt("project", ""));
   const town = opt("town", "");
-  const clear = Number(opt("clear", "0.15"));
+  const clear = Number(opt("clear", String(CLEAR_DEFAULT)));
   const checkOnly = argv.includes("--check");
   const layoutFile = path.join(dir, "authoring/towns", `${town}-layout.json`);
   const layout = JSON.parse(fs.readFileSync(layoutFile, "utf8"));

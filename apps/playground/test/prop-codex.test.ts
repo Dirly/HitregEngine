@@ -155,11 +155,15 @@ test("request reopen: a made request goes back to open with the reason kept", as
 });
 
 test("unpaintedMonolithFaults: a stone part left out of the paint regions of a painted stone piece is flagged", () => {
-  const surf = (part: string) => ({ name: part.replace(/\W+/g, "-"), part, projection: "front", detail: "x", metres: [1, 1], pixels: [40, 40] });
+  // a paint surface carries the faces it covers (paintPlanSchema requires `faces`); by default the whole part
   const parts = [{ part: "fist", role: "stone", faces: 10 }, { part: "wrist seat", role: "stone", faces: 8 }, { part: "masonry plinth", role: "stone", faces: 6 }, { part: "band", role: "iron", faces: 4 }];
+  const surf = (part: string, faces = parts.find((p) => p.part === part)!.faces) => ({ name: part.replace(/\W+/g, "-"), part, projection: "front", detail: "x", metres: [1, 1], pixels: [40, 40], faces });
   const f = unpaintedMonolithFaults({ parts, size: [8, 11, 5], paintPlan: { surfaces: [surf("fist")], roles: ["stone", "iron"] } as never });
   assert.deepEqual(unpaintedMonolithFaults({ parts, size: [7, 2, 3], paintPlan: { surfaces: [surf("fist")], roles: ["stone"] } as never }), [], "a low dressed block is not a monolith");
   assert.equal(f.length, 1); assert.match(f[0]!, /wrist seat/); assert.doesNotMatch(f[0]!, /masonry plinth|band/);
   assert.deepEqual(unpaintedMonolithFaults({ parts, size: [8, 11, 5], paintPlan: { surfaces: [surf("fist"), surf("wrist seat")], roles: ["stone"] } as never }), []);
   assert.deepEqual(unpaintedMonolithFaults({ parts, paintPlan: null }), []);
+  // a painted part whose projections leave its flanks out (6 of 10 faces in no region) keeps the shared tile there
+  const flank = unpaintedMonolithFaults({ parts, size: [8, 11, 5], paintPlan: { surfaces: [surf("fist", 4), surf("wrist seat")], roles: ["stone"] } as never });
+  assert.equal(flank.length, 1); assert.match(flank[0]!, /6 of 10 faces of part "fist"/);
 });

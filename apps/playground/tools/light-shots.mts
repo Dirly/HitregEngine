@@ -828,6 +828,10 @@ const result = await sheetPage.evaluate(async ({ tiles, rowsNames, colTimes, tit
       sky: luma(d, W, { x0: 0, y0: 0, x1: W, y1: Math.round(Hh * 0.2) })!.luma,
       ground: luma(d, W, { x0: 0, y0: Math.round(Hh * 0.8), x1: W, y1: Hh })!.luma,
       light: luma(d, W, t.boxes.light), dark: luma(d, W, t.boxes.dark), grey: luma(d, W, t.boxes.grey),
+      // share of pixels (every 4th, both ways) more than 4 luma off the frame's median: a failed render is one flat clear
+      // colour (~0), a dark lit scene still has its shapes (the Knucklecrown night aerial: luma 4, its fingers and pool drawn)
+      detail: (() => { const v: number[] = []; for (let y = 0; y < Hh; y += 4) for (let x = 0; x < W; x += 4) { const i = (y * W + x) * 4; v.push(0.2126 * d[i]! + 0.7152 * d[i + 1]! + 0.0722 * d[i + 2]!); }
+        const med = [...v].sort((a, b) => a - b)[v.length >> 1] ?? 0; return +(v.filter((q) => Math.abs(q - med) > 4).length / Math.max(1, v.length)).toFixed(3); })(),
     };
     measures.push(m);
     const r = rowsNames.indexOf(t.row), c = Math.max(0, colTimes.indexOf(t.time));
@@ -870,7 +874,15 @@ const BLACK_FRAME_LUMA = 20;
 // L (Wristgate 2026-10-29): a gorge at 23:00 lit by two braziers measured luma 14-20 and was called a FAILED render four
 // times; a night hour (20-04) keeps the failed-render line at 8 (a blank night frame reads 0-5, a lit dark scene 9+)
 const NIGHT_BLACK_LUMA = 8, nightHour = (t: number | null | undefined) => typeof t === "number" && (t >= 20 || t < 5);
-const black = shots.map((s, i) => ({ s, m: result.measures[i] })).filter(({ s, m }) => typeof m?.frame === "number" && m.frame < (nightHour(s.time as number | null) ? NIGHT_BLACK_LUMA : BLACK_FRAME_LUMA));
+// L (KNUCKLECROWN close 2026-10-29: the night aerial, looking straight down with no sky, read luma 4-5 at 60-330 m and
+// was called a failed render on every run though the ring and pool were drawn): a night frame under the line is a failed
+// render only when it is also FLAT (`detail` under BLACK_DETAIL_MIN: one clear colour); a day frame keeps the luma rule.
+// The same run's blank night frames (a GPU-busy box: every frame one flat 4 kB clear colour, luma 14) passed the night
+// line of 8: a FLAT frame under BLACK_FRAME_LUMA is a failed render at any hour
+const BLACK_DETAIL_MIN = 0.02;
+const flat = (m: any) => typeof m.detail === "number" ? m.detail < BLACK_DETAIL_MIN : m.frame < NIGHT_BLACK_LUMA;
+const black = shots.map((s, i) => ({ s, m: result.measures[i] })).filter(({ s, m }) => typeof m?.frame === "number" && m.frame < BLACK_FRAME_LUMA
+  && (!nightHour(s.time as number | null) || flat(m)));
 if (black.length) { console.error(`STOP: ${black.length} black frame(s) (luma < ${BLACK_FRAME_LUMA}: a failed render, not a dark scene): ${black.map(({ s, m }) => `${s.spot}${s.time === null ? "" : `@${s.time}`} (${m.frame.toFixed(0)})`).join(", ")} — re-run those spots`); process.exitCode = 1; }
 // a spot that must SHOW an entity (`shows`): every such spot needs at least one frame where each id passes (day frames
 // carry it; a dark veil in a dark night recess may change too few pixels), else the run exits 1 naming it
