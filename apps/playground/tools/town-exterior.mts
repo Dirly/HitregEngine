@@ -117,8 +117,19 @@ if (square && square.pts.length >= 2) {
     cands.push({ id: `stall-${++k}`, kind: "stall", at, face: [-n[0] * s, -n[1] * s], r: 1.8 });
   }
 }
+/** A dock built as a recipe quay operator (`wall` variant `quay` named `<town>-<structure>`): its deck strip by the face. */
+function quaySiteOf(id: string): { kind: string; centre: P2; along: P2; length: number; width: number; groundY?: number } | null {
+  const ops = ((recipe as unknown as { features: { operators?: Array<Record<string, any>> } }).features.operators ?? []);
+  const op = ops.find((o) => o.op === "wall" && o.variant === "quay" && (o.id === `${town}-${id}` || o.id === id));
+  if (!op || !Array.isArray(op.points) || op.points.length < 2) return null;
+  const a = op.points[0] as P2, b = op.points[op.points.length - 1] as P2, L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+  const u: P2 = [(b[0] - a[0]) / L, (b[1] - a[1]) / L], n: P2 = [-u[1], u[0]], c: P2 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const s = (centre[0] - c[0]) * n[0] + (centre[1] - c[1]) * n[1] > 0 ? 1 : -1;
+  const w = Math.min(8, Number(op.backfill?.width ?? 6));
+  return { kind: "reserved-rect", centre: [c[0] + n[0] * s * (w / 2), c[1] + n[1] * s * (w / 2)], along: u, length: L, width: w, groundY: Number(op.height ?? 0) };
+}
 for (const st of plan.structures ?? []) {
-  const site = st.site;
+  const site = st.site ?? (st.kind === "dock" ? quaySiteOf(st.id) : null);
   if (st.kind !== "dock" || !site || site.kind !== "reserved-rect") continue;
   const u = site.along, n: P2 = [-u[1], u[0]];
   // the landward long edge: the side nearer the town centre

@@ -97,3 +97,9 @@ test('registered tool validates manifest/result and refuses overwrite before any
  const out=await run(ctx,input);toolResultSchema.parse(out);assert.equal(written.length,2);
  written.length=0;await assert.rejects(run({...ctx,assetExists:()=>true},input),/Output exists/);assert.equal(written.length,0);
 });
+test('grow scales an attachment about its own centre (a deep cowl) and refuses more than 2x',async()=>{
+ const grown={...recipe(),attachments:[{model:'fixture.gltf',grow:{scale:2}}]};
+ const out=await buildStatue(grown,()=>source());
+ assert.deepEqual(out.report.bounds.map(v=>v.map(n=>+n.toFixed(6))),[[-0.75,0,-0.75],[2.25,6,2.25]]);
+ await assert.rejects(buildStatue({...recipe(),attachments:[{model:'fixture.gltf',grow:3}]},()=>source()),/grow scale/);
+});

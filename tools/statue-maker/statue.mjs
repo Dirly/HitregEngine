@@ -212,9 +212,18 @@ export async function buildStatue(recipe, readModel, options = {}) {
   let triangles = gather(body, recipe.body.parts, new T.Matrix4(), 'body');
   for (const [i, attachment] of (recipe.attachments ?? []).entries()) {
     const model = await load(attachment.model);
-    triangles.push(...gather(model, attachment.parts, mountMatrix(body.scene, attachment.mount), `attachment-${i}`));
+    const own = gather(model, attachment.parts, mountMatrix(body.scene, attachment.mount), `attachment-${i}`);
     // Creation mounts mirror the right-hand copy across the model's local Z.
-    if (attachment.mount?.mirrorTo) triangles.push(...gather(model, attachment.parts, mountMatrix(body.scene, { ...attachment.mount, ...attachment.mount.mirrorTo }).multiply(new T.Matrix4().makeScale(1,1,-1)), `attachment-${i}-mirror`));
+    if (attachment.mount?.mirrorTo) own.push(...gather(model, attachment.parts, mountMatrix(body.scene, { ...attachment.mount, ...attachment.mount.mirrorTo }).multiply(new T.Matrix4().makeScale(1,1,-1)), `attachment-${i}-mirror`));
+    // grow: a monumental read of a worn piece (a deep cowl over the face, Wristgate 2026-10-29): the attachment scales
+    // uniformly about its own posed bounding-box centre, then shifts by grow.shift x its own size (figure axes, +z front)
+    if (attachment.grow !== undefined) {
+      const g = typeof attachment.grow === 'number' ? { scale: attachment.grow } : attachment.grow, k = positive(g.scale ?? 1, 'grow scale');
+      if (k > 2) throw new Error('grow scale must be <= 2');
+      const box = new T.Box3().setFromPoints(own.flatMap(t => t.p)), c = box.getCenter(V()), size = box.getSize(V()), sh = vector(g.shift ?? [0,0,0], 'grow shift');
+      for (const tri of own) for (const p of tri.p) p.sub(c).multiplyScalar(k).add(c).add(V(sh[0]*size.x, sh[1]*size.y, sh[2]*size.z));
+    }
+    triangles.push(...own);
   }
   const humanBounds = new T.Box3().setFromPoints(triangles.flatMap(t => t.p)), floor = humanBounds.min.y;
   const scale = recipe.height / positive(humanBounds.max.y - floor, 'source height');

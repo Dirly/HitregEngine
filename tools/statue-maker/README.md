@@ -73,6 +73,10 @@ bone mapping and targets. Review it before building a different rig. The current
 human profile supplies the CC rig's two-hand sword-rest pose; it does not claim
 to fit other skeletons automatically. IK rejects unreachable targets.
 
+An attachment may carry `grow` (a number, or `{ "scale": k, "shift": [x, y, z] }`): after mounting, its parts scale
+uniformly by k (<= 2) about their own posed bounding-box centre, then shift by `shift` times their own size (figure
+axes, +Z front). It is the monumental read of a worn piece, such as a deep cowl that shades the face (a 1.35x hood).
+
 The optional point-down `sword` uses a source whose blade axis is +Y, broad axis
 Z and thin axis X. Its `parts` list is explicit. `pommelHeight`, `front`, `width`
 and `depth` are dimensions in the unscaled figure's source units, not output

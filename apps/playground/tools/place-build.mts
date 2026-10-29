@@ -521,8 +521,9 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
     const parsed = applyRecipeEdits(worldRecipeSchema.parse(w2), worldOps as never); // validates every patch
     for (const o of worldOps) (w2.features[o.kind] ??= []).push((parsed.recipe.features as any)[o.kind].find((f: any) => f.id === o.feature.id));
   }
-  { // the layout's place-region vegetation (layout `vegetation`): set on regions[id = poi], taken off on remove
-    const lf = path.join(JOB, "layout.json"), veg = fs.existsSync(lf) ? read(lf).vegetation : undefined, region = (w2.regions ?? []).find((r: any) => r.id === poi);
+  { // the layout's place-region vegetation (layout `vegetation`, or <job>/vegetation.json for a job built by its own build-spec
+    // with no layout: Wristgate 2026-10-29): set on regions[id = poi], taken off on remove
+    const lf = path.join(JOB, "layout.json"), vf = path.join(JOB, "vegetation.json"), veg = (fs.existsSync(lf) ? read(lf).vegetation : undefined) ?? (fs.existsSync(vf) ? read(vf) : undefined), region = (w2.regions ?? []).find((r: any) => r.id === poi);
     if (veg && !region) fail(`layout vegetation: the world has no place region ${poi} (worldgen regions) to carry it`);
     if (veg && region) { if (remove) delete region.vegetation; else region.vegetation = veg; worldRecipeSchema.parse(w2); }
   }

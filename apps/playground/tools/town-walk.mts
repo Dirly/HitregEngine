@@ -21,6 +21,8 @@
  * at a run, even with jumps — a "needs a jump" is also a failure for a road.
  */
 import fs from "node:fs";
+import { isTownStreet } from "./_town-streets.mts";
+import { glbBoundsInFrame, planBox } from "./_town-wall-clear.mts";
 import path from "node:path";
 import {
   HeadlessWorld,
@@ -211,7 +213,23 @@ function envelope(b: { centre: P2; facing: P2; size?: [number, number]; corners:
   const at = (a: number, fw: number): P2 => [cx + r[0] * a + f[0] * fw, cz + r[1] * a + f[1] * fw];
   return [at(-W, front), at(W, front), at(W, -back), at(-W, -back)];
 }
-const obstacles = (layoutDoc?.buildings ?? []).map((b) => ((b as { ground?: P2[] }).ground ? grow((b as { ground: P2[] }).ground, 0.4) : envelope(b)));
+/**
+ * The SHIPPED model's plan box where it exists (assets/models/towns/<town>/<model>.glb, read in the lot's own frame):
+ * the kit hangs steps, skirts and towers 0.5-5 m past the layout outline, and a route planned round the outline ran
+ * the body into the Bell Watch's skirt (Saltharrow 2026-10-29). Else the layout outline, else the generic envelope.
+ */
+function shippedBox(b: { id: string; centre: P2; yaw?: number; preRot?: number; model?: string }): P2[] | null {
+  const file = path.join(projectDir, "assets", "models", "towns", townName, `${b.model ?? b.id}.glb`);
+  if (!fs.existsSync(file) || typeof b.yaw !== "number") return null;
+  const yaw = b.yaw + (b.preRot ?? 0);
+  const f = glbBoundsInFrame(file, yaw);
+  const pb = planBox(b.id, [b.centre[0], 0, b.centre[1]], yaw, f.lo, f.hi);
+  const c = Math.cos(yaw), sn = Math.sin(yaw);
+  const at = (lx: number, lz: number): P2 => [pb.cx + c * lx + sn * lz, pb.cz - sn * lx + c * lz];
+  // body radius 0.4 + 0.2 m: with no shoulder margin beside a building (below) the route may hug the outline
+  return grow([at(-pb.hx, -pb.hz), at(pb.hx, -pb.hz), at(pb.hx, pb.hz), at(-pb.hx, pb.hz)], 0.6);
+}
+const obstacles = (layoutDoc?.buildings ?? []).map((b) => shippedBox(b as never) ?? ((b as { ground?: P2[] }).ground ? grow((b as { ground: P2[] }).ground, 0.4) : envelope(b)));
 /**
  * A thin built landmark (a palisade, a fence-thin wall operator) can pass BETWEEN the 1 m grid samples, so the planner
  * routed straight through it (Reedholt's 0.6 m palisade, T-D2). A cell whose centre has a landmark collider within the
@@ -236,6 +254,8 @@ function plan(from: P2, to: P2): P2[] | null {
   const ok = new Uint8Array(w * h);
   /** 1 where the floor is a BUILT surface (a stair, a deck, a floor), not terrain: stairs climb steeper than any slope */
   const built = new Uint8Array(w * h);
+  /** 1 where a cell is closed ONLY by a building outline, which is already grown by the body's radius (0.4 m) */
+  const byHouse = new Uint8Array(w * h);
   // The grid is sampled from the PHYSICS world the body will walk (terrain + buildings + landmarks + props), not
   // the field: a downward ray from 3 m over the ground finds what a foot lands on (a quay deck, a stair step, a
   // floor), and an upward ray over it finds what a head hits (a wall, a pillar, a tower) — blocked. Without this
@@ -251,7 +271,11 @@ function plan(from: P2, to: P2): P2[] | null {
       const z = z0 + j;
       const g = field.height(x, z);
       const top = field.surfaceCast(x, z, g + 40, g - 40) ?? g;
-      const down = world.sim.raycast([x, top + 3, z], [0, -1, 0], 8, { solid: true });
+      // a ray that STARTS inside a solid (the masonry over a gate arch, a lintel, an eave lower than 3 m) hits at once:
+      // that is a roof over the ground, not a floor, so cast again from head height under it (Saltharrow's land gate
+      // read as a closed wall and no door route could leave it)
+      let down = world.sim.raycast([x, top + 3, z], [0, -1, 0], 8, { solid: true });
+      if (down && down.point[1] > top + 2.9) down = world.sim.raycast([x, top + 1.9, z], [0, -1, 0], 6.9, { solid: true });
       const foot = down ? down.point[1] : top;
       if (down && !down.entityId.includes("/terrain")) built[i + j * w] = 1;
       const head = world.sim.raycast([x, foot + 0.3, z], [0, 1, 0], 1.5, { solid: true }) ?? thinLandmarkNear(x, foot, z);
@@ -261,6 +285,9 @@ function plan(from: P2, to: P2): P2[] | null {
       // far side of a house went in at the door and stopped at the back wall
       const housed = obstacles.some((poly) => insidePoly(poly, x, z));
       ok[i + j * w] = !housed && foot >= recipe.seaLevel + 0.2 && !(water !== null && water > foot + 0.3) && !head ? 1 : 0;
+      if (housed && foot >= recipe.seaLevel + 0.2 && !head) byHouse[i + j * w] = 1;
+      if (process.env.TOWN_WALK_WHY && !ok[i + j * w] && Math.hypot(x - from[0], z - from[1]) < 7 && (i + j) % 3 === 0)
+        console.log(`    cell [${x}, ${z}] y ${foot.toFixed(1)}: ${housed ? "housed " : ""}${head ? `head ${(head as { entityId?: string }).entityId ?? "?"} ` : ""}${water !== null && water > foot + 0.3 ? "water" : ""}`);
     }
   // shoulders: a cell is open only if its 8 neighbours are too (about a metre of width for a 0.8 m body)
   const open0 = ok.slice();
@@ -268,7 +295,9 @@ function plan(from: P2, to: P2): P2[] | null {
     for (let i = 1; i < w - 1; i++) {
       const k = i + j * w;
       if (!open0[k]) continue;
-      for (let dj = -1; dj <= 1 && ok[k]; dj++) for (let di = -1; di <= 1; di++) if (!open0[k + di + dj * w]) { ok[k] = 0; break; }
+      // a neighbour closed only by a building's grown outline does not narrow the lane again: the outline already
+      // carries the body's radius (a 2.4 m passage inside Saltharrow's land gate read as closed by counting it twice)
+      for (let dj = -1; dj <= 1 && ok[k]; dj++) for (let di = -1; di <= 1; di++) if (!open0[k + di + dj * w] && !byHouse[k + di + dj * w]) { ok[k] = 0; break; }
     }
   // edges cost more: a cell beside a drop of > 0.5 m (a stair's cheek wall, a quay lip, a bank) is where a body
   // falls off or wedges, so routes keep to the middle of stairs and streets
@@ -337,7 +366,21 @@ function plan(from: P2, to: P2): P2[] | null {
       if (cost < g[k]!) { g[k] = cost; came[k] = c; f[k] = cost + hx(k); open.push(k); }
     }
   }
-  if (came[goal] === -1 && goal !== start) return null;
+  if (came[goal] === -1 && goal !== start) {
+    if (process.env.TOWN_WALK_WHY) {
+      // where the search stalled: the reached cell nearest the goal, and the grid round it (# closed, . open, s/g ends)
+      let near = start, nd = Infinity, reached = 0;
+      for (let k = 0; k < w * h; k++) if (closed[k]) { reached++; const d = hx(k); if (d < nd) (nd = d), (near = k); }
+      console.log(`  WHY ${from.map(Math.round)} -> ${to.map(Math.round)}: ${reached} cells reached; nearest [${x0 + (near % w)}, ${z0 + Math.floor(near / w)}] y ${H[near]!.toFixed(1)}, ${nd.toFixed(0)} m short`);
+      for (const [lab, c0] of [["near", near], ["start", start]] as const) for (let dj = -6; dj <= 6; dj++) {
+        const near = c0;
+        let row = `    ${dj === -6 ? lab.padEnd(6) : "      "}`;
+        for (let di = -10; di <= 10; di++) { const k = near + di + dj * w; row += k === near ? "@" : !ok[k] ? "#" : H[k]! - H[near]! > 0.6 ? "^" : H[near]! - H[k]! > 0.6 ? "v" : "."; }
+        console.log(row);
+      }
+    }
+    return null;
+  }
   const out: P2[] = [];
   for (let k = goal; k !== -1; k = came[k]!) out.push([x0 + (k % w), z0 + Math.floor(k / w)]);
   return out.reverse();
@@ -375,7 +418,20 @@ if (flag("doors") && layoutDoc && gates.length) {
   for (const b of layoutDoc.buildings) {
     // plan to the street 8 m out in front of the door, then walk straight in: the last stretch is the entrance
     const fr = (b as { facing: P2 }).facing;
-    const front: P2 = [b.door[0] + fr[0] * 8, b.door[1] + fr[1] * 8];
+    // the street in front of the door: on a terrace band the street runs along the brow, and 8 m straight out from a
+    // door is down the riser on the band below (Saltharrow 2026-10-29), so the nearest town street point within 10 m wins
+    let front: P2 = [b.door[0] + fr[0] * 8, b.door[1] + fr[1] * 8];
+    let best = 10;
+    for (const r of recipe.features.roads) {
+      if (!isTownStreet(r.id, town.id)) continue;
+      const pts = r.points as P2[];
+      for (let k = 1; k < pts.length; k++) {
+        const a = pts[k - 1]!, c = pts[k]!, dx = c[0] - a[0], dz = c[1] - a[1], l2 = dx * dx + dz * dz || 1;
+        const t = Math.max(0, Math.min(1, ((b.door[0] - a[0]) * dx + (b.door[1] - a[1]) * dz) / l2));
+        const q: P2 = [a[0] + dx * t, a[1] + dz * t], d = Math.hypot(q[0] - b.door[0], q[1] - b.door[1]);
+        if (d < best) (best = d), (front = q);
+      }
+    }
     const toFront = plan(gates[0]!.at as P2, front);
     const route = toFront ? [...toFront, ...densify([front, b.door], 1).slice(1)] : null;
     if (!route) { unplanned.push(`door:${b.id}`); console.log(`  FAIL door:${b.id} — no walkable ground connects it to ${gates[0]!.id}`); continue; }

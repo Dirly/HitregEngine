@@ -65,7 +65,8 @@
       "fit": "contain",
       "anchor": "bottom",
       "cut": true,
-      "fitPadding": 0,
+      "fitPadding": 3,
+      "anchorPad": 0,
       "openEnclosed": true
     },
     "#f800ff": {
