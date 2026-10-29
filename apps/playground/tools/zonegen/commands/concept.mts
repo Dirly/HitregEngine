@@ -1,6 +1,6 @@
 /**
  * zonegen concept <world> --project <p> --zone <z> --poi <id>   (or --town <name> for a town, zone optional)
- *   [--height <m>] [--port 5317] [--renders-only | --paint-only] [--dry-run] [--keep-bare] [--style "..."] [--timeout 1800]
+ *   [--height <m>] [--port 5317] [--spot-timeout 240] [--renders-only | --paint-only] [--dry-run] [--keep-bare] [--style "..."] [--timeout 1800]
  *
  * CONCEPT ON SITE (Derek 2026-10-29: "do you take a snapshot of the area then feed those for the concept art?"). Every
  * firstshore concept frame was drawn from text; Codex invented a cliff tall enough for a 50 m gate and the owner built
@@ -35,6 +35,7 @@ import { AssetLibrary, ComponentRegistry, createWorldField, expandScene, PrefabE
 // @ts-ignore untyped helper module
 import { findAsset } from "../../_closure.mjs";
 import { runCapped } from "../../_run-capped.mts";
+import { tallScatterRules, treeSampler } from "../../worldgen-relief.mts";
 import { approachView, conceptBrief, farView, measureSite, readDistance, type PromptText, type SiteFit, type View } from "../../_concept-site.mts";
 // @ts-ignore plain JS engine tool module
 import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership, ownsFeature } from "../../../../../tools/poi-review/concept-site.mjs";
@@ -131,8 +132,13 @@ export async function run(ctx: Ctx): Promise<number> {
   console.log(`field: ${((Date.now() - t0) / 1000).toFixed(1)} s (bare: ${ownedFeatures} feature(s) of ${id} left out)`);
   const fit: SiteFit = measureSite(field, center, radius, terrainRadius);
   const roads = fromIds.map((rid) => (raw.features?.roads ?? []).find((r: J) => r.id === rid)).filter(Boolean).map((r: J) => (r.points as number[][]).map(xz));
-  const approach = approachView(field, center, height, read, roads, approachPts);
-  const far = farView(field, center, height, read, [approach.eye[0], approach.eye[2]]);
+  // the trees the scatter rules stand on the ground: a sight line through a wood shows trunks, not the site
+  const trees = treeSampler(worldRecipeSchema.parse(bareRaw), field);
+  const canopy = (x: number, z: number): number => trees.density(x, z);
+  const bareRecipe = worldRecipeSchema.parse(bareRaw), tall = treeSampler(bareRecipe, field, undefined, tallScatterRules(bareRecipe));
+  const clutter = (x: number, z: number): number => tall.density(x, z);
+  const approach = approachView(field, center, height, read, roads, approachPts, canopy, clutter);
+  const far = farView(field, center, height, read, [approach.eye[0], approach.eye[2]], canopy, clutter);
   let wall: string | null = null;
   if (townName) {
     const r = spawnSync(process.execPath, [...TSX, "tools/town-wall-line.mts", "check", "--project", ctx.project, "--town", townName], { encoding: "utf8", maxBuffer: 64 << 20 });
@@ -208,6 +214,17 @@ export async function run(ctx: Ctx): Promise<number> {
   return 0;
 }
 
+/** Is a PNG one flat colour (every sampled pixel within 6 of the first)? */
+function blankFrame(file: string): boolean {
+  try {
+    const img = decodePng(fs.readFileSync(file)) as Img;
+    const ch = img.data.length / (img.width * img.height);
+    const step = Math.max(1, Math.floor((img.width * img.height) / 4000));
+    for (let i = step; i < img.width * img.height; i += step) for (let c = 0; c < 3; c++) if (Math.abs(img.data[i * ch + c]! - img.data[c]!) > 6) return false;
+    return true;
+  } catch { return false; }
+}
+
 const cam = (v: View) => ({ camera: v.eye.map((n) => Math.round(n * 10) / 10), target: v.target.map((n) => Math.round(n * 10) / 10), from: v.from, px: v.px, note: v.note });
 
 /** Scene entities that are prefab instances the closure cannot expand (PrefabError), the place's own skipped. */
@@ -275,10 +292,13 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
     const port = ctx.opt("port", "5317");
     if (["5173", "5287", "5291", "5293"].includes(port)) return { ok: false, why: `port ${port} belongs to someone else: pass a probe port of your own` };
     console.log(`rendering ${spots.length} bare view(s) of ${sceneId} on :${port} (scope ${scope} m) ...`);
-    const r = await runCapped([...TSX, "tools/light-shots.mts", "--scene", sceneId, "--spots", spotsFile, "--times", "12", "--no-refs", "--weather-settle", "4", "--out", tmp, "--port", port, "--scope", String(scope)], 20 * 60_000, path.join(tmp, "shots.log"));
+    const r = await runCapped([...TSX, "tools/light-shots.mts", "--scene", sceneId, "--spots", spotsFile, "--times", "12", "--no-refs", "--weather-settle", "4", "--out", tmp, "--port", port, "--scope", String(scope), "--spot-timeout", ctx.opt("spot-timeout", "240")], 20 * 60_000, path.join(tmp, "shots.log"));
     const dir = path.join(tmp, sceneId), files: Record<string, string> = {};
     for (const v of views) { const f = exists(dir) ? fs.readdirSync(dir).find((n) => n.startsWith(`${v.name}-`) && n.endsWith(".png")) : undefined; if (f) files[v.name] = path.join(dir, f); }
     if (!files.approach || !files.far) return { ok: false, why: `light-shots exit ${r.status}${r.timedOut ? " (TIMEOUT)" : ""}: ${r.out.split("\n").filter((l) => /STOP|Error|TIMEOUT|fail/i.test(l)).slice(-4).join(" | ") || r.out.slice(-400)}` };
+    // a frame of one flat colour is a render that never drew (2026-10-29 w5-ground: two black 4 KB frames were kept as the
+    // bare site on a busy machine); refuse it rather than overwrite the last good render
+    for (const [k, f] of Object.entries(files)) if (blankFrame(f)) return { ok: false, why: `the ${k} frame is blank (one flat colour): the scene never drew — retry on a quieter machine or raise --spot-timeout` };
     // copy out before the temp folder goes
     const keep = fs.mkdtempSync(path.join(os.tmpdir(), "concept-frames-"));
     for (const [k, f] of Object.entries(files)) { const to = path.join(keep, `${k}.png`); fs.copyFileSync(f, to); files[k] = to; }

@@ -61,6 +61,28 @@ import { isLedge, ledgeChurnSpeed, riverFlowSpeed } from "./white-water.js";
 
 /** How far over the sea plane an `overSea` river's drowned channel is drawn (m): clear of the plane's depth. */
 const RIVER_OVER_SEA = 0.08;
+/** A town pad higher than this over the sea stands on the land, not at the shore: it does not clear a sea cliff (featureObstacles). Matches the coastal-town rule (centre <= 12 m over the sea). */
+const SEA_CLIFF_TOWN_RISE = 12;
+
+/**
+ * The runs of a road polyline whose graded surface is at or under `maxY` (each run with its neighbouring points, so a
+ * run of one point is still a segment's worth); a road with no `surfaceY` is one run, as before.
+ */
+function lowRuns(points: readonly (readonly [number, number])[], surfaceY: readonly number[] | undefined, maxY: number): [number, number][][] {
+  const pts = points.map((p) => [p[0], p[1]] as [number, number]);
+  if (!surfaceY || surfaceY.length !== pts.length) return [pts];
+  const runs: [number, number][][] = [];
+  let start = -1;
+  for (let i = 0; i <= pts.length; i++) {
+    const low = i < pts.length && surfaceY[i]! <= maxY;
+    if (low && start < 0) start = i;
+    if (!low && start >= 0) {
+      runs.push(pts.slice(Math.max(0, start - 1), Math.min(pts.length, i + 1)));
+      start = -1;
+    }
+  }
+  return runs;
+}
 
 // ------------------------------------------------------------------ geometry
 
@@ -951,12 +973,24 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
    * levels locally. Clearing round them pushed the whole wall back 40-90 m and dropped any stack whose site weight
    * fell under 0.6 — a POI sited on a stack erased the stack.
    */
-  const featureObstacles = () => [
-        // big fills only: a raised landform (a mesa, a plateau) is a place; a small one is a drained hollow the plain may cover
-        ...recipe.features.fills.filter((fl) => Math.abs(fl.polygon.reduce((s, p, i, a) => s + p[0] * a[(i + 1) % a.length]![1] - a[(i + 1) % a.length]![0] * p[1], 0)) / 2 > 50000).map((fl) => ({ points: fl.polygon, radius: fl.bank, closed: true })),
-        ...recipe.features.towns.map((tw) => ({ points: [tw.center] as [number, number][], radius: tw.radius + tw.falloff })),
+  // `sea`: the obstacles of a SEA CLIFF, where only what stands at the waterline clears it (towns/roads up on the land
+  // stand on the profile); butte fields keep clear of every town and road as before
+  const featureObstacles = (sea = false) => [
+        // big fills only: a raised landform (a mesa, a plateau) is a place; a small one is a drained hollow the plain may cover.
+        // A hydrology fill (tag "hollow": a basin not kept as a lake) is never one, however big (2026-10-29 redstrand w5: a
+        // 0.2 km² settled-away lake basin cleared the sea cliff that WAS its rim, dropping the ground 40 m and leaving the
+        // fill standing on a striped 36 m wall)
+        ...recipe.features.fills.filter((fl) => !fl.tags.includes("hollow") && Math.abs(fl.polygon.reduce((s, p, i, a) => s + p[0] * a[(i + 1) % a.length]![1] - a[(i + 1) % a.length]![0] * p[1], 0)) / 2 > 50000).map((fl) => ({ points: fl.polygon, radius: fl.bank, closed: true })),
+        // a town at the waterline (coastal, or a pad within SEA_CLIFF_TOWN_RISE of the sea) keeps its low ground; a town whose
+        // pad stands up on the land stands on the ground the cliff profile makes and keeps it (2026-10-29 redstrand w5: an
+        // inland town at 55.9 m cleared the cliff-top plateau round it, dropping the land 40-56 m and leaving its pad on a wall)
+        ...recipe.features.towns
+          .filter((tw) => !sea || tw.coastal || tw.groundY === undefined || tw.groundY <= recipe.seaLevel + SEA_CLIFF_TOWN_RISE)
+          .map((tw) => ({ points: [tw.center] as [number, number][], radius: tw.radius + tw.falloff })),
         // an approach onto a monument (keepLandforms) does not clear it away
-        ...recipe.features.roads.filter((r) => !r.keepLandforms).map((r) => ({ points: r.points, radius: r.width / 2 + r.shoulder + r.smooth })),
+        // a graded road (surfaceY per point) clears only its runs down at the waterline, like a town: a road up on the
+        // cliff-top plateau cleared the plateau 50-100 m round it and ran in a 10-30 m ditch (redstrand w5, town-1's west)
+        ...recipe.features.roads.filter((r) => !r.keepLandforms).flatMap((r) => lowRuns(r.points, sea ? r.surfaceY : undefined, recipe.seaLevel + SEA_CLIFF_TOWN_RISE).map((points) => ({ points, radius: r.width / 2 + r.shoulder + r.smooth }))),
         // NOT rivers, NOT lakes (2026-10-28): the hydrology finds a basin on the field WITH the sea cliffs built, so a tarn on a cliff
         // top sits on the cliffed ground; clearing the wall round it dropped that ground 40 m and hung the sheet in the
         // air (every dogfood seed with a rim lake), and the outlet river leaving it pushed the wall back 40-90 m under
@@ -969,7 +1003,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       seed,
       shore: (x, z) => shoreAt(x, z).distance,
       region: (id) => recipe.regions.find((g) => g.id === id)?.polygon ?? null,
-      obstacles: featureObstacles(),
+      obstacles: featureObstacles(true),
     }));
   // Opt-in butte fields (./buttes.ts)
   const butteDocs = t.buttes ?? [];

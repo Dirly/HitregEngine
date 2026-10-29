@@ -22,6 +22,8 @@
  *               the outline descriptor >= DESCRIPTOR_MIN from every other seed's (tools/worldgen-coast-shape.mts)
  *   read        (w2-shape) a dry climate reads dry: mostly dry open ground, woodland on the upland / by water, the
  *               riparian ribbon >= RIBBON_MIN_M along a river (tools/worldgen-biome-read.mts); a wet climate passes
+ *   flora       (w5-ground) every tree species grows where the climate allows it: palms/jungle only when tropical,
+ *               a dry world's pines only on the upland (tools/worldgen-flora.mts)
  *   biomes      (A) every adjacent anchor pair legal under `climate.transitions`, wetlands by water/lowland, dry biomes
  *               on the lee; >= 3 anchors at >= 10 % of the land, none over 60 %; (B) >= 5 feature kinds of woodland /
  *               open ground / upland / lake / river / cliff coast / beach or cove / wetland / canyon / crater or tarn
@@ -42,6 +44,7 @@ import { biomeFindings, describeBiomes, type BiomeReport } from "./worldgen-clim
 import { parseNeedSpecs, seedNeedLine, seedNeeds, seedNeedsTable, type SeedNeed } from "./worldgen-dogfood-needs.mts";
 import { describeShape, descriptorDistance, measureShape, shapeFindings, type ShapeReport } from "./worldgen-coast-shape.mts";
 import { biomeRead, describeBiomeRead, type BiomeReadReport } from "./worldgen-biome-read.mts";
+import { describeFlora, floraClimate, floraFindings } from "./worldgen-flora.mts";
 import {
   INTERIOR_LAKES_MIN,
   RELIEF_MIN_M,
@@ -110,6 +113,8 @@ export interface SeedResult {
   shape: ShapeReport | null;
   /** the read rule: a dry climate reads dry, its woodland placed, its riparian ribbon drawn */
   read: BiomeReadReport | null;
+  /** the flora rule: tree species/biome pairs the climate does not grow (tools/worldgen-flora.mts); -1 = not judged */
+  flora: number;
 }
 
 function opt(argv: string[], name: string): string | null {
@@ -219,7 +224,7 @@ export function commandDogfood(host: DogfoodHost): void {
   for (const seed of seeds) {
     const t0 = performance.now();
     const name = `${worldName}-s${seed}`;
-    const r: SeedResult = { seed, name, ladder: null, widthKm: 0, landKm2: 0, uplandShare: 0, silhouette: 0, lakes: 0, interiorLakes: 0, woodland: 0, coastOk: false, coastShares: "", dangling: -1, lakesNoRiver: -1, undeclared: 0, uphill: -1, waterFindings: -1, borderFindings: -1, rivers: 0, riverKm: 0, failed: [], mapPng: null, seconds: 0, error: null, notes: [], biomes: null, needs: [], shape: null, read: null };
+    const r: SeedResult = { seed, name, ladder: null, widthKm: 0, landKm2: 0, uplandShare: 0, silhouette: 0, lakes: 0, interiorLakes: 0, woodland: 0, coastOk: false, coastShares: "", dangling: -1, lakesNoRiver: -1, undeclared: 0, uphill: -1, waterFindings: -1, borderFindings: -1, rivers: 0, riverKm: 0, failed: [], mapPng: null, seconds: 0, error: null, notes: [], biomes: null, needs: [], shape: null, read: null, flora: -1 };
     results.push(r);
     const stages: [string, string[]][] = [
       ["init", ["init", name, "--from", look, "--seed", String(seed)]],
@@ -287,6 +292,10 @@ export function commandDogfood(host: DogfoodHost): void {
         r.read = biomeRead(recipe, field);
         r.notes.push(`read: ${describeBiomeRead(r.read)}`);
         for (const f of r.read.findings) r.notes.push(`read: ! ${f}`);
+        // the tree species follow the climate (2026-10-29 w5-ground: palms on a dry coast)
+        const flora = floraFindings(recipe);
+        r.flora = flora.length;
+        if (flora.length) r.notes.push(`flora: ! ${floraClimate(recipe)} climate grows ${describeFlora(flora)}`);
       } catch (e) {
         r.error = `judging: ${(e as Error).message.split("\n")[0]}`;
       }
@@ -304,6 +313,7 @@ export function commandDogfood(host: DogfoodHost): void {
       if (r.borderFindings !== 0) r.failed.push("border");
       if (!r.biomes || r.biomes.findings.length > 0) r.failed.push("biomes");
       if (!r.read || r.read.findings.length > 0) r.failed.push("read");
+      if (r.flora !== 0) r.failed.push("flora");
     }
     r.seconds = Math.round((performance.now() - t0) / 100) / 10;
     const L = r.ladder;

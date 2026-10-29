@@ -117,6 +117,39 @@ export function along(points: V2[], step = 5): { p: V2; s: number }[] {
   return out;
 }
 
+/** Tree canopy height the sight line must clear (m): under it, the trees between the eye and the site hide it. */
+export const CANOPY_M = 16;
+/** Expected trees in a 3 m wide corridor along the sight line, under the canopy, that hide the site. */
+export const CANOPY_BLOCK = 0.8;
+/**
+ * Trees standing in the sight line (expected count from the scatter rules' density, under the canopy height). The bare
+ * ground said "seen"; the render showed a wall of oasis trunks (redstrand 2026-10-29 town-1: approach and far both
+ * inside the wood, the site invisible). `canopy` = expected trees per m2 at (x, z).
+ */
+export function canopyBlock(g: Ground, eye: V3, target: V3, canopy?: (x: number, z: number) => number): number {
+  if (!canopy) return 0;
+  const len = Math.hypot(target[0] - eye[0], target[2] - eye[2]), step = 6;
+  let n = 0;
+  for (let s = step; s < len - 25; s += step) {
+    const t = s / len, x = eye[0] + (target[0] - eye[0]) * t, z = eye[2] + (target[2] - eye[2]) * t, y = eye[1] + (target[1] - eye[1]) * t;
+    if (y - g.height(x, z) > CANOPY_M) continue;
+    n += canopy(x, z) * 3 * step;
+  }
+  return n;
+}
+
+/** The first NEAR_CLEAR_M of a sight line holds no tall scatter (a boulder or trunk filling the foreground: redstrand town-1 far frame). */
+export const NEAR_CLEAR_M = 30;
+/** Expected tall scatter pieces in an 8 m wide corridor over the first NEAR_CLEAR_M that reject the eye. */
+export const NEAR_CLUTTER_MAX = 0.15;
+export function nearClutter(eye: V3, target: V3, clutter?: (x: number, z: number) => number): number {
+  if (!clutter) return 0;
+  const len = Math.hypot(target[0] - eye[0], target[2] - eye[2]) || 1;
+  let n = clutter(eye[0], eye[2]) * 8 * 3;
+  for (let s = 3; s <= NEAR_CLEAR_M; s += 3) n += clutter(eye[0] + ((target[0] - eye[0]) * s) / len, eye[2] + ((target[2] - eye[2]) * s) / len) * 8 * 3;
+  return n;
+}
+
 export interface View { name: "approach" | "far"; eye: V3; target: V3; from: number; px: number; visible: number; note: string }
 
 /**
@@ -125,7 +158,7 @@ export interface View { name: "approach" | "far"; eye: V3; target: V3; from: num
  * `height` m mark at the centre shows at least READ_PX_MIN px — the farthest such point within 1.25 x the read
  * distance. When none does, the best-seen point (note says so).
  */
-export function approachView(g: Ground, c: V2, height: number, read: number, roads: V2[][], approach: V2[]): View {
+export function approachView(g: Ground, c: V2, height: number, read: number, roads: V2[][], approach: V2[], canopy?: (x: number, z: number) => number, clutter?: (x: number, z: number) => number): View {
   const foot = g.height(c[0], c[1]), top = foot + height;
   const cand: V2[] = [];
   for (const r of roads) {
@@ -142,6 +175,8 @@ export function approachView(g: Ground, c: V2, height: number, read: number, roa
     if (d > read * 1.25 || d < 10 || wet(g, p[0], p[1])) continue;
     const eye: V3 = [p[0], g.height(p[0], p[1]) + EYE_M, p[1]];
     const r = readPixels(g, eye, { at: c, foot, top });
+    if (canopyBlock(g, eye, target, canopy) > CANOPY_BLOCK) r.px = 0; // trees in the way: not seen from here
+    if (nearClutter(eye, target, clutter) > NEAR_CLUTTER_MAX) r.px *= 0.5; // a boulder or trunk may fill the foreground: a clear eye wins, a cluttered one is still a view (a wood has no clear eye)
     const v: View = { name: "approach", eye, target, from: Math.round(d), px: r.px, visible: r.visible, note: "" };
     if (r.px >= READ_PX_MIN && (!first || d > first.from)) first = v;
     if (!best || r.px > best.px) best = v;
@@ -157,7 +192,7 @@ export function approachView(g: Ground, c: V2, height: number, read: number, roa
  * The far view: from [read, 1.15 read] on 36 bearings, the dry spot that shows most of a `height` m mark at player
  * height, ties to the side nearest `prefer` (the approach). Raised 10 m at a time (to 60 m) when nothing shows 3 m.
  */
-export function farView(g: Ground, c: V2, height: number, read: number, prefer: V2 | null): View {
+export function farView(g: Ground, c: V2, height: number, read: number, prefer: V2 | null, canopy?: (x: number, z: number) => number, clutter?: (x: number, z: number) => number): View {
   const foot = g.height(c[0], c[1]), top = foot + height, target: V3 = [c[0], foot + height * 0.4, c[1]];
   for (let lift = EYE_M; lift <= 60; lift = lift === EYE_M ? 10 : lift + 10) {
     let best: (View & { score: number }) | null = null;
@@ -165,6 +200,8 @@ export function farView(g: Ground, c: V2, height: number, read: number, prefer: 
       const a = (k / 36) * Math.PI * 2, d = read * f, p: V2 = [c[0] + Math.sin(a) * d, c[1] - Math.cos(a) * d];
       if (wet(g, p[0], p[1])) continue;
       const eye: V3 = [p[0], g.height(p[0], p[1]) + lift, p[1]], r = readPixels(g, eye, { at: c, foot, top });
+      if (canopyBlock(g, eye, target, canopy) > CANOPY_BLOCK) { r.px = 0; r.visible = 0; }
+      else if (nearClutter(eye, target, clutter) > NEAR_CLUTTER_MAX) { r.px *= 0.5; r.visible *= 0.5; } // prefer a clear foreground, never refuse every eye in a wood
       const near = prefer ? 1 - dist(p, prefer) / (2 * d + 1) : 0;
       const score = r.visible + near * 2;
       if (!best || score > best.score) best = { name: "far", eye, target, from: Math.round(d), px: r.px, visible: r.visible, note: "", score };
@@ -179,7 +216,9 @@ export interface PromptText { name: string; premise: string; read?: string; land
 
 /** The shared repaint brief: the ground is fixed, only the built place is added; then the place and the style. */
 export function conceptBrief(t: PromptText, fit: SiteFit, height: number): string {
-  const face = fit.face ? `${fit.face.height} m (bearing ${fit.face.bearing} deg, ${fit.face.from} m from the centre)` : "none";
+  // the face the place stands under counts too (an entrance foot: the face is inside the radius, none beyond it)
+  const f0 = fit.face ?? fit.faceAtPlace;
+  const face = f0 ? `${f0.height} m (bearing ${f0.bearing} deg, ${f0.from} m from the centre)` : "none";
   return [
     `Each attached image is an IN-GAME RENDER of the real, bare site where "${t.name}" will be built. The ground in it is FIXED and already built: keep the camera, the horizon line, every rock and cliff height, the water line and the slope of the land exactly as rendered. Do not raise, deepen, widen or add cliffs, hills, gorges, falls or water. Add ONLY the built place (structures, walls, paths, props, light, smoke) standing on this ground at a believable scale; vegetation may be thinned where the place clears it.`,
     `Measured ground (judge scale by it): the tallest rock face here is ${face}; the place's own ground has ${fit.relief} m of relief and ${fit.apronM2} m2 of standable apron; the tallest thing the place should show is about ${height} m. A structure taller than the face it stands on is wrong.`,

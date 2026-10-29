@@ -16,8 +16,10 @@ export type V2 = [number, number];
 export type V3 = [number, number, number];
 
 export const FAR_MIN_M = 300;
+/** The nearest a far camera may stand when nothing 300-400 m out works. */
+export const FAR_NEAR_M = 180;
 /** Eye heights over the camera's ground tried in turn. */
-export const FAR_EYES_M = [20, 30, 45, 60];
+export const FAR_EYES_M = [30, 45, 60];
 /** Clearance the sight line keeps over the bare ground (scatter rocks and trees stand on it). */
 export const SIGHT_CLEAR_M = 6;
 export const FAR_MAX_M = 400;
@@ -124,19 +126,23 @@ export function farCamera(c: FarCameraInput): FarCamera | null {
   const target: V3 = [c.at[0], r1(c.y + 4), c.at[1]];
   const bearings = Array.from({ length: 24 }, (_, k) => k * 15).sort((a, b) => angDist(a, c.view) - angDist(b, c.view));
   const dists = [Math.round((min + max) / 2), min, max];
-  for (const b of bearings) {
+  // a site on a narrow cape or under a face looking out to sea has no dry land 300-400 m out: a nearer ring (>= FAR_NEAR_M) is
+  // tried last (redstrand foot-23 on the SE cape spine had no far frame)
+  dists.push(FAR_NEAR_M, Math.round((FAR_NEAR_M + min) / 2));
+  // two passes: a frame at most half water anywhere round the site first, then up to FAR_WATER_MAX
+  for (const waterMax of [0.5, FAR_WATER_MAX]) for (const b of bearings) {
     const [dx, dz] = dirOf(b);
     for (const d of dists) {
       const x = c.at[0] + dx * d, z = c.at[1] + dz * d;
       const g = c.ground(x, z);
-      if (g < c.seaLevel + 2) continue; // on land only
-      // a raised eye (20-60 m: over the scatter, the pad read as ground not as a horizon line); redstrand 2026-10-29: an 8 m
+      if (g < c.seaLevel + 2 || c.wet?.(x, z)) continue; // on dry land only (redstrand: a camera stood on a lake)
+      // a raised eye (30-60 m: over the scatter and the tree tops — a 20 m eye stood inside pine canopies on redstrand s110/s111/s129, the pad read as ground not as a horizon line); redstrand 2026-10-29: an 8 m
       // eye stood behind a scatter rock and a rise and showed neither the pad nor its flanks
       for (const eye of FAR_EYES_M) {
         const camera: V3 = [r1(x), r1(g + eye), r1(z)];
         if (!cameraClear(camera, c.ground)) continue;
         const check = checkFrame(camera, target, c.ground, c.seaLevel, { wet: c.wet });
-        if (check.ok) return { camera, target, bearing: b, distance: d, check };
+        if (check.ok && check.water <= waterMax) return { camera, target, bearing: b, distance: d, check };
       }
     }
   }

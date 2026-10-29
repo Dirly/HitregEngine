@@ -97,3 +97,60 @@ describe("stacks.omit keeps a view corridor clear", () => {
     for (const s of after) expect(before.some((b) => b.x === s.x && b.z === s.z && b.radius === s.radius && b.top === s.top)).toBe(true);
   });
 });
+
+// 2026-10-29 redstrand w5-ground: a lake basin the settle filled (0.2 km², a `hollow` fill from `worldgen rivers`) was
+// taken for a raised landform and cleared the sea cliff that was its own rim: the ground beside it fell 40 m and the
+// fill stood on a striped vertical wall. A hydrology hollow never pushes the cliff back; a landform fill still does.
+describe("a filled hollow is not a sea-cliff obstacle", () => {
+  const plain = createWorldField(recipe());
+  const z = 0, wx = wallX(plain, z);
+  // a 300 x 300 m fill whose seaward edge stands 30 m inside the wall
+  const poly = (x1: number): [number, number][] => [[x1 - 300, -150], [x1, -150], [x1, 150], [x1 - 300, 150]];
+  const fill = (tags: string[]) => ({ id: "fill-1", polygon: poly(wx - 30), y: plain.height(wx - 200, z) - 1, bank: 12, tags });
+  it("a hollow fill keeps the wall where it was", () => {
+    const f = createWorldField(recipe({ fills: [fill(["hollow"])] }));
+    for (const dz of [-60, 0, 60]) expect(wallX(f, z + dz)).toBeCloseTo(wallX(plain, z + dz), 6);
+    expect(f.height(wx - 15, z)).toBeCloseTo(plain.height(wx - 15, z), 0);
+  });
+  it("an untagged big fill (a raised landform) still clears it", () => {
+    const f = createWorldField(recipe({ fills: [fill([])] }));
+    expect(Math.abs(f.height(wx - 15, z) - plain.height(wx - 15, z))).toBeGreaterThan(1);
+  });
+});
+
+// 2026-10-29 redstrand w5-ground: an inland town whose pad stands on the cliff-top plateau (55.9 m) cleared the sea
+// cliff round it — the plateau IS the cliff profile there — and the land 100-140 m out fell 40-56 m: the town pad stood
+// on a striped wall. A town up on the land keeps the cliff; a town at the waterline still clears it.
+describe("a town on the cliff top keeps the cliff", () => {
+  const plain = createWorldField(recipe());
+  const z = 0, wx = wallX(plain, z);
+  const cx = wx - 140, top = plain.height(cx, z);
+  const town = (groundY: number) => ({ id: "t", center: [cx, z], radius: 45, falloff: 36, groundY });
+  it("a pad up on the land keeps the ground beside it and the wall", () => {
+    const f = createWorldField(recipe({ towns: [town(Math.round(top))] }));
+    expect(f.height(cx + 110, z)).toBeCloseTo(plain.height(cx + 110, z), 0);
+    expect(wallX(f, z)).toBeCloseTo(wx, 6);
+  });
+  it("a pad at the waterline still clears it", () => {
+    const f = createWorldField(recipe({ towns: [town(base.seaLevel + 4)] }));
+    expect(Math.abs(f.height(cx + 110, z) - plain.height(cx + 110, z))).toBeGreaterThan(1);
+  });
+});
+
+// ...and a graded road up there (surfaceY on the plateau) cleared the plateau 50-100 m round it: a 10-30 m ditch along
+// town-1's roads. A road clears only its runs down at the waterline.
+describe("a road on the cliff top keeps the cliff", () => {
+  const plain = createWorldField(recipe());
+  const z = 0, wx = wallX(plain, z);
+  const x = wx - 110, top = plain.height(x, z);
+  const road = (y: number) => ({ id: "r", points: [[x, -200], [x, 0], [x, 200]], width: 3.4, shoulder: 3, smooth: 5.4, surfaceY: [y, y, y] });
+  it("a road graded up on the land keeps the ground beside it", () => {
+    const f = createWorldField(recipe({ roads: [road(Math.round(top))] }));
+    expect(f.height(x + 40, z)).toBeCloseTo(plain.height(x + 40, z), 0);
+    expect(wallX(f, z)).toBeCloseTo(wx, 6);
+  });
+  it("a road graded at the waterline still clears it", () => {
+    const f = createWorldField(recipe({ roads: [road(base.seaLevel + 3)] }));
+    expect(Math.abs(f.height(x + 40, z) - plain.height(x + 40, z))).toBeGreaterThan(1);
+  });
+});

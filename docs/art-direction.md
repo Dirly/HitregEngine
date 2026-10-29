@@ -19,6 +19,17 @@ are not. An insect silhouette or organic material does not make a human-made
 object appropriate. Keep existing creature models and useful natural materials;
 do not invent an insect civilization to supply a town-style prop list.
 
+## Trees
+
+Owner direction (2026-10-29): match the existing trees' measured triangle counts
+and construction. Keep shaped, bent, tapered trunks with a handful of irregular
+structural boughs, and reuse the large curved foliage-panel approach. Avoid dense branch scaffolds,
+regular radial fans and visible spiral layouts. Leaf artwork and a few shaped
+panels supply the crown's richness. Omit modeled roots that would be underground.
+Preserve the painted leaves' proportions when changing a crown: reposition and
+uniformly scale foliage panels, or correct their UV mapping. Inspect the texture-only
+view for stretched leaves, as well as the silhouette and the crown from above.
+
 ## Divide the work before modeling
 
 Start new prop designs with generated or supplied concept art (owner direction,

@@ -181,6 +181,11 @@ export function treeRules(recipe: WorldRecipe): { rule: ScatterRule; index: numb
     .filter(({ rule }) => !!rule.wind && rule.density > 0 && rule.biomes.length > 0 && (rule.colliderSize?.[1] ?? 0) >= TREE_COLLIDER_M);
 }
 
+/** Every scatter rule that stands taller than `minH` m (trees AND boulders): what blocks a camera's near view. */
+export function tallScatterRules(recipe: WorldRecipe, minH = 2): { rule: ScatterRule; index: number }[] {
+  return recipe.scatter.map((rule, index) => ({ rule, index })).filter(({ rule }) => rule.density > 0 && rule.biomes.length > 0 && (rule.colliderSize?.[1] ?? 0) >= minH);
+}
+
 export interface TreeSampler {
   /**
    * Expected trees per m² at (x, z) with ground `h`, before clumping; 0 under water, on a cleared plot, or too steep.
@@ -195,8 +200,8 @@ export interface TreeSampler {
  * `density` x `biomeDensity[biome]`, its slope and height windows, the region's vegetation plan and clearings.
  * Clumping is not applied (it moves trees into groves; the share of woodland is what this measures).
  */
-export function treeSampler(recipe: WorldRecipe, field: WorldField, veg: VegetationIndex = vegetationIndex(recipe)): TreeSampler {
-  const trees = treeRules(recipe);
+export function treeSampler(recipe: WorldRecipe, field: WorldField, veg: VegetationIndex = vegetationIndex(recipe), rules: { rule: ScatterRule; index: number }[] = treeRules(recipe)): TreeSampler {
+  const trees = rules;
   const biomeIndex = new Map(recipe.biomes.map((b, i) => [b.id, i] as const));
   const sea = recipe.seaLevel;
   const perRule = trees.map(({ rule }) => rule.biomes.map((id) => ({ i: biomeIndex.get(id) ?? -1, gain: rule.biomeDensity?.[id] ?? 1 })).filter((b) => b.i >= 0));

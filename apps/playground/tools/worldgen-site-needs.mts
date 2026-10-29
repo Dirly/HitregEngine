@@ -530,3 +530,66 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   if (!files.length) { console.error(`no needs.json at ${target}`); bad++; }
   process.exitCode = bad ? 1 : 0;
 }
+
+/**
+ * worldgen siting-map <world> --project <p>: ONE overview map of every candidate of every role proposed so far
+ * (authoring/siting/<world>/candidates.json for towns + every <zone>-<role>[-<for>].json from `zonegen sites --propose`),
+ * numbered per role, ringed green (needs met) or red, with a key down the right edge. Written to
+ * authoring/siting/<world>/candidates-map.png so the owner sees WHERE the candidates are before any pick
+ * (redstrand 2026-10-29: "where will the POIs and entrance go?").
+ */
+export async function commandSitingMap(host: SiteNeedsHost): Promise<void> {
+  const { recipe } = host.loadRecipe();
+  const dir = sitingDir(host);
+  if (!fs.existsSync(dir)) host.fail(`no siting dir ${dir}: run towns --propose / zonegen sites --propose first`);
+  const projectDir = path.join(PLAYGROUND, "projects", host.project);
+  const basePng = path.join(projectDir, "assets", "maps", `${host.world}.base.png`);
+  if (!fs.existsSync(basePng)) host.fail(`${basePng} missing (zonegen map ${host.world} --project ${host.project} --base)`);
+  type C = { id: string; at: V2; radius: number; met: boolean; role: string };
+  const cands: C[] = [];
+  const add = (role: string, list: { id: string; at: V2; radius?: number; needs?: NeedsReport }[], radius: number) => {
+    for (const c of list) cands.push({ id: c.id, at: c.at, radius: c.radius ?? radius, met: c.needs?.met ?? false, role });
+  };
+  const towns = path.join(dir, "candidates.json");
+  if (fs.existsSync(towns)) for (const r of (JSON.parse(fs.readFileSync(towns, "utf8")) as { roles: { role: string; radius: number; candidates: TownCandidate[] }[] }).roles) add(r.role, r.candidates, r.radius);
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".json") && x !== "candidates.json" && x !== "pick.json" && !x.endsWith("-pick.json"))) {
+    const doc = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as { role?: string; radius?: number; candidates?: { id: string; at: V2; needs?: NeedsReport }[] };
+    if (doc.role && doc.candidates) add(doc.role,doc.candidates, doc.radius ?? 60);
+  }
+  if (!cands.length) host.fail("no candidates in " + dir);
+  const roles = [...new Set(cands.map((c) => c.role))];
+  const palette = ["#ffd54f", "#4fc3f7", "#f48fb1", "#aed581", "#ce93d8", "#ffab91", "#80cbc4", "#fff59d"];
+  const colour = Object.fromEntries(roles.map((r, i) => [r, palette[i % palette.length]!]));
+  const numbered = roles.flatMap((r) => cands.filter((c) => c.role === r).map((c, i) => ({ ...c, n: i + 1, colour: colour[r] })));
+  const xs = cands.map((c) => c.at[0]), zs = cands.map((c) => c.at[1]);
+  const pad = 400, W = 1600, H = 1200;
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cz = (Math.min(...zs) + Math.max(...zs)) / 2;
+  const scale = Math.min((W - 360) / (Math.max(...xs) - Math.min(...xs) + pad * 2), H / (Math.max(...zs) - Math.min(...zs) + pad * 2));
+  const view = { cx: cx + 150 / scale, cz, scale, width: W, height: H };
+  const map = (await import(pathToFileURL(path.join(PLAYGROUND, "tools", "zonegen", "commands", "map.mts")).href)) as { shootMap(o: unknown): Promise<string> };
+  const layers = (await import(pathToFileURL(path.join(PLAYGROUND, "src", "map-layers.ts")).href)) as { collectMapData(r: unknown, s: unknown, e: unknown, w: string): unknown; layerCounts(d: unknown): unknown; DEFAULT_LAYERS: readonly string[] };
+  const data = layers.collectMapData(recipe, null, { world: host.world }, host.world);
+  const draw = String.raw`
+for (const c of data.cands) {
+  const x = toX(c.at[0]), y = toY(c.at[1]), r = Math.max(7, c.radius * scale);
+  ctx.lineWidth = 3; ctx.strokeStyle = c.met ? "#69f0ae" : "#ff5252"; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = c.colour; ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#000"; ctx.font = "bold 12px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillText(String(c.n), x, y + 4);
+}
+ctx.textAlign = "left";
+let ky = 300; const kx = ctx.canvas.width - 380;
+ctx.fillStyle = "rgba(0,0,0,0.78)"; ctx.fillRect(kx - 10, ky - 24, 385, 22 + data.cands.length * 17 + data.roles.length * 8);
+ctx.font = "bold 13px system-ui, sans-serif";
+for (const role of data.roles) {
+  for (const c of data.cands.filter((q) => q.role === role)) {
+    ctx.fillStyle = c.colour; ctx.fillText(role + " " + c.n, kx, ky);
+    ctx.fillStyle = c.met ? "#69f0ae" : "#ff8a80"; ctx.fillText((c.met ? "met " : "UNMET ") + c.id + " [" + c.at.map(Math.round).join(", ") + "]", kx + 150, ky);
+    ky += 17;
+  }
+  ky += 8;
+}`;
+  const out = path.join(dir, "candidates-map.png");
+  const shot = await map.shootMap({ basePng, data, view, layers: new Set(layers.DEFAULT_LAYERS), title: `${host.world} · siting candidates (ring green = needs met)`, counts: layers.layerCounts(data), out, overlay: { data: { cands: numbered, roles }, draw } });
+  if (shot) host.fail(`siting-map: ${shot}`);
+  console.log(`wrote ${path.relative(process.cwd(), out)}  (${cands.length} candidates, ${roles.length} roles: ${roles.join(", ")})`);
+}

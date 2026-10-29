@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { checkFrame, farCamera, FAR_MAX_M, FAR_MIN_M, FAR_WATER_MAX } from "../tools/_far-camera.mts";
+import { checkFrame, farCamera, FAR_MAX_M, FAR_NEAR_M, FAR_WATER_MAX } from "../tools/_far-camera.mts";
 
 // a round island r 600 (ground 30 m at the centre falling to -20 m at r 700), sea level 0
 const ground = (x: number, z: number): number => 30 - (Math.hypot(x, z) / 600) * 30 - Math.max(0, Math.hypot(x, z) - 600) * 0.2;
@@ -13,7 +13,7 @@ test("a coastal candidate's far camera stands on land, 300-400 m out, and sees t
   const [x, , z] = cam.camera;
   assert.ok(ground(x, z) > 2, `camera on land (ground ${ground(x, z).toFixed(1)})`);
   const d = Math.hypot(x - at[0], z - at[1]);
-  assert.ok(d >= FAR_MIN_M - 1 && d <= FAR_MAX_M + 1, `distance ${d}`);
+  assert.ok(d >= FAR_NEAR_M - 1 && d <= FAR_MAX_M + 1, `distance ${d}`); // 300-400 m first, a nearer ring when nothing there frames the pad over land
   assert.ok(cam.check.visible && cam.check.water <= FAR_WATER_MAX, JSON.stringify(cam.check));
   // the old placement (420 m out on the open side = over the sea, looking back) is what the check refuses when it
   // looks out to sea: a camera on the shore aimed away from the island over open water
@@ -39,11 +39,16 @@ test("a generated world scene carries the environment: day-night clock, weather,
     world: { name: "World", parent: null, tags: ["world"], components: { voxelWorld: { world: "w", mesher: "auto" } } },
     sky: { name: "Sky", parent: null, tags: [], components: { sky: { preset: "day" } } },
   };
-  const added = withEnvironment(entities, "projects/proving/assets/scenes/proving.scene.json");
+  // a look scene fixture (no live project is read by a test)
+  const os = await import("node:os"), fs = await import("node:fs"), path = await import("node:path");
+  const look = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "scene-env-")), "look.scene.json");
+  fs.writeFileSync(look, JSON.stringify({ entities: { sky: { name: "Sky", parent: null, tags: [], components: { sky: { preset: "dusk" }, script: { name: "day-night", params: { startHour: 9 } } } }, world: { name: "World", parent: null, tags: [], components: { script: { name: "weather", params: { gloomMax: 0.4 } } } } } }));
+  const added = withEnvironment(entities, look);
   assert.deepEqual(added.sort(), ["day-night", "weather", "zone-mood"]);
   assert.equal((entities.sky!.components.script as { name: string }).name, "day-night");
   assert.equal((entities.world!.components.script as { name: string }).name, "weather");
   assert.equal((entities["zone-mood"]!.components.script as { name: string }).name, "zone-mood");
+  assert.equal((entities.sky!.components.sky as { preset: string }).preset, "dusk", "the look scene's sky is taken");
   // idempotent
   assert.deepEqual(withEnvironment(entities), []);
 });
@@ -72,4 +77,27 @@ test("a camera at the foot of a cliff is refused", async () => {
   const wall = (x: number) => (x > 15 ? 100 : 5);
   assert.equal(cameraClear([0, 25, 0], wall), false);
   assert.equal(cameraClear([0, 25, 0], () => 5), true);
+});
+
+test("a far camera never stands on a lake", () => {
+  const g = (x: number, z: number) => 20 + 0 * x * z;
+  const lake = (x: number, z: number) => Math.hypot(x, z - 350) < 120;
+  const cam = farCamera({ at: [0, 0], y: 20, view: 180, ground: g, seaLevel: 0, wet: lake });
+  assert.ok(cam && !lake(cam.camera[0], cam.camera[2]), JSON.stringify(cam?.camera));
+});
+
+test("concept cameras: a sight line through a wood is blocked, one over it is not", async () => {
+  const { canopyBlock, CANOPY_BLOCK } = await import("../tools/_concept-site.mts");
+  const g = { height: () => 10 } as never;
+  const wood = () => 0.02; // trees per m2
+  assert.ok(canopyBlock(g, [0, 11.7, 0], [400, 15, 0], wood) > CANOPY_BLOCK);
+  assert.ok(canopyBlock(g, [0, 60, 0], [400, 15, 0], wood) < canopyBlock(g, [0, 11.7, 0], [400, 15, 0], wood));
+  assert.equal(canopyBlock(g, [0, 11.7, 0], [400, 15, 0]), 0);
+});
+
+test("concept cameras: a boulder in the first 30 m rejects the eye", async () => {
+  const { nearClutter, NEAR_CLUTTER_MAX } = await import("../tools/_concept-site.mts");
+  const rocks = (x: number) => (x < 30 ? 0.01 : 0);
+  assert.ok(nearClutter([0, 2, 0], [300, 2, 0], rocks) > NEAR_CLUTTER_MAX);
+  assert.ok(nearClutter([100, 2, 0], [400, 2, 0], rocks) <= NEAR_CLUTTER_MAX);
 });

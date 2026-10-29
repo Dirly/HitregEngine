@@ -111,6 +111,8 @@ import { commandRockSkins, writeRockSkinTemplate } from "./rock-skins.mts";
 import { commandPalette, commandRockAudit } from "./worldgen-rock-audit.mts";
 import { commandWaterEdges } from "./water-edges.mts";
 import { commandWaterLogic, lakeSettleLevels } from "./worldgen-water-logic.mts";
+import { describeFillWalls, fillWalls } from "./worldgen-fill-walls.mts";
+import { applyFlora, describeFlora, floraClimate, floraFindings } from "./worldgen-flora.mts";
 import { COAST_COLOURS, coastStageCheck, commandCoast, commandCoastTop } from "./worldgen-coast.mts";
 import { riverWaterDoc } from "./_river-water.mts";
 import { measureTownRisers, riserRule } from "./worldgen-riser-rule.mts";
@@ -121,7 +123,7 @@ import { commandTerraceFromPlan } from "./worldgen-terrace-from-plan.mts";
 import { PROGRAM_RULE, bandStreet, kerbedBand, loadTownProgram, measureShelfFlat, planProgramShelves, programFitFindings, programLandGate, type TownProgram } from "./worldgen-town-program.mts";
 import { COASTAL_TOWN, TERRACE_DEFAULTS, coastalTownFindings, findCoastalSites, landGate, terraceReach } from "./worldgen-coastal-towns.mts";
 import { commandVegetation } from "./worldgen-vegetation.mts";
-import { commandNeeds, commandTownsPick, commandTownsPropose, needsStageCheck, townNeedsFindings, type SiteNeedsHost } from "./worldgen-site-needs.mts";
+import { commandNeeds, commandSitingMap, commandTownsPick, commandTownsPropose, needsStageCheck, townNeedsFindings, type SiteNeedsHost } from "./worldgen-site-needs.mts";
 import { commandRoad } from "./worldgen-road.mts";
 import { commandFine, commandOp, commandOpPreview, fineStatusLine, stampGateStage } from "./worldgen-operators.mts";
 import { findAsset } from "./_closure.mjs";
@@ -280,6 +282,9 @@ const HELP = `worldgen — procedural world pipeline
                    than the land puts ONE anchor over it; --aridity 0..1 (a dry climate: cells want moisture x (1-N));
                    --warmth -0.5..0.5 (every cell's latitude shifted toward the hot pole);
                    --riparian <anchor>[:reach[:rise]] (an oasis ribbon of that anchor along every wet river) | off
+  flora  <world>   tree SPECIES follow the climate: palms/jungle only when tropical; a dry world's pines only on the
+                   upland, broadleaf only by water or up high (their density goes to the oasis broadleaf / the scrub tree);
+                   --check = the flora row's findings, nothing written (climate runs it on every write)
   zone-name <world> --zone <id> --name "<name>" [--landmarks a,b,c] [--hub x,z] [--border coast[:loop]]: name a zone (or
                    town zone) from its landmarks and drop its draft tag — the zone-names / town-names rows, through the
                    tool; --border coast gives a one-landmass zone the coast plan's shoreline as its border
@@ -361,6 +366,8 @@ const HELP = `worldgen — procedural world pipeline
                    for) + plan-<id>.png + far-<id>.png (bare terrain); a fresh siting agent (tools/zonegen/briefs/site-towns.md)
                    writes { towns: [{ role, candidate, why, town?, tier?, rulings? }] } and --pick <file> applies it (refuses
                    a candidate failing a need of its role; stamps siteRole + keep)
+  siting-map <world>  one overview map of every proposed siting candidate (towns + zonegen sites), numbered per role:
+                   authoring/siting/<world>/candidates-map.png
   needs  <world>   solve the recipe's needs[] (cliff-face for a grand entrance, walled-neck for a walled town) into need-<id>
                    height patches [--only <id>] [--check]; the needs status row fails an unsolved or no-longer-met need
   town-pins <world> record which towns stay put (\`keep: true\`) without re-siting anything: --keep <ids|all>,
@@ -1578,7 +1585,8 @@ function riversPass(recipe: WorldRecipe, caps: ReadonlyMap<number, number>): { l
       ([cx, cz]) => [round(grid.worldX(cx) - grid.step / 2), round(grid.worldZ(cz) - grid.step / 2)] as [number, number],
     );
     if (outline.length < 4) return;
-    fills.push({ id: `fill-${fills.length + 1}`, polygon: outline, y: round(basin.level + 0.35), bank: 12, tags: [] });
+    // tag "hollow": a drained basin, never a raised landform (core featureObstacles: it must not clear the sea cliff that is its rim)
+    fills.push({ id: `fill-${fills.length + 1}`, polygon: outline, y: round(basin.level + 0.35), bank: 12, tags: ["hollow"] });
   };
   const maxLakeArea = option("max-lake", 0.12) * 1e6;
   const lakeFill = option("lake-fill", 9);
@@ -7517,9 +7525,10 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
         const undeclared = lakesUndeclared(r);
         if (undeclared.length > 0) return `${undeclared.length} lake(s) neither drain nor are declared endorheic (${undeclared.slice(0, 5).join(", ")}): worldgen rivers --endorheic <ids|dry>`;
         const perched = perchedRiverMetres(r);
-        return perched.metres > 100
-          ? `${Math.round(perched.metres)} m of river perched over its valley (${perched.rivers.slice(0, 5).join(", ")}): re-trace`
-          : null;
+        if (perched.metres > 100) return `${Math.round(perched.metres)} m of river perched over its valley (${perched.rivers.slice(0, 5).join(", ")}): re-trace`;
+        // a filled hollow reads as ground: no fill standing on a wall (tools/worldgen-fill-walls.mts)
+        const walls = r.features.fills.length ? fillWalls(r, statusField(r)) : [];
+        return walls.length > 0 ? `filled hollow on a wall: ${describeFillWalls(walls)} — re-run rivers (hollow fills no longer clear sea cliffs)` : null;
       },
     },
     {
@@ -7570,6 +7579,17 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
       how: "worldgen cover <world> --apply <project>/authoring/cover-rules.json",
       optional: true,
       check: (r) => (r.cover.length > 0 ? null : "no ground-cover layers: only scatter props grow"),
+    },
+    {
+      // the tree SPECIES follow the climate (2026-10-29 redstrand: proving's palms grew on a dry red-sandstone coast)
+      name: "flora",
+      after: ["init"],
+      by: "procedural",
+      how: "worldgen flora <world>   (worldgen climate runs it too; tools/worldgen-flora.mts)",
+      check: (r) => {
+        const f = floraFindings(r);
+        return f.length > 0 ? `${f.length} tree species/biome pair(s) the ${floraClimate(r)} climate does not grow: ${describeFlora(f)}` : null;
+      },
     },
     {
       // a zone's own ground (palette tiles per role) from the cast's palettes;
@@ -8168,12 +8188,32 @@ function commandClimate(): void {
     zones.sites = sites.map((s) => ({ cell: s.cell, anchor: s.anchor }));
   }
   if (keep.length === 0 && !flag("size") && !flag("border") && !flag("auto") && !flag("aridity") && !flag("warmth") && !rip) fail("nothing to change: --anchors a,b,c, --size N, --border N, --aridity 0..1, --warmth -0.5..0.5, --riparian <anchor>[:reach[:rise]] | off, --auto (pin every cell's anchor from the ground) or --report (the biomes rule)");
+  // species follow the climate: palms only where it is tropical, pine only on a dry world's upland (tools/worldgen-flora.mts)
+  for (const n of applyFlora(recipe)) console.log(`  ${n}`);
   writeRecipe(recipe, file);
-  if (zones.aridity) console.log(`  aridity ${zones.aridity}: cells want moisture x ${1 - zones.aridity}`);
+  if (zones.aridity) console.log(`  aridity${zones.aridity}: cells want moisture x ${1 - zones.aridity}`);
   if (zones.warmth) console.log(`  warmth ${zones.warmth}: every cell judged ${zones.warmth} nearer the hot pole`);
   if (zones.riparian) console.log(`  riparian: ${zones.riparian.anchor} greens ${zones.riparian.anchors?.join(", ") ?? "every drier anchor"} within ${zones.riparian.reach} m of a wet river and ${zones.riparian.rise} m over its water`);
   const land = recipe.bounds?.continents.map((c) => c.radius + c.falloff * (1 - (recipe.bounds?.shelf ?? 0.58))) ?? [];
   console.log(`  climate cells ${zones.size} m (border ${zones.border} m)${land.length ? `; the largest landmass is ~${Math.round(Math.max(...land) * 2)} m across` : ""}`);
+}
+
+/**
+ * `worldgen flora <world> [--check]` — the scatter's TREE species made to follow the climate (tools/worldgen-flora.mts):
+ * palms and jungle only in a tropical climate; in a dry one pine only on the upland and broadleaf only by water or up
+ * high, their density handed to the oasis broadleaf / the dry scrub tree. `climate` runs it on every write; this
+ * re-runs it on a world whose scatter was borrowed or edited since. --check prints the findings and writes nothing.
+ */
+function commandFlora(): void {
+  const { recipe, file } = loadRecipe();
+  const before = floraFindings(recipe);
+  console.log(`  climate ${floraClimate(recipe)}: ${before.length ? describeFlora(before) : "every tree species fits"}`);
+  if (flag("check")) {
+    if (before.length) process.exitCode = 1;
+    return;
+  }
+  for (const n of applyFlora(recipe)) console.log(`  ${n}`);
+  writeRecipe(recipe, file);
 }
 
 /**
@@ -10954,6 +10994,9 @@ switch (command) {
   case "needs":
     commandNeeds(siteNeedsHost());
     break;
+  case "siting-map":
+    await commandSitingMap(siteNeedsHost());
+    break;
   case "town-pins":
     commandTownPins();
     break;
@@ -11008,6 +11051,9 @@ switch (command) {
     break;
   case "climate":
     commandClimate();
+    break;
+  case "flora":
+    commandFlora();
     break;
   case "planar-cliffs":
     commandPlanarCliffs();
