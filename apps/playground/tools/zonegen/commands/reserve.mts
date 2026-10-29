@@ -221,7 +221,10 @@ export async function run(ctx: Ctx): Promise<number> {
       if (loc.kind !== "town") {
         const size = placeSize.get(r.location) ?? loc.size;
         const small = reservationTierFault(size, { radius: r.radius, approaches: 1 + r.approaches.length });
-        if (small) err(f, "under-tier", `${ref}: ${small} (tools/poi-review/size-tiers.mjs; grow the reservation or re-tier the place)`, ref);
+        // a dated approachRuling excepts the approach COUNT only: re-test with the tier's count met, so the diameter still fails
+        const ruled = small && r.approachRuling ? reservationTierFault(size, { radius: r.radius, approaches: 99 }) === null : false;
+        if (ruled) warn(f, "under-tier-ruled", `${ref}: ${small} — ruled: ${r.approachRuling}`, ref);
+        else if (small) err(f, "under-tier", `${ref}: ${small} (tools/poi-review/size-tiers.mjs; grow the reservation or re-tier the place)`, ref);
         else if (2 * r.radius > tierFor(size).footprintDiameterM.max) warn(f, "over-tier", `${ref}: ${2 * r.radius} m across is more than a ${size} place (${tierFor(size).footprintDiameterM.max} m): the next tier up?`, ref);
       }
       if (r.terrainRadius > 0 && r.terrainRadius < r.radius) warn(f, "terrain-radius", `${ref}: may reshape terrain only inside ${r.terrainRadius} m of a ${r.radius} m site`, ref);

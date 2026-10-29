@@ -578,6 +578,11 @@ export const reservationSchema = z.object({
     .describe("Further ways in, beyond `approach`. Each must actually reach the reservation."),
   entrance: z.object({ position: z.tuple([z.number(), z.number(), z.number()]), yaw: z.number().default(0) }).optional(),
   interior: z.enum(["none", "embedded", "instanced"]).default("none").describe("embedded reserves the underground volume too; instanced only needs the entrance."),
+  approachRuling: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2} .{8,}/, "a dated ruling: YYYY-MM-DD <who>: <why>")
+    .optional()
+    .describe("A dated coordinator ruling that this place has FEWER ways in than its size tier asks, by design (a cape-end entrance reached along one ridge). `reserve` then warns instead of failing `under-tier` on the approach count; the diameter rule still holds."),
   needRulings: z.array(needRulingSchema).default([]).describe("Dated coordinator rulings excepting a site need this reservation's ground misses ({ need: \"rock-face\", ruling: \"2026-10-29 ...\" }); reserve fails every other unmet need."),
 });
 export type Reservation = z.infer<typeof reservationSchema>;

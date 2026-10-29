@@ -12,6 +12,12 @@ budgets, the reviewer, the install queue and the ledger. The order itself is a c
 npx tsx tools/zonegen.mts status <world> --project <p> --zone <z> --next   # from apps/playground
 ```
 
+The ORDER across the world is enforced by `zonegen stages <world> --project <p> --next` (tools/world-order.mts): start
+the file with `--roles`, record each pick with `--site`, `--done status-clean`, `--freeze` before any concept; show Derek
+each on-site sheet and record `zonegen approve --stage concept` before a design starts; record agent stages with
+`--done <stage> --evidence <file>`. Tell Derek what the table says, never a stage from memory. Never unfreeze without a
+dated ruling.
+
 Also read `docs/world-standards/process.md` (or the `world-standards` skill). Reviewers use
 `docs/world-standards/review-rubric.md`. Load other standards only for the task in hand.
 Before choosing the place roster or writing quests, read `docs/world-standards/adventure-design.md`.

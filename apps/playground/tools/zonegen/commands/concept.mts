@@ -36,10 +36,12 @@ import { AssetLibrary, ComponentRegistry, createWorldField, expandScene, PrefabE
 import { findAsset } from "../../_closure.mjs";
 import { runCapped } from "../../_run-capped.mts";
 import { tallScatterRules, treeSampler } from "../../worldgen-relief.mts";
+import { groundSpread, GROUNDLESS_STD } from "../../_far-camera.mts";
 import { approachView, conceptBrief, farView, measureSite, readDistance, type PromptText, type SiteFit, type View } from "../../_concept-site.mts";
 // @ts-ignore plain JS engine tool module
 import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership, ownsFeature } from "../../../../../tools/poi-review/concept-site.mjs";
 import { decodePng, encodePng } from "../../_png.mjs";
+import * as order from "../../world-order.mts";
 // @ts-expect-error untyped helper module
 import { drawText } from "../../_font.mjs";
 
@@ -70,6 +72,13 @@ export async function run(ctx: Ctx): Promise<number> {
   if (!poiArg === !townArg) { console.error("zonegen concept: give --poi <reservation location> (with --zone) or --town <name>"); return 2; }
   if (poiArg && !ctx.zone) { console.error("zonegen concept: --poi needs --zone <id>"); return 2; }
   if (!exists(P.recipe)) { console.error(`zonegen concept: no world ${P.recipe}`); return 2; }
+  // WORLD ORDER (tools/world-order.mts): paint only on a frozen world, on a sited place; a repaint needs current renders
+  const orderKey = (poiArg || townArg)!;
+  if (!ctx.flag("dry-run")) {
+    const refused = order.requirePlaceStage(P.projectDir, orderKey, "world-frozen", "zonegen concept", ctx.world)
+      ?? order.requirePlaceStage(P.projectDir, orderKey, ctx.flag("paint-only") ? "bare-renders" : "sited", "zonegen concept", ctx.world);
+    if (refused) { console.error(refused); return 3; }
+  }
   const raw = readJson(P.recipe) as J;
   const recipe = worldRecipeSchema.parse(raw);
 
@@ -211,6 +220,8 @@ export async function run(ctx: Ctx): Promise<number> {
   for (const v of ["approach", "far"] as const) console.log(`  ${v.padEnd(8)} bare ${rel(renders[v])}${exists(frames[v]) ? `  ->  painted ${rel(frames[v])}` : ""}`);
   console.log(`  plan     ${rel(renders.plan)}\n  sheet    ${rel(sheet)}   (open it: judge the painting against the numbers)\n  manifest ${rel(manifestFile)}`);
   if (exists(frames.approach)) console.log(`  design.json: "concept": [${[frames.approach, frames.far].filter(exists).map((f) => `"${rel(f)}"`).join(", ")}]`);
+  if (!ctx.flag("paint-only")) { const r = order.recordPlaceStage(P.projectDir, orderKey, "bare-renders", { by: "zonegen concept", evidenceFile: manifestFile }, ctx.world); if (r) console.log(`  ${r}`); }
+  if (!ctx.flag("renders-only")) { const r = order.recordPlaceStage(P.projectDir, orderKey, "concept-painted", { by: "zonegen concept", evidenceFile: sheet }, ctx.world); if (r) console.log(`  ${r}`); }
   return 0;
 }
 
@@ -299,6 +310,8 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
     // a frame of one flat colour is a render that never drew (2026-10-29 w5-ground: two black 4 KB frames were kept as the
     // bare site on a busy machine); refuse it rather than overwrite the last good render
     for (const [k, f] of Object.entries(files)) if (blankFrame(f)) return { ok: false, why: `the ${k} frame is blank (one flat colour): the scene never drew — retry on a quieter machine or raise --spot-timeout` };
+    // ... and one whose ground never streamed in (sky over the sea plane; 2026-10-29 w6, tools/_far-camera.mts groundSpread)
+    for (const [k, f] of Object.entries(files)) { const g = groundSpread(decodePng(fs.readFileSync(f)) as Img); if (g < GROUNDLESS_STD) return { ok: false, why: `the ${k} frame shows no ground (lower-frame luma spread ${g.toFixed(1)} < ${GROUNDLESS_STD}): the terrain never streamed — retry` }; }
     // copy out before the temp folder goes
     const keep = fs.mkdtempSync(path.join(os.tmpdir(), "concept-frames-"));
     for (const [k, f] of Object.entries(files)) { const to = path.join(keep, `${k}.png`); fs.copyFileSync(f, to); files[k] = to; }

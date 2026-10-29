@@ -244,6 +244,7 @@ export {
 
 export {
   createWorldField,
+  hollowFillShape,
   RIVER_FALL_MIN,
   RIVER_RUN_GRADE,
   type WorldField,

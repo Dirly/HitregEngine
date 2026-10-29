@@ -14,6 +14,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { ComponentRegistry, applyOps, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
 import { applyOpsToSceneFile } from "./_scene-write.mts";
+import { recordPlaceStage, requirePlaceStage } from "./world-order.mts";
 
 const argv = process.argv.slice(2);
 const opt = (name: string, fallback: string): string => {
@@ -28,6 +29,12 @@ if (!projectName || !townName) {
 }
 const projectDir = path.resolve("projects", projectName);
 const townDoc = JSON.parse(fs.readFileSync(path.join(projectDir, "authoring/towns", `${townName}.json`), "utf8"));
+// WORLD ORDER (tools/world-order.mts): a town in a staged world installs only after its final review passed
+const orderKey = String(townDoc.town ?? townName);
+if (!argv.includes("--dry")) {
+  const refused = requirePlaceStage(projectDir, orderKey, "final-review", "town-install", townDoc.world);
+  if (refused) { console.error(refused); process.exit(3); }
+}
 const models = opt("models", `towns/${townName}`);
 const manifest = JSON.parse(fs.readFileSync(path.join(projectDir, "assets/models", models, "manifest.json"), "utf8")) as {
   districts: Record<string, { file: string; anchor: [number, number, number]; buildings: string[]; tris: number; materials: number; lift?: number;
@@ -100,3 +107,7 @@ result = applyOpsToSceneFile(sceneFile, ops, (d, o) => applyOps(d, o, registry),
 fs.writeFileSync(path.join(projectDir, "authoring/towns", `${townName}-install-ops.json`), `${JSON.stringify({ ops, inverse: result.inverse }, null, 1)}\n`);
 for (const [district, d] of Object.entries(manifest.districts)) console.log(`  ${district}: ${d.buildings.length} buildings, ${d.tris} tris, ${d.materials} materials at [${anchorOf(d)}]${anchorOf(d)[1] !== d.anchor[1] ? ` (layout floor; exported at ${d.anchor[1]})` : ""}`);
 console.log(`installed into ${path.relative(process.cwd(), sceneFile)} (${ops.length} ops; inverse saved)`);
+{
+  const r = recordPlaceStage(projectDir, orderKey, "installed", { by: "town-install", evidenceFile: path.join(projectDir, "authoring/towns", `${townName}-install-ops.json`) }, townDoc.world);
+  if (r) console.log(`  ${r}`);
+}

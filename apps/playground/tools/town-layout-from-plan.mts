@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createWorldField, worldRecipeSchema } from "@hitreg/core";
 import { footprintOf, densify, r2, type Envelopes } from "./town-design-check.mts";
+import { requirePlaceStage } from "./world-order.mts";
 import { townDesignSchema } from "./town-design-schema.mts";
 
 export function layoutFromPlan(argv: string[], projectDir: string, planArg: string): number {
@@ -19,6 +20,9 @@ export function layoutFromPlan(argv: string[], projectDir: string, planArg: stri
   const file = path.isAbsolute(planArg) ? planArg : fs.existsSync(path.resolve(planArg)) ? path.resolve(planArg) : path.join(projectDir, planArg);
   const design = townDesignSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
   const townsDir = path.dirname(file);
+  // WORLD ORDER (tools/world-order.mts): lots go down only on an approved plan, on the current world
+  const refused = requirePlaceStage(projectDir, design.town, "plan-approved", "town-layout --from-plan", design.world);
+  if (refused) { console.error(refused); return 3; }
   const recipeFile = opt("recipe") ? path.resolve(opt("recipe")) : path.join(projectDir, "assets", "worlds", `${design.world}.json`);
   const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync(recipeFile, "utf8")));
   const field = createWorldField(recipe);

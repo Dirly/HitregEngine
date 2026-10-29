@@ -1,0 +1,175 @@
+/**
+ * zonegen stages <world> --project <p>  — the world's build ORDER (tools/world-order.mts): a table place x stage with
+ * ok / STALE / MISSING / BLOCKED-BY, read from authoring/stages/<world>.json against the current world hash. This is
+ * the answer to "what stage is X in": the coordinator reads it and tells Derek what it says, never prose.
+ *
+ *   stages <world> --project <p> [--next] [--json]          the table; --next = the one next allowed action per place
+ *   stages <world> --project <p> --roles a,b,c              start the file / set the siting roles the world must fill
+ *   stages <world> --project <p> --site <id> --kind poi|entrance|town --role <r> [--zone z] [--name stem] --by <who> [--evidence f] [--note ..]
+ *                                                           record a place sited (on the reservation / town centre it has now)
+ *   stages <world> --project <p> --done status-clean [--allow row,row --ruling "YYYY-MM-DD ..."]
+ *                                                           runs `worldgen status`; records it only when every non-optional row is ok
+ *   stages <world> --project <p> --freeze --by <who>        world-frozen (needs status-clean + siting ok). From here every worldgen
+ *                                                           write that changes the world refuses without --unfreeze "<dated ruling>"
+ *   stages <world> --project <p> --done <stage> --place <id> --evidence <file> --by <who> [--note ..]
+ *                                                           an agent stage (design, design-review, town-design, grey-box,
+ *                                                           grey-box-review, detail, final-review, installed, walked); refused
+ *                                                           unless the stage before it is ok; a review's evidence must say PASS
+ *   stages <world> --project <p> --schema                   the file's JSON Schema
+ * Approvals: `zonegen approve`. Concept stages are recorded by `zonegen concept` itself.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { z } from "zod";
+import {
+  MANUAL_STAGES, REVIEW_STAGES, currentSite, currentWorldHash, evaluate, fileSha, isDatedRuling, loadStages, nextOf, reviewVerdict, saveStages, short, stagesFile,
+  stagesOf, worldStagesSchema, type StageState, type WorldStages,
+} from "../../world-order.mts";
+
+interface Ctx { project: string; world: string; zone: string; opt(name: string, fallback?: string): string; flag(name: string): boolean; paths: { projectDir: string } }
+
+const cell = (s: StageState): string => (s.state === "ok" ? "ok" : s.state === "BLOCKED" ? `BLOCKED-BY ${s.blockedBy}` : s.state);
+
+export function table(projectDir: string, doc: WorldStages): string {
+  const ev = evaluate(projectDir, doc);
+  const out: string[] = [`${doc.world}: world ${ev.worldHash ? short(ev.worldHash) : "MISSING"}  (${path.relative(process.cwd(), stagesFile(projectDir, doc.world))})`];
+  out.push("world");
+  for (const s of ev.world) out.push(`  ${cell(s).padEnd(26)} ${s.stage.padEnd(17)} ${s.why}`);
+  for (const { place, rows } of ev.places) {
+    out.push(`${place.id} (${place.kind}, ${place.role}${place.zone ? `, ${place.zone}` : ""})`);
+    for (const s of rows) out.push(`  ${cell(s).padEnd(26)} ${s.stage.padEnd(17)} ${s.why}`);
+  }
+  if (doc.unfreezes.length) {
+    const u = doc.unfreezes[doc.unfreezes.length - 1]!;
+    out.push(`last unfreeze ${u.at}: ${u.ruling} (${u.stale.length} stage(s) went STALE)`);
+  }
+  return out.join("\n");
+}
+
+export function nextLines(projectDir: string, doc: WorldStages): string[] {
+  const ev = evaluate(projectDir, doc);
+  const lines: string[] = [];
+  const w = nextOf(ev.world);
+  if (w) lines.push(`world: ${w.stage} [${cell(w)}${w.why ? `: ${w.why}` : ""}] -> ${w.how}`);
+  for (const { place, rows } of ev.places) {
+    const n = nextOf(rows);
+    if (!n) { lines.push(`${place.id}: done (walked)`); continue; }
+    // BLOCKED points at its blocker: a world stage when the place waits on the world
+    // past `sited` every place stage stands on the frozen world: while it is not frozen, the place waits on the world
+    const frozen = ev.world.find((x) => x.stage === "world-frozen")!.state === "ok";
+    if (w && n.stage !== "sited" && !frozen) lines.push(`${place.id}: ${n.stage} [${cell(n)}] waits on the world (${w.stage} first; nothing past sited runs on an unfrozen world)`);
+    else lines.push(`${place.id}: ${n.stage} [${cell(n)}${n.why ? `: ${n.why}` : ""}] -> ${n.how}`);
+  }
+  return lines;
+}
+
+function worldgenStatusFaults(doc: WorldStages): { faults: string[]; error: string } {
+  const r = spawnSync(process.execPath, ["--import", "tsx", path.join("tools", "worldgen.mts"), "status", doc.world, "--project", doc.project], { encoding: "utf8", maxBuffer: 1 << 24 });
+  const faults: string[] = [];
+  let rows = 0;
+  for (const line of (r.stdout ?? "").split(/\r?\n/)) {
+    const m = /^ {2}(ok|STALE|MISSING)\s+(\S+)/.exec(line);
+    if (!m) continue;
+    rows++;
+    if (m[1] !== "ok" && !/\(optional\)\s*$/.test(line)) faults.push(`${m[2]} ${m[1]}${line.includes("—") ? ` —${line.split("—").slice(1).join("—").trimEnd()}` : ""}`);
+  }
+  return { faults, error: rows ? "" : (r.stderr || r.stdout || "worldgen status printed nothing").trim().split(/\r?\n/)[0]! };
+}
+
+export async function run(ctx: Ctx): Promise<number> {
+  const projectDir = ctx.paths.projectDir;
+  if (ctx.flag("schema")) { console.log(JSON.stringify(z.toJSONSchema(worldStagesSchema, { io: "input" }), null, 2)); return 0; }
+  let doc = loadStages(projectDir, ctx.world);
+  const by = ctx.opt("by");
+  const now = () => new Date().toISOString();
+
+  if (ctx.opt("roles")) {
+    doc ??= worldStagesSchema.parse({ version: 1, world: ctx.world, project: ctx.project });
+    doc.roles = ctx.opt("roles").split(",").map((s) => s.trim()).filter(Boolean);
+    saveStages(projectDir, doc);
+    console.log(`roles: ${doc.roles.join(", ")}`);
+  }
+  if (!doc) { console.error(`zonegen stages: no ${path.relative(process.cwd(), stagesFile(projectDir, ctx.world))} — start it: zonegen stages ${ctx.world} --project ${ctx.project} --roles <role,role,...>`); return 2; }
+  const hash = currentWorldHash(projectDir, doc);
+
+  // ---- sited ----
+  if (ctx.opt("site")) {
+    const id = ctx.opt("site"), kind = ctx.opt("kind"), role = ctx.opt("role");
+    if (!["poi", "entrance", "town"].includes(kind) || !role || !by) { console.error("zonegen stages --site <id> --kind poi|entrance|town --role <role> --by <who> [--zone z] [--name stem]"); return 2; }
+    if (!doc.roles.includes(role)) { console.error(`zonegen stages: role ${role} is not one of this world's roles (${doc.roles.join(", ")})`); return 2; }
+    if (!hash) { console.error("zonegen stages: no world recipe"); return 2; }
+    let p = doc.places.find((x) => x.id === id);
+    if (!p) { p = { id, kind: kind as "poi", role, stages: {} }; doc.places.push(p); }
+    p.kind = kind as "poi"; p.role = role;
+    if (ctx.zone) p.zone = ctx.zone;
+    if (ctx.opt("name")) p.name = ctx.opt("name");
+    const site = currentSite(projectDir, doc, p);
+    if (!site) { console.error(`zonegen stages: ${id} has no ${kind === "town" ? "town in the recipe" : `reservation in zone ${p.zone ?? "(give --zone)"}`}: reserve / pick it first`); return 2; }
+    const ev = ctx.opt("evidence");
+    p.stages["sited"] = { at: now(), worldHash: hash, by, site, ...(ctx.opt("note") ? { note: ctx.opt("note") } : {}), ...(ev ? { evidence: path.relative(projectDir, path.resolve(ev)).split(path.sep).join("/"), evidenceSha: fileSha(path.resolve(ev)) ?? undefined } : {}) };
+    saveStages(projectDir, doc);
+    console.log(`sited ${id} (${kind}, ${role}) at [${site.center}] r ${site.radius} on world ${short(hash)}`);
+    return 0;
+  }
+
+  // ---- status-clean ----
+  if (ctx.opt("done") === "status-clean") {
+    if (!hash) { console.error("zonegen stages: no world recipe"); return 2; }
+    const { faults, error } = worldgenStatusFaults(doc);
+    if (error) { console.error(`zonegen stages: worldgen status failed: ${error}`); return 1; }
+    const allow = ctx.opt("allow").split(",").map((s) => s.trim()).filter(Boolean);
+    const left = faults.filter((f) => !allow.includes(f.split(" ")[0]!));
+    if (allow.length && !isDatedRuling(ctx.opt("ruling"))) { console.error('zonegen stages: --allow needs --ruling "YYYY-MM-DD <who>: <why>"'); return 2; }
+    if (left.length) { console.error(`status-clean refused: worldgen status has ${left.length} open row(s):\n${left.map((f) => `  ${f}`).join("\n")}`); return 1; }
+    doc.stages["status-clean"] = { at: now(), worldHash: hash, by: by || "zonegen stages", note: allow.length ? `allowed open: ${allow.join(", ")}` : "every non-optional row ok", ...(allow.length ? { ruling: ctx.opt("ruling") } : {}) };
+    saveStages(projectDir, doc);
+    console.log(`status-clean recorded on world ${short(hash)}`);
+    return 0;
+  }
+
+  // ---- freeze ----
+  if (ctx.flag("freeze")) {
+    if (!by) { console.error("zonegen stages --freeze --by <who>"); return 2; }
+    const ev = evaluate(projectDir, doc);
+    const bad = ev.world.slice(0, 3).filter((s) => s.state !== "ok");
+    if (bad.length) { console.error(`freeze refused: ${bad.map((s) => `${s.stage} is ${cell(s)}${s.why ? ` (${s.why})` : ""}`).join("; ")}\n  do it: ${bad[0]!.how}`); return 1; }
+    doc.stages["world-frozen"] = { at: now(), worldHash: hash!, by };
+    saveStages(projectDir, doc);
+    console.log(`FROZE ${doc.world} on world ${short(hash!)}: worldgen now refuses world changes without --unfreeze "<dated ruling>"`);
+    return 0;
+  }
+
+  // ---- an agent stage ----
+  if (ctx.opt("done")) {
+    const stage = ctx.opt("done"), key = ctx.opt("place"), ev = ctx.opt("evidence");
+    if (!(MANUAL_STAGES as readonly string[]).includes(stage)) { console.error(`zonegen stages: --done takes status-clean or ${MANUAL_STAGES.join(", ")} (concept stages: zonegen concept; approvals: zonegen approve)`); return 2; }
+    if (!key || !ev || !by) { console.error(`zonegen stages --done ${stage} --place <id> --evidence <file> --by <who>`); return 2; }
+    const p = doc.places.find((x) => x.id === key || x.name === key);
+    if (!p) { console.error(`zonegen stages: no place ${key} (sited: ${doc.places.map((x) => x.id).join(", ") || "none"})`); return 2; }
+    const order = stagesOf(p);
+    const i = order.indexOf(stage);
+    if (i < 0) { console.error(`zonegen stages: a ${p.kind} has no ${stage} stage`); return 2; }
+    const rows = evaluate(projectDir, doc).places.find((e) => e.place === p)!.rows;
+    const before = rows[i - 1]!;
+    if (before.state !== "ok") { const n = nextOf(rows)!; console.error(`${stage} refused for ${p.id}: ${before.stage} is ${cell(before)}${before.why ? ` (${before.why})` : ""}\n  next step: ${n.stage} -> ${n.how}`); return 1; }
+    const file = path.resolve(ev);
+    if (!fs.existsSync(file)) { console.error(`zonegen stages: no evidence file ${ev}`); return 2; }
+    if ((REVIEW_STAGES as readonly string[]).includes(stage)) {
+      const v = reviewVerdict(file);
+      if (v !== "PASS") { console.error(`${stage} refused: the review ${ev} says ${v ?? "no verdict (PASS / RETURN / FAIL)"} — a RETURN is fixed and reviewed again by a FRESH reviewer`); return 1; }
+    }
+    p.stages[stage] = { at: now(), worldHash: hash!, by, evidence: path.relative(projectDir, file).split(path.sep).join("/"), evidenceSha: fileSha(file) ?? undefined, ...(ctx.opt("note") ? { note: ctx.opt("note") } : {}) };
+    saveStages(projectDir, doc);
+    console.log(`recorded ${p.id} ${stage} on world ${short(hash!)}`);
+    const n = nextOf(evaluate(projectDir, doc).places.find((e) => e.place.id === p.id)!.rows);
+    if (n) console.log(`next: ${n.stage} -> ${n.how}`);
+    return 0;
+  }
+
+  if (ctx.flag("json")) { console.log(JSON.stringify(evaluate(projectDir, doc), null, 1)); return 0; }
+  if (ctx.flag("next")) { console.log(nextLines(projectDir, doc).join("\n")); return 0; }
+  console.log(table(projectDir, doc));
+  console.log(`\n${nextLines(projectDir, doc).map((l) => `next  ${l}`).join("\n")}`);
+  return 0;
+}

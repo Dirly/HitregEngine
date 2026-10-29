@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createWorldField, defaultWorldRecipe, worldRecipeSchema } from "@hitreg/core";
-import { FILL_WALL_MAX_M, fillWalls } from "../tools/worldgen-fill-walls.mts";
+import { FILL_WALL_MAX_M, PLATE_EDGE_MAX_M, fillPlates, fillWalls } from "../tools/worldgen-fill-walls.mts";
 
 // 2026-10-29 redstrand w5-ground: a settled-away lake basin's fill stood 36 m over the ground beside it (its sea-cliff rim
 // cleared). A hollow fill reads as ground only when the ground round it stands at or over its level.
@@ -36,5 +36,48 @@ describe("fillWalls", () => {
     const r = world((g) => g + 30, []);
     r.recipe.features.fills[0]!.id = "landform-mesa";
     assert.deepEqual(fillWalls(r.recipe, r.field), []);
+  });
+});
+
+// 2026-10-29 redstrand w6: the settled-away basin under the first town site read from 400 m as one dead-flat plate with a
+// crisp edge. A hollow fill's floor now rises into its rim and swells; a landform fill stays the flat raise it is.
+describe("hollow fill floor", () => {
+  it("is never under the spill level and is not dead flat", () => {
+    const { recipe, field } = world((g) => g + 2);
+    const y = recipe.features.fills[0]!.y;
+    let min = Infinity, max = -Infinity;
+    for (let x = -90; x <= 90; x += 10) for (let z = -90; z <= 90; z += 10) { const h = field.height(x, z); min = Math.min(min, h); max = Math.max(max, h); }
+    assert.ok(min >= y - 0.05, "floor dips under the spill level: " + min + " < " + y);
+    assert.ok(max - min > 0.5, "floor relief only " + (max - min).toFixed(2) + " m");
+  });
+  it("a landform fill stays flat", () => {
+    const r = world((g) => g + 2, []);
+    r.recipe.features.fills[0]!.id = "landform-mesa";
+    const f = createWorldField(r.recipe);
+    const y = r.recipe.features.fills[0]!.y;
+    for (const [x, z] of [[0, 0], [50, -40], [-70, 60]] as const) assert.ok(Math.abs(f.height(x, z) - y) < 0.05);
+  });
+});
+
+describe("fillPlates", () => {
+  // a 200 m square hollow at y 10 in a bowl: flat inside, the ground climbing 1:2 from the outline
+  const sq = 100;
+  const bowl = (flat: boolean) => ({
+    height: (x: number, z: number) => {
+      const d = Math.max(Math.abs(x), Math.abs(z)) - sq;
+      if (d > 0) return 10 + d * 0.5;
+      return flat ? 10 : 10 + 3 * (1 - Math.min(1, -d / 40)) ** 2;
+    },
+    waterY: () => null,
+    rivers: [],
+  });
+  const recipe = worldRecipeSchema.parse({ ...base, features: { fills: [{ id: "fill-1", polygon: [[-sq, -sq], [sq, -sq], [sq, sq], [-sq, sq]], y: 10, bank: 12, tags: ["hollow"] }] } });
+  it("fails a dead-flat floor meeting a climbing bowl in a crease", () => {
+    const p = fillPlates(recipe, bowl(true) as never);
+    assert.equal(p.length, 1);
+    assert.ok(p[0]!.metres > PLATE_EDGE_MAX_M);
+  });
+  it("passes a floor that rises into its rim", () => {
+    assert.deepEqual(fillPlates(recipe, bowl(false) as never), []);
   });
 });

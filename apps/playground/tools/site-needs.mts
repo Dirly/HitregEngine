@@ -994,7 +994,20 @@ export function solveCliffFace(g: NeedGround, need: GroundNeedDoc, area: NeedAre
     Math.floor(Math.min(...corners.map((c) => c[0]!))), Math.floor(Math.min(...corners.map((c) => c[1]!))),
     Math.ceil(Math.max(...corners.map((c) => c[0]!))), Math.ceil(Math.max(...corners.map((c) => c[1]!))),
   ];
-  const { patch, raised } = patchOver(`need-${need.id}`, box, 3, (x, z) => g.height(x, z), wantY);
+  // every edge of the patch falls to the natural ground at no more than EDGE_FALL (rise/run): the lifted block behind the
+  // face otherwise ended at the box edge as a wall (2026-10-29 redstrand w6: a 121 m lift on the SE cape left 33 m steps
+  // at the back and sides where the cape falls to the sea; `worldgen lips` failed 834 cells)
+  const EDGE_FALL = 1.2;
+  const edgeClamped = (x: number, z: number): number | null => {
+    const y = wantY(x, z);
+    if (y === null) return null;
+    // distance to the edge of the shape wantY draws (a rectangle turned to the face, inside the axis-aligned box)
+    const u = (x - fx) * ix + (z - fz) * iz, v = Math.abs((x - fx) * px + (z - fz) * pz);
+    if (u < 0) return y; // the apron and its 45 deg fill fall to the ground on their own
+    const d = Math.min(u - behind, run + crest + back - u, half + taper - v);
+    return Math.min(y, g.height(x, z) + Math.max(0, d) * EDGE_FALL);
+  };
+  const { patch, raised } = patchOver(`need-${need.id}`, box, 3, (x, z) => g.height(x, z), edgeClamped);
   return { ok: true, existing: false, at: [Math.round(fx), Math.round(fz)], faces: Math.round(front), height: H, raised: R1(raised), patch, message: `a ${H} m scarp behind [${Math.round(fx)}, ${Math.round(fz)}], front facing ${compassWord(front)}, ${need.width} m wide (lifted at most ${R1(raised)} m)` };
 }
 

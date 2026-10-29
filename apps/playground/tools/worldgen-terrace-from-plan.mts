@@ -24,6 +24,7 @@ import { recipeInverse, removeTerrace, solveTerraceChain, terraceGates, townWall
 import { checkDesign, densify, footprintOf, inPoly, lineDist, polyEdgeDist, polyEdges, r2, siteFall, type DesignReport, type Envelopes, type ResolvedEdge, type V2 } from "./town-design-check.mts";
 import { DESIGN_RULE, townDesignSchema, type DesignTerrace, type TownDesign } from "./town-design-schema.mts";
 import { programFromPlan } from "./worldgen-town-program.mts";
+import { requirePlaceStage } from "./world-order.mts";
 
 type RoadDoc = WorldRecipe["features"]["roads"][number];
 
@@ -369,6 +370,9 @@ export function commandTerraceFromPlan(host: FromPlanHost, planFile: string): vo
   if (recipe.name !== design.world) host.fail(`terrace --from-plan: the design is for world ${design.world}, this is ${recipe.name}`);
   const town = recipe.features.towns.find((t) => t.id === design.town);
   if (!town) host.fail(`terrace --from-plan: no town ${design.town} in ${recipe.name}`);
+  // WORLD ORDER (tools/world-order.mts): the cut needs the town's plan approved on the current world
+  const refused = requirePlaceStage(path.resolve("projects", host.project), design.town, "plan-approved", "worldgen terrace --from-plan", design.world);
+  if (refused) host.fail(refused);
   const envFile = path.join(path.dirname(file), `${design.name}-envelopes.json`);
   const envelopes: Envelopes = fs.existsSync(envFile) ? JSON.parse(fs.readFileSync(envFile, "utf8")) : {};
   const bare = createWorldField(bareOfTown(recipe, design.town));

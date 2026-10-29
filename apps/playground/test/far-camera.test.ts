@@ -1,6 +1,6 @@
-import test from "node:test";
+import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { checkFrame, farCamera, FAR_MAX_M, FAR_NEAR_M, FAR_WATER_MAX } from "../tools/_far-camera.mts";
+import { checkFrame, farCamera, FAR_MAX_M, FAR_NEAR_M, FAR_WATER_MAX, groundSpread, GROUNDLESS_STD } from "../tools/_far-camera.mts";
 
 // a round island r 600 (ground 30 m at the centre falling to -20 m at r 700), sea level 0
 const ground = (x: number, z: number): number => 30 - (Math.hypot(x, z) / 600) * 30 - Math.max(0, Math.hypot(x, z) - 600) * 0.2;
@@ -100,4 +100,16 @@ test("concept cameras: a boulder in the first 30 m rejects the eye", async () =>
   const rocks = (x: number) => (x < 30 ? 0.01 : 0);
   assert.ok(nearClutter([0, 2, 0], [300, 2, 0], rocks) > NEAR_CLUTTER_MAX);
   assert.ok(nearClutter([100, 2, 0], [400, 2, 0], rocks) <= NEAR_CLUTTER_MAX);
+});
+
+// 2026-10-29 redstrand w6: the propose's light-shots page drew far frames with no ground (sky over the sea plane) after a
+// few long teleports; groundSpread tells them from a real (even flat) ground.
+describe("groundSpread", () => {
+  const frame = (ground: (x: number, y: number) => number) => {
+    const w = 64, h = 36, data = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const v = y < h * 0.5 ? 200 : ground(x, y); const o = (y * w + x) * 4; data[o] = data[o + 1] = data[o + 2] = v; data[o + 3] = 255; }
+    return { width: w, height: h, data };
+  };
+  it("a flat sea plane is groundless", () => assert.ok(groundSpread(frame(() => 110)) < GROUNDLESS_STD));
+  it("textured ground is not", () => assert.ok(groundSpread(frame((x, y) => 90 + ((x * 7 + y * 13) % 50))) > GROUNDLESS_STD));
 });

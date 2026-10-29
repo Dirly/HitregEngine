@@ -24,6 +24,7 @@ import path from "node:path";
 import { createWorldField, worldRecipeSchema, type WorldRecipe } from "@hitreg/core";
 import { walkGridBox } from "./_town-grid.mts";
 import { readJsonTracked, writeJsonFile } from "./_scene-write.mts";
+import { requirePlaceStage } from "./world-order.mts";
 
 const argv = process.argv.slice(2);
 const opt = (name: string, fallback: string): string => {
@@ -45,6 +46,11 @@ const CELL = 3.2;
 const projectDir = path.resolve("projects", projectName);
 const townsDir = path.join(projectDir, "authoring/towns");
 const townDoc = JSON.parse(fs.readFileSync(path.join(townsDir, `${townName}.json`), "utf8"));
+// WORLD ORDER (tools/world-order.mts): a town in a staged world is laid out only after its plan is approved
+{
+  const refused = requirePlaceStage(projectDir, String(townDoc.town ?? townName), "plan-approved", "town-layout", townDoc.world);
+  if (refused) { console.error(refused); process.exit(3); }
+}
 const plan = JSON.parse(fs.readFileSync(path.join(townsDir, `${townName}-plan.json`), "utf8"));
 // --recipe <file>: a scratch copy (pads/lanes trials and their lips/seated gates before the coordinator installs)
 const recipeFile = opt("recipe", "") ? path.resolve(opt("recipe", "")) : path.join(projectDir, "assets/worlds", `${townDoc.world}.json`);

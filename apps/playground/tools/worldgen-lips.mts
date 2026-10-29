@@ -295,6 +295,9 @@ export function readLipsExceptions(recipeFile: string): LipsException[] {
   return Array.isArray(j.exceptions) ? j.exceptions : [];
 }
 
+/** Rise/run a generated cliff-face need may stand at before lips calls it a wall (72 deg). */
+export const NEED_FACE_MAX_SLOPE = 3;
+
 export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number, number]; aliasTol?: number; maxSlope?: number; lipTol?: number; allow?: string[]; exceptions?: LipsException[] } = {}): LipsResult & { faults: (TerrainLipFault & { owner: string })[]; excepted: number } {
   const field = createWorldField(recipe);
   const reference = createWorldField({ ...recipe, features: { ...recipe.features, heightPatches: [], roads: [] } });
@@ -343,7 +346,9 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
     const ref = o.kind === "patch" && o.id.startsWith("tw-") ? withoutTerrace(o.id) : o.kind === "patch" && o.id.startsWith("op:") ? withoutPatch(o.id) : reference;
     const rep = measureTerrainLips(field, ref, {
       x0, z0, x1, z1,
-      aliasTol: opts.aliasTol, maxSlope: opts.maxSlope, lipTol: opts.lipTol,
+      // a ground-need patch (`need-*`, worldgen needs) IS a rock face: its 45-60 deg face is the point, so only a wall
+      // steeper than NEED_FACE_MAX_SLOPE counts (2026-10-29 redstrand w6: the weeping-sun scarp read as 1173 steps)
+      aliasTol: opts.aliasTol, maxSlope: o.kind === "patch" && o.id.startsWith("need-") ? Math.max(opts.maxSlope ?? 1.6, NEED_FACE_MAX_SLOPE) : opts.maxSlope, lipTol: opts.lipTol,
       include: (x, z) => {
         const mine = o.band(x, z);
         if (mine > 0) return false;

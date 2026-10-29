@@ -148,3 +148,24 @@ export function farCamera(c: FarCameraInput): FarCamera | null {
   }
   return null;
 }
+
+/**
+ * Luma spread (standard deviation, 0-255) of the lower 40 % of a rendered frame, where the ground is. Under
+ * GROUNDLESS_STD the terrain never streamed in: the frame is sky over the flat sea plane or a horizon impostor
+ * (2026-10-29 redstrand w6: after a few long teleports the propose's light-shots page drew 5 of 14 far frames with no
+ * ground and then crashed; the frames looked like an open sea and could be mistaken for a sea view). Real ground,
+ * even a flat plain, measures 13-27; the groundless frames 4.4-5.4.
+ */
+export const GROUNDLESS_STD = 8;
+export function groundSpread(img: { width: number; height: number; data: Uint8Array }): number {
+  const { width: w, height: h, data } = img;
+  const ch = data.length / (w * h);
+  let s = 0, q = 0, n = 0;
+  for (let y = Math.floor(h * 0.6); y < h; y += 2)
+    for (let x = 0; x < w; x += 2) {
+      const o = (y * w + x) * ch;
+      const v = data[o]! * 0.3 + data[o + 1]! * 0.59 + data[o + 2]! * 0.11;
+      s += v; q += v * v; n++;
+    }
+  return n ? Math.sqrt(Math.max(0, q / n - (s / n) ** 2)) : 0;
+}

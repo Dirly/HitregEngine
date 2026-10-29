@@ -29,6 +29,7 @@ import { DESIGN_RULE, townDesignSchema, type TownDesign } from "./town-design-sc
 import { bareOfTown } from "./worldgen-terrace-from-plan.mts";
 import { PROGRAM_RULE, bandStreet, planProgramShelves, programFromPlan } from "./worldgen-town-program.mts";
 import { TERRACE_DEFAULTS } from "./worldgen-coastal-towns.mts";
+import { requirePlaceStage } from "./world-order.mts";
 
 const argv = process.argv.slice(2);
 const cmd = argv[0] ?? "";
@@ -97,6 +98,9 @@ function propose(): void {
   if (!townId) throw new Error("propose: --town <recipe town id>");
   const worldName = opt("world") || (fs.existsSync(path.join(townsDir, `${name}.json`)) ? JSON.parse(fs.readFileSync(path.join(townsDir, `${name}.json`), "utf8")).world : "");
   if (!worldName) throw new Error("propose: --world <name> (no authoring/towns/<stem>.json says)");
+  // WORLD ORDER (tools/world-order.mts): the town's layout is drawn after its design passed review, on the current world
+  const refused = requirePlaceStage(projectDir, townId, "design-review", "town-design propose", worldName);
+  if (refused) { console.error(refused); process.exit(3); }
   const { recipe } = loadWorld(worldName);
   const town = recipe.features.towns.find((t) => t.id === townId);
   if (!town) throw new Error(`no town ${townId} in ${recipe.name}`);

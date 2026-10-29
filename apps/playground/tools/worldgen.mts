@@ -111,7 +111,7 @@ import { commandRockSkins, writeRockSkinTemplate } from "./rock-skins.mts";
 import { commandPalette, commandRockAudit } from "./worldgen-rock-audit.mts";
 import { commandWaterEdges } from "./water-edges.mts";
 import { commandWaterLogic, lakeSettleLevels } from "./worldgen-water-logic.mts";
-import { describeFillWalls, fillWalls } from "./worldgen-fill-walls.mts";
+import { describeFillPlates, describeFillWalls, fillPlates, fillWalls } from "./worldgen-fill-walls.mts";
 import { applyFlora, describeFlora, floraClimate, floraFindings } from "./worldgen-flora.mts";
 import { COAST_COLOURS, coastStageCheck, commandCoast, commandCoastTop } from "./worldgen-coast.mts";
 import { riverWaterDoc } from "./_river-water.mts";
@@ -129,6 +129,7 @@ import { commandFine, commandOp, commandOpPreview, fineStatusLine, stampGateStag
 import { findAsset } from "./_closure.mjs";
 import { briefStories, zonegenPopulated, zoneStoriesMissing } from "./_zone-sources.mts";
 import { readJsonTracked, updateJsonFile, writeJsonFile } from "./_scene-write.mts";
+import { guardWorldWrite } from "./world-order.mts";
 
 // ---------------------------------------------------------------- cli plumbing
 
@@ -234,6 +235,13 @@ function writeRecipe(recipe: WorldRecipe, file: string): void {
     recipe.pipeline = { ...recipe.pipeline, [currentStage]: next.stamp };
     if (next.moved) console.log(`  (${currentStage} changed nothing; re-checked against a newer upstream stage, stamp moved just past it)`);
     else if (unchanged) console.log(`  (${currentStage} changed nothing: its stamp is kept, so nothing downstream goes stale)`);
+  }
+  // WORLD ORDER (tools/world-order.mts): a frozen world (authoring/stages/<world>.json) refuses a write that changes the
+  // world under its places, unless --unfreeze "<dated ruling>" (which marks every place stage done on it STALE)
+  {
+    const g = guardWorldWrite(file, recipe, stringOption("unfreeze", ""), `worldgen ${currentStage || command}`);
+    if (!g.ok) fail(g.message);
+    if (g.message) console.log(g.message);
   }
   // validate BEFORE writing: a stage must never leave a broken world on disk
   const parsed = worldRecipeSchema.safeParse(recipe);
@@ -7528,7 +7536,10 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
         if (perched.metres > 100) return `${Math.round(perched.metres)} m of river perched over its valley (${perched.rivers.slice(0, 5).join(", ")}): re-trace`;
         // a filled hollow reads as ground: no fill standing on a wall (tools/worldgen-fill-walls.mts)
         const walls = r.features.fills.length ? fillWalls(r, statusField(r)) : [];
-        return walls.length > 0 ? `filled hollow on a wall: ${describeFillWalls(walls)} — re-run rivers (hollow fills no longer clear sea cliffs)` : null;
+        if (walls.length > 0) return `filled hollow on a wall: ${describeFillWalls(walls)} — re-run rivers (hollow fills no longer clear sea cliffs)`;
+        // ... and as ground, not a plate: no dead-flat floor meeting its bowl in a crease (2026-10-29 redstrand w6)
+        const plates = r.features.fills.length ? fillPlates(r, statusField(r)) : [];
+        return plates.length > 0 ? `filled hollow reads as a plate: ${describeFillPlates(plates)} — re-run rivers (hollow fills carry the tag "hollow" and are shaped by the field)` : null;
       },
     },
     {

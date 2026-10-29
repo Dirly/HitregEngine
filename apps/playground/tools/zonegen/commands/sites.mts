@@ -365,8 +365,16 @@ async function siteNeeds(ctx: Ctx, recipe: J, region: J, candidates: (Candidate 
       rows.push({ id: `foot-${i + 1}`, kind: "face-foot", at: ff.at, y: g.height(ff.at[0], ff.at[1]), radius, view: viewOf(rep, (ff.into + 180) % 360), needs: rep, score: ff.face / 10 });
     });
   }
+  // the face the generator made for THIS place (recipe `needs`, `worldgen needs`): its solved foot is always a candidate
+  // (2026-10-29 redstrand w6: a solved 70 m scarp for weeping-sun was not among the face feet the finder kept, and the
+  // propose reported a SHORTFALL for the very face it had asked for)
+  for (const need of ((recipe.needs ?? []) as J[]).filter((n) => n.kind === "cliff-face" && n.solved && (n.for === forId || n.for === role))) {
+    const at: [number, number] = [need.solved.at[0], need.solved.at[1]];
+    const rep = measureNeeds(g, role, at[0], at[1], radius, overrides, self);
+    rows.push({ id: `need-${need.id}`, kind: "need-face", at, y: g.height(at[0], at[1]), radius, view: viewOf(rep, need.solved.faces), needs: rep, score: 100 });
+  }
   const unmet = (r: Row) => r.needs.results.reduce((n, x) => n + x.faults.length, 0);
-  rows.sort((a, b) => Number(b.needs.met) - Number(a.needs.met) || unmet(a) - unmet(b) || b.score - a.score);
+  rows.sort((a, b) => Number(b.needs.met) - Number(a.needs.met) || Number(b.kind === "need-face") - Number(a.kind === "need-face") || unmet(a) - unmet(b) || b.score - a.score);
   const met = rows.filter((r) => r.needs.met);
   console.log(`\n  site needs for ${role}${forId ? ` (${forId})` : ""}: ${met.length} of ${rows.length} site(s) meet every need (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
   for (const r of rows.slice(0, 12)) console.log(`    ${r.id.padEnd(8)} ${r.kind.padEnd(12)} [${r.at.join(", ")}] y${Math.round(r.y)}  ${needsLine(r.needs)}`);

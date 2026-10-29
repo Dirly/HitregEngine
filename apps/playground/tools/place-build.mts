@@ -47,6 +47,7 @@
  */
 import fs from "node:fs";
 import { readableReportFile } from "./_dress-report.mts";
+import { recordPlaceStage, requirePlaceStage } from "./world-order.mts";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -1080,6 +1081,10 @@ else if (cmd === "quality") { if (!world || !zone) fail("usage: place-build qual
 else if (ID_CMDS.has(cmd ?? "")) {
   if (!world || !zone || !poi) fail("usage: place-build <command> <world> --zone <z> --location <id> [--project p]");
   const t0 = Date.now();
+  // WORLD ORDER (tools/world-order.mts): in a staged world the grey box starts only after the design passed review, and the
+  // live install only after the final review, both on the current world
+  const orderGate = ["plan", "all", "build"].includes(cmd ?? "") ? "design-review" : cmd === "install" && !has("dry-run") && !has("uninstall") ? "final-review" : "";
+  if (orderGate) { const refused = requirePlaceStage(path.join(PROJECTS, project), poi, orderGate, `place-build ${cmd}`, world); if (refused) { console.error(refused); process.exit(3); } }
   if (cmd === "survey") survey();
   if (cmd === "bridge") bridgeJob();
   if (cmd === "approach") { approachOnly = true; plan(); }
@@ -1098,6 +1103,9 @@ else if (ID_CMDS.has(cmd ?? "")) {
   if (cmd === "shots" || cmd === "all") await shots();
   if (cmd === "all") { gates(["place"]); process.exitCode = read(path.join(JOB, "reports", "gates.json")).ok ? 0 : 1; } // the evidence check again, now the shots are newer than the ops; the exit is the final table
   if (cmd === "evidence") recordReadShot(); // the read shot from pictures already taken (no browser)
-  if (cmd === "install") install();
+  if (cmd === "install") {
+    install();
+    if (!has("dry-run") && !has("uninstall") && !process.exitCode) { const r = recordPlaceStage(path.join(PROJECTS, project), poi, "installed", { by: "place-build install" }, world); if (r) console.log(`  ${r}`); }
+  }
   console.log(`(${cmd} ${poi}: ${Math.round((Date.now() - t0) / 1000)} s)`);
 } else fail("usage: place-build archetypes | plan|lab|build|gates|shots|all|install <world> --zone <z> --location <id> [...]  (header of tools/place-build.mts)");

@@ -899,6 +899,26 @@ function hexToRgb(hex: string): [number, number, number] {
   return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
 }
 
+/**
+ * How a hydrology hollow's fill is shaped (tag "hollow", written by `worldgen rivers`): sized from its area, so a big
+ * settled basin gets a broad rim fillet and a swell and a pocket a small one. null: a landform fill (a mesa, a plateau)
+ * stays the flat raise it is. 2026-10-29 redstrand w6: a 0.2 km² filled basin read from 400 m as one dead-flat plate
+ * with a crisp edge (playground `tools/worldgen-fill-walls.mts` fillPlates is the check).
+ */
+export function hollowFillShape(f: FillDoc): { rise: number; rimRun: number; outRun: number; swell: number; grain: number; reach: number } | null {
+  if (!f.tags.includes("hollow")) return null;
+  let a = 0;
+  const p = f.polygon;
+  for (let i = 0; i < p.length; i++) { const [ax, az] = p[i]!, [bx, bz] = p[(i + 1) % p.length]!; a += ax * bz - bx * az; }
+  const r = Math.sqrt(Math.abs(a) / 2 / Math.PI);
+  const rise = clamp(0.03 * r, 2.5, 6);
+  const rimRun = clamp(0.4 * r, 30, 120);
+  const outRun = f.bank;
+  const swell = clamp(0.02 * r, 0.8, 3);
+  const grain = clamp(0.8 * r, 40, 110);
+  return { rise, rimRun, outRun, swell, grain, reach: Math.max(rimRun, outRun) + 10 };
+}
+
 export function createWorldField(recipe: WorldRecipe): WorldField {
   const seed = recipe.seed;
   const t = recipe.terrain;
@@ -1665,7 +1685,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   });
   const lakes = makeBuckets<LakeDoc>(lakeDocs, lakeBounds);
   const fillDocs = recipe.features.fills;
-  const fills = makeBuckets<FillDoc>(fillDocs, (f) => polylineBounds(f.polygon, f.bank + 2));
+  const fills = makeBuckets<FillDoc>(fillDocs, (f) => polylineBounds(f.polygon, Math.max(f.bank, hollowFillShape(f)?.reach ?? 0) + 2));
   // Outlines are rasterised once (polygon-index.ts): a column deep inside a
   // lake or far from its shore answers in one lookup, and only the band
   // along the shore pays for exact segment distances. Testing all 160
@@ -1675,8 +1695,55 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const lakeNo = new Map<LakeDoc, number>(lakeDocs.map((l, i) => [l, i]));
   /** Signed distance to a lake's shoreline: negative inside the water (±1e6 well away from the shore). */
   const lakeDistance = (lake: LakeDoc, x: number, z: number): number => lakeIndex.signedDistance(lakeNo.get(lake)!, x, z);
-  const fillIndex = new PolygonIndex(fillDocs.map((f) => ({ kind: "polygon", points: f.polygon, band: f.bank + 2 }) as OutlineSpec));
+  const fillShapes = fillDocs.map(hollowFillShape);
+  const fillIndex = new PolygonIndex(fillDocs.map((f, i) => ({ kind: "polygon", points: f.polygon, band: Math.max(f.bank, fillShapes[i]?.reach ?? 0) + 2 }) as OutlineSpec));
   const fillNo = new Map<FillDoc, number>(fillDocs.map((f, i) => [f, i]));
+  /**
+   * A hollow's rim stands over its spill level by different heights round it: a cliff foot on one side, a low saddle
+   * on another. The fillet may climb only part way up the rim beside it, or it builds a lip over a low rim. Raster
+   * (FILL_RIM_STEP m, built on first use) of the natural rim height over the fill level, inverse-distance blended
+   * from samples just outside the outline.
+   */
+  const FILL_RIM_STEP = 16;
+  const fillRims: ({ x0: number; z0: number; nx: number; nz: number; cap: Float32Array } | undefined)[] = [];
+  function fillRimCap(no: number, x: number, z: number): number {
+    let g = fillRims[no];
+    const fill = fillDocs[no]!;
+    if (!g) {
+      const shape = fillShapes[no]!;
+      const poly = fill.polygon;
+      let area = 0;
+      for (let i = 0; i < poly.length; i++) { const [ax, az] = poly[i]!, [bx, bz] = poly[(i + 1) % poly.length]!; area += ax * bz - bx * az; }
+      const sign = area > 0 ? 1 : -1;
+      const sx: number[] = [], sz: number[] = [], sh: number[] = [];
+      for (let i = 0; i < poly.length; i++) {
+        const [ax, az] = poly[i]!, [bx, bz] = poly[(i + 1) % poly.length]!;
+        const len = Math.hypot(bx - ax, bz - az);
+        if (len <= 0) continue;
+        const ox = ((bz - az) / len) * sign, oz = (-(bx - ax) / len) * sign;
+        for (let t = 6; t < len + 6; t += 12) {
+          const u = Math.min(t, len);
+          const px = ax + ((bx - ax) * u) / len + ox * 12, pz = az + ((bz - az) * u) / len + oz * 12;
+          sx.push(px); sz.push(pz); sh.push(Math.max(0, naturalHeight(px, pz) - fill.y));
+        }
+      }
+      const [minX, minZ, maxX, maxZ] = polylineBounds(poly, shape.reach + FILL_RIM_STEP);
+      const nx = Math.ceil((maxX - minX) / FILL_RIM_STEP) + 1, nz = Math.ceil((maxZ - minZ) / FILL_RIM_STEP) + 1;
+      const cap = new Float32Array(nx * nz);
+      for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+        const cx = minX + i * FILL_RIM_STEP, cz = minZ + j * FILL_RIM_STEP;
+        let ws = 0, hs = 0;
+        for (let k = 0; k < sx.length; k++) { const w = 1 / ((sx[k]! - cx) ** 2 + (sz[k]! - cz) ** 2 + 400); ws += w * w; hs += w * w * sh[k]!; }
+        cap[j * nx + i] = ws > 0 ? hs / ws : 0;
+      }
+      g = { x0: minX, z0: minZ, nx, nz, cap };
+      fillRims[no] = g;
+    }
+    const fx = clamp((x - g.x0) / FILL_RIM_STEP, 0, g.nx - 1.001), fz = clamp((z - g.z0) / FILL_RIM_STEP, 0, g.nz - 1.001);
+    const i = Math.floor(fx), j = Math.floor(fz), ax = fx - i, az = fz - j;
+    const c = g.cap;
+    return (c[j * g.nx + i]! * (1 - ax) + c[j * g.nx + i + 1]! * ax) * (1 - az) + (c[(j + 1) * g.nx + i]! * (1 - ax) + c[(j + 1) * g.nx + i + 1]! * ax) * az;
+  }
   /** Widest the blob ever gets — a taper may widen upward as well as narrow. */
   const blobReach = (b: BlobDoc): number => Math.max(b.radius, b.topRadius ?? b.radius);
   const blobs = makeBuckets<BlobDoc>(recipe.features.blobs, (b) => [
@@ -2924,11 +2991,39 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       for (let k = 0; k < nearLakes.length; k++) if (lakeSd[k]! <= nearLakes[k]!.bank * 0.5) underLake = true;
       if (!underLake) {
         for (const fill of nearFills) {
+          const no = fillNo.get(fill)!;
+          const shape = fillShapes[no];
+          if (!shape) {
+            if (out >= fill.y) continue;
+            const sd = fillIndex.signedDistance(no, x, z);
+            if (sd > fill.bank) continue;
+            const w = sd <= 0 ? 1 : 1 - smoothstep(0, fill.bank, sd);
+            out = out + (fill.y - out) * w;
+            continue;
+          }
+          // A hydrology hollow (tag "hollow"): the floor reads as ground, not a dead-flat plate with a crisp edge
+          // (2026-10-29 redstrand w6). Never under the spill level (no new pond); the floor rises into its rim over
+          // `rimRun` (a fillet, its edge line warped so it is no traced contour) and carries a low swell of ground
+          // noise deep inside; outside, the raise eases back to the natural bowl over `outRun`.
           if (out >= fill.y) continue;
-          const sd = fillIndex.signedDistance(fillNo.get(fill)!, x, z);
-          if (sd > fill.bank) continue;
-          const w = sd <= 0 ? 1 : 1 - smoothstep(0, fill.bank, sd);
-          out = out + (fill.y - out) * w;
+          const sdRaw = fillIndex.signedDistance(no, x, z);
+          if (sdRaw > shape.outRun + 8) continue;
+          const sd = sdRaw + 8 * perlin2(x / 70, z / 70, recipe.seed + 6211);
+          let tgt: number;
+          let w = 1;
+          // the lift only where the natural ground is under the level (k): ground the outline overshoots onto stays itself
+          const k = clamp((fill.y - out) / 3, 0, 1);
+          const rise = Math.min(shape.rise, 0.8 * fillRimCap(no, x, z)) * k;
+          if (sd <= 0) {
+            const t = smoothstep(0, shape.rimRun, -sd);
+            const n = clamp(0.5 + 0.5 * (perlin2(x / shape.grain, z / shape.grain, recipe.seed + 6217) * 0.7 + perlin2((x * 2.7) / shape.grain, (z * 2.7) / shape.grain, recipe.seed + 6229) * 0.3), 0, 1);
+            tgt = fill.y + rise * (1 - t) * (1 - t) + shape.swell * k * n * t;
+          } else {
+            const s = smoothstep(0, shape.outRun, sd);
+            tgt = fill.y + rise * (1 - s);
+            w = 1 - s;
+          }
+          if (out < tgt) out = out + (tgt - out) * w;
         }
       }
     }

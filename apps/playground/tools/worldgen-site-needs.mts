@@ -27,7 +27,7 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { createWorldField, TOWN_SITE_ROLES, type GroundNeedDoc, type TownDoc, type WorldField, type WorldRecipe } from "@hitreg/core";
-import { farCamera, FAR_MAX_M } from "./_far-camera.mts";
+import { farCamera, FAR_MAX_M, groundSpread, GROUNDLESS_STD } from "./_far-camera.mts";
 import { decodePng, encodePng } from "./_png.mjs";
 import { drawText as drawGlyphs } from "./_map-text.mts";
 import { coastalFaults, findCoastalSites, measureCoastalSite } from "./worldgen-coastal-towns.mts";
@@ -379,6 +379,9 @@ for (const c of data.cands) {
     const hit = fs.existsSync(frames) ? fs.readdirSync(frames).find((x) => x === `${pre}${c.id}-12.png` || x === `${pre}${c.id}-interior.png`) : undefined;
     if (!hit) continue;
     const frame = path.join(frames, hit);
+    // a frame whose ground never streamed in (sky over the sea plane) is not a picture of the site: no far-<id>.png
+    const spread = groundSpread(decodePng(fs.readFileSync(frame)));
+    if (spread < GROUNDLESS_STD) { console.warn(`  far render ${c.id}: NO GROUND drew (lower-frame luma spread ${spread.toFixed(1)} < ${GROUNDLESS_STD}) — re-render it (fewer spots per run)`); continue; }
     markFrame(frame, path.join(dir, `far-${pre}${c.id}.png`), c.id, (c as { farCamera?: { distance?: number; bearing?: number } }).farCamera);
     c.far = `far-${pre}${c.id}.png`;
   }
