@@ -169,7 +169,9 @@ export function findChimneys(root: THREE.Object3D, skip?: (material: THREE.Mater
     // a stack has the roof or the air on all four sides, a keystone, a corbel or a sill has its wall behind it
     const reach = Math.max(p.x1 - p.x0, p.z1 - p.z0) / 2 + 0.4;
     let drops = true;
-    for (const [dx, dz] of [[reach, 0], [-reach, 0], [0, reach], [0, -reach]] as const) {
+    // and the four diagonals (k-kit 2026-10-29): an ANGLE buttress top at a chapel tower's corner has the tower only
+    // diagonally behind it, so the four axis probes all fell into the air and the Font Chapel's buttress "smoked"
+    for (const [dx, dz] of [[reach, 0], [-reach, 0], [0, reach], [0, -reach], [reach, reach], [-reach, reach], [reach, -reach], [-reach, -reach]] as const) {
       if (!(highestAt(x + dx, z + dz) < p.y - 0.3)) drops = false;
     }
     if (!drops) continue;

@@ -47,4 +47,12 @@ describe("findChimneys", () => {
     expect(tops[0]!.x).toBeCloseTo(3);
     expect(tops[0]!.z).toBeCloseTo(3);
   });
+  it("does not smoke an angle buttress top at a tower's corner (the tower is only diagonally behind it)", () => {
+    // k-kit 2026-10-29: the Font Chapel's corner buttress (a small square top, sky above, the four axis probes in the
+    // air) was found as a stack; the diagonal probes hit the tower
+    const tower = new THREE.Group();
+    tower.add(box(4, 30, 4, 0, 0, 0));        // tower 4 x 4, x/z -2..2
+    tower.add(box(0.8, 19.2, 0.8, 2.6, 0, 2.6)); // angle buttress clear of the +x+z corner (2.2..3.0), top at 19.2
+    expect(findChimneys(tower)).toHaveLength(0);
+  });
 });
