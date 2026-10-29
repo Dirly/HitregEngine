@@ -20,6 +20,9 @@
  *     [--port 5291]             (default 5291) and stops it by PID afterwards. Never point --url at a server you
  *                               do not own: the page blocks every dev-server write, but it still loads the scene.
  *     [--distance 4] [--gap 2]  camera-to-characters metres, metres between the two characters
+ *     [--fixed-rig]             rig spots shot from FIXED cameras at the rig pose on the field ground (grey-box
+ *                               scenes: the rig camera gave black frames against static massing boxes); a fixed camera
+ *                               under the ground is refused (exit 2) on every run
  *     [--keep-mobs] [--headed] [--pick-only]   (--pick-only: write the auto spots and stop)
  *     [--spot-timeout 90]       seconds one spot may take; a stalled spot prints `TIMEOUT spot <name>` and is skipped
  *     [--ab]                    per spot, time the cheap world extras OFF vs ON in the same session (vsync off)
@@ -213,6 +216,28 @@ else {
   console.log(`auto-picked ${spots.length} spots -> ${f} (pass --spots ${f} on the AFTER run)`);
 }
 if (argv.includes("--pick-only")) { console.log(JSON.stringify(spots)); process.exit(0); }
+// --fixed-rig: every RIG spot becomes a FIXED camera at the pose the rig would take (distance behind the spot along
+// `facing`, eye 1.7 m over the field ground or the pitch rise), looking at the spot at chest height. The rig camera
+// against static massing boxes (a grey-box scene) gave black frames on every rig spot (z1-town2 2026-10-28).
+const groundAt = (x: number, z: number): number => { const h = field!.height(x, z); return field!.surfaceCast(x, z, h + 40, h - 40) ?? h; };
+if (argv.includes("--fixed-rig") && field) {
+  spots = spots.map((sp) => {
+    if (sp.camera && sp.target) return sp;
+    const [fx, fz] = lookDir(sp.facing ?? 180);
+    const d = sp.distance ?? DIST;
+    const cx = sp.x - fx * d, cz = sp.z - fz * d;
+    const ty = groundAt(sp.x, sp.z) + 1.5;
+    const cy = Math.max(groundAt(cx, cz) + 1.7, ty + Math.tan(sp.pitch ?? 0.03) * d);
+    return { ...sp, camera: [cx, cy, cz] as [number, number, number], target: [sp.x, ty, sp.z] as [number, number, number] };
+  });
+  console.log(`--fixed-rig: ${spots.length} spot(s) shot from fixed cameras at the rig pose`);
+}
+// a fixed camera under the ground shoots the inside of the terrain (z1-town2: y 17.5 over ground 18.2): refuse it
+// (outdoor spots only: a spot with its own floor `y` is an interior or cave and may sit under the top ground)
+if (field) {
+  const under = spots.filter((sp) => sp.camera && sp.y === undefined && sp.camera[1] < groundAt(sp.camera[0], sp.camera[2]) + 0.3);
+  if (under.length) { console.error(`STOP: fixed camera(s) under the ground: ${under.map((sp) => `${sp.name} y ${sp.camera![1]} over ground ${groundAt(sp.camera![0], sp.camera![2]).toFixed(1)}`).join(", ")}`); process.exit(2); }
+}
 // under the heavy-lock wrapper (it exports HEAVY_LOCK): the slot's label carries the spot count, so `heavy status` shows the size of the run
 if (process.env.HEAVY_LOCK) {
   try {

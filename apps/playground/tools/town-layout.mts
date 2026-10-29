@@ -165,6 +165,13 @@ const MAX_SPREAD = Number(opt("max-spread", PADS ? "3" : "0.8"));
 const problems: string[] = [];
 const placed: Placed[] = [];
 
+/** The terrace polyline's offset `v` at chord-frame `uu` (frame origin a, axes u/v): a bent shelf's crown line. */
+function shelfV(pts: P[], a: P, u: P, v: P, uu: number): number {
+  const f = pts.map((q) => [(q[0] - a[0]) * u[0] + (q[1] - a[1]) * u[1], (q[0] - a[0]) * v[0] + (q[1] - a[1]) * v[1]] as P);
+  if (uu <= f[0]![0]) return f[0]![1];
+  for (let k = 1; k < f.length; k++) if (uu <= f[k]![0]) { const t = (uu - f[k - 1]![0]) / ((f[k]![0] - f[k - 1]![0]) || 1); return f[k - 1]![1] + (f[k]![1] - f[k - 1]![1]) * t; }
+  return f.at(-1)![1];
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function evaluate(b: any, bu: number, sideName: string, setback: number, terraceId: string): Placed | null {
   const terrace = town!.terraces.find((t) => t.id === terraceId);
@@ -183,6 +190,10 @@ function evaluate(b: any, bu: number, sideName: string, setback: number, terrace
   const lane = (plan.lanes ?? []).find((l: { id: string }) => l.id === b.street) as { road?: string; terrace?: string; v?: number; width?: number } | undefined;
   const laneRoads = lane?.road ? ownRoads.filter((r) => r.id === lane.road) : lane ? [] : ownRoads;
   if (lane && lane.v !== undefined) { streetV = lane.v; streetHalf = (lane.width ?? 4) / 2; }
+  // `brow`: the street follows the SHELF, `brow` metres off the terrace polyline at this u (+ = east side), so a lane
+  // on a bent shelf stays on it (a constant chord-frame `v` ran 4.5 m off a bent shelf's crown, z1-town 2026-10-28)
+  const browLane = lane as { brow?: number; width?: number } | undefined;
+  if (browLane && typeof browLane.brow === "number") { streetV = shelfV(terrace.points as P[], a, u, v, bu) + browLane.brow; streetHalf = (browLane.width ?? 4) / 2; }
   for (const r of laneRoads) {
     const pts = r.points as P[];
     for (let k = 1; k < pts.length; k++) {
@@ -531,7 +542,8 @@ if (argv.includes("--write-lanes")) {
   const roadsRaw = recipeRaw.features.roads as { id: string; points: P[] }[];
   const written: string[] = [];
   for (const lane of (plan.lanes ?? []) as { id: string; terrace: string; v?: number; width?: number; road?: string }[]) {
-    if (lane.road || lane.v === undefined || (lane as { placementOnly?: boolean }).placementOnly) continue;
+    const brow = (lane as { brow?: number }).brow;
+    if (lane.road || (lane.v === undefined && typeof brow !== "number") || (lane as { placementOnly?: boolean }).placementOnly) continue;
     const t = town.terraces.find((x) => x.id === lane.terrace);
     const onIt = placed.filter((q) => (plan.buildings as { id: string; street?: string }[]).find((b) => b.id === q.id)?.street === lane.id);
     if (!t || onIt.length === 0) continue;
@@ -544,9 +556,12 @@ if (argv.includes("--write-lanes")) {
     const us = onIt.flatMap((q) => q.corners.map(toU));
     const u0 = Math.min(...us) - 4;
     const u1 = Math.max(...us) + 4;
-    const at = (uu: number): P => [a[0] + u[0] * uu + v[0] * lane.v!, a[1] + u[1] * uu + v[1] * lane.v!];
-    const pts: P[] = [at(u0), at(u1)];
-    const ys = [t.groundY, t.groundY];
+    const laneV = (uu: number): number => (typeof brow === "number" ? shelfV(t.points as P[], a, u, v, uu) + brow : lane.v!);
+    const at = (uu: number): P => [a[0] + u[0] * uu + v[0] * laneV(uu), a[1] + u[1] * uu + v[1] * laneV(uu)];
+    // a brow lane follows the bent shelf: one point every ~4 m (a chord lane stays a straight two-point line)
+    const steps = typeof brow === "number" ? Math.max(1, Math.ceil((u1 - u0) / 4)) : 1;
+    const pts: P[] = Array.from({ length: steps + 1 }, (_, i) => at(u0 + ((u1 - u0) * i) / steps));
+    const ys = pts.map(() => t.groundY);
     // join the nearer end to the nearest point of another town road (not a lane of this pass)
     let best: { end: 0 | 1; q: P; d: number } | null = null;
     for (const r of recipe.features.roads.filter((r) => r.id.startsWith(`${town.id}-`) && !r.id.startsWith(`${town.id}-lane-`))) {

@@ -11,6 +11,7 @@
 //        --size 512x512 --prompt-file prompt.txt [--ref a.png [--ref b.png …]] [--alpha] [--timeout 600] [--force]
 //        (every --ref is attached, in order; the prompt names them by position)
 //        --paint: the one --ref is a screenshot whose COMPOSITION is repainted, resampled smooth (loading art)
+//   (gen / gen-set print JSON: seconds, tokens = the session's Codex token count or null, results per image)
 //   gen / gen-set --dry-run   print the codex command and the stdin brief it would send, then exit (no request, no call)
 //   node tools/image-request.mjs gen-set --manifest set.json [--timeout 1800]   # N images in ONE codex session
 //   node tools/image-request.mjs new --id plan --target … --size 1024x1280 --prompt "…"   # queue only
@@ -167,12 +168,15 @@ async function generate(items, timeoutSec) {
   const t0 = Date.now();
   const res = runCodex(stage, brief(items), refs, timeoutSec);
   const secs = Number(((Date.now() - t0) / 1000).toFixed(0));
+  // the Codex CLI ends a session with "tokens used: N"; the result JSON carries it so callers can keep a ledger
+  const tokenMatch = `${res.stdout ?? ""}\n${res.stderr ?? ""}`.match(/tokens used[:\s]*([\d,]+)/i);
+  const tokens = tokenMatch ? Number(tokenMatch[1].replace(/,/g, "")) : null;
 
   if (res.status !== 0 && !items.some((it) => fs.existsSync(path.join(stage, it.file)))) {
     const why = `codex exec exited ${res.status}${res.signal ? ` (${res.signal})` : ""}`;
     for (const it of items) write(it.id, { ...read(it.id), status: "failed", finishedAt: new Date().toISOString(), fulfiller: "codex", notes: why });
     console.error((res.stderr || res.stdout || "").slice(-2000));
-    console.error(`${why} after ${secs}s`);
+    console.error(`${why} after ${secs}s; Codex tokens: ${tokens ?? "unknown"}`);
     process.exit(1);
   }
 
@@ -194,11 +198,11 @@ async function generate(items, timeoutSec) {
     let flattened = null;
     if (!it.alpha) flattened = await flattenOntoWhite(it.target);
     const info = pngInfo(it.target);
-    write(it.id, { ...read(it.id), status: "done", finishedAt: new Date().toISOString(), fulfiller: "codex", notes: `${secs}s` });
+    write(it.id, { ...read(it.id), status: "done", finishedAt: new Date().toISOString(), fulfiller: "codex", notes: `${secs}s`, tokens });
     out.push({ id: it.id, status: "done", target: it.target, bytes: fs.statSync(it.target).size, size: `${info.w}x${info.h}`, alpha: info.alpha, ...(flattened ? { fixed: flattened } : {}) });
   }
   const strays = fs.readdirSync(stage).filter((f) => !items.some((it) => it.file === f));
-  console.log(JSON.stringify({ seconds: secs, results: out, ...(strays.length ? { discardedStrays: strays } : {}) }, null, 2));
+  console.log(JSON.stringify({ seconds: secs, tokens, results: out, ...(strays.length ? { discardedStrays: strays } : {}) }, null, 2));
   process.exit(bad ? 1 : 0);
 }
 

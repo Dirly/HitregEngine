@@ -612,3 +612,33 @@ test("gate 16: a story element's props must exist in the project closure's catal
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("gate 12: a clearing outside the reservation never stretches the footprint; a recorded coordinator size ruling excepts only the usable-area shortfall", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "poi-ruling-"));
+  try {
+    const zone = path.join(root, "zonegen", "w", "zones", "z"), d = path.join(zone, "pois", "gate");
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(zone, "reservations.json"), JSON.stringify({ reservations: [{ location: "gate", center: [0, 0], radius: 100 }] }));
+    fs.writeFileSync(path.join(d, "brief.json"), JSON.stringify({ id: "gate", adventureSize: "medium" }));
+    const hand = { integration: { worldOps: "world-ops.json" }, populateClearings: ["a", "b"], measurements: { measuredCombinedUsableAreaM2: 8800, approaches: [{ from: "trail" }, { from: "river" }],
+      features: [{ id: "front", kind: "landmark", linkedTo: ["plaza"] }, { id: "plaza", kind: "shore", linkedTo: ["front"] }, { id: "pool", kind: "water", linkedTo: ["plaza"] }] } };
+    fs.writeFileSync(path.join(d, "handoff.json"), JSON.stringify(hand));
+    fs.writeFileSync(path.join(d, "world-ops.json"), JSON.stringify([{ edit: "add-feature", kind: "heightPatches", feature: { id: "cut", origin: [-90, -90], size: [180, 180] } }]));
+    // two site clearings inside the disc, one sight-line tree cut 300 m out on the moor
+    fs.writeFileSync(path.join(d, "clearings.json"), JSON.stringify([{ id: "plaza", center: [0, 0], radius: 20 }, { id: "rim", center: [60, 0], radius: 10 }, { id: "moor-sightline", center: [300, 0], radius: 22 }]));
+    const m = measureSize(d);
+    assert.ok(m.measurement.footprintDiameterM < 300, `footprint ${m.measurement.footprintDiameterM}`);
+    assert.deepEqual(m.faults, ["usable area 8800 m2, a medium place needs >= 9000 m2"]);
+    // the coordinator's ruling, recorded where the gate reads it
+    fs.writeFileSync(path.join(zone, "size-rulings.json"), JSON.stringify({ rulings: [{ job: "gate", by: "coordinator", date: "2026-10-29", ruling: "entrance: front + plaza + approaches", usableAreaM2: 8800 }] }));
+    const ok = measureSize(d);
+    assert.equal(ok.ok, true, ok.faults.join("; "));
+    assert.match(ok.excepted.join(" "), /EXCEPTED: coordinator 2026-10-29/);
+    // a place that shrinks below the ruled figure fails again, and the ruling never excepts any other fault
+    hand.measurements.measuredCombinedUsableAreaM2 = 8700; hand.populateClearings = ["a"];
+    fs.writeFileSync(path.join(d, "handoff.json"), JSON.stringify(hand));
+    assert.deepEqual(measureSize(d).faults, ["usable area 8700 m2, a medium place needs >= 9000 m2", "1 creature group(s), a medium place needs 2+"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

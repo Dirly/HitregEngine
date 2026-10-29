@@ -54,6 +54,7 @@ tools/*
 !tools/poi-review/
 !tools/dungeon-pipeline/
 !tools/place-build/
+!tools/armor-codex/
 !tools/dungeon-room-kit/
 tools/dungeon-room-kit/**/__pycache__/
 tools/dungeon-room-kit/examples/kit-out/

@@ -23,6 +23,40 @@ All three are at the body's density (109 texels/m, nearest-filtered). One model
 
 ## Making a set, in order
 
+### One command
+
+From `apps/playground`, one brief file per set (`projects/foundation/authoring/armor-sets/<id>.json`; its
+schema is `armor brief schema`, every field described):
+
+    node --import tsx tools/armor.mts brief new <id> --project foundation    # template; fill every TODO
+    node --import tsx tools/armor.mts run <id> --project foundation          # lint -> gen -> import -> bake -> items -> review
+    node --import tsx tools/armor.mts queue <id> <id> … --project foundation # several sets back to back
+    node --import tsx tools/armor.mts status [<id>] --project foundation     # each stage ok / STALE / MISSING / FAILED
+
+Every stage can also be run alone (`brief lint`, `gen [--dry-run] [--force]`, `import`, `bake`, `items`,
+`items lint`, `review`). What each does is the manual order below, automated:
+
+- **gen** writes ONE `image-request gen-set` manifest in this doc's order (body over the key; the woman's
+  sheet with `key-female.png` first and his art second; helm and shoulders with `key-labelled.png` first and
+  the body second plus the match-the-body paragraph and the clean-read rule). The SUBJECT is composed from the
+  brief and carried word for word on all four prompts. Sheets that exist are skipped (`--force` redoes them),
+  so a set runs as two Codex sessions: the body, then everything painted to it. A session attaches each
+  reference once, so each prompt is told which attachment is its FIRST and SECOND. Token counts go to
+  `authoring/armor-sets/ledger.md`.
+- **import** imports all four sheets, composites her chest front (`<id>-f`), runs match-material (the brief's
+  `match`, or the weight-class default: hood and soft pad from chest + arms; a plate set's from the trousers)
+  and prints the gates: holes inside the body's real UV triangles (only robe/tasset hems and the back ornament
+  may cut), opaque texels on cut-out free edges (a few stray touches are cleared; more fail: regenerate), and
+  texels/m on each model. A failure keeps the stage and installs nothing.
+- **bake** = `body-page` + `weapon-page` for helm and shoulder with every theme already on the page + icons.
+- **items** = one item per slot per tier (`<id>-<slot>-<rarity>`), man's parts, `Ornate*`/`ChestHalo` only on
+  ornate rare+ tiers, tagged with the set id; icon framing for gloves/boots goes into `item-icons.json`.
+- **review** writes `authoring/armor-sets/review/<id>.png`: the dressed character in its bind pose (both sexes,
+  front and back, one row per tier, mounted with the creation asset's mounts) plus the icon strip. It is drawn
+  in software, with no browser or dev server. Look at it; the creator (`/?creator`) is still the in-engine check.
+
+The steps below are the fallback when a stage needs doing by hand.
+
 1. **Body first.** Write the SUBJECT (materials, colours, trim, the back
    ornament) and generate over `tools/atlas/sets/human-body/key.png` with `tools/atlas/sets/human-body/prompt.md`.
    Import with `sets/human-body/manifest.json` (`solidGround`). Check alpha at

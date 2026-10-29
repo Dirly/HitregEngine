@@ -140,6 +140,9 @@ export function measurementFaults(m) {
   if (t.id === "crossing") return crossingFaults(m, t);
   const out = [];
   if (m.footprintDiameterM < t.footprintDiameterM.min) out.push(`footprint ${Math.round(m.footprintDiameterM)} m across, a ${t.id} place needs >= ${t.footprintDiameterM.min} m`);
+  // L (Wristgate 2026-10-28: sight-line tree clearings 300 m out stretched a medium place's hull to 415 m and nobody said so):
+  // a footprint over the tier's maximum is a fault too — the place is bigger than its tier, or something far off is in the hull
+  if (Number.isFinite(t.footprintDiameterM.max) && m.footprintDiameterM > t.footprintDiameterM.max) out.push(`footprint ${Math.round(m.footprintDiameterM)} m across, over the ${t.id} maximum ${t.footprintDiameterM.max} m (a far clearing or route in the hull, or the wrong tier)`);
   if (m.usableAreaM2 === null) out.push(`no MEASURED usable area (handoff.measurements.measuredCombinedUsableAreaM2): an estimate does not count; a ${t.id} place needs >= ${t.minUsableAreaM2} m2`);
   else {
     if (m.usableAreaM2 < t.minUsableAreaM2) out.push(`usable area ${Math.round(m.usableAreaM2)} m2, a ${t.id} place needs >= ${t.minUsableAreaM2} m2`);

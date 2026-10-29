@@ -321,6 +321,14 @@ export const placeLayoutSchema = z.object({
     bank: z.number().min(6).max(30).default(8).describe("Metres the shore eases from the waterline back to the pad (>= 6: the 6 m rule; no lip)."),
     material: z.string().optional().describe("Water material for this pool (recipe lake `material`): a still black pool, a murky tarn."),
   }).strict()).max(4).default([]).describe("STILL WATER as data: a hand-placed recipe lake (carve: true) of ONE level sunk below the pad in its own hollow. L (KNUCKLECROWN 2026-10-28): a landmark ringing a pool had no way to say the pool; a basin kerb is a square tank."),
+  clearings: z.array(z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    element: z.string().optional().describe("The design element the clearing serves (checked like a piece's)."),
+    at: xz.describe("Place frame centre."),
+    radius: z.number().min(8).max(160).describe("Metres."),
+    keep: z.number().min(0).max(1).default(0.15).describe("Share of trees and scatter kept inside (0.15: a heath with a few stripped trees)."),
+    feather: z.number().min(0).max(60).default(20).describe("Metres outside the edge over which the woods return."),
+  }).strict()).max(6).default([]).describe("HEATH / SIGHTLINE clearings as data (recipe vegetation clearings, scatter only, ground cover kept): a landmark in woodland is hidden from its own roads by the trees, not the terrain. L (KNUCKLECROWN 2026-10-28: 25 m pillars on a forested crown were invisible from all three roads at 300 m)."),
 }).strict().superRefine((l, ctx) => {
   const ids = l.pieces.map((p) => p.id);
   for (const id of new Set(ids)) if (ids.filter((x) => x === id).length > 1) ctx.addIssue({ code: "custom", path: ["pieces"], message: `piece id ${id} repeats` });
@@ -412,7 +420,7 @@ export function layoutCoverage(design: { elements?: { id: string; madeOf?: strin
   for (const e of els) {
     const props = (e.madeOf ?? []).filter((m) => !exempt.test(m) && m.includes("/") && (o.catalogued?.(m) ?? true));
     if (!props.length || props.every((m) => (o.questProps ?? []).includes(m))) continue;
-    if (!l.pieces.some((p) => p.element === e.id) && !l.ground.some((q) => q.element === e.id) && !(l.pools ?? []).some((q) => q.element === e.id)) out.push(`element ${e.id} has no layout piece`);
+    if (!l.pieces.some((p) => p.element === e.id) && !l.ground.some((q) => q.element === e.id) && !(l.pools ?? []).some((q) => q.element === e.id) && !(l.clearings ?? []).some((q) => q.element === e.id)) out.push(`element ${e.id} has no layout piece`);
   }
   return out;
 }
@@ -1315,8 +1323,22 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   if (L) for (const q of L.pools ?? []) {
     const c = toWorld(core.at, front, q.at);
     worldOps.push({ edit: "add-feature", kind: "lakes", feature: { id: `pb-${poi}-pool-${q.id}`, center: [r2(c[0]), r2(c[1])], radius: q.radius, waterY: r2(padY - q.sink), depth: q.depth, bank: q.bank, carve: true, ...(q.material ? { material: q.material } : {}) } });
+    // the hollow is cut INTO the core pad patch too: a height patch wins over the lake's own carve, so the pool on a
+    // levelled crown drew as dry pad (L KNUCKLECROWN 2026-10-28: water-edges "0 bodies", the pool flat at padY)
+    const pad = worldOps.find((w: any) => w.feature?.id === `pb-${poi}-core-pad`) as any, wy = padY - q.sink;
+    if (pad?.feature?.heights) {
+      const P = pad.feature, st = P.size[0] / (P.columns - 1);
+      for (let rr = 0; rr < P.rows; rr++) for (let cc = 0; cc < P.columns; cc++) {
+        const k = rr * P.columns + cc, d = Math.hypot(P.origin[0] + cc * st - c[0], P.origin[1] + rr * st - c[1]);
+        if (d > q.radius + q.bank) continue;
+        const t = d <= q.radius ? 0 : (d - q.radius) / q.bank, e = t * t * (3 - 2 * t);
+        const h = d <= q.radius ? wy - q.depth * (1 - (d / q.radius) ** 2) : wy + (P.heights[k] - wy) * e;
+        P.heights[k] = r2(Math.min(P.heights[k], h)); if (P.weights) P.weights[k] = 1;
+      }
+    } else notes.push(`LAYOUT: pool ${q.id}: no core pad patch to cut the hollow into (the lake carves the natural ground)`);
     notes.push(`LAYOUT: pool ${q.id}: still water r ${q.radius} m at y ${r2(padY - q.sink)} (pad ${r2(padY)} - ${q.sink}), bank ${q.bank} m`);
   }
+  if (L) for (const q of L.clearings ?? []) { const c = toWorld(core.at, front, q.at); clearings.push({ id: `${poi}-heath-${q.id}`, center: [r2(c[0]), r2(c[1])], radius: q.radius, feather: q.feather, keep: q.keep, scatter: true, cover: false, owner: poi, walk: false }); }
   // THE RING (archetype `ring`): a ground band round an anchor, as data: a groundPaints feature and catalogued ground
   // props spread round it. L (weep-well 2026-10-20): the brief's set piece (a white salt-killed reed ring round the
   // tarn) had nothing expressing it; the landmark read as a small cairn.

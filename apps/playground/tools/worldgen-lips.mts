@@ -234,12 +234,12 @@ export function builtMassBand(recipe: WorldRecipe, height: (x: number, z: number
   return (x, z) => {
     const hs = [height(x, z), height(x + 2, z), height(x - 2, z), height(x, z + 2), height(x, z - 2)];
     const lo = Math.min(...hs), hi = Math.max(...hs);
-    if (hi - lo < 1) return false;
+    // a sawtooth (alias) cell has almost no rise: it is hidden when the mass holds its ground 0.6 m above and below
     for (const v of vols) {
       const lx = x - v.at[0], lz = z - v.at[1];
       if (lx < v.min[0] || lx > v.max[0] || lz < v.min[2] || lz > v.max[2]) continue;
       let inside = true;
-      for (let y = lo + 0.3; y <= hi - 0.3 && inside; y += 0.5) if (!(v.vol.density(lx, y - v.y, lz) < 0)) inside = false;
+      for (let y = lo - 0.6; y <= hi + 0.6 && inside; y += 0.5) if (!(v.vol.density(lx, y - v.y, lz) < 0)) inside = false;
       if (inside) return true;
     }
     return false;

@@ -480,7 +480,14 @@ for (const [id, e] of Object.entries(allEnts)) {
   const p = posOf(id).p;
   portals.push({ id, at: [p[0], p[2]], scene: typeof sc.params?.scene === "string" && sc.params.scene ? sc.params.scene : null, veil: !!allEnts[`${id}-veil`] || sc.params?.mode !== "trigger" });
 }
-const doors = (Array.isArray(hand.doors) ? hand.doors : []).map((d: unknown) => artDoorSchema.parse(d));
+// L (Wristgate 2026-10-29): a grey-box hand-off wrote doors as { name, portal, at: [x,y,z], note } and art-check died on a
+// raw Zod stack; a malformed door is a named usage stop with the schema's own wording, not a crash
+const doors = (Array.isArray(hand.doors) ? hand.doors : []).map((d: unknown, i: number) => {
+  const r = artDoorSchema.safeParse(d);
+  if (r.success) return r.data;
+  console.error(`STOP: handoff.json doors[${i}] is not an art-check door { name, sealed, why?, at?: [x, z] }: ${r.error.issues.map((x) => `${x.path.join(".") || "(entry)"} ${x.message}`).join("; ")}`);
+  process.exit(2);
+});
 const zoneDir = zone ? path.join(HOME, "authoring", "zonegen", home.world, "zones", zone) : null;
 const place = zoneDir ? ((tryJson(path.join(zoneDir, "brief.json"))?.places ?? []) as { id: string; dungeon?: { name?: string } | null; holder?: string }[]).reduce<{ id: string; dungeon?: { name?: string } | null; holder?: string } | undefined>((hit, p) => (p.id === tier.id ? p : hit ?? (p.id === jobParent(jobDir) ? p : undefined)), undefined) : undefined; // a parented door (brief parent) judges its parent place's dungeon door
 const doorAt = (() => {

@@ -510,10 +510,15 @@ export function footprintPoints(dir) {
     if (isXZ(v.origin) && Array.isArray(v.size) && v.size.length === 2) { const [ox, oz] = xz(v.origin); pts.push([ox, oz], [ox + v.size[0], oz + v.size[1]]); }
     for (const [k, x] of Object.entries(v)) if (!SKIP_KEYS.has(k)) walk(x);
   };
+  // L (Wristgate 2026-10-29, coordinator ruling): a vegetation clearing wholly OUTSIDE the job's reservation (sight-line
+  // tree cuts on the moor 40-160 m past the rim) is vegetation, not built footprint: it never stretches the hull
+  const res = jobTier(dir).reservation;
+  const outside = (c) => !!res && Array.isArray(res.center) && isXZ(c?.center) && Math.hypot(xz(c.center)[0] - res.center[0], xz(c.center)[1] - res.center[1]) - (Number(c.radius) || 0) > (Number(res.radius) || 0);
   for (const f of deliveredOps(dir)) {
     if (/\.landmark\.json$/i.test(f)) continue; // a landmark's own parts are in its local frame
-    const j = tryJson(path.join(dir, f));
+    let j = tryJson(path.join(dir, f));
     if (!j) continue;
+    if (f === "clearings.json" && Array.isArray(j)) j = j.filter((c) => !outside(c));
     const ops = Array.isArray(j) ? j : j.ops;
     if (Array.isArray(ops) && ops.some((o) => o?.op === "add-entity")) {
       for (const o of ops) {
@@ -636,8 +641,25 @@ function measureFamily(pdir) {
     const hull = hullMeasure([...own.pts, ...kids.flatMap((k) => k.pts)]);
     measurement = aggregateMeasurement(own.measurement.tier, [own.measurement, ...kids.map((k) => ({ ...k.measurement, job: k.id }))], { diameter: Math.round(hull.diameter * 10) / 10, hullArea: Math.round(hull.area) });
   }
-  const faults = own.tier ? [...own.featureFaults, ...measurementFaults(measurement)] : [noTier];
-  return { ...own, measurement, children: kids.map((k) => k.id), faults };
+  const all = own.tier ? [...own.featureFaults, ...measurementFaults(measurement)] : [noTier];
+  const ruling = sizeRulingFor(pdir, own.id), excepted = ruling ? all.filter((f) => rulingExcepts(ruling, f, measurement)) : [];
+  const faults = all.filter((f) => !excepted.includes(f));
+  return { ...own, measurement, children: kids.map((k) => k.id), faults, ...(excepted.length ? { excepted: excepted.map((f) => `${f} (EXCEPTED: ${ruling.by} ${ruling.date}: ${ruling.ruling})`) } : {}) };
+}
+
+/**
+ * L (Wristgate 2026-10-29): a coordinator's size ruling is recorded where gate 12 reads it, never in the owner's prose:
+ * `<zone>/size-rulings.json` `{ rulings: [{ job, by, date, ruling, usableAreaM2? }] }`. `usableAreaM2` excepts the
+ * usable-area fault only while the MEASURED area stays at or above the ruled figure (a shrunk place fails again); no
+ * other fault is ever excepted. Each entry cites the dated coordinator decision it records (`ruling`).
+ */
+export function sizeRulingFor(dir, id) {
+  const zd = zoneDirOf(dir);
+  const all = zd ? tryJson(path.join(zd, "size-rulings.json"))?.rulings ?? [] : [];
+  return all.find((r) => r && (r.job === id || r.job === path.basename(dir)) && typeof r.ruling === "string" && r.by) ?? null;
+}
+function rulingExcepts(r, fault, m) {
+  return typeof r.usableAreaM2 === "number" && /^usable area \d+ m2, a \w+ place needs/.test(fault) && typeof m.usableAreaM2 === "number" && m.usableAreaM2 >= r.usableAreaM2;
 }
 
 /**
@@ -649,7 +671,7 @@ export function measureSize(dir) {
   const parent = jobParent(dir);
   if (!parent) {
     const f = measureFamily(dir);
-    return { id: f.id, tier: f.tier, points: f.pts.length, measurement: f.measurement, ...(f.children.length ? { children: f.children } : {}), faults: f.faults, ok: f.faults.length === 0 };
+    return { id: f.id, tier: f.tier, points: f.pts.length, measurement: f.measurement, ...(f.children.length ? { children: f.children } : {}), faults: f.faults, ...(f.excepted ? { excepted: f.excepted } : {}), ok: f.faults.length === 0 };
   }
   const own = measureOwn(dir);
   const faults = [...own.featureFaults];

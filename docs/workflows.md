@@ -119,8 +119,10 @@ before repeating a style or major asset group.
   (the unwrap-to-atlas process, what each recipe setting is for, and the prompt
   rules that make artwork land) and `docs/weapon-atlas.md` for a modular
   weapon ubermesh. The `weapon-unwrap` skill wraps both for Claude sessions.
-- **Player armor sets** (body + helm + shoulder art, then items per slot): read
-  `docs/armor-sets.md` (the `armor-sets` skill wraps it). Ornaments only on rare+ gear.
+- **Player armor sets** (body + helm + shoulder art, then items per slot): ONE command from
+  one brief, `node --import tsx tools/armor.mts run <set-id> --project foundation` (`armor brief
+  new <id>` first; `armor status`; `armor queue <ids…>` for several). Read `docs/armor-sets.md`
+  → One command (the `armor-sets` skill wraps it). Ornaments only on rare+ gear.
 - **Texture pages (weapon, armor, helm, shoulder, body, head) are always SQUARE:**
   a tile is `[u, v, scale]` with one scale; every packer goes through
   `apps/playground/tools/_page.mjs`, which refuses anything else.

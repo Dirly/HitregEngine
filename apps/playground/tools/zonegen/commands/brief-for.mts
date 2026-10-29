@@ -58,6 +58,13 @@ function defaultBuildingMap(projectDir: string, town: string, building: string):
   return hit ? hit.slice(0, -".json".length) : building;
 }
 
+/** The project whose sockets/ holds a site map: the world project, else the place's place-build lab (projects/pb-<poi>). */
+export function siteMapDir(projectDir: string, mapId: string, poi: string): string {
+  const has = (d: string) => !!mapId && fs.existsSync(path.join(d, "authoring", "dressing", "sockets", `${mapId}.json`));
+  const lab = path.join(path.dirname(projectDir), `pb-${poi}`);
+  return has(projectDir) || !poi || !has(lab) ? projectDir : lab;
+}
+
 /** The area role site-sockets measured the map as ("(site camp, ..." in its source line). */
 function siteRole(projectDir: string, mapId: string): string {
   const f = path.join(projectDir, "authoring", "dressing", "sockets", `${mapId}.json`);
@@ -103,6 +110,9 @@ export async function run(ctx: Ctx): Promise<number> {
         })
         .join("\n  ");
   }
+  // L (Wristgate 2026-10-29): a place-build place's socket maps are measured in its LAB (projects/pb-<poi>), not in the
+  // world project (the place is not installed yet): the brief named the project, found no map and called a yard a camp
+  const siteDir = siteMapDir(p.projectDir, stage === "dress-site" ? `${ctx.opt("poi")}-${ctx.opt("area")}` : "", ctx.opt("poi"));
   const vars: Record<string, string> = {
     world,
     project: ctx.project,
@@ -130,7 +140,8 @@ export async function run(ctx: Ctx): Promise<number> {
     poi: ctx.opt("poi"),
     area: ctx.opt("area"),
     siteMap: `${ctx.opt("poi")}-${ctx.opt("area")}`,
-    role: siteRole(p.projectDir, `${ctx.opt("poi")}-${ctx.opt("area")}`),
+    role: siteRole(siteDir, `${ctx.opt("poi")}-${ctx.opt("area")}`),
+    siteProject: path.basename(siteDir),
     questObjects: stage === "dress-site" || BUILDING_STAGES.includes(stage) ? questObjectsFor(p.projectDir, world, stage === "dress-site" ? ctx.opt("poi") : ctx.opt("town")) : "",
   };
   const text = fs.readFileSync(path.join(briefsDir, `${stage}.md`), "utf8").replace(/\{(\w+)\}/g, (m, k: string) => vars[k] ?? m);

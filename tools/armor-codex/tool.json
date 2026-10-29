@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "hitreg.armor",
+  "name": "Armor Set (Codex)",
+  "description": "One command makes a whole player armor set from one brief (projects/<p>/authoring/armor-sets/<id>.json): Codex paints the body, the woman's chest, helm and shoulder sheets in one gen-set manifest, then import + measured gates (holes on the body's real UVs, cut-out free edges, texels/m) + match-material, the page bakes, one item per slot per tier with icons, and a review sheet. A failing gate keeps the stage and installs nothing. CLI: apps/playground/tools/armor.mts; docs/armor-sets.md (One command).",
+  "category": "Assets/Generate",
+  "surfaces": ["tools"],
+  "permissions": [],
+  "entry": "./run.mjs",
+  "inputs": {
+    "command": {
+      "kind": "select",
+      "label": "Command",
+      "default": "status",
+      "options": [
+        { "value": "status", "label": "Stage status (ok / STALE / MISSING / FAILED)" },
+        { "value": "lint", "label": "Brief lint" },
+        { "value": "dry-run", "label": "Gen dry run (manifest + prompts, no Codex)" },
+        { "value": "run", "label": "Run: lint -> gen -> import -> bake -> items -> review" }
+      ]
+    },
+    "set": { "kind": "string", "label": "Set id (blank = every brief for status)", "default": "" },
+    "project": { "kind": "string", "label": "Project", "default": "foundation" }
+  }
+}

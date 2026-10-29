@@ -13,6 +13,15 @@ Each model's unwrap/key/import steps are **docs/mob-atlas.md** (the
 
 ## Order
 
+1. `node --import tsx tools/armor.mts brief new <id> --project foundation` (from `apps/playground`), fill
+   every TODO: the SUBJECT, materials, palette, back ornament, tiers, helm/shoulder parts and looks.
+2. `armor run <id> --project foundation`: brief lint, gen (Codex), import + gates, bake, items, review.
+   It stops at the first failing gate with the stage kept; fix the cause (usually the brief's words), re-run.
+   Several sets: `armor queue <ids…>`. Where it stands: `armor status`.
+3. **Look at** `authoring/armor-sets/review/<id>.png` (and the creator) before calling the set done.
+
+### Manual fallback (what each stage does)
+
 1. **Body sheet** over `tools/atlas/sets/human-body/key.png` with
    `tools/atlas/sets/human-body/prompt.md` (write the SUBJECT once — reuse it
    word for word for every later step). Import with `sets/human-body/manifest.json`.
