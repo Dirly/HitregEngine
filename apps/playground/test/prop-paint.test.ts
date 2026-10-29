@@ -1,6 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';
 import {planPainting,importPainting,paintingStatus,paintDir,paintPlanSchema,paintingBrief,type PaintPlan} from '../tools/prop-codex/paint.mts';
-import {assertAtlasBudget,packBuiltProps} from '../tools/prop-codex/pack.mts';
+import {assertAtlasBudget,packBuiltProps,atlasFor} from '../tools/prop-codex/pack.mts';
 import {BLENDER,blenderBuild,gateFaults} from '../tools/prop-codex/check.mts';
 import {writeBrief} from '../tools/prop-codex/brief.mts';
 import {install} from '../tools/prop-codex/install.mts';
@@ -154,6 +154,13 @@ emit(m,'Synthetic wrap test fixture',category='decor',cultures=['civic'])
   packBuiltProps(wk,[{...plainRecord,paint:final[0]!.paint}]);assert.deepEqual(owners(),['codex-craft-painted']);
   fs.writeFileSync(plainSource,plainBytes);
   packBuiltProps(wk,[plainRecord]);assert.deepEqual(owners(),['town-craft']);assert.deepEqual(fs.readFileSync(controlFile),controlBytes);
+  // c-props2: a painted LANDMARK packs onto its own atlas (the painted props' 4-page budget stays theirs), and moves back out cleanly.
+  const owners3=()=>['town-craft','codex-craft-painted','codex-craft-landmark'].filter(name=>{const f=atlasPaths(path.join(wk,'assets'),name).layoutFile;return fs.existsSync(f)&&JSON.parse(fs.readFileSync(f,'utf8')).sources.some((s:any)=>s.out===plainOutput);});
+  assert.equal(atlasFor(plainRecord,new Set(['plain-fixture'])),'town-craft');assert.equal(atlasFor({name:'x',paint:{}},new Set(['x'])),'codex-craft-landmark');assert.equal(atlasFor({name:'x',paint:{}}),'codex-craft-painted');
+  fs.copyFileSync(path.join(out,'paint-fixture.glb'),plainSource);
+  packBuiltProps(wk,[{...plainRecord,paint:final[0]!.paint}],()=>{},new Set(['plain-fixture']));assert.deepEqual(owners3(),['codex-craft-landmark']);
+  fs.writeFileSync(plainSource,plainBytes);
+  packBuiltProps(wk,[plainRecord]);assert.deepEqual(owners3(),['town-craft']);assert.deepEqual(fs.readFileSync(controlFile),controlBytes);
   // The normal installer must retain provenance and render clay/unlit/lit, not just export a source GLB.
   json(path.join(wk,'authoring/prop-catalogs.json'),{version:1,catalogs:[]});json(path.join(wk,'authoring/codex-craft/requests.json'),{version:1,props:Object.fromEntries([...final,plainRecord].map(g=>[g.name,{request:'test/'+g.name,project:'world-kit',for:'synthetic fixture',culture:'civic',scale:'human'}]))});
   const installed=install(wk,{cards:['paint-fixture']});assert.equal(installed.built.length,3);

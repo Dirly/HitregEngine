@@ -177,3 +177,26 @@ test("unpaintedMonolithFaults: a stone part left out of the paint regions of a p
   const flank = unpaintedMonolithFaults({ parts, size: [8, 11, 5], paintPlan: { surfaces: [surf("fist", 4), surf("wrist seat")], roles: ["stone"] } as never });
   assert.equal(flank.length, 1); assert.match(flank[0]!, /6 of 10 faces of part "fist"/);
 });
+
+// c-props2 (2026-10-29): a set of carved pieces matches ONE zone stone; the request's `tint` tile rides as the third paint ref.
+test("paint gen names the tint tile as the third reference and lets it own the stone colour", async () => {
+  const { paintRefsLine, designTint, designConcept } = await import("../tools/prop-codex/paint.mts");
+  assert.equal(paintRefsLine(), "");
+  assert.match(paintRefsLine("c.png"), /SECOND is the concept frame: match its stone colour/);
+  const both = paintRefsLine("c.png", "t.png");
+  assert.match(both, /SECOND is the concept frame/);
+  assert.doesNotMatch(both, /match its stone colour/);
+  assert.match(both, /THIRD is the zone's stone tile/);
+  assert.match(paintRefsLine(undefined, "t.png"), /SECOND is the zone's stone tile/);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "hitreg-tint-")), wk = path.join(root, "projects/world-kit");
+  fs.mkdirSync(path.join(wk, "authoring/codex-craft"), { recursive: true });
+  fs.mkdirSync(path.join(root, "projects/x/authoring/dressing"), { recursive: true });
+  fs.writeFileSync(path.join(root, "tile.png"), "x"); fs.writeFileSync(path.join(root, "frame.png"), "x");
+  fs.writeFileSync(path.join(wk, "authoring/codex-craft/requests.json"), JSON.stringify({ props: { ring: { project: "x", request: "sacred/ring" } } }));
+  fs.writeFileSync(path.join(root, "projects/x/authoring/dressing/prop-requests.json"), JSON.stringify({ requests: [{ id: "sacred/ring", concept: "frame.png", tint: "tile.png" }] }));
+  try {
+    assert.equal(designTint(wk, "ring", root), path.resolve(root, "tile.png"));
+    assert.equal(designConcept(wk, "ring", root), path.resolve(root, "frame.png"));
+    assert.equal(designTint(wk, "other", root), undefined);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

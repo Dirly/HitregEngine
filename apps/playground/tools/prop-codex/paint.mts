@@ -122,15 +122,26 @@ export function importPainting(wk:string,name:string,artFile:string){
  return paintingStatus(wk,name);
 }
 /** The design's concept frame, if its prop request carried one (`request add --concept`): codex-craft requests.json -> the request project's prop-requests.json. */
-export function designConcept(wk:string,name:string,play=path.resolve(wk,'../..')):string|undefined{
- try{const o=read(path.join(wk,'authoring/codex-craft/requests.json')).props?.[name];if(!o)return;const reqs=read(path.join(wk,'..',o.project,'authoring/dressing/prop-requests.json')).requests??[];const c=reqs.find((r:any)=>r.id===o.request)?.concept;return c&&fs.existsSync(path.resolve(play,c))?path.resolve(play,c):undefined;}catch{return;}
+export function designConcept(wk:string,name:string,play=path.resolve(wk,'../..')):string|undefined{return requestFile(wk,name,'concept',play);}
+/** The stone tile the paint must sit on (request `tint`, e.g. the zone's cliff tile): a set of carved pieces matches ONE zone stone, not each concept frame's own red. */
+export function designTint(wk:string,name:string,play=path.resolve(wk,'../..')):string|undefined{return requestFile(wk,name,'tint',play);}
+function requestFile(wk:string,name:string,key:'concept'|'tint',play:string):string|undefined{
+ try{const o=read(path.join(wk,'authoring/codex-craft/requests.json')).props?.[name];if(!o)return;const reqs=read(path.join(wk,'..',o.project,'authoring/dressing/prop-requests.json')).requests??[];const c=reqs.find((r:any)=>r.id===o.request)?.[key];return typeof c==='string'&&fs.existsSync(path.resolve(play,c))?path.resolve(play,c):undefined;}catch{return;}
+}
+/** The prompt line naming each attached reference by position: UV guide, then concept frame, then tint tile. */
+export function paintRefsLine(concept?:string,tint?:string):string{
+ if(!concept&&!tint)return '';
+ const nth=['SECOND','THIRD'];let i=0,out='\nThe FIRST attached image is the UV guide to paint;';
+ if(concept)out+=` the ${nth[i++]} is the concept frame: match its${tint?'':' stone colour,'} palette, carved motifs and wear (never its perspective, backdrop or the scale figure)${tint?';':'.'}`;
+ if(tint)out+=` the ${nth[i++]} is the zone's stone tile: every stone surface takes ITS hue, saturation and value (the concept's red is only a hint), so the piece sits beside the zone's cliffs and the other carved pieces of its set.`;
+ return out;
 }
 export function generatePainting(wk:string,name:string,force=false){
- const dir=paintDir(wk,name),layout=paintLayoutSchema.parse(read(path.join(dir,'layout.json'))),play=path.resolve(wk,'../..'),concept=designConcept(wk,name,play);
+ const dir=paintDir(wk,name),layout=paintLayoutSchema.parse(read(path.join(dir,'layout.json'))),play=path.resolve(wk,'../..'),concept=designConcept(wk,name,play),tint=designTint(wk,name,play);
  const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'hitreg-paint-prompt-')),promptFile=path.join(scratch,'prompt.txt');
  try{
-  fs.writeFileSync(promptFile,paintingBrief(layout)+(concept?'\nThe FIRST attached image is the UV guide to paint; the SECOND is the concept frame: match its stone colour, palette, carved motifs and wear (never its perspective, backdrop or the scale figure).':''));
-  const r=spawnSync(process.execPath,[path.join(play,'tools/image-request.mjs'),'gen','--id',`prop-${name}-paint`,'--target',path.relative(play,path.join(dir,'art.png')),'--size',`${layout.size}x${layout.size}`,'--ref',path.join(dir,'key.png'),...(concept?['--ref',concept]:[]),'--purpose','UV-registered hand-painted prop artwork','--prompt-file',promptFile,...(force?['--force']:[])],{encoding:'utf8',cwd:play,maxBuffer:1<<26});
+  fs.writeFileSync(promptFile,paintingBrief(layout)+paintRefsLine(concept,tint));
+  const r=spawnSync(process.execPath,[path.join(play,'tools/image-request.mjs'),'gen','--id',`prop-${name}-paint`,'--target',path.relative(play,path.join(dir,'art.png')),'--size',`${layout.size}x${layout.size}`,'--ref',path.join(dir,'key.png'),...(concept?['--ref',concept]:[]),...(tint?['--ref',tint]:[]),'--purpose','UV-registered hand-painted prop artwork','--prompt-file',promptFile,...(force?['--force']:[])],{encoding:'utf8',cwd:play,maxBuffer:1<<26});
   if(r.status!==0)throw Error('Image generation failed: '+r.stdout+r.stderr);
  }finally{const resolved=path.resolve(scratch);if(!resolved.startsWith(path.resolve(os.tmpdir())+path.sep)||!path.basename(resolved).startsWith('hitreg-paint-prompt-'))throw Error('Unexpected painting prompt scratch path');fs.rmSync(resolved,{recursive:true,force:true});}
  importPainting(wk,name,path.join(dir,'art.png'));

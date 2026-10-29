@@ -14,7 +14,7 @@ import { runBlender } from "../../../../tools/blender-lock.mjs";
 import { applyOps, createScene, ComponentRegistry, registerCoreComponents, dressingSchema, prefabFromSubtree, mergeVocabulary, type Op } from "@hitreg/core";
 import { BLENDER, blenderBuild, gateFaults, type GeometryRecord } from "./check.mts";
 import {paintingStatus} from './paint.mts';
-import {packBuiltProps, PAINTED_ATLAS} from './pack.mts';
+import {packBuiltProps, PAINTED_ATLAS, LANDMARK_ATLAS, atlasFor} from './pack.mts';
 import {assertDesignReuse,readReusePolicy} from '../_prop-reuse.mts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -86,6 +86,7 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
   if(failed.length)throw Error(failed.map(g=>`${g.name}: ${g.error}`).join('\n'));
   const origins = readOrigins(worldKit);
   const vocabularyFile=path.join(worldKit,'authoring/dressing/vocabulary.json'),scales=mergeVocabulary(fs.existsSync(vocabularyFile)?readJson(vocabularyFile):undefined).scales;
+  const landmarks=new Set<string>();
   for(const g of built.filter(g=>g.paint)){
     const origin=origins[g.name],scale=scales.find(s=>s.id===origin?.scale);
     if(!origin||!scale)throw Error(`${g.name}: missing source origin or scale`);
@@ -94,13 +95,14 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
     const reqFile=[path.join(worldKit,'..',origin.project),path.resolve(worldKit,'../../../../../projects-archive',origin.project)].map(p=>path.join(p,'authoring/dressing/prop-requests.json')).find(f=>fs.existsSync(f)),reqs=reqFile?readJson(reqFile):[],lm=origin.landmark??(Array.isArray(reqs)?reqs:reqs.requests??[]).find((r:any)=>r?.id===origin.request)?.landmark;
     const faults=gateFaults(g,{name:g.name,culture:origin.culture,scale:{id:scale.id,height:scale.height},worldKit,...(lm?{landmark:lm}:{})},scales);
     if(faults.length)throw Error(`${g.name}: ${faults.join('; ')}`);
+    if(lm)landmarks.add(g.name);
   }
 
   // pack onto the shared town-craft page; the town-craft models it re-emits must not change
   const tcDir = path.join(worldKit, "assets/models/town-craft");
   const before = new Map((fs.existsSync(tcDir)?fs.readdirSync(tcDir):[]).map((f) => [f, sha(path.join(tcDir, f))]));
   const packMessages:string[]=[];
-  packBuiltProps(worldKit,built,s=>{packMessages.push(s);log(s);});
+  packBuiltProps(worldKit,built,s=>{packMessages.push(s);log(s);},landmarks);
   const packLog=packMessages.join('\n');
   const changed = [...before].filter(([f, h]) => sha(path.join(tcDir, f)) !== h).map(([f]) => f);
   if (changed.length) throw Error(`the pack changed ${changed.length} town-craft model(s) (${changed.slice(0, 4).join(", ")}): the shared page moved; restore them from git and investigate`);
@@ -139,7 +141,7 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
       recipe: "apps/playground/tools/prop-codex/build.py (town-craft helpers + role sheet)", sourceModel: `authoring/${COLLECTION}/source/${g.name}.glb`, sourceModelSha256: sha(path.join(source, g.name + ".glb")),
       request: o.request, requestProject: o.project, for: o.for, design: g.design, size: g.size,
       frame: `glTF Y-up metres; ${g.mount === "wall" ? "wall-contact rear, vertically centred" : "bottom-centre foot"} root; front +Z`,
-      parts: g.parts, textureRoles: [...new Set((g.parts ?? []).map((p) => p.role))].sort(), triangles: g.triangles, materials: 1, atlas: g.paint ? PAINTED_ATLAS : "town-craft", filter: "nearest",
+      parts: g.parts, textureRoles: [...new Set((g.parts ?? []).map((p) => p.role))].sort(), triangles: g.triangles, materials: 1, atlas: atlasFor(g, landmarks), filter: "nearest",
       ...(g.paint?{painting:{guide:`authoring/${COLLECTION}/paint/${g.name}/key.png`,layout:`authoring/${COLLECTION}/paint/${g.name}/layout.json`,art:`authoring/${COLLECTION}/paint/${g.name}/art.png`,receipt:`authoring/${COLLECTION}/paint/${g.name}/receipt.json`,geometrySha256:g.paint.geometrySha256,artSha256:g.paint.artSha256,atlasSha256:g.paint.atlasSha256,surfaces:g.paint.surfaces.map(({name,part,projection,detail,metres,pixels,texel})=>({name,part,projection,detail,metres,pixels,texel}))}}:{}),
       texelsPerMetre: g.texel, alpha: "opaque; openings are actual geometry", instancing: "one body mesh/material, static instancing", lod: "none",
       collision: g.solid ? "exact static trimesh from published model" : "none (soft)", ...(g.water ? { water: `engine water disc r ${g.water.radius} m, depth ${g.water.depth} m (${POOL_WATER})` } : {}), behavior: "Static decoration; no gameplay.", effects: [],
@@ -148,9 +150,10 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
     assets.push({ id: model, path: `assets/models/${model}`, sha256: sha(runtime), source: `authoring/${COLLECTION}/source/${g.name}.glb` });
   }
   if (anyWater) assets.push({ id: POOL_WATER, path: `assets/materials/${POOL_WATER}.json`, sha256: sha(path.join(worldKit, "assets/materials", POOL_WATER + ".json")), source: "tools/prop-codex/install.mts (engine water shader, calm pool)" });
-  if(built.some(g=>g.paint)){
-    const layout=readJson(path.join(worldKit,`assets/textures/atlas/${PAINTED_ATLAS}.atlas.json`));
-    for(let i=0;i<layout.pages;i++){const p=`assets/textures/atlas/${PAINTED_ATLAS}-${i}.png`;assets.push({id:p,path:p,sha256:sha(path.join(worldKit,p)),source:'tools/prop-codex/pack.mts'});}
+  for(const atlas of [PAINTED_ATLAS,LANDMARK_ATLAS]){
+    if(!built.some(g=>atlasFor(g,landmarks)===atlas))continue;
+    const layout=readJson(path.join(worldKit,`assets/textures/atlas/${atlas}.atlas.json`));
+    for(let i=0;i<layout.pages;i++){const p=`assets/textures/atlas/${atlas}-${i}.png`;assets.push({id:p,path:p,sha256:sha(path.join(worldKit,p)),source:'tools/prop-codex/pack.mts'});}
   }
   write(path.join(D, "catalog.json"), {
     version: 1, about: "Props from open requests: simple functional geometry, shared material tiles and optional named hand-painted surfaces.",

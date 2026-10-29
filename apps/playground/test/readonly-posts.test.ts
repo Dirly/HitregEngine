@@ -20,3 +20,31 @@ test("the stub drops writes and lets reads through", () => {
   dropWrites(route("GET", "http://x/__hitreg/asset-file?file=a"));
   assert.deepEqual(seen, ["pass http://x/__hitreg/asset-json?project=p", "drop http://x/__hitreg/write-asset", "pass http://x/__hitreg/asset-file?file=a"]);
 });
+
+// c-props2 (2026-10-29): a project shot script copied an older inline stub (`if (r.method() !== "GET") return
+// route.fulfill(...)`), the batched asset-json read came back {"ok":true} and the lab boot died on "prefab
+// codex-craft/... not found" although the dev server served the file. Every script that stubs dev-server writes, in
+// the engine tools AND in project authoring folders (where shot scripts get copied), must go through READ_ONLY_POSTS.
+test("no browser script stubs every non-GET dev-server request (the asset-json read must pass)", () => {
+  const roots = ["tools", "../../tools", "projects"];
+  const skip = /node_modules|[\/]\.git[\/]|[\/]assets[\/]|[\/]archive/;
+  const files: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 8 || skip.test(dir + "/")) return;
+    let ents: fs.Dirent[] = [];
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = `${dir}/${e.name}`;
+      if (e.isDirectory()) walk(p, depth + 1);
+      else if (/\.(mts|mjs|ts|js)$/.test(e.name) && !skip.test(p)) files.push(p);
+    }
+  };
+  for (const r of roots) walk(r, 0);
+  const bad = files.filter((f) => {
+    const src = fs.readFileSync(f, "utf8");
+    if (!/__hitreg/.test(src) || !/\.route\(/.test(src)) return false;
+    // a stub = a non-GET test whose branch fulfills; it must name READ_ONLY_POSTS (or use dropWrites)
+    return src.split("\n").some((l) => /method\(\)\s*!==\s*["']GET["']/.test(l) && /fulfill/.test(l) && !/READ_ONLY_POSTS|dropWrites/.test(l));
+  });
+  assert.deepEqual(bad, [], `these scripts drop the read-only POSTs (use READ_ONLY_POSTS / dropWrites from tools/_readonly-posts.mjs): ${bad.join(", ")}`);
+});

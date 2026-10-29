@@ -5,6 +5,14 @@ import {readGltf,imageBytes} from '../../../../tools/wfc-3d/gltf.mjs';
 import {packAtlas,atlasPaths} from '../../../../tools/wfc-3d/kit.mjs';
 import type {GeometryRecord} from './check.mts';
 export const PAINTED_ATLAS='codex-craft-painted';
+/** Painted LANDMARK pieces (request --landmark: 6-40 m set pieces whose paint pages run 512-1024 px) pack apart from the
+ * painted props. c-props2 (2026-10-29): the Red Dial ring, blade and pillar took the shared painted atlas to 6 of its
+ * 4 pages; the split keeps each collection inside its own budget and never shrinks a UV. Budget 8: a 1024 px landmark page
+ * plus its 4 px bleed fills a whole 2048 page (OPEN: paint pages sized to tile with bleed), a landmark is one piece per
+ * place and a page loads only with the model that uses it, so ONE PAGE PER LANDMARK is the deliberate rule. */
+export const LANDMARK_ATLAS='codex-craft-landmark';
+/** The painted atlas a built prop packs onto (town-craft for unpainted designs). */
+export const atlasFor=(g:{name:string;paint?:unknown},landmarks:ReadonlySet<string>=new Set()):string=>!g.paint?'town-craft':landmarks.has(g.name)?LANDMARK_ATLAS:PAINTED_ATLAS;
 /** The base-colour images a packed source glb contributes (what the packer adds per material). */
 function sourceImages(file:string):{width:number;height:number;rgba:Uint8Array}[]{
  if(!fs.existsSync(file))return [];const g=readGltf(file),out:{width:number;height:number;rgba:Uint8Array}[]=[];
@@ -35,22 +43,26 @@ export function pruneDeadIslands(layout:any,entries:{file:string;out:string}[]):
  return {...layout,islands,pages};
 }
 /** Check all retained consumers before either packer writes anything. No density-reducing fallback. */
-export function assertAtlasBudget(layout:any,entries:{file:string;out:string;kind:string}[],maxPages:number){
+export function assertAtlasBudget(layout:any,entries:{file:string;out:string;kind:string}[],maxPages:number,name="prop"){
  const atlas=new Atlas({pageSize:2048,pad:4,layout}),byOut=new Map<string,any>();
  for(const s of layout?.sources ?? [])byOut.set(s.out,s);for(const s of entries)byOut.set(s.out,s);
  for(const s of byOut.values())for(const image of sourceImages(s.file))atlas.add(image);
- if(atlas.pages.length>maxPages)throw Error(`Prop atlas needs ${atlas.pages.length} pages; budget is ${maxPages}. Split the collection or deliberately repack unused islands; UVs will not be shrunk.`);
+ if(atlas.pages.length>maxPages){
+  // c-props2: name the atlas and the page-sized islands: a 1024 px paint page plus its bleed cannot share a 2048 page row, so each one costs a whole page
+  const big=[...byOut.values()].filter(s=>sourceImages(s.file).some(im=>im.width+2*atlas.pad>atlas.pageSize/2)).map(s=>path.basename(s.out).replace(/.gltf$/,""));
+  throw Error(`${name} atlas needs ${atlas.pages.length} pages; budget is ${maxPages}.${big.length?` Each of these takes a whole ${atlas.pageSize} px page (image + ${atlas.pad} px bleed over half a page): ${big.join(", ")}.`:""} Split the collection or deliberately repack unused islands; UVs will not be shrunk.`);
+ }
 }
-export function packBuiltProps(wk:string,built:GeometryRecord[],log:(s:string)=>void=()=>{}){
- const assetsDir=path.join(wk,'assets'),groups=[{atlas:'town-craft',rows:built.filter(g=>!g.paint),max:1},{atlas:PAINTED_ATLAS,rows:built.filter(g=>!!g.paint),max:4}];
+export function packBuiltProps(wk:string,built:GeometryRecord[],log:(s:string)=>void=()=>{},landmarks:ReadonlySet<string>=new Set()){
+ const assetsDir=path.join(wk,'assets'),groups=[{atlas:'town-craft',max:1},{atlas:PAINTED_ATLAS,max:4},{atlas:LANDMARK_ATLAS,max:8}].map(g=>({...g,rows:built.filter(r=>atlasFor(r,landmarks)===g.atlas)}));
  const plans=groups.map(group=>{
   const layoutFile=atlasPaths(assetsDir,group.atlas).layoutFile;
   const existing=fs.existsSync(layoutFile)?JSON.parse(fs.readFileSync(layoutFile,'utf8')):null;
   const moved=new Set(groups.filter(g=>g.atlas!==group.atlas).flatMap(g=>g.rows.map(r=>`models/codex-craft/${r.name}.gltf`)));
   const kept=existing?{...existing,sources:(existing.sources ?? []).filter((s:any)=>!moved.has(s.out))}:null;
   const entries0=group.rows.map(r=>({file:path.join(wk,'authoring/codex-craft/source',r.name+'.glb'),out:`models/codex-craft/${r.name}.gltf`,kind:'prop' as const}));
-  const entries=entries0,layout=group.atlas===PAINTED_ATLAS&&kept?pruneDeadIslands(kept,entries):kept;
-  if(entries.length)assertAtlasBudget(layout,entries,group.max);
+  const entries=entries0,layout=group.atlas!=='town-craft'&&kept?pruneDeadIslands(kept,entries):kept;
+  if(entries.length)assertAtlasBudget(layout,entries,group.max,group.atlas);
   return {...group,layoutFile,existing,layout,entries};
  });
  for(const p of plans){

@@ -57,7 +57,9 @@ export interface PropRequest { id: string; name: string; culture: string; scale:
   size?: number;
   /** The piece's CONCEPT frame (`request add --concept <png>`, path from apps/playground), painted before the build
    *  (art-direction: concept first): the Codex design job gets it as context, `props paint gen` as a second ref. */
-  concept?: string }
+  concept?: string;
+  /** The stone/material TILE its paint must match (`request add --tint <png>`, e.g. the zone cliff tile): `paint gen` sends it as the third ref. */
+  tint?: string }
 export const requestsFile = (project: string): string => path.join(project, "authoring/dressing/prop-requests.json");
 export function readRequests(project: string): PropRequest[] {
   const f = requestsFile(project);
@@ -96,6 +98,7 @@ export function addRequest(project: string, r: Omit<PropRequest, "id" | "at" | "
   if (dup && !dup.for.split(", ").includes(r.for)) dup.for = `${dup.for}, ${r.for}`;
   if (dup && r.size) dup.size = r.size;
   if (dup && r.concept) dup.concept = r.concept;
+  if (dup && r.tint) dup.tint = r.tint;
   const row: PropRequest = dup ?? { id: `${r.culture}/${slug}`, ...r, at: new Date().toISOString(), status: "open" };
   if (!dup) list.push(row);
   const f = requestsFile(project);
