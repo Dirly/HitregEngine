@@ -359,6 +359,12 @@ const HELP = `worldgen — procedural world pipeline
                    Idempotent (lifts the last run's pads and ramps off first); re-run "paths" after.
                    --walls / --no-walls (default: recipe townTerraces.walls): risers become retaining walls
                    (terraceWalls <town>-riser-<n>, ramps/stairs as wall inserts); pinned towns untouched
+                   PROGRAM: a town with a plan (authoring/towns/<name>-plan.json) or a recipe \`program\` is sized
+                   from it (tools/worldgen-town-program.mts): straight street-shaped bands along the contour, as
+                   long and as many (--max-terraces) as the program's flat area needs, radius grown to take them,
+                   the land gate at an end of the top band; MEASURES the built level ground (re-plans on a
+                   shortfall) and FAILS writing nothing when the ground cannot hold the program. --program-area
+                   <m2> overrides, --program-reach (60 / 1.8 r) and --program-cut 3 bound it, --no-program = radius
   gates  <world>   where a town's own roads meet the world's. With no options it AUDITS: every gate and
                    whether a path arrives at it, every walled town a path crosses instead of entering,
                    the towns still routed to their centre (exit 1 on findings). To record one after a

@@ -8005,10 +8005,14 @@
                     "description": "Shelves stepped up the site, for a town with verticality. Written by `worldgen terrace`, which also cuts the ramps between them as ordinary roads (`<town>-ramp-*`). Empty for a town on the flat.",
                     "$ref": "#/$defs/__schema839"
                   },
+                  "program": {
+                    "description": "The town's PROGRAM as flat ground (tools/worldgen-town-program.mts PROGRAM_RULE), written by `worldgen terrace` from the town plan + the kit's footprints: required = sum over lots of (request size x 3.2 m kit cell + measured envelope, else town-layout's default envelope) x 1.15 (lot air, setback, the 0.6 m raised pad's skirt) + streets (sum of frontages + 1 m, x 5 m / 2 x 1.2 for crossings) + wall clearance (4 m x half the perimeter of a disc of that area). `terrace` cuts street-shaped bands along the contour until their usable area (length x depth less the retaining-wall inset) holds it — longer bands, more bands up to --max-terraces, the town radius grown to take them — and FAILS (writes nothing) with the shortfall when the ground cannot. The `program-fit` row (`worldgen status`, `zonegen town`) fails while the measured level ground on the built shelves is under it; the plan on disk wins over this recorded number. Absent: no plan, the shelves are sized from the radius.",
+                    "$ref": "#/$defs/__schema846"
+                  },
                   "gates": {
                     "default": [],
                     "description": "Ways in. A town with gates is entered ONLY through them: `worldgen paths` and `worldgen trails` route to the gate mouth that faces where they come from instead of to the centre, and the pad is a wall to every route not arriving at one. Leave empty for an open village whose lanes are the road.",
-                    "$ref": "#/$defs/__schema843"
+                    "$ref": "#/$defs/__schema847"
                   },
                   "tags": {
                     "default": [],
@@ -8025,41 +8029,41 @@
             },
             "landformCalm": {
               "description": "Discs where anchor `landform` families (and river valleys) are faded out, so authored places — towns, dressed sites, height patches, terrace walls — keep the ground they were built on when a profile is added or retuned. Written by `worldgen landform-calm`. Omit = no calm (and no cost).",
-              "$ref": "#/$defs/__schema850"
+              "$ref": "#/$defs/__schema854"
             },
             "heightPatches": {
               "default": [],
               "description": "Raster elevation edits applied after ordinary heightfield features. Affect terrain mesh, collision and placement together; later patches win. Existing 3D density modifiers still apply.",
-              "$ref": "#/$defs/__schema852"
+              "$ref": "#/$defs/__schema856"
             },
             "lakes": {
               "default": [],
               "description": "Standing water at its own level, basin carved beneath. Written by `worldgen rivers`.",
-              "$ref": "#/$defs/__schema882"
+              "$ref": "#/$defs/__schema886"
             },
             "bridges": {
               "default": [],
               "description": "Road decks spanning rivers. Written by `worldgen roads`. The streamer draws each as a PLACEHOLDER (a flat slab and box piers); a real bridge is a `bridgeSpans` entry (`worldgen bridge-place`, the world-kit bridge kits).",
-              "$ref": "#/$defs/__schema891"
+              "$ref": "#/$defs/__schema895"
             },
             "bridgeSpans": {
               "description": "Real bridges across gaps (stone arch bridges / aqueducts with piers founded on the ground or seabed, or rope suspension bridges) — authoring truth. `worldgen bridge-place` fits each to the ground and writes its `solved` pieces plus the derived `bs-<id>*` height patches and clearing; `--refit` re-solves them after the terrain changes.",
-              "$ref": "#/$defs/__schema899"
+              "$ref": "#/$defs/__schema903"
             },
             "fills": {
               "default": [],
               "description": "Sediment-filled hollows on the river network. Written by `worldgen rivers`.",
-              "$ref": "#/$defs/__schema979"
+              "$ref": "#/$defs/__schema983"
             },
             "riverPaths": {
               "default": [],
               "description": "Hand- or agent-drawn river centrelines. AUTHORING input: `worldgen rivers` solves each into `rivers`.",
-              "$ref": "#/$defs/__schema982"
+              "$ref": "#/$defs/__schema986"
             },
             "tunnels": {
               "default": [],
               "description": "Carved cave passages. Written by `worldgen caves`.",
-              "$ref": "#/$defs/__schema985"
+              "$ref": "#/$defs/__schema989"
             },
             "blobs": {
               "default": [],
@@ -8105,11 +8109,11 @@
                   "height": {
                     "default": 0,
                     "description": "0 = a sphere. Above 0 the blob is a VERTICAL CAPSULE this tall, rising from `center` — which is what turns the escape hatch into a monolith: a desert pillar is one line of JSON rather than a stack of spheres, and it stays one line when you drag it somewhere else.",
-                    "$ref": "#/$defs/__schema989"
+                    "$ref": "#/$defs/__schema993"
                   },
                   "topRadius": {
                     "description": "Radius at the TOP of a capsule (needs `height`). Omit for a uniform column. A value below `radius` is what turns a pillar into a needle — a spire tapering as it rises reads as weathered stone, a cylinder reads as a prop.",
-                    "$ref": "#/$defs/__schema990"
+                    "$ref": "#/$defs/__schema994"
                   },
                   "scaleX": {
                     "default": 1,
@@ -8131,35 +8135,35 @@
             "passages": {
               "default": [],
               "description": "Bounded rectangular flat-floor passage cutters applied after blobs. Signed exterior samples avoid tunnel floor snapping. They remove rock only; a supported floor and roof must already exist. Render, collision and placement share this field.",
-              "$ref": "#/$defs/__schema991"
+              "$ref": "#/$defs/__schema995"
             },
             "operators": {
               "description": "LANDFORM OPERATORS — authoring truth for shaped ground: `{ id, op, ...params }` (terrace, path, ...; the engine spec's `landformOperators` lists them). Agents write these, never raw carve boxes. `worldgen op <world> --apply` compiles each into derived features with ids `op:<id>:*` (regenerable, never hand-edited; re-applying replaces exactly them) and stamps `compiled`. The field reads only the compiled pieces. docs/voxel-worlds.md \"Landform operators\".",
-              "$ref": "#/$defs/__schema1004"
+              "$ref": "#/$defs/__schema1008"
             },
             "kitWalls": {
               "description": "Retaining-wall RUNS on shelf risers, COMPILED by a landform operator (`terrace`; ids `op:<id>:wall-<n>`); never hand-edited. The streamer places each world-kit piece (2 m straights + caps); the field carves each face cut down to the wall foot. docs/voxel-worlds.md \"Landform operators\".",
-              "$ref": "#/$defs/__schema1010"
+              "$ref": "#/$defs/__schema1014"
             },
             "landmarks": {
               "description": "LANDMARKS: baked rock built from a landform operator's solve (`ledges` mode landmark; ids `op:<id>:landmark`), never hand-edited. The streamer places the prefab (merged DC mesh + trimesh collider, the terrain material) in the cell its origin stands in; the operator's height patch keeps the terrain inside it. docs/voxel-worlds.md 'Landform operators'.",
-              "$ref": "#/$defs/__schema1027"
+              "$ref": "#/$defs/__schema1031"
             },
             "groundPaints": {
               "description": "GROUND PAINT: one palette surface over a polygon or disc (feathered, optionally limited by slope or height band), e.g. pale cut stone on a quarry floor, scree on talus fans, ash on a camp. Splat only (no height, no new material). COMPILED by the `paint` and `scree` landform operators (ids `op:<id>:*`); never hand-edited. Later entries win; roads, rivers and lakes still paint over it. docs/voxel-worlds.md 'Landform operators'.",
-              "$ref": "#/$defs/__schema1036"
+              "$ref": "#/$defs/__schema1040"
             },
             "rockSets": {
               "description": "Boulders COMPILED by a landform operator (`scree`; ids `op:<id>:rocks`): instances of existing scatter rules seated on the meshed ground like fall-site rocks, batched with each rule. Never hand-edited.",
-              "$ref": "#/$defs/__schema1063"
+              "$ref": "#/$defs/__schema1067"
             },
             "ribbons": {
               "description": "Path RIBBONS: solved walk surfaces laid over graded ground (steps, switchbacks, retaining walls). COMPILED by the `path` landform operator (ids `op:<id>:ribbon`); never hand-edited. The streamer draws each as a surface mesh with a collider; the field carves its wall faces; vegetation keeps its outline clear. Paths are ribbons: never carve a path.",
-              "$ref": "#/$defs/__schema1070"
+              "$ref": "#/$defs/__schema1074"
             },
             "fallSites": {
               "description": "Agent-crafted waterfalls: a solved fall split into a cascade of pools and dressed with rocks. Written by `worldgen fall-site`; see docs/world-editing/rivers-and-falls.md.",
-              "$ref": "#/$defs/__schema1093"
+              "$ref": "#/$defs/__schema1097"
             },
             "pois": {
               "default": [],
@@ -8197,21 +8201,21 @@
                   },
                   "name": {
                     "description": "What players call this one — 'The Warren Mouth'. Set by a story; a bare generated POI has none and is labelled by its id.",
-                    "$ref": "#/$defs/__schema1143"
+                    "$ref": "#/$defs/__schema1147"
                   },
                   "zone": {
                     "default": "",
                     "description": "Region id this POI stands in (recipe `regions`), or empty in an unzoned world. Stamped by `worldgen pois` and re-stamped whenever the zones are redrawn, so a zone's contents can be listed, dressed and quested over without anything having to re-run point-in-polygon over 1000 landmarks.",
-                    "$ref": "#/$defs/__schema1144"
+                    "$ref": "#/$defs/__schema1148"
                   },
                   "radius": {
                     "description": "Area of effect for kinds that have one — a waystation's sanctuary circle (metres).",
-                    "$ref": "#/$defs/__schema1145"
+                    "$ref": "#/$defs/__schema1149"
                   },
                   "tags": {
                     "default": [],
                     "description": "Free-form; \"safe\" marks a sanctuary (no player-on-player damage within `radius`), \"pass\" a zone-border pass.",
-                    "$ref": "#/$defs/__schema1146"
+                    "$ref": "#/$defs/__schema1150"
                   }
                 },
                 "required": [
@@ -8222,69 +8226,69 @@
             },
             "terraceWalls": {
               "description": "Terraces held up by real retaining walls (pad outline, drop, inserts) — authoring truth. `worldgen terrace-place` fits each to the ground and writes its `solved` pieces plus the derived `tw-<id>*` height patch, passages and clearing; `--refit` re-solves them after the terrain changes. `worldgen terrace` writes the `<town>-riser-*` ones for towns when `townTerraces.walls` is on.",
-              "$ref": "#/$defs/__schema1147"
+              "$ref": "#/$defs/__schema1151"
             },
             "floaterClears": {
               "description": "Floating voxels removed: solid lattice cells cut off from the ground mass and smaller than `floaters.keepVoxels`, forced to air by the field (point query and mesher alike). Written by `tools/voxel-floaters.mts` (`worldgen status` row `floaters`); never hand-written.",
-              "$ref": "#/$defs/__schema1185"
+              "$ref": "#/$defs/__schema1189"
             },
             "clearings": {
               "description": "Patches kept clear of scatter and/or ground cover (a site's footprint, a hall pad, a town's building plots, streets and door paths), feathered at the edge. Terrain is untouched. Written by `worldgen vegetation --clearings <file>`; see docs/voxel-worlds.md section 31.",
-              "$ref": "#/$defs/__schema1187"
+              "$ref": "#/$defs/__schema1191"
             },
             "camps": {
               "default": [],
               "description": "Enemy camps — where monsters live. Written by `worldgen spawn`, which also patches the matching spawnArea entities into the scene (ids `camp-*`, rewritten on every run); hand-written camps are kept.",
-              "$ref": "#/$defs/__schema1206"
+              "$ref": "#/$defs/__schema1210"
             }
           }
         },
         "verticalRange": {
           "description": "The vertical band actually meshed per cell. A voxel world is not infinite in Y for free.",
           "default": {},
-          "$ref": "#/$defs/__schema1262"
+          "$ref": "#/$defs/__schema1266"
         },
         "textureFilter": {
           "default": "linear",
           "description": "Magnification filter for every terrain surface texture. Set 'nearest' for PIXEL ART so it stays chunky instead of being smeared smooth up close. Emitted onto the terrain material by `worldgen material`.",
-          "$ref": "#/$defs/__schema1265"
+          "$ref": "#/$defs/__schema1269"
         },
         "macroNoise": {
           "description": "Noise multiplied over the whole blended terrain to break up texture repetition, emitted onto the terrain material by `worldgen material`. It lives HERE and not only in the material because the material is derived data — anything written straight into it is lost the next time the palette changes and it gets re-emitted.",
-          "$ref": "#/$defs/__schema1266"
+          "$ref": "#/$defs/__schema1270"
         },
         "material": {
           "type": "string"
         },
         "waterMaterial": {
           "description": "Material asset id for the water emitted into streamed cells (lakes, and rivers without a `riverMaterial`), clipped from each cell's terrain. Without it rivers are carved but dry. `worldgen init` writes one beside the terrain material.",
-          "$ref": "#/$defs/__schema1274"
+          "$ref": "#/$defs/__schema1278"
         },
         "riverMaterial": {
           "description": "Material asset id for river water specifically — a water material with `flowMode: \"field\"`, so the water visibly runs downstream along the current each vertex carries. Falls back to `waterMaterial` (standing water). `worldgen rivers` writes `<waterMaterial>-river` and sets this.",
-          "$ref": "#/$defs/__schema1275"
+          "$ref": "#/$defs/__schema1279"
         },
         "marshMaterial": {
           "description": "Material asset id for the marsh sheet (zone anchors with a `waterTable`): still, murky standing water. Falls back to `waterMaterial`.",
-          "$ref": "#/$defs/__schema1276"
+          "$ref": "#/$defs/__schema1280"
         },
         "bridgeMaterial": {
           "description": "Material asset id for the placeholder decks emitted for `features.bridges`. `worldgen roads` writes a plain timber-coloured one when the recipe has none.",
-          "$ref": "#/$defs/__schema1277"
+          "$ref": "#/$defs/__schema1281"
         },
         "splat": {
           "default": "dense",
           "description": "How the terrain mesh carries its surface weights. `dense`: every vertex carries a weight per palette surface (ceil(N/4) vec4 attributes) and the shader blends every layer — fine to 16 surfaces. `indexed`: every vertex carries the ids and weights of the FOUR layers it blends (two 4-byte attributes), the shader samples those four from one texture array, and the palette can be 64 deep (zone ground textures). A palette past 16 is meshed indexed regardless. `worldgen material` must be re-run after changing it.",
-          "$ref": "#/$defs/__schema1278"
+          "$ref": "#/$defs/__schema1282"
         },
         "zoneGround": {
           "description": "How zone ground overrides (`regions[].ground`) blend across zone borders.",
           "default": {},
-          "$ref": "#/$defs/__schema1279"
+          "$ref": "#/$defs/__schema1283"
         },
         "rockSkins": {
           "description": "ROCK SKINS — the world's stone follows the place. Cliff surface NAME -> body slice (`rockCap.bases` index) of the world's rock-cap material. Every scatter rock, boulder and cliff mass (rules with `cap`, `rockBase` or `rockBaseByCliff`) samples the cliff the terrain draws where it stands (zone `ground.cliff` overrides included, so it is its zone's stone, or the sea cliff / butte it leans on) and wears that slice; this table wins over a rule's `rockBase` / `rockBaseByCliff`. Key \"*\" is the fallback. The slice should be the cliff's own tile (the zone's rock texture or its cliff tile at the 40 texels/m standard): `worldgen rock-skins` measures the tone of each. Same meshes, one material, one batch per model. Omit for the legacy per-rule bases. Written by `worldgen init` / `zone-textures`.",
-          "$ref": "#/$defs/__schema1282"
+          "$ref": "#/$defs/__schema1286"
         }
       },
       "required": [
@@ -15868,6 +15872,10 @@
                 "minimum": 0,
                 "maximum": 1
               },
+              "street": {
+                "description": "A STREET-SHAPED shelf (a straight band along the contour) written by `worldgen terrace` when it sizes a town from its program (`townSchema.program`): the street the band was cut for. town-layout's frame for the band is its centreline, so a lane on it is `axis` + `offset`. Absent on a contour-fitted or disc shelf.",
+                "$ref": "#/$defs/__schema843"
+              },
               "tags": {
                 "default": [],
                 "type": "array",
@@ -15902,6 +15910,74 @@
           "minimum": 0
         },
         "__schema843": {
+          "type": "object",
+          "properties": {
+            "axis": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "$ref": "#/$defs/__schema844"
+                },
+                {
+                  "$ref": "#/$defs/__schema845"
+                }
+              ],
+              "description": "Unit XZ direction the street runs: the band's centreline, first point to last."
+            },
+            "offset": {
+              "type": "number",
+              "description": "Metres from the centreline to the street's middle, + to the axis's left ([-axis.z, axis.x]). 0 = down the middle with a row of lots each side; otherwise one row with the street along the band's seaward (downhill) edge."
+            },
+            "width": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Street width, metres."
+            }
+          },
+          "required": [
+            "axis",
+            "offset",
+            "width"
+          ]
+        },
+        "__schema844": {
+          "type": "number"
+        },
+        "__schema845": {
+          "type": "number"
+        },
+        "__schema846": {
+          "type": "object",
+          "properties": {
+            "area": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Required flat ground, m2."
+            },
+            "lots": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "description": "Buildings in the program (every building of the plan: optional and dropped lots count; the program is not cut to fit)."
+            },
+            "across": {
+              "type": "number",
+              "minimum": 0,
+              "description": "The deepest lot ACROSS a band (its shorter side + 1 m setback; a long lot turns onto a cross lane), m: some shelf must be this + a 5 m street deep."
+            },
+            "source": {
+              "type": "string",
+              "description": "Where it was derived from: the town plan (authoring/towns/<name>-plan.json) or 'recipe'."
+            }
+          },
+          "required": [
+            "area",
+            "lots",
+            "across",
+            "source"
+          ]
+        },
+        "__schema847": {
           "type": "array",
           "items": {
             "type": "object",
@@ -15914,10 +15990,10 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema844"
+                    "$ref": "#/$defs/__schema848"
                   },
                   {
-                    "$ref": "#/$defs/__schema845"
+                    "$ref": "#/$defs/__schema849"
                   }
                 ],
                 "description": "World XZ of the gate mouth — where the town's own roads end and the world's begin. Every path to this town arrives HERE, not at the centre."
@@ -15926,10 +16002,10 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema846"
+                    "$ref": "#/$defs/__schema850"
                   },
                   {
-                    "$ref": "#/$defs/__schema847"
+                    "$ref": "#/$defs/__schema851"
                   }
                 ],
                 "description": "Outward XZ direction the road leaves in, pointing away from the town. Normalised on use; [0, 0] is an error."
@@ -15937,12 +16013,12 @@
               "width": {
                 "default": 6,
                 "description": "Clear width of the opening. A path arriving here is drawn no wider than this.",
-                "$ref": "#/$defs/__schema848"
+                "$ref": "#/$defs/__schema852"
               },
               "approach": {
                 "default": 30,
                 "description": "Metres of DEAD STRAIGHT path laid outward from `at` along `facing` before the router takes over. This is what makes the road leave square-on through the arch instead of raking past it; 0 lets the router start bending at the gate itself.",
-                "$ref": "#/$defs/__schema849"
+                "$ref": "#/$defs/__schema853"
               },
               "tags": {
                 "default": [],
@@ -15958,27 +16034,27 @@
             ]
           }
         },
-        "__schema844": {
-          "type": "number"
-        },
-        "__schema845": {
-          "type": "number"
-        },
-        "__schema846": {
-          "type": "number"
-        },
-        "__schema847": {
-          "type": "number"
-        },
         "__schema848": {
+          "type": "number"
+        },
+        "__schema849": {
+          "type": "number"
+        },
+        "__schema850": {
+          "type": "number"
+        },
+        "__schema851": {
+          "type": "number"
+        },
+        "__schema852": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema849": {
+        "__schema853": {
           "type": "number",
           "minimum": 0
         },
-        "__schema850": {
+        "__schema854": {
           "type": "array",
           "items": {
             "type": "object",
@@ -16006,7 +16082,7 @@
               "falloff": {
                 "default": 120,
                 "description": "Metres over which the families fade back in outside `radius`.",
-                "$ref": "#/$defs/__schema851"
+                "$ref": "#/$defs/__schema855"
               }
             },
             "required": [
@@ -16016,59 +16092,59 @@
             ]
           }
         },
-        "__schema851": {
+        "__schema855": {
           "type": "number",
           "minimum": 0
         },
-        "__schema852": {
+        "__schema856": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema853"
-              },
-              "origin": {
-                "$ref": "#/$defs/__schema854"
-              },
-              "size": {
                 "$ref": "#/$defs/__schema857"
               },
-              "columns": {
-                "$ref": "#/$defs/__schema860"
+              "origin": {
+                "$ref": "#/$defs/__schema858"
               },
-              "rows": {
+              "size": {
                 "$ref": "#/$defs/__schema861"
               },
-              "heights": {
-                "$ref": "#/$defs/__schema862"
-              },
-              "weights": {
+              "columns": {
                 "$ref": "#/$defs/__schema864"
               },
-              "blend": {
-                "$ref": "#/$defs/__schema867"
+              "rows": {
+                "$ref": "#/$defs/__schema865"
               },
-              "feather": {
+              "heights": {
+                "$ref": "#/$defs/__schema866"
+              },
+              "weights": {
                 "$ref": "#/$defs/__schema868"
               },
-              "edgeSlope": {
-                "$ref": "#/$defs/__schema870"
+              "blend": {
+                "$ref": "#/$defs/__schema871"
               },
-              "maxSlope": {
+              "feather": {
                 "$ref": "#/$defs/__schema872"
               },
-              "calm": {
+              "edgeSlope": {
                 "$ref": "#/$defs/__schema874"
               },
-              "raiseOnly": {
+              "maxSlope": {
                 "$ref": "#/$defs/__schema876"
               },
-              "afterRivers": {
+              "calm": {
                 "$ref": "#/$defs/__schema878"
               },
-              "filter": {
+              "raiseOnly": {
                 "$ref": "#/$defs/__schema880"
+              },
+              "afterRivers": {
+                "$ref": "#/$defs/__schema882"
+              },
+              "filter": {
+                "$ref": "#/$defs/__schema884"
               }
             },
             "required": [
@@ -16081,108 +16157,92 @@
             ]
           }
         },
-        "__schema853": {
+        "__schema857": {
           "default": "height-patch",
           "type": "string"
         },
-        "__schema854": {
+        "__schema858": {
           "type": "array",
           "prefixItems": [
             {
-              "$ref": "#/$defs/__schema855"
+              "$ref": "#/$defs/__schema859"
             },
             {
-              "$ref": "#/$defs/__schema856"
+              "$ref": "#/$defs/__schema860"
             }
           ],
           "description": "World XZ of the first sample (northwest corner). Rows increase toward +Z."
         },
-        "__schema855": {
+        "__schema859": {
           "type": "number"
         },
-        "__schema856": {
+        "__schema860": {
           "type": "number"
         },
-        "__schema857": {
+        "__schema861": {
           "type": "array",
           "prefixItems": [
             {
-              "$ref": "#/$defs/__schema858"
+              "$ref": "#/$defs/__schema862"
             },
             {
-              "$ref": "#/$defs/__schema859"
+              "$ref": "#/$defs/__schema863"
             }
           ],
           "description": "World XZ extent from first to last sample, in metres."
         },
-        "__schema858": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema859": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema860": {
-          "type": "integer",
-          "minimum": 2,
-          "maximum": 1025
-        },
-        "__schema861": {
-          "type": "integer",
-          "minimum": 2,
-          "maximum": 1025
-        },
         "__schema862": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema863": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema864": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1025
+        },
+        "__schema865": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1025
+        },
+        "__schema866": {
           "maxItems": 1050625,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema863"
+            "$ref": "#/$defs/__schema867"
           },
           "description": "Absolute world Y samples, row-major (row * columns + column). Bilinear interpolation; importers decode image brightness into metres before storing."
         },
-        "__schema863": {
+        "__schema867": {
           "type": "number"
         },
-        "__schema864": {
+        "__schema868": {
           "description": "Per-sample opacity in [0, 1], row-major like `heights` (bilinear). Present = a MASKED edit: the ground under the patch is pulled toward `heights` by this weight (times the edge feather), so where it is 0 the ground beneath shows through and is never frozen into the raster (a later road, a neighbouring patch or a terrain rebuild under the untouched part of the box still shows). Omitted = opaque: the raster replaces the ground inside the feather.",
-          "$ref": "#/$defs/__schema865"
+          "$ref": "#/$defs/__schema869"
         },
-        "__schema865": {
+        "__schema869": {
           "maxItems": 1050625,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema866"
+            "$ref": "#/$defs/__schema870"
           }
         },
-        "__schema866": {
+        "__schema870": {
           "type": "number",
           "minimum": 0,
           "maximum": 1
         },
-        "__schema867": {
+        "__schema871": {
           "type": "number",
           "exclusiveMinimum": 0,
           "description": "Metres INSIDE every patch edge used to smoothstep from existing terrain to these heights. Exactly zero influence and zero blend derivative on the boundary; neighbouring chunks sample the same field. A MINIMUM: the evaluated feather is never narrower than two voxel steps and, unless `feather` is set, widens per edge until the blend is no steeper than `edgeSlope` for the height the patch differs from the ground along that edge (capped at half the extent)."
         },
-        "__schema868": {
-          "description": "Explicit feather width in metres inside every edge (at least `blend`), replacing the automatic per-edge width. A feather narrower than two voxel steps draws as a sawtooth on any edge that is not level with the ground.",
-          "$ref": "#/$defs/__schema869"
-        },
-        "__schema869": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema870": {
-          "description": "Steepest rise/run the automatic edge feather allows (default 1 = 45 degrees). Lower = softer edges.",
-          "$ref": "#/$defs/__schema871"
-        },
-        "__schema871": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
         "__schema872": {
-          "description": "Steepest rise/run allowed INSIDE the raster. Risers drawn steeper (a terrace or tier wall, a bench edge) are filled at the foot into a talus at this slope, keeping every top level where it is. Omitted = the raster as written. A wall steeper than about 1.6 between 2 m lattice samples draws as a zig-zag; `worldgen lips` reports where.",
+          "description": "Explicit feather width in metres inside every edge (at least `blend`), replacing the automatic per-edge width. A feather narrower than two voxel steps draws as a sawtooth on any edge that is not level with the ground.",
           "$ref": "#/$defs/__schema873"
         },
         "__schema873": {
@@ -16190,35 +16250,51 @@
           "exclusiveMinimum": 0
         },
         "__schema874": {
-          "description": "Built ground: the terrain's 3D overhang noise is off wherever this patch pulls the ground (scaled by 1 - its blend weight), so no rock heaves through what is laid on it. The wall operator's ramp cut sets it with `ramp.cut.calm`.",
+          "description": "Steepest rise/run the automatic edge feather allows (default 1 = 45 degrees). Lower = softer edges.",
           "$ref": "#/$defs/__schema875"
         },
         "__schema875": {
-          "type": "boolean"
+          "type": "number",
+          "exclusiveMinimum": 0
         },
         "__schema876": {
-          "description": "true: the patch only FILLS — wherever its blended height would fall below the ground under it, that ground stays. A raised shelf or apron sampled next to a sheer cliff then never chamfers the cliff top or face between its lattice samples (the bilinear raster between a toe sample and a top sample would cut the rim). Under sea cliffs and buttes it takes the column from the walls only where it lifts gentle ground (beside a stack the heightfield is the stack top, not the surface); elsewhere the walls keep their faces and read the raised heightfield.",
+          "description": "Steepest rise/run allowed INSIDE the raster. Risers drawn steeper (a terrace or tier wall, a bench edge) are filled at the foot into a talus at this slope, keeping every top level where it is. Omitted = the raster as written. A wall steeper than about 1.6 between 2 m lattice samples draws as a zig-zag; `worldgen lips` reports where.",
           "$ref": "#/$defs/__schema877"
         },
         "__schema877": {
-          "type": "boolean"
+          "type": "number",
+          "exclusiveMinimum": 0
         },
         "__schema878": {
-          "description": "Ground the river solve must NOT see (like terrace-wall `tw-*` and bridge-span `bs-*` patches): banks raised beside a channel, a lip shoulder. Without it the solve re-reads the raised ground and can move the river, its levels and its falls. The patch still shapes the finished ground, the water clip and every gate.",
+          "description": "Built ground: the terrain's 3D overhang noise is off wherever this patch pulls the ground (scaled by 1 - its blend weight), so no rock heaves through what is laid on it. The wall operator's ramp cut sets it with `ramp.cut.calm`.",
           "$ref": "#/$defs/__schema879"
         },
         "__schema879": {
           "type": "boolean"
         },
         "__schema880": {
-          "description": "Half-width in metres of the tent prefilter applied to the raster before sampling (default: the voxel step). Anti-aliases cliffs and terrace edges drawn sharper than the lattice so diagonal edges do not stair-step. 0 = raw raster.",
+          "description": "true: the patch only FILLS — wherever its blended height would fall below the ground under it, that ground stays. A raised shelf or apron sampled next to a sheer cliff then never chamfers the cliff top or face between its lattice samples (the bilinear raster between a toe sample and a top sample would cut the rim). Under sea cliffs and buttes it takes the column from the walls only where it lifts gentle ground (beside a stack the heightfield is the stack top, not the surface); elsewhere the walls keep their faces and read the raised heightfield.",
           "$ref": "#/$defs/__schema881"
         },
         "__schema881": {
+          "type": "boolean"
+        },
+        "__schema882": {
+          "description": "Ground the river solve must NOT see (like terrace-wall `tw-*` and bridge-span `bs-*` patches): banks raised beside a channel, a lip shoulder. Without it the solve re-reads the raised ground and can move the river, its levels and its falls. The patch still shapes the finished ground, the water clip and every gate.",
+          "$ref": "#/$defs/__schema883"
+        },
+        "__schema883": {
+          "type": "boolean"
+        },
+        "__schema884": {
+          "description": "Half-width in metres of the tent prefilter applied to the raster before sampling (default: the voxel step). Anti-aliases cliffs and terrace edges drawn sharper than the lattice so diagonal edges do not stair-step. 0 = raw raster.",
+          "$ref": "#/$defs/__schema885"
+        },
+        "__schema885": {
           "type": "number",
           "minimum": 0
         },
-        "__schema882": {
+        "__schema886": {
           "type": "array",
           "items": {
             "type": "object",
@@ -16240,7 +16316,7 @@
               },
               "polygon": {
                 "description": "World-space XZ outline of the shore. Omit for a disc of `radius` about `center`.",
-                "$ref": "#/$defs/__schema883"
+                "$ref": "#/$defs/__schema887"
               },
               "radius": {
                 "default": 60,
@@ -16254,31 +16330,31 @@
               "depth": {
                 "default": 6,
                 "description": "How far below the surface the deepest water is.",
-                "$ref": "#/$defs/__schema885"
+                "$ref": "#/$defs/__schema889"
               },
               "bank": {
                 "default": 18,
                 "description": "Distance over which the shore eases from the waterline back to natural terrain, and the bed from the shore down to `depth`.",
-                "$ref": "#/$defs/__schema886"
+                "$ref": "#/$defs/__schema890"
               },
               "carve": {
                 "default": true,
                 "description": "true (hand-placed lakes): dig the basin — everything inside the outline goes down to `depth`, and a `bank` outside it eases to the waterline, whatever the ground was. false (`worldgen rivers` writes this): the terrain already holds the basin the hydrology found, so only ground at or under the surface is deepened, blended over two banks, and ground standing over a metre above it — an island, or an outline that overshot onto a hillside — is left alone. Carving a traced outline dug craters with vertical walls where it strayed uphill.",
-                "$ref": "#/$defs/__schema887"
+                "$ref": "#/$defs/__schema891"
               },
               "material": {
                 "description": "Water material for THIS lake, overriding the recipe's `waterMaterial`. A swamp pool is still, murky and opaque; a tarn is clear — one water for both reads wrong in both.",
-                "$ref": "#/$defs/__schema888"
+                "$ref": "#/$defs/__schema892"
               },
               "surface": {
                 "default": "",
                 "description": "Palette surface NAME painted on the bed and a `shore` band around the outline — wet sand, gravel — so the ground under and beside the water is not the biome's grass. Empty leaves the biome's cover; an unknown name paints nothing.",
-                "$ref": "#/$defs/__schema889"
+                "$ref": "#/$defs/__schema893"
               },
               "shore": {
                 "default": 8,
                 "description": "Metres beyond the outline the `surface` fades out over.",
-                "$ref": "#/$defs/__schema890"
+                "$ref": "#/$defs/__schema894"
               },
               "tags": {
                 "default": [],
@@ -16294,14 +16370,14 @@
             ]
           }
         },
-        "__schema883": {
+        "__schema887": {
           "minItems": 3,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema884"
+            "$ref": "#/$defs/__schema888"
           }
         },
-        "__schema884": {
+        "__schema888": {
           "type": "array",
           "prefixItems": [
             {
@@ -16312,28 +16388,28 @@
             }
           ]
         },
-        "__schema885": {
+        "__schema889": {
           "type": "number",
           "exclusiveMinimum": 0
-        },
-        "__schema886": {
-          "type": "number",
-          "minimum": 0
-        },
-        "__schema887": {
-          "type": "boolean"
-        },
-        "__schema888": {
-          "type": "string"
-        },
-        "__schema889": {
-          "type": "string"
         },
         "__schema890": {
           "type": "number",
           "minimum": 0
         },
         "__schema891": {
+          "type": "boolean"
+        },
+        "__schema892": {
+          "type": "string"
+        },
+        "__schema893": {
+          "type": "string"
+        },
+        "__schema894": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema895": {
           "type": "array",
           "items": {
             "type": "object",
@@ -16346,10 +16422,10 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema892"
+                    "$ref": "#/$defs/__schema896"
                   },
                   {
-                    "$ref": "#/$defs/__schema893"
+                    "$ref": "#/$defs/__schema897"
                   }
                 ],
                 "description": "World-space XZ of the two abutments: where the road stops on one bank and resumes on the other."
@@ -16357,7 +16433,7 @@
               "width": {
                 "default": 6,
                 "description": "Deck width — the road's.",
-                "$ref": "#/$defs/__schema894"
+                "$ref": "#/$defs/__schema898"
               },
               "deckY": {
                 "type": "number",
@@ -16366,20 +16442,20 @@
               "thickness": {
                 "default": 0.6,
                 "description": "Deck slab thickness, hanging below `deckY`.",
-                "$ref": "#/$defs/__schema895"
+                "$ref": "#/$defs/__schema899"
               },
               "river": {
                 "default": "",
                 "description": "Id of the river crossed.",
-                "$ref": "#/$defs/__schema896"
+                "$ref": "#/$defs/__schema900"
               },
               "waterY": {
                 "description": "Water surface under the span, for the WFC stage to size piers.",
-                "$ref": "#/$defs/__schema897"
+                "$ref": "#/$defs/__schema901"
               },
               "material": {
                 "description": "Material for the deck, overriding the recipe's `bridgeMaterial`.",
-                "$ref": "#/$defs/__schema898"
+                "$ref": "#/$defs/__schema902"
               },
               "tags": {
                 "default": [],
@@ -16395,7 +16471,7 @@
             ]
           }
         },
-        "__schema892": {
+        "__schema896": {
           "type": "array",
           "prefixItems": [
             {
@@ -16406,7 +16482,7 @@
             }
           ]
         },
-        "__schema893": {
+        "__schema897": {
           "type": "array",
           "prefixItems": [
             {
@@ -16417,87 +16493,87 @@
             }
           ]
         },
-        "__schema894": {
+        "__schema898": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema895": {
+        "__schema899": {
           "type": "number",
           "minimum": 0
         },
-        "__schema896": {
+        "__schema900": {
           "type": "string"
         },
-        "__schema897": {
+        "__schema901": {
           "type": "number"
         },
-        "__schema898": {
+        "__schema902": {
           "type": "string"
         },
-        "__schema899": {
+        "__schema903": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema900"
+                "$ref": "#/$defs/__schema904"
               },
               "owner": {
-                "$ref": "#/$defs/__schema901"
-              },
-              "kind": {
-                "$ref": "#/$defs/__schema903"
-              },
-              "style": {
                 "$ref": "#/$defs/__schema905"
               },
-              "a": {
+              "kind": {
                 "$ref": "#/$defs/__schema907"
+              },
+              "style": {
+                "$ref": "#/$defs/__schema909"
+              },
+              "a": {
+                "$ref": "#/$defs/__schema911"
               },
               "b": {
-                "$ref": "#/$defs/__schema907"
+                "$ref": "#/$defs/__schema911"
               },
               "toward": {
-                "$ref": "#/$defs/__schema916"
-              },
-              "channel": {
-                "$ref": "#/$defs/__schema918"
-              },
-              "tiers": {
                 "$ref": "#/$defs/__schema920"
               },
-              "bay": {
+              "channel": {
                 "$ref": "#/$defs/__schema922"
               },
-              "maxPier": {
+              "tiers": {
                 "$ref": "#/$defs/__schema924"
               },
-              "maxWater": {
+              "bay": {
                 "$ref": "#/$defs/__schema926"
               },
-              "sag": {
+              "maxPier": {
                 "$ref": "#/$defs/__schema928"
               },
-              "width": {
+              "maxWater": {
                 "$ref": "#/$defs/__schema930"
               },
-              "rails": {
+              "sag": {
                 "$ref": "#/$defs/__schema932"
               },
-              "seat": {
+              "width": {
                 "$ref": "#/$defs/__schema934"
               },
-              "seed": {
+              "rails": {
                 "$ref": "#/$defs/__schema936"
               },
+              "seat": {
+                "$ref": "#/$defs/__schema938"
+              },
+              "seed": {
+                "$ref": "#/$defs/__schema940"
+              },
               "replaces": {
-                "$ref": "#/$defs/__schema937"
+                "$ref": "#/$defs/__schema941"
               },
               "tags": {
-                "$ref": "#/$defs/__schema939"
+                "$ref": "#/$defs/__schema943"
               },
               "solved": {
-                "$ref": "#/$defs/__schema940"
+                "$ref": "#/$defs/__schema944"
               }
             },
             "required": [
@@ -16508,24 +16584,24 @@
             "description": "A bridge across a gap: two anchors + kind + style; solved by `worldgen bridge-place` from the world-kit bridge kits."
           }
         },
-        "__schema900": {
+        "__schema904": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9-]*$",
           "description": "Stable id; its derived height patches and clearing are `bs-<id>*`."
         },
-        "__schema901": {
+        "__schema905": {
           "description": "Who wrote it (a town, POI or zone id).",
-          "$ref": "#/$defs/__schema902"
+          "$ref": "#/$defs/__schema906"
         },
-        "__schema902": {
+        "__schema906": {
           "type": "string"
         },
-        "__schema903": {
+        "__schema907": {
           "default": "arch",
           "description": "arch: stone arch bridge / aqueduct (bays 6-16 m, piers founded on the ground or seabed, up to ~70 m piers). rope: rope suspension bridge (12-130 m, no piers): sea stacks, chasms, anything too deep or wet for piers; STRAIGHT in plan between NATURAL TOPS, the height taken as SLOPE (end to end <= 30 deg, the deck <= 35 deg): Derek's standing rule, never stairs, stages, towers or plinths to meet a deck; steeper means a different anchor pair. plinth: reserved (the kit's stone landing plinth is a future POI part; bridge-place refuses it).",
-          "$ref": "#/$defs/__schema904"
+          "$ref": "#/$defs/__schema908"
         },
-        "__schema904": {
+        "__schema908": {
           "type": "string",
           "enum": [
             "arch",
@@ -16533,29 +16609,29 @@
             "plinth"
           ]
         },
-        "__schema905": {
+        "__schema909": {
           "default": "gnawspur",
           "description": "gnawspur: coursed rubble with dressed voussoir rings, string course, coping and paving (the Gnawspur aqueduct). coastal: dark lichened rubble, ragged voussoirs, weather-picked bosses. Rope bridges are always the Gnawbridge's lashed hull planks on tarred stringers (style ignored).",
-          "$ref": "#/$defs/__schema906"
+          "$ref": "#/$defs/__schema910"
         },
-        "__schema906": {
+        "__schema910": {
           "type": "string",
           "enum": [
             "gnawspur",
             "coastal"
           ]
         },
-        "__schema907": {
+        "__schema911": {
           "type": "object",
           "properties": {
             "at": {
-              "$ref": "#/$defs/__schema908"
-            },
-            "y": {
               "$ref": "#/$defs/__schema912"
             },
+            "y": {
+              "$ref": "#/$defs/__schema916"
+            },
             "seat": {
-              "$ref": "#/$defs/__schema914"
+              "$ref": "#/$defs/__schema918"
             }
           },
           "required": [
@@ -16563,33 +16639,33 @@
           ],
           "description": "One end of a span."
         },
-        "__schema908": {
+        "__schema912": {
           "description": "World [x, z] of this end: where the deck meets the land (a cliff-top edge, a stack top).",
-          "$ref": "#/$defs/__schema911"
+          "$ref": "#/$defs/__schema915"
         },
-        "__schema909": {
+        "__schema913": {
           "type": "number"
         },
-        "__schema910": {
+        "__schema914": {
           "type": "number"
         },
-        "__schema911": {
+        "__schema915": {
           "type": "array",
           "prefixItems": [
             {
-              "$ref": "#/$defs/__schema909"
+              "$ref": "#/$defs/__schema913"
             },
             {
-              "$ref": "#/$defs/__schema910"
+              "$ref": "#/$defs/__schema914"
             }
           ]
         },
-        "__schema912": {
+        "__schema916": {
           "default": "ground",
           "description": "Deck height at this end (world Y), or \"ground\": the natural ground there. Arch decks are level (both ends within 2 m; the pads are levelled to the deck); a rope deck runs from one end's height to the other's.",
-          "$ref": "#/$defs/__schema913"
+          "$ref": "#/$defs/__schema917"
         },
-        "__schema913": {
+        "__schema917": {
           "anyOf": [
             {
               "type": "number"
@@ -16600,11 +16676,11 @@
             }
           ]
         },
-        "__schema914": {
+        "__schema918": {
           "description": "This end's seating, overriding the span's `seat` (a span from a headland onto a DC stack top: pad on the land, rock on the stack; stage: a timber landing stage, docks / sea-level landings only; plinth: refused for rope ends).",
-          "$ref": "#/$defs/__schema915"
+          "$ref": "#/$defs/__schema919"
         },
-        "__schema915": {
+        "__schema919": {
           "type": "string",
           "enum": [
             "pad",
@@ -16613,31 +16689,31 @@
             "plinth"
           ]
         },
-        "__schema916": {
+        "__schema920": {
           "default": [],
           "description": "plinth only: the far ends of the rope bridges landing on it (world [x, z]); the parapet opens toward each and the stair's roof hatch keeps clear of their landings.",
-          "$ref": "#/$defs/__schema917"
-        },
-        "__schema917": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/__schema911"
-          }
-        },
-        "__schema918": {
-          "default": false,
-          "description": "arch only: a true aqueduct, a water channel along the deck beside a 2.2 m towpath.",
-          "$ref": "#/$defs/__schema919"
-        },
-        "__schema919": {
-          "type": "boolean"
-        },
-        "__schema920": {
-          "default": "auto",
-          "description": "arch only: 2 = a lower arcade under the top one (Pont du Gard). auto: 2 when a pier would be over 24 m tall.",
           "$ref": "#/$defs/__schema921"
         },
         "__schema921": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema915"
+          }
+        },
+        "__schema922": {
+          "default": false,
+          "description": "arch only: a true aqueduct, a water channel along the deck beside a 2.2 m towpath.",
+          "$ref": "#/$defs/__schema923"
+        },
+        "__schema923": {
+          "type": "boolean"
+        },
+        "__schema924": {
+          "default": "auto",
+          "description": "arch only: 2 = a lower arcade under the top one (Pont du Gard). auto: 2 when a pier would be over 24 m tall.",
+          "$ref": "#/$defs/__schema925"
+        },
+        "__schema925": {
           "anyOf": [
             {
               "type": "string",
@@ -16653,11 +16729,11 @@
             }
           ]
         },
-        "__schema922": {
+        "__schema926": {
           "description": "arch only: force the bay width (m). Omitted = chosen from the gap and the pier heights (taller crossings get wider bays).",
-          "$ref": "#/$defs/__schema923"
+          "$ref": "#/$defs/__schema927"
         },
-        "__schema923": {
+        "__schema927": {
           "anyOf": [
             {
               "type": "number",
@@ -16685,58 +16761,58 @@
             }
           ]
         },
-        "__schema924": {
+        "__schema928": {
           "default": 70,
           "description": "arch only: tallest pier (m, springing to footing) the fit may build.",
-          "$ref": "#/$defs/__schema925"
-        },
-        "__schema925": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema926": {
-          "default": 14,
-          "description": "arch only: deepest water (m) a pier may be founded in; a layout that needs a deeper pier fails over to another bay width or fails (use a rope bridge).",
-          "$ref": "#/$defs/__schema927"
-        },
-        "__schema927": {
-          "type": "number",
-          "minimum": 0
-        },
-        "__schema928": {
-          "default": 0.035,
-          "description": "rope only: the deck's sag at mid-span as a fraction of the span (3.5 % = 3.2 m on 90 m).",
           "$ref": "#/$defs/__schema929"
         },
         "__schema929": {
           "type": "number",
-          "minimum": 0.01,
-          "maximum": 0.12
+          "exclusiveMinimum": 0
         },
         "__schema930": {
-          "default": 1.8,
-          "description": "rope only: deck width (m).",
+          "default": 14,
+          "description": "arch only: deepest water (m) a pier may be founded in; a layout that needs a deeper pier fails over to another bay width or fails (use a rope bridge).",
           "$ref": "#/$defs/__schema931"
         },
         "__schema931": {
           "type": "number",
-          "minimum": 1.2,
-          "maximum": 3
+          "minimum": 0
         },
         "__schema932": {
-          "default": true,
-          "description": "rope only: hidden rail colliders along the hand ropes (nobody steps off by accident).",
+          "default": 0.035,
+          "description": "rope only: the deck's sag at mid-span as a fraction of the span (3.5 % = 3.2 m on 90 m).",
           "$ref": "#/$defs/__schema933"
         },
         "__schema933": {
-          "type": "boolean"
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 0.12
         },
         "__schema934": {
-          "default": "pad",
-          "description": "pad: level each end with a feathered height patch (the cliff top behind the face only). rock: no patch (an end on a DC cliff top or rock formation): a rope end slides to the rim and its deck eases level over it, the gate checks the rock seats it. stage (rope only): a timber landing stage off a steep lip, with a walkway / stair to walkable ground (world-kit bridges stage.mts).",
+          "default": 1.8,
+          "description": "rope only: deck width (m).",
           "$ref": "#/$defs/__schema935"
         },
         "__schema935": {
+          "type": "number",
+          "minimum": 1.2,
+          "maximum": 3
+        },
+        "__schema936": {
+          "default": true,
+          "description": "rope only: hidden rail colliders along the hand ropes (nobody steps off by accident).",
+          "$ref": "#/$defs/__schema937"
+        },
+        "__schema937": {
+          "type": "boolean"
+        },
+        "__schema938": {
+          "default": "pad",
+          "description": "pad: level each end with a feathered height patch (the cliff top behind the face only). rock: no patch (an end on a DC cliff top or rock formation): a rope end slides to the rim and its deck eases level over it, the gate checks the rock seats it. stage (rope only): a timber landing stage off a steep lip, with a walkway / stair to walkable ground (world-kit bridges stage.mts).",
+          "$ref": "#/$defs/__schema939"
+        },
+        "__schema939": {
           "type": "string",
           "enum": [
             "pad",
@@ -16745,28 +16821,28 @@
             "plinth"
           ]
         },
-        "__schema936": {
+        "__schema940": {
           "type": "string"
         },
-        "__schema937": {
+        "__schema941": {
           "description": "Id of the `features.bridges` PLACEHOLDER deck (a road/trail crossing written by `worldgen roads`) this span stands in for: once the span is fitted the streamer stops drawing that flat slab and its box piers. Anchor the span on the placeholder's abutments at its deckY so the road ends meet the deck.",
-          "$ref": "#/$defs/__schema938"
+          "$ref": "#/$defs/__schema942"
         },
-        "__schema938": {
+        "__schema942": {
           "type": "string"
         },
-        "__schema939": {
+        "__schema943": {
           "default": [],
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "__schema940": {
+        "__schema944": {
           "description": "Written by `worldgen bridge-place`; never hand-edit. Absent = not fitted yet (nothing is built).",
-          "$ref": "#/$defs/__schema941"
+          "$ref": "#/$defs/__schema945"
         },
-        "__schema941": {
+        "__schema945": {
           "type": "object",
           "properties": {
             "kind": {
@@ -16792,13 +16868,13 @@
               "type": "array",
               "prefixItems": [
                 {
-                  "$ref": "#/$defs/__schema942"
+                  "$ref": "#/$defs/__schema946"
                 },
                 {
-                  "$ref": "#/$defs/__schema943"
+                  "$ref": "#/$defs/__schema947"
                 },
                 {
-                  "$ref": "#/$defs/__schema944"
+                  "$ref": "#/$defs/__schema948"
                 }
               ],
               "description": "World point s = 0 of the span frame (the measured face A for an arch, deck end A for a rope bridge)."
@@ -16814,19 +16890,19 @@
             "dy": {
               "default": 0,
               "description": "Rope: deck end B minus end A.",
-              "$ref": "#/$defs/__schema945"
+              "$ref": "#/$defs/__schema949"
             },
             "bay": {
               "description": "Arch: bay width (m).",
-              "$ref": "#/$defs/__schema946"
+              "$ref": "#/$defs/__schema950"
             },
             "bays": {
               "description": "Arch: number of top-arcade bays.",
-              "$ref": "#/$defs/__schema947"
+              "$ref": "#/$defs/__schema951"
             },
             "tiers": {
               "description": "Arch: 1, or 2 with a lower arcade (Pont du Gard).",
-              "$ref": "#/$defs/__schema948"
+              "$ref": "#/$defs/__schema952"
             },
             "drops": {
               "default": [
@@ -16834,16 +16910,16 @@
                 0
               ],
               "description": "Rope: metres each end's landing falls over its length, following a rock top that falls inland (0 = level).",
-              "$ref": "#/$defs/__schema949"
+              "$ref": "#/$defs/__schema953"
             },
             "lowDrop": {
               "description": "Rope: the deck's lowest point below end A (m).",
-              "$ref": "#/$defs/__schema950"
+              "$ref": "#/$defs/__schema954"
             },
             "pieces": {
               "type": "array",
               "items": {
-                "$ref": "#/$defs/__schema951"
+                "$ref": "#/$defs/__schema955"
               },
               "description": "Every kit piece, world placed. The streamer emits these; do not hand-edit."
             },
@@ -16857,13 +16933,13 @@
                     "type": "array",
                     "prefixItems": [
                       {
-                        "$ref": "#/$defs/__schema955"
+                        "$ref": "#/$defs/__schema959"
                       },
                       {
-                        "$ref": "#/$defs/__schema956"
+                        "$ref": "#/$defs/__schema960"
                       },
                       {
-                        "$ref": "#/$defs/__schema957"
+                        "$ref": "#/$defs/__schema961"
                       }
                     ],
                     "description": "World [x, y, z]: the pier centre at its springing (top)."
@@ -16875,7 +16951,7 @@
                   "water": {
                     "anyOf": [
                       {
-                        "$ref": "#/$defs/__schema958"
+                        "$ref": "#/$defs/__schema962"
                       },
                       {
                         "type": "null"
@@ -16910,7 +16986,7 @@
             "profile": {
               "type": "array",
               "items": {
-                "$ref": "#/$defs/__schema959"
+                "$ref": "#/$defs/__schema963"
               },
               "description": "The walked deck surface as [s, y] samples along the span frame (s from `origin`, y world): what the walk probe reads."
             },
@@ -16918,10 +16994,10 @@
               "type": "object",
               "properties": {
                 "patches": {
-                  "$ref": "#/$defs/__schema960"
+                  "$ref": "#/$defs/__schema964"
                 },
                 "clearing": {
-                  "$ref": "#/$defs/__schema961"
+                  "$ref": "#/$defs/__schema965"
                 }
               },
               "required": [
@@ -16935,12 +17011,12 @@
             },
             "plinth": {
               "description": "kind plinth: the solved tower.",
-              "$ref": "#/$defs/__schema962"
+              "$ref": "#/$defs/__schema966"
             },
             "stages": {
               "default": [],
               "description": "Timber landing stages at `seat: stage` ends.",
-              "$ref": "#/$defs/__schema970"
+              "$ref": "#/$defs/__schema974"
             },
             "warnings": {
               "default": [],
@@ -16963,32 +17039,32 @@
             "ground"
           ]
         },
-        "__schema942": {
-          "type": "number"
-        },
-        "__schema943": {
-          "type": "number"
-        },
-        "__schema944": {
-          "type": "number"
-        },
-        "__schema945": {
-          "type": "number"
-        },
         "__schema946": {
           "type": "number"
         },
         "__schema947": {
-          "type": "integer",
-          "minimum": -9007199254740991,
-          "maximum": 9007199254740991
+          "type": "number"
         },
         "__schema948": {
+          "type": "number"
+        },
+        "__schema949": {
+          "type": "number"
+        },
+        "__schema950": {
+          "type": "number"
+        },
+        "__schema951": {
           "type": "integer",
           "minimum": -9007199254740991,
           "maximum": 9007199254740991
         },
-        "__schema949": {
+        "__schema952": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "__schema953": {
           "type": "array",
           "prefixItems": [
             {
@@ -16999,10 +17075,10 @@
             }
           ]
         },
-        "__schema950": {
+        "__schema954": {
           "type": "number"
         },
-        "__schema951": {
+        "__schema955": {
           "type": "object",
           "properties": {
             "prefab": {
@@ -17017,13 +17093,13 @@
               "type": "array",
               "prefixItems": [
                 {
-                  "$ref": "#/$defs/__schema952"
+                  "$ref": "#/$defs/__schema956"
                 },
                 {
-                  "$ref": "#/$defs/__schema953"
+                  "$ref": "#/$defs/__schema957"
                 },
                 {
-                  "$ref": "#/$defs/__schema954"
+                  "$ref": "#/$defs/__schema958"
                 }
               ],
               "description": "World position of the piece origin (see the kit's frames in world-kit authoring/bridges/lookup.json)."
@@ -17040,18 +17116,6 @@
             "yaw"
           ]
         },
-        "__schema952": {
-          "type": "number"
-        },
-        "__schema953": {
-          "type": "number"
-        },
-        "__schema954": {
-          "type": "number"
-        },
-        "__schema955": {
-          "type": "number"
-        },
         "__schema956": {
           "type": "number"
         },
@@ -17062,6 +17126,18 @@
           "type": "number"
         },
         "__schema959": {
+          "type": "number"
+        },
+        "__schema960": {
+          "type": "number"
+        },
+        "__schema961": {
+          "type": "number"
+        },
+        "__schema962": {
+          "type": "number"
+        },
+        "__schema963": {
           "type": "array",
           "prefixItems": [
             {
@@ -17072,16 +17148,16 @@
             }
           ]
         },
-        "__schema960": {
+        "__schema964": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "__schema961": {
+        "__schema965": {
           "type": "string"
         },
-        "__schema962": {
+        "__schema966": {
           "type": "object",
           "properties": {
             "prefab": {
@@ -17091,13 +17167,13 @@
               "type": "array",
               "prefixItems": [
                 {
-                  "$ref": "#/$defs/__schema963"
+                  "$ref": "#/$defs/__schema967"
                 },
                 {
-                  "$ref": "#/$defs/__schema964"
+                  "$ref": "#/$defs/__schema968"
                 },
                 {
-                  "$ref": "#/$defs/__schema965"
+                  "$ref": "#/$defs/__schema969"
                 }
               ],
               "description": "World centre of the roof (the walked roof top)."
@@ -17121,13 +17197,13 @@
               "type": "array",
               "prefixItems": [
                 {
-                  "$ref": "#/$defs/__schema966"
+                  "$ref": "#/$defs/__schema970"
                 },
                 {
-                  "$ref": "#/$defs/__schema967"
+                  "$ref": "#/$defs/__schema971"
                 },
                 {
-                  "$ref": "#/$defs/__schema968"
+                  "$ref": "#/$defs/__schema972"
                 }
               ],
               "description": "World point just outside the doorway, on the ground."
@@ -17135,7 +17211,7 @@
             "stair": {
               "type": "array",
               "items": {
-                "$ref": "#/$defs/__schema969"
+                "$ref": "#/$defs/__schema973"
               },
               "description": "World stair stations, door corner to the roof: what the walk probe follows."
             }
@@ -17151,18 +17227,6 @@
             "stair"
           ]
         },
-        "__schema963": {
-          "type": "number"
-        },
-        "__schema964": {
-          "type": "number"
-        },
-        "__schema965": {
-          "type": "number"
-        },
-        "__schema966": {
-          "type": "number"
-        },
         "__schema967": {
           "type": "number"
         },
@@ -17170,6 +17234,18 @@
           "type": "number"
         },
         "__schema969": {
+          "type": "number"
+        },
+        "__schema970": {
+          "type": "number"
+        },
+        "__schema971": {
+          "type": "number"
+        },
+        "__schema972": {
+          "type": "number"
+        },
+        "__schema973": {
           "type": "array",
           "prefixItems": [
             {
@@ -17183,7 +17259,7 @@
             }
           ]
         },
-        "__schema970": {
+        "__schema974": {
           "type": "array",
           "items": {
             "type": "object",
@@ -17203,13 +17279,13 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema971"
+                    "$ref": "#/$defs/__schema975"
                   },
                   {
-                    "$ref": "#/$defs/__schema972"
+                    "$ref": "#/$defs/__schema976"
                   },
                   {
-                    "$ref": "#/$defs/__schema973"
+                    "$ref": "#/$defs/__schema977"
                   }
                 ],
                 "description": "World point of the stage frame: the rope deck end on the platform."
@@ -17221,7 +17297,7 @@
               "path": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/__schema974"
+                  "$ref": "#/$defs/__schema978"
                 },
                 "description": "World deck-top centreline of the walkway, platform back edge to the walkable ground: what the walk probe follows."
               },
@@ -17229,13 +17305,13 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema975"
+                    "$ref": "#/$defs/__schema979"
                   },
                   {
-                    "$ref": "#/$defs/__schema976"
+                    "$ref": "#/$defs/__schema980"
                   },
                   {
-                    "$ref": "#/$defs/__schema977"
+                    "$ref": "#/$defs/__schema981"
                   }
                 ],
                 "description": "The walkable ground the walkway reaches."
@@ -17243,7 +17319,7 @@
               "feet": {
                 "default": [],
                 "description": "World foot of every post / strut (the footing gate checks each is in rock or ground).",
-                "$ref": "#/$defs/__schema978"
+                "$ref": "#/$defs/__schema982"
               }
             },
             "required": [
@@ -17256,16 +17332,16 @@
             ]
           }
         },
-        "__schema971": {
+        "__schema975": {
           "type": "number"
         },
-        "__schema972": {
+        "__schema976": {
           "type": "number"
         },
-        "__schema973": {
+        "__schema977": {
           "type": "number"
         },
-        "__schema974": {
+        "__schema978": {
           "type": "array",
           "prefixItems": [
             {
@@ -17279,16 +17355,16 @@
             }
           ]
         },
-        "__schema975": {
+        "__schema979": {
           "type": "number"
         },
-        "__schema976": {
+        "__schema980": {
           "type": "number"
         },
-        "__schema977": {
+        "__schema981": {
           "type": "number"
         },
-        "__schema978": {
+        "__schema982": {
           "type": "array",
           "items": {
             "type": "array",
@@ -17305,7 +17381,7 @@
             ]
           }
         },
-        "__schema979": {
+        "__schema983": {
           "type": "array",
           "items": {
             "type": "object",
@@ -17318,7 +17394,7 @@
                 "minItems": 3,
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/__schema980"
+                  "$ref": "#/$defs/__schema984"
                 },
                 "description": "World-space XZ outline of the hollow."
               },
@@ -17329,7 +17405,7 @@
               "bank": {
                 "default": 12,
                 "description": "Distance beyond the outline over which the raise eases out.",
-                "$ref": "#/$defs/__schema981"
+                "$ref": "#/$defs/__schema985"
               },
               "tags": {
                 "default": [],
@@ -17345,7 +17421,7 @@
             ]
           }
         },
-        "__schema980": {
+        "__schema984": {
           "type": "array",
           "prefixItems": [
             {
@@ -17356,11 +17432,11 @@
             }
           ]
         },
-        "__schema981": {
+        "__schema985": {
           "type": "number",
           "minimum": 0
         },
-        "__schema982": {
+        "__schema986": {
           "type": "array",
           "items": {
             "type": "object",
@@ -17376,11 +17452,11 @@
               "width": {
                 "default": 14,
                 "description": "Channel width at the mouth; the head is narrower unless `widths` are given.",
-                "$ref": "#/$defs/__schema983"
+                "$ref": "#/$defs/__schema987"
               },
               "widths": {
                 "description": "Per-point width, same length as `points`.",
-                "$ref": "#/$defs/__schema984"
+                "$ref": "#/$defs/__schema988"
               },
               "tags": {
                 "default": [],
@@ -17395,18 +17471,18 @@
             ]
           }
         },
-        "__schema983": {
+        "__schema987": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema984": {
+        "__schema988": {
           "type": "array",
           "items": {
             "type": "number",
             "exclusiveMinimum": 0
           }
         },
-        "__schema985": {
+        "__schema989": {
           "type": "array",
           "items": {
             "type": "object",
@@ -17419,18 +17495,18 @@
                 "minItems": 2,
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/__schema986"
+                  "$ref": "#/$defs/__schema990"
                 },
                 "description": "World-space path in 3D — unlike rivers and roads, a cave goes up and down as well as along."
               },
               "radius": {
                 "default": 3,
                 "description": "Passage radius. Keep it comfortably ABOVE the world's voxel size (cellSize / resolution): marching cubes cannot represent a hole much narrower than one voxel, so a thinner tunnel is silently sealed in the mesh and in the collider cooked from it, however open the field says it is.",
-                "$ref": "#/$defs/__schema987"
+                "$ref": "#/$defs/__schema991"
               },
               "endRadius": {
                 "description": "Radius at the last point; omit for a uniform tube. Lets a passage open out into a chamber.",
-                "$ref": "#/$defs/__schema988"
+                "$ref": "#/$defs/__schema992"
               }
             },
             "required": [
@@ -17438,7 +17514,7 @@
             ]
           }
         },
-        "__schema986": {
+        "__schema990": {
           "type": "array",
           "prefixItems": [
             {
@@ -17452,23 +17528,23 @@
             }
           ]
         },
-        "__schema987": {
+        "__schema991": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema988": {
+        "__schema992": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema989": {
+        "__schema993": {
           "type": "number",
           "minimum": 0
         },
-        "__schema990": {
+        "__schema994": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema991": {
+        "__schema995": {
           "type": "array",
           "items": {
             "type": "object",
@@ -17481,13 +17557,13 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema992"
+                    "$ref": "#/$defs/__schema996"
                   },
                   {
-                    "$ref": "#/$defs/__schema993"
+                    "$ref": "#/$defs/__schema997"
                   },
                   {
-                    "$ref": "#/$defs/__schema994"
+                    "$ref": "#/$defs/__schema998"
                   }
                 ],
                 "description": "Box entrance centre or ellipse near-end centre at the flat floor datum, in world metres."
@@ -17516,7 +17592,7 @@
               "footprint": {
                 "default": "box",
                 "description": "Box passage, or elliptical chamber centred halfway along length. Both preserve a flat floor; ellipse width/length are the protected diameters.",
-                "$ref": "#/$defs/__schema995"
+                "$ref": "#/$defs/__schema999"
               },
               "length": {
                 "type": "number",
@@ -17536,42 +17612,42 @@
               "wallNoise": {
                 "default": 0,
                 "description": "Maximum outward wall recess, metres; sidewalls for box, all radial directions including both ends for ellipse. Never intrudes into protected air or changes the flat floor.",
-                "$ref": "#/$defs/__schema996"
+                "$ref": "#/$defs/__schema1000"
               },
               "noiseDetail": {
                 "default": 0,
                 "description": "Fraction of outward wall relief sampled at half noiseScale; zero preserves the original single-scale profile.",
-                "$ref": "#/$defs/__schema997"
+                "$ref": "#/$defs/__schema1001"
               },
               "roofRise": {
                 "default": 0,
                 "description": "Additional arched clearance above height: across a box passage, radially over an elliptical chamber. Never lowers the protected base ceiling; roof maximum is floor+height+roofRise+roofNoise.",
-                "$ref": "#/$defs/__schema998"
+                "$ref": "#/$defs/__schema1002"
               },
               "roofNoise": {
                 "default": 0,
                 "description": "Maximum additional outward roof recess, metres; fades at footprint edges and never changes the floor or protected base height. Thick rock backing above the full roof maximum must exceed the three-lattice-step roof skirt depth.",
-                "$ref": "#/$defs/__schema999"
+                "$ref": "#/$defs/__schema1003"
               },
               "noiseScale": {
                 "default": 6,
                 "description": "Wall-noise wavelength in metres; use a scale resolved by the world lattice.",
-                "$ref": "#/$defs/__schema1000"
+                "$ref": "#/$defs/__schema1004"
               },
               "seed": {
                 "default": 1,
                 "description": "Deterministic wall-noise seed, combined with the world seed.",
-                "$ref": "#/$defs/__schema1001"
+                "$ref": "#/$defs/__schema1005"
               },
               "falloff": {
                 "default": 4,
                 "description": "Exterior signed-sampling margin in metres; bound terrain influence and use at least two full-detail voxel steps. Coarser LOD is an approximation.",
-                "$ref": "#/$defs/__schema1002"
+                "$ref": "#/$defs/__schema1006"
               },
               "connectionBand": {
                 "default": 4,
                 "description": "Noise fades to zero within this distance of both end planes and floor/ceiling, preserving stable terminal profiles and flat boundary bands.",
-                "$ref": "#/$defs/__schema1003"
+                "$ref": "#/$defs/__schema1007"
               }
             },
             "required": [
@@ -17582,69 +17658,69 @@
             ]
           }
         },
-        "__schema992": {
+        "__schema996": {
           "type": "number"
         },
-        "__schema993": {
+        "__schema997": {
           "type": "number"
         },
-        "__schema994": {
+        "__schema998": {
           "type": "number"
         },
-        "__schema995": {
+        "__schema999": {
           "type": "string",
           "enum": [
             "box",
             "ellipse"
           ]
         },
-        "__schema996": {
+        "__schema1000": {
           "type": "number",
           "minimum": 0
         },
-        "__schema997": {
+        "__schema1001": {
           "type": "number",
           "minimum": 0,
           "maximum": 1
         },
-        "__schema998": {
+        "__schema1002": {
           "type": "number",
           "minimum": 0
         },
-        "__schema999": {
+        "__schema1003": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1000": {
+        "__schema1004": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1001": {
+        "__schema1005": {
           "type": "integer",
           "minimum": -9007199254740991,
           "maximum": 9007199254740991
         },
-        "__schema1002": {
+        "__schema1006": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1003": {
+        "__schema1007": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1004": {
+        "__schema1008": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema1005"
+                "$ref": "#/$defs/__schema1009"
               },
               "op": {
-                "$ref": "#/$defs/__schema1006"
+                "$ref": "#/$defs/__schema1010"
               },
               "compiled": {
-                "$ref": "#/$defs/__schema1007"
+                "$ref": "#/$defs/__schema1011"
               }
             },
             "required": [
@@ -17652,20 +17728,20 @@
               "op"
             ],
             "additionalProperties": {
-              "$ref": "#/$defs/__schema1009"
+              "$ref": "#/$defs/__schema1013"
             }
           }
         },
-        "__schema1005": {
+        "__schema1009": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9-]*$",
           "description": "Slug. Its compiled pieces are `op:<id>:*`; re-applying replaces exactly those."
         },
-        "__schema1006": {
+        "__schema1010": {
           "type": "string",
           "description": "Registered operator: see the engine spec `landformOperators` (terrace, path, ...)."
         },
-        "__schema1007": {
+        "__schema1011": {
           "type": "object",
           "properties": {
             "digest": {
@@ -17679,7 +17755,7 @@
             "pieces": {
               "type": "array",
               "items": {
-                "$ref": "#/$defs/__schema1008"
+                "$ref": "#/$defs/__schema1012"
               },
               "description": "`<kind>/<id>` of every installed piece."
             }
@@ -17690,11 +17766,11 @@
             "pieces"
           ]
         },
-        "__schema1008": {
+        "__schema1012": {
           "type": "string"
         },
-        "__schema1009": {},
-        "__schema1010": {
+        "__schema1013": {},
+        "__schema1014": {
           "type": "array",
           "items": {
             "type": "object",
@@ -17714,14 +17790,14 @@
               "pieces": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/__schema1011"
+                  "$ref": "#/$defs/__schema1015"
                 },
                 "description": "Kit pieces in run order: a 2 m straight and its cap per module."
               },
               "cuts": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/__schema1017"
+                  "$ref": "#/$defs/__schema1021"
                 },
                 "description": "One `face` cut per module: the low side the field carves down to the wall foot."
               }
@@ -17734,7 +17810,7 @@
             ]
           }
         },
-        "__schema1011": {
+        "__schema1015": {
           "type": "object",
           "properties": {
             "prefab": {
@@ -17748,13 +17824,13 @@
               "type": "array",
               "prefixItems": [
                 {
-                  "$ref": "#/$defs/__schema1012"
+                  "$ref": "#/$defs/__schema1016"
                 },
                 {
-                  "$ref": "#/$defs/__schema1013"
+                  "$ref": "#/$defs/__schema1017"
                 },
                 {
-                  "$ref": "#/$defs/__schema1014"
+                  "$ref": "#/$defs/__schema1018"
                 }
               ],
               "description": "World position of the piece origin (its start vertex on the face line, at the wall foot)."
@@ -17765,11 +17841,11 @@
             },
             "run": {
               "description": "Length (m) the piece runs along its face from its origin (body pieces).",
-              "$ref": "#/$defs/__schema1015"
+              "$ref": "#/$defs/__schema1019"
             },
             "overrides": {
               "description": "Prefab overrides for this placement: the run-space UV phase variant of its meshes (the texture runs on unbroken from the piece before).",
-              "$ref": "#/$defs/__schema1016"
+              "$ref": "#/$defs/__schema1020"
             }
           },
           "required": [
@@ -17779,20 +17855,20 @@
             "yaw"
           ]
         },
-        "__schema1012": {
+        "__schema1016": {
           "type": "number"
         },
-        "__schema1013": {
+        "__schema1017": {
           "type": "number"
         },
-        "__schema1014": {
+        "__schema1018": {
           "type": "number"
         },
-        "__schema1015": {
+        "__schema1019": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1016": {
+        "__schema1020": {
           "type": "array",
           "items": {
             "type": "object",
@@ -17808,7 +17884,7 @@
             ]
           }
         },
-        "__schema1017": {
+        "__schema1021": {
           "type": "object",
           "properties": {
             "kind": {
@@ -17821,20 +17897,20 @@
             },
             "origin": {
               "description": "World XZ the cut's frame starts at.",
-              "$ref": "#/$defs/__schema1020"
+              "$ref": "#/$defs/__schema1024"
             },
             "dir": {
               "description": "Unit XZ direction of the frame's s axis (the face's walking direction); n is to its right (the low side).",
-              "$ref": "#/$defs/__schema1020"
+              "$ref": "#/$defs/__schema1024"
             },
             "s": {
               "type": "array",
               "prefixItems": [
                 {
-                  "$ref": "#/$defs/__schema1021"
+                  "$ref": "#/$defs/__schema1025"
                 },
                 {
-                  "$ref": "#/$defs/__schema1022"
+                  "$ref": "#/$defs/__schema1026"
                 }
               ],
               "description": "Extent along dir (m)."
@@ -17843,10 +17919,10 @@
               "type": "array",
               "prefixItems": [
                 {
-                  "$ref": "#/$defs/__schema1023"
+                  "$ref": "#/$defs/__schema1027"
                 },
                 {
-                  "$ref": "#/$defs/__schema1024"
+                  "$ref": "#/$defs/__schema1028"
                 }
               ],
               "description": "Extent along the low-side normal (m): negative is behind the face, inside the wall."
@@ -17855,10 +17931,10 @@
               "type": "array",
               "prefixItems": [
                 {
-                  "$ref": "#/$defs/__schema1025"
+                  "$ref": "#/$defs/__schema1029"
                 },
                 {
-                  "$ref": "#/$defs/__schema1026"
+                  "$ref": "#/$defs/__schema1030"
                 }
               ],
               "description": "Floor and top of the carved box (world Y). The floor is exact: the foot of the wall."
@@ -17873,26 +17949,6 @@
             "y"
           ]
         },
-        "__schema1018": {
-          "type": "number"
-        },
-        "__schema1019": {
-          "type": "number"
-        },
-        "__schema1020": {
-          "type": "array",
-          "prefixItems": [
-            {
-              "$ref": "#/$defs/__schema1018"
-            },
-            {
-              "$ref": "#/$defs/__schema1019"
-            }
-          ]
-        },
-        "__schema1021": {
-          "type": "number"
-        },
         "__schema1022": {
           "type": "number"
         },
@@ -17900,7 +17956,15 @@
           "type": "number"
         },
         "__schema1024": {
-          "type": "number"
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/__schema1022"
+            },
+            {
+              "$ref": "#/$defs/__schema1023"
+            }
+          ]
         },
         "__schema1025": {
           "type": "number"
@@ -17909,6 +17973,18 @@
           "type": "number"
         },
         "__schema1027": {
+          "type": "number"
+        },
+        "__schema1028": {
+          "type": "number"
+        },
+        "__schema1029": {
+          "type": "number"
+        },
+        "__schema1030": {
+          "type": "number"
+        },
+        "__schema1031": {
           "type": "array",
           "items": {
             "type": "object",
@@ -17925,13 +18001,13 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema1028"
+                    "$ref": "#/$defs/__schema1032"
                   },
                   {
-                    "$ref": "#/$defs/__schema1029"
+                    "$ref": "#/$defs/__schema1033"
                   },
                   {
-                    "$ref": "#/$defs/__schema1030"
+                    "$ref": "#/$defs/__schema1034"
                   }
                 ],
                 "description": "World origin of the prefab (the landmark's footprint centre at y 0); it streams in the cell this stands in."
@@ -17947,7 +18023,7 @@
               },
               "fog": {
                 "description": "From the operator's `fog`: the placed landmark gets this `landmark` component (reads through zone fog to `fogReach`).",
-                "$ref": "#/$defs/__schema1031"
+                "$ref": "#/$defs/__schema1035"
               }
             },
             "required": [
@@ -17959,90 +18035,90 @@
             ]
           }
         },
-        "__schema1028": {
+        "__schema1032": {
           "type": "number"
         },
-        "__schema1029": {
+        "__schema1033": {
           "type": "number"
         },
-        "__schema1030": {
+        "__schema1034": {
           "type": "number"
         },
-        "__schema1031": {
+        "__schema1035": {
           "type": "object",
           "properties": {
             "fogReach": {
-              "$ref": "#/$defs/__schema1032"
+              "$ref": "#/$defs/__schema1036"
             },
             "silhouette": {
-              "$ref": "#/$defs/__schema1034"
+              "$ref": "#/$defs/__schema1038"
             }
           },
           "description": "Marks a landmark — a dungeon entrance or a POI's hero structure — so it reads as a darker silhouette through fog far past the zone's fog distance while terrain, props and plants keep the zone's fog. Put it on the landmark's own root (the shell, not the POI root with its clutter). Its meshes get one fog variant per material; it culls as its own unit (behind terrain only). See docs/culling.md 'Landmarks through fog'."
         },
-        "__schema1032": {
+        "__schema1036": {
           "default": 600,
           "description": "Metres out to which this subtree reads through the zone's fog. Its fog thickens evenly to fully opaque at this distance (never thicker than the ground's fog, never thinner than a fraction of it), so a landmark the zone fog hides at 200 m stands as a hazy shape out to here. Never culled by size inside it; streamed landmarks still end at the world's farTerrain ring. Typical: 400-900 for an entrance seen across a zone.",
-          "$ref": "#/$defs/__schema1033"
+          "$ref": "#/$defs/__schema1037"
         },
-        "__schema1033": {
+        "__schema1037": {
           "type": "number",
           "minimum": 50,
           "maximum": 4000
         },
-        "__schema1034": {
+        "__schema1038": {
           "default": 0.6,
           "description": "How dark the far landmark reads against the fog: 0 = fades toward the fog colour like the ground, 1 = a clearly darker shape (40% under the fog colour; never a black cutout). The darkening dissolves back into the fog over the last 30% of `fogReach`, so it never pops at the edge.",
-          "$ref": "#/$defs/__schema1035"
+          "$ref": "#/$defs/__schema1039"
         },
-        "__schema1035": {
+        "__schema1039": {
           "type": "number",
           "minimum": 0,
           "maximum": 1
         },
-        "__schema1036": {
+        "__schema1040": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema1037"
+                "$ref": "#/$defs/__schema1041"
               },
               "surface": {
-                "$ref": "#/$defs/__schema1038"
-              },
-              "polygon": {
-                "$ref": "#/$defs/__schema1039"
-              },
-              "center": {
                 "$ref": "#/$defs/__schema1042"
               },
-              "radius": {
+              "polygon": {
                 "$ref": "#/$defs/__schema1043"
               },
-              "feather": {
-                "$ref": "#/$defs/__schema1045"
+              "center": {
+                "$ref": "#/$defs/__schema1046"
               },
-              "edgeNoise": {
+              "radius": {
                 "$ref": "#/$defs/__schema1047"
               },
-              "strength": {
+              "feather": {
                 "$ref": "#/$defs/__schema1049"
               },
-              "breakup": {
+              "edgeNoise": {
                 "$ref": "#/$defs/__schema1051"
               },
-              "slope": {
+              "strength": {
                 "$ref": "#/$defs/__schema1053"
               },
-              "height": {
+              "breakup": {
                 "$ref": "#/$defs/__schema1055"
               },
-              "faces": {
+              "slope": {
                 "$ref": "#/$defs/__schema1057"
               },
-              "clear": {
+              "height": {
                 "$ref": "#/$defs/__schema1059"
+              },
+              "faces": {
+                "$ref": "#/$defs/__schema1061"
+              },
+              "clear": {
+                "$ref": "#/$defs/__schema1063"
               }
             },
             "required": [
@@ -18051,27 +18127,27 @@
             "description": "One palette surface painted over an area (polygon or disc, feathered), optionally limited by slope or height. Splat only: no height change, no new material."
           }
         },
-        "__schema1037": {
+        "__schema1041": {
           "default": "ground-paint",
           "type": "string"
         },
-        "__schema1038": {
+        "__schema1042": {
           "type": "string",
           "minLength": 1,
           "description": "Palette surface name (`recipe.surfaces[].name`) to paint. Must already be in the palette; add a tile with `worldgen material` first if it is not."
         },
-        "__schema1039": {
+        "__schema1043": {
           "description": "Outline [x, z] (any simple polygon). Give this OR center + radius.",
-          "$ref": "#/$defs/__schema1040"
+          "$ref": "#/$defs/__schema1044"
         },
-        "__schema1040": {
+        "__schema1044": {
           "minItems": 3,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema1041"
+            "$ref": "#/$defs/__schema1045"
           }
         },
-        "__schema1041": {
+        "__schema1045": {
           "type": "array",
           "prefixItems": [
             {
@@ -18082,82 +18158,82 @@
             }
           ]
         },
-        "__schema1042": {
-          "description": "Disc centre [x, z] (with `radius`).",
-          "$ref": "#/$defs/__schema1041"
-        },
-        "__schema1043": {
-          "description": "Disc radius, metres.",
-          "$ref": "#/$defs/__schema1044"
-        },
-        "__schema1044": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema1045": {
-          "default": 3,
-          "description": "Metres OUTSIDE the outline over which the paint fades to nothing. 0 = a hard (noisy) edge.",
-          "$ref": "#/$defs/__schema1046"
-        },
         "__schema1046": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 40
+          "description": "Disc centre [x, z] (with `radius`).",
+          "$ref": "#/$defs/__schema1045"
         },
         "__schema1047": {
-          "default": 1.5,
-          "description": "Metres the painted edge wanders in and out (~12 m wavelength), so it never reads as a drawn line.",
+          "description": "Disc radius, metres.",
           "$ref": "#/$defs/__schema1048"
         },
         "__schema1048": {
           "type": "number",
-          "minimum": 0,
-          "maximum": 12
+          "exclusiveMinimum": 0
         },
         "__schema1049": {
-          "default": 1,
-          "description": "Paint opacity at full weight (1 = only this surface).",
+          "default": 3,
+          "description": "Metres OUTSIDE the outline over which the paint fades to nothing. 0 = a hard (noisy) edge.",
           "$ref": "#/$defs/__schema1050"
         },
         "__schema1050": {
           "type": "number",
           "minimum": 0,
-          "maximum": 1
+          "maximum": 40
         },
         "__schema1051": {
-          "default": 0,
-          "description": "Fraction of the area left unpainted in noise blotches (~10 m), so a large paint shows the ground through. 0 = solid.",
+          "default": 1.5,
+          "description": "Metres the painted edge wanders in and out (~12 m wavelength), so it never reads as a drawn line.",
           "$ref": "#/$defs/__schema1052"
         },
         "__schema1052": {
           "type": "number",
           "minimum": 0,
-          "maximum": 0.9
+          "maximum": 12
         },
         "__schema1053": {
-          "description": "Only where the ground slope is inside [min, max] degrees (faded over 4 degrees each side).",
+          "default": 1,
+          "description": "Paint opacity at full weight (1 = only this surface).",
           "$ref": "#/$defs/__schema1054"
         },
         "__schema1054": {
-          "type": "array",
-          "prefixItems": [
-            {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 90
-            },
-            {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 90
-            }
-          ]
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
         },
         "__schema1055": {
-          "description": "Only where the ground is inside [minY, maxY] world metres (faded over 1.5 m each side).",
+          "default": 0,
+          "description": "Fraction of the area left unpainted in noise blotches (~10 m), so a large paint shows the ground through. 0 = solid.",
           "$ref": "#/$defs/__schema1056"
         },
         "__schema1056": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.9
+        },
+        "__schema1057": {
+          "description": "Only where the ground slope is inside [min, max] degrees (faded over 4 degrees each side).",
+          "$ref": "#/$defs/__schema1058"
+        },
+        "__schema1058": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 90
+            },
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 90
+            }
+          ]
+        },
+        "__schema1059": {
+          "description": "Only where the ground is inside [minY, maxY] world metres (faded over 1.5 m each side).",
+          "$ref": "#/$defs/__schema1060"
+        },
+        "__schema1060": {
           "type": "array",
           "prefixItems": [
             {
@@ -18168,49 +18244,49 @@
             }
           ]
         },
-        "__schema1057": {
+        "__schema1061": {
           "default": false,
           "description": "Also paint near-vertical faces. Default false: like road and lake paint it fades out between 40 and 53 degrees, so a face keeps the zone's cliff stone.",
-          "$ref": "#/$defs/__schema1058"
-        },
-        "__schema1058": {
-          "type": "boolean"
-        },
-        "__schema1059": {
-          "description": "Also a vegetation clearing over the same outline (feathered like the paint). Omit = vegetation untouched (cover still follows the surface it grows on).",
-          "$ref": "#/$defs/__schema1060"
-        },
-        "__schema1060": {
-          "type": "object",
-          "properties": {
-            "scatter": {
-              "default": true,
-              "description": "Keep scatter props (trees, bushes, rocks of the world's rules) off the painted area.",
-              "$ref": "#/$defs/__schema1061"
-            },
-            "cover": {
-              "default": true,
-              "description": "Keep ground cover (grass, flowers) off it.",
-              "$ref": "#/$defs/__schema1062"
-            }
-          }
-        },
-        "__schema1061": {
-          "type": "boolean"
+          "$ref": "#/$defs/__schema1062"
         },
         "__schema1062": {
           "type": "boolean"
         },
         "__schema1063": {
+          "description": "Also a vegetation clearing over the same outline (feathered like the paint). Omit = vegetation untouched (cover still follows the surface it grows on).",
+          "$ref": "#/$defs/__schema1064"
+        },
+        "__schema1064": {
+          "type": "object",
+          "properties": {
+            "scatter": {
+              "default": true,
+              "description": "Keep scatter props (trees, bushes, rocks of the world's rules) off the painted area.",
+              "$ref": "#/$defs/__schema1065"
+            },
+            "cover": {
+              "default": true,
+              "description": "Keep ground cover (grass, flowers) off it.",
+              "$ref": "#/$defs/__schema1066"
+            }
+          }
+        },
+        "__schema1065": {
+          "type": "boolean"
+        },
+        "__schema1066": {
+          "type": "boolean"
+        },
+        "__schema1067": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema1064"
+                "$ref": "#/$defs/__schema1068"
               },
               "rocks": {
-                "$ref": "#/$defs/__schema1065"
+                "$ref": "#/$defs/__schema1069"
               }
             },
             "required": [
@@ -18219,18 +18295,18 @@
             "description": "Boulders COMPILED by a landform operator (`scree`; ids `op:<id>:rocks`), never hand-edited: instances of existing scatter rules, seated on the meshed ground like fall-site rocks (unsupported ones dropped)."
           }
         },
-        "__schema1064": {
+        "__schema1068": {
           "default": "rock-set",
           "type": "string"
         },
-        "__schema1065": {
+        "__schema1069": {
           "maxItems": 2000,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema1066"
+            "$ref": "#/$defs/__schema1070"
           }
         },
-        "__schema1066": {
+        "__schema1070": {
           "type": "object",
           "properties": {
             "rule": {
@@ -18241,10 +18317,10 @@
               "type": "array",
               "prefixItems": [
                 {
-                  "$ref": "#/$defs/__schema1067"
+                  "$ref": "#/$defs/__schema1071"
                 },
                 {
-                  "$ref": "#/$defs/__schema1068"
+                  "$ref": "#/$defs/__schema1072"
                 }
               ],
               "description": "World XZ; stood on the meshed ground there."
@@ -18252,7 +18328,7 @@
             "yaw": {
               "default": 0,
               "description": "Radians about Y.",
-              "$ref": "#/$defs/__schema1069"
+              "$ref": "#/$defs/__schema1073"
             },
             "scale": {
               "default": 1,
@@ -18265,61 +18341,61 @@
             "at"
           ]
         },
-        "__schema1067": {
+        "__schema1071": {
           "type": "number"
         },
-        "__schema1068": {
+        "__schema1072": {
           "type": "number"
         },
-        "__schema1069": {
+        "__schema1073": {
           "type": "number"
         },
-        "__schema1070": {
+        "__schema1074": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema1071"
+                "$ref": "#/$defs/__schema1075"
               },
               "width": {
-                "$ref": "#/$defs/__schema1072"
-              },
-              "style": {
-                "$ref": "#/$defs/__schema1073"
-              },
-              "surface": {
-                "$ref": "#/$defs/__schema1074"
-              },
-              "edge": {
                 "$ref": "#/$defs/__schema1076"
               },
-              "seed": {
+              "style": {
                 "$ref": "#/$defs/__schema1077"
               },
-              "wallSkin": {
-                "$ref": "#/$defs/__schema1079"
+              "surface": {
+                "$ref": "#/$defs/__schema1078"
               },
-              "samples": {
+              "edge": {
+                "$ref": "#/$defs/__schema1080"
+              },
+              "seed": {
                 "$ref": "#/$defs/__schema1081"
               },
-              "flights": {
+              "wallSkin": {
                 "$ref": "#/$defs/__schema1083"
               },
-              "switchbacks": {
+              "samples": {
                 "$ref": "#/$defs/__schema1085"
               },
+              "flights": {
+                "$ref": "#/$defs/__schema1087"
+              },
+              "switchbacks": {
+                "$ref": "#/$defs/__schema1089"
+              },
               "pieces": {
-                "$ref": "#/$defs/__schema1086"
-              },
-              "cuts": {
-                "$ref": "#/$defs/__schema1088"
-              },
-              "clearing": {
                 "$ref": "#/$defs/__schema1090"
               },
-              "warnings": {
+              "cuts": {
                 "$ref": "#/$defs/__schema1092"
+              },
+              "clearing": {
+                "$ref": "#/$defs/__schema1094"
+              },
+              "warnings": {
+                "$ref": "#/$defs/__schema1096"
               }
             },
             "required": [
@@ -18331,14 +18407,14 @@
             "description": "A solved path ribbon: compiled by the `path` landform operator; never hand-edit."
           }
         },
-        "__schema1071": {
+        "__schema1075": {
           "type": "string"
         },
-        "__schema1072": {
+        "__schema1076": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1073": {
+        "__schema1077": {
           "type": "string",
           "enum": [
             "dirt",
@@ -18346,14 +18422,14 @@
             "slab"
           ]
         },
-        "__schema1074": {
+        "__schema1078": {
           "description": "Palette surface name; omitted = the zone's `road` (dirt) or `paving` (cobble, slab) tile at the ribbon's middle.",
-          "$ref": "#/$defs/__schema1075"
+          "$ref": "#/$defs/__schema1079"
         },
-        "__schema1075": {
+        "__schema1079": {
           "type": "string"
         },
-        "__schema1076": {
+        "__schema1080": {
           "default": "verge",
           "type": "string",
           "enum": [
@@ -18361,32 +18437,32 @@
             "hard"
           ]
         },
-        "__schema1077": {
+        "__schema1081": {
           "default": 0,
           "description": "Edge-jitter phase.",
-          "$ref": "#/$defs/__schema1078"
+          "$ref": "#/$defs/__schema1082"
         },
-        "__schema1078": {
+        "__schema1082": {
           "type": "integer",
           "minimum": -9007199254740991,
           "maximum": 9007199254740991
         },
-        "__schema1079": {
+        "__schema1083": {
           "description": "The path's `wallSkin` (omitted = the zone's stone).",
-          "$ref": "#/$defs/__schema1080"
+          "$ref": "#/$defs/__schema1084"
         },
-        "__schema1080": {
+        "__schema1084": {
           "type": "string"
         },
-        "__schema1081": {
+        "__schema1085": {
           "minItems": 2,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema1082"
+            "$ref": "#/$defs/__schema1086"
           },
           "description": "[x, walkY, z, shoulderLeft, shoulderRight] every ~1 m along the centre. A negative shoulder = a retaining wall on that side, its face that far out."
         },
-        "__schema1082": {
+        "__schema1086": {
           "type": "array",
           "prefixItems": [
             {
@@ -18406,7 +18482,7 @@
             }
           ]
         },
-        "__schema1083": {
+        "__schema1087": {
           "default": [],
           "type": "array",
           "items": {
@@ -18427,7 +18503,7 @@
               "treads": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/__schema1084"
+                  "$ref": "#/$defs/__schema1088"
                 },
                 "description": "[s0, s1, topY] of every tread and landing, s = metres along the ribbon."
               },
@@ -18444,7 +18520,7 @@
             ]
           }
         },
-        "__schema1084": {
+        "__schema1088": {
           "type": "array",
           "prefixItems": [
             {
@@ -18458,39 +18534,39 @@
             }
           ]
         },
-        "__schema1085": {
+        "__schema1089": {
           "default": 0,
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "__schema1086": {
+        "__schema1090": {
           "default": [],
           "description": "Retaining-wall kit pieces, world placed. The streamer emits them; do not hand-edit.",
-          "$ref": "#/$defs/__schema1087"
-        },
-        "__schema1087": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/__schema1011"
-          }
-        },
-        "__schema1088": {
-          "default": [],
-          "description": "Oriented boxes the field carves in front of every wall face (same contract as terrace walls).",
-          "$ref": "#/$defs/__schema1089"
-        },
-        "__schema1089": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/__schema1017"
-          }
-        },
-        "__schema1090": {
-          "description": "Outline kept clear of scatter and ground cover (the ribbon plus a metre each side).",
           "$ref": "#/$defs/__schema1091"
         },
         "__schema1091": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema1015"
+          }
+        },
+        "__schema1092": {
+          "default": [],
+          "description": "Oriented boxes the field carves in front of every wall face (same contract as terrace walls).",
+          "$ref": "#/$defs/__schema1093"
+        },
+        "__schema1093": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema1021"
+          }
+        },
+        "__schema1094": {
+          "description": "Outline kept clear of scatter and ground cover (the ribbon plus a metre each side).",
+          "$ref": "#/$defs/__schema1095"
+        },
+        "__schema1095": {
           "type": "array",
           "items": {
             "type": "array",
@@ -18504,44 +18580,44 @@
             ]
           }
         },
-        "__schema1092": {
+        "__schema1096": {
           "default": [],
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "__schema1093": {
+        "__schema1097": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema1094"
-              },
-              "at": {
-                "$ref": "#/$defs/__schema1095"
-              },
-              "template": {
                 "$ref": "#/$defs/__schema1098"
               },
+              "at": {
+                "$ref": "#/$defs/__schema1099"
+              },
+              "template": {
+                "$ref": "#/$defs/__schema1102"
+              },
               "tiers": {
-                "$ref": "#/$defs/__schema1100"
+                "$ref": "#/$defs/__schema1104"
               },
               "course": {
-                "$ref": "#/$defs/__schema1103"
+                "$ref": "#/$defs/__schema1107"
               },
               "rocks": {
-                "$ref": "#/$defs/__schema1105"
+                "$ref": "#/$defs/__schema1109"
               },
               "walls": {
-                "$ref": "#/$defs/__schema1111"
+                "$ref": "#/$defs/__schema1115"
               },
               "formations": {
-                "$ref": "#/$defs/__schema1118"
+                "$ref": "#/$defs/__schema1122"
               },
               "gorge": {
-                "$ref": "#/$defs/__schema1130"
+                "$ref": "#/$defs/__schema1134"
               }
             },
             "required": [
@@ -18550,46 +18626,46 @@
             "description": "An agent-crafted waterfall: one solved fall re-shaped (a cascade of tiers and pools) and dressed with rocks. Written by `worldgen fall-site`, or by an agent from its `--snapshot` context. Bounded to the fall's own span (a few dozen metres); re-solved live by the field, so it follows the river if the world is regenerated."
           }
         },
-        "__schema1094": {
+        "__schema1098": {
           "default": "fall-site",
           "type": "string"
         },
-        "__schema1095": {
+        "__schema1099": {
           "type": "array",
           "prefixItems": [
             {
-              "$ref": "#/$defs/__schema1096"
+              "$ref": "#/$defs/__schema1100"
             },
             {
-              "$ref": "#/$defs/__schema1097"
+              "$ref": "#/$defs/__schema1101"
             }
           ],
           "description": "The FOOT of the solved fall this site dresses (WorldField.falls[i].x/z; `worldgen fall-site <world> --list` prints them). Matched to the nearest drop of at least 2 m within 25 m, so a site survives small re-solves; a site that matches nothing does nothing."
         },
-        "__schema1096": {
+        "__schema1100": {
           "type": "number"
         },
-        "__schema1097": {
+        "__schema1101": {
           "type": "number"
         },
-        "__schema1098": {
+        "__schema1102": {
           "default": "cascade",
           "description": "single: the fall as solved, dressed only (rocks). cascade: the drop split into `tiers` — each its own lip, curtain, mist and splash — with a level pool between them held up on a rock ledge the field builds.",
-          "$ref": "#/$defs/__schema1099"
+          "$ref": "#/$defs/__schema1103"
         },
-        "__schema1099": {
+        "__schema1103": {
           "type": "string",
           "enum": [
             "single",
             "cascade"
           ]
         },
-        "__schema1100": {
+        "__schema1104": {
           "default": [],
           "description": "cascade only, top to bottom. Empty = three even steps with 16 m pools. Keep every step at least 3 m (under that it is a rapid, not a fall).",
-          "$ref": "#/$defs/__schema1101"
+          "$ref": "#/$defs/__schema1105"
         },
-        "__schema1101": {
+        "__schema1105": {
           "type": "array",
           "items": {
             "type": "object",
@@ -18602,7 +18678,7 @@
               "pool": {
                 "default": 16,
                 "description": "Length (m) of the level pool below this step, before the next lip. Ignored on the last tier: it lands in the river's own pool.",
-                "$ref": "#/$defs/__schema1102"
+                "$ref": "#/$defs/__schema1106"
               }
             },
             "required": [
@@ -18610,16 +18686,16 @@
             ]
           }
         },
-        "__schema1102": {
+        "__schema1106": {
           "type": "number",
           "minimum": 4
         },
-        "__schema1103": {
+        "__schema1107": {
           "default": [],
           "description": "Optional: the river's centreline redrawn through the site, upstream to downstream, as world XZ points. The river's own points between the nearest point to the first and the nearest point to the last are replaced by these (bed, width and depth interpolated along), then the field splines and solves it as usual. Use it to bend a dead-straight traced reach: a gentle S through the pools, a dog-leg at a lip. Keep both ends ON the river (within a channel width of it) and every point within 60 m of the site.",
-          "$ref": "#/$defs/__schema1104"
+          "$ref": "#/$defs/__schema1108"
         },
-        "__schema1104": {
+        "__schema1108": {
           "type": "array",
           "items": {
             "type": "array",
@@ -18633,12 +18709,12 @@
             ]
           }
         },
-        "__schema1105": {
+        "__schema1109": {
           "default": [],
           "description": "Stacked rocks and boulders that make the site read as placed: along the pool rims, on the lip, in the plunge pool. Each is stood on the MESHED surface (blobs and overhangs included) and bedded so its footprint does not hang off a slope.",
-          "$ref": "#/$defs/__schema1106"
+          "$ref": "#/$defs/__schema1110"
         },
-        "__schema1106": {
+        "__schema1110": {
           "type": "array",
           "items": {
             "type": "object",
@@ -18651,10 +18727,10 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema1107"
+                    "$ref": "#/$defs/__schema1111"
                   },
                   {
-                    "$ref": "#/$defs/__schema1108"
+                    "$ref": "#/$defs/__schema1112"
                   }
                 ],
                 "description": "World XZ; stood on the ground there."
@@ -18662,12 +18738,12 @@
               "lift": {
                 "default": 0,
                 "description": "Metres above (or into, if negative) the ground.",
-                "$ref": "#/$defs/__schema1109"
+                "$ref": "#/$defs/__schema1113"
               },
               "yaw": {
                 "default": 0,
                 "description": "Radians about Y.",
-                "$ref": "#/$defs/__schema1110"
+                "$ref": "#/$defs/__schema1114"
               },
               "scale": {
                 "default": 1,
@@ -18681,23 +18757,23 @@
             ]
           }
         },
-        "__schema1107": {
-          "type": "number"
-        },
-        "__schema1108": {
-          "type": "number"
-        },
-        "__schema1109": {
-          "type": "number"
-        },
-        "__schema1110": {
-          "type": "number"
-        },
         "__schema1111": {
-          "description": "Automatic scree: rocks of one scatter rule RESTING at each tier's foot around the plunge pools, on bench ledges and at the wall toes (clustered there, bottom-up, on the ground or on a rock below: support within 0.2 m under the lowest points, around the centre of mass). Never on a face steeper than 45 degrees, in the channel, on a lip line or over the rim. Big masses and wall faces are not this: they are rock volumes. Seeded by the site id (stable between runs).",
-          "$ref": "#/$defs/__schema1112"
+          "type": "number"
         },
         "__schema1112": {
+          "type": "number"
+        },
+        "__schema1113": {
+          "type": "number"
+        },
+        "__schema1114": {
+          "type": "number"
+        },
+        "__schema1115": {
+          "description": "Automatic scree: rocks of one scatter rule RESTING at each tier's foot around the plunge pools, on bench ledges and at the wall toes (clustered there, bottom-up, on the ground or on a rock below: support within 0.2 m under the lowest points, around the centre of mass). Never on a face steeper than 45 degrees, in the channel, on a lip line or over the rim. Big masses and wall faces are not this: they are rock volumes. Seeded by the site id (stable between runs).",
+          "$ref": "#/$defs/__schema1116"
+        },
+        "__schema1116": {
           "type": "object",
           "properties": {
             "rule": {
@@ -18707,7 +18783,7 @@
             "max": {
               "default": 90,
               "description": "Most scree rocks for the site.",
-              "$ref": "#/$defs/__schema1113"
+              "$ref": "#/$defs/__schema1117"
             },
             "scale": {
               "default": [
@@ -18715,7 +18791,7 @@
                 3
               ],
               "description": "Instance scale range (model units); larger rocks go down first, lowest on each tier.",
-              "$ref": "#/$defs/__schema1114"
+              "$ref": "#/$defs/__schema1118"
             },
             "band": {
               "default": [
@@ -18723,29 +18799,29 @@
                 40
               ],
               "description": "[below, above] metres around each station's water level searched for ground to rest on.",
-              "$ref": "#/$defs/__schema1115"
+              "$ref": "#/$defs/__schema1119"
             },
             "reach": {
               "default": 40,
               "description": "How far (m) out from the channel centreline to look for ground.",
-              "$ref": "#/$defs/__schema1116"
+              "$ref": "#/$defs/__schema1120"
             },
             "upstream": {
               "default": 0,
               "description": "Metres upstream of the top lip line where the dressing starts. Above the lip is the lake shore: keep 0 unless the channel is walled there.",
-              "$ref": "#/$defs/__schema1117"
+              "$ref": "#/$defs/__schema1121"
             }
           },
           "required": [
             "rule"
           ]
         },
-        "__schema1113": {
+        "__schema1117": {
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "__schema1114": {
+        "__schema1118": {
           "type": "array",
           "prefixItems": [
             {
@@ -18758,7 +18834,7 @@
             }
           ]
         },
-        "__schema1115": {
+        "__schema1119": {
           "type": "array",
           "prefixItems": [
             {
@@ -18771,73 +18847,73 @@
             }
           ]
         },
-        "__schema1116": {
+        "__schema1120": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1117": {
+        "__schema1121": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1118": {
+        "__schema1122": {
           "description": "Faceted DC rock masses fused with the gorge walls: shoulders flanking every curtain, buttresses, ledge outcrops and pool-rim blocks (core rockFormations). Generated and baked by `tools/rock-formations.mts <project> <world> <site> --scene <scene>`, which reads these options; the scree (`walls`) rests on the same masses and keeps out of them. Absent = no formations.",
-          "$ref": "#/$defs/__schema1119"
+          "$ref": "#/$defs/__schema1123"
         },
-        "__schema1119": {
+        "__schema1123": {
           "type": "object",
           "properties": {
             "seed": {
               "description": "Extra seed mixed into the site-id hash (a different, equally valid set).",
-              "$ref": "#/$defs/__schema1120"
+              "$ref": "#/$defs/__schema1124"
             },
             "spacing": {
               "description": "Mean spacing (m) of wall buttresses along each side; default 8.",
-              "$ref": "#/$defs/__schema1121"
+              "$ref": "#/$defs/__schema1125"
             },
             "scale": {
               "description": "Scales every mass; default 1.",
-              "$ref": "#/$defs/__schema1122"
+              "$ref": "#/$defs/__schema1126"
             },
             "margin": {
               "description": "Clearance (m) past the measured water edge no rock may enter; default 1.5.",
-              "$ref": "#/$defs/__schema1123"
+              "$ref": "#/$defs/__schema1127"
             },
             "clear": {
               "description": "Keep-clear discs: a mass whose centre falls inside one is left out (a stair, ledge line, fight space or sight line); every other mass is unchanged.",
-              "$ref": "#/$defs/__schema1124"
+              "$ref": "#/$defs/__schema1128"
             },
             "voxelSize": {
               "description": "Volume lattice spacing (m); default 1 (dual contouring keeps the facets crisp).",
-              "$ref": "#/$defs/__schema1127"
+              "$ref": "#/$defs/__schema1131"
             },
             "wallSurface": {
               "description": "World surface name for the faces; default 'rock'.",
-              "$ref": "#/$defs/__schema1128"
+              "$ref": "#/$defs/__schema1132"
             },
             "accentSurface": {
               "description": "Surface brushed faintly on some fronts; default 'cliff' ('' for none).",
-              "$ref": "#/$defs/__schema1129"
+              "$ref": "#/$defs/__schema1133"
             }
           }
         },
-        "__schema1120": {
+        "__schema1124": {
           "type": "integer",
           "minimum": -9007199254740991,
           "maximum": 9007199254740991
         },
-        "__schema1121": {
+        "__schema1125": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1122": {
+        "__schema1126": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1123": {
+        "__schema1127": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1124": {
+        "__schema1128": {
           "type": "array",
           "items": {
             "type": "object",
@@ -18846,10 +18922,10 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema1125"
+                    "$ref": "#/$defs/__schema1129"
                   },
                   {
-                    "$ref": "#/$defs/__schema1126"
+                    "$ref": "#/$defs/__schema1130"
                   }
                 ],
                 "description": "[x, z] centre."
@@ -18866,204 +18942,204 @@
             ]
           }
         },
-        "__schema1125": {
+        "__schema1129": {
           "type": "number"
         },
-        "__schema1126": {
+        "__schema1130": {
           "type": "number"
         },
-        "__schema1127": {
+        "__schema1131": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1128": {
+        "__schema1132": {
           "type": "string"
         },
-        "__schema1129": {
+        "__schema1133": {
           "type": "string"
         },
-        "__schema1130": {
+        "__schema1134": {
           "description": "cascade only: the SITE-SCALE shape of the gorge, built from the solved tiers — a rounded bowl under every pool (wider than the channel, oval, longest downstream), a curved amphitheatre headwall at every tier, and side walls stepping back in benches whose width wanders along the span. Only ever cuts, and eases out to the land at `reach`. Absent = on with these defaults; `{ \"enabled\": false }` keeps the plain slot the river carve makes.",
-          "$ref": "#/$defs/__schema1131"
+          "$ref": "#/$defs/__schema1135"
         },
-        "__schema1131": {
+        "__schema1135": {
           "type": "object",
           "properties": {
             "enabled": {
               "default": true,
               "description": "false: no site-scale shape, only the river's own slot carve.",
-              "$ref": "#/$defs/__schema1132"
+              "$ref": "#/$defs/__schema1136"
             },
             "bowl": {
               "default": 2.3,
               "description": "Widest pool bowl: the channel with its bed widened this many times, plus the channel's own bank reach to the waterline (1 is the channel's water; 1.5-2.5 reads as a plunge pool). The pool's water fills the bowl to where its ground rises out, and necks back to the channel at every lip.",
-              "$ref": "#/$defs/__schema1133"
+              "$ref": "#/$defs/__schema1137"
             },
             "depth": {
               "default": 3,
               "description": "How far (m) the middle of each bowl sits under its pool's water.",
-              "$ref": "#/$defs/__schema1134"
+              "$ref": "#/$defs/__schema1138"
             },
             "rim": {
               "default": 2,
               "description": "Freeboard (m): how far the bowl's rim stands over its pool before the walls begin.",
-              "$ref": "#/$defs/__schema1135"
+              "$ref": "#/$defs/__schema1139"
             },
             "step": {
               "default": 8,
               "description": "Height (m) of one bench of the stepped side walls.",
-              "$ref": "#/$defs/__schema1136"
+              "$ref": "#/$defs/__schema1140"
             },
             "slope": {
               "default": 0.8,
               "description": "Mean rise over run of the stepped walls (benches plus risers). The risers stand about 2.1x this; keep them under 2.",
-              "$ref": "#/$defs/__schema1137"
+              "$ref": "#/$defs/__schema1141"
             },
             "wander": {
               "default": 5,
               "description": "How far (m) the foot of each side wall wanders out from the bowl, per side, independently.",
-              "$ref": "#/$defs/__schema1138"
+              "$ref": "#/$defs/__schema1142"
             },
             "wavelength": {
               "default": 14,
               "description": "Along-channel wavelength (m) of that wander (a second octave runs at 0.6x).",
-              "$ref": "#/$defs/__schema1139"
+              "$ref": "#/$defs/__schema1143"
             },
             "curve": {
               "default": 0.03,
               "description": "Headwall curvature: at d metres across the channel a tier's cliff face stands curve·d² metres further downstream than at the lip (a concave amphitheatre).",
-              "$ref": "#/$defs/__schema1140"
+              "$ref": "#/$defs/__schema1144"
             },
             "reach": {
               "default": 60,
               "description": "How far (m) from the channel the shape extends; it eases out to the land over its last 15 m.",
-              "$ref": "#/$defs/__schema1141"
+              "$ref": "#/$defs/__schema1145"
             },
             "lastPool": {
               "default": 18,
               "description": "Length (m) of the bowl below the last tier, in the river's own pool.",
-              "$ref": "#/$defs/__schema1142"
+              "$ref": "#/$defs/__schema1146"
             }
           }
         },
-        "__schema1132": {
+        "__schema1136": {
           "type": "boolean"
         },
-        "__schema1133": {
+        "__schema1137": {
           "type": "number",
           "minimum": 1,
           "maximum": 2.5
         },
-        "__schema1134": {
+        "__schema1138": {
           "type": "number",
           "minimum": 0,
           "maximum": 8
         },
-        "__schema1135": {
+        "__schema1139": {
           "type": "number",
           "minimum": 1.5
         },
-        "__schema1136": {
+        "__schema1140": {
           "type": "number",
           "minimum": 2
         },
-        "__schema1137": {
+        "__schema1141": {
           "type": "number",
           "minimum": 0.3,
           "maximum": 1.2
         },
-        "__schema1138": {
+        "__schema1142": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1139": {
+        "__schema1143": {
           "type": "number",
           "minimum": 6,
           "maximum": 30
         },
-        "__schema1140": {
+        "__schema1144": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1141": {
+        "__schema1145": {
           "type": "number",
           "minimum": 15
         },
-        "__schema1142": {
+        "__schema1146": {
           "type": "number",
           "minimum": 6
         },
-        "__schema1143": {
+        "__schema1147": {
           "type": "string"
         },
-        "__schema1144": {
+        "__schema1148": {
           "type": "string"
         },
-        "__schema1145": {
+        "__schema1149": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1146": {
+        "__schema1150": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "__schema1147": {
+        "__schema1151": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema1148"
+                "$ref": "#/$defs/__schema1152"
               },
               "owner": {
-                "$ref": "#/$defs/__schema1149"
-              },
-              "style": {
-                "$ref": "#/$defs/__schema1151"
-              },
-              "fallback": {
                 "$ref": "#/$defs/__schema1153"
               },
-              "footprint": {
+              "style": {
                 "$ref": "#/$defs/__schema1155"
               },
+              "fallback": {
+                "$ref": "#/$defs/__schema1157"
+              },
+              "footprint": {
+                "$ref": "#/$defs/__schema1159"
+              },
               "walls": {
-                "$ref": "#/$defs/__schema1156"
-              },
-              "minDrop": {
-                "$ref": "#/$defs/__schema1158"
-              },
-              "facing": {
                 "$ref": "#/$defs/__schema1160"
               },
+              "minDrop": {
+                "$ref": "#/$defs/__schema1162"
+              },
+              "facing": {
+                "$ref": "#/$defs/__schema1164"
+              },
               "topY": {
-                "$ref": "#/$defs/__schema1161"
-              },
-              "height": {
-                "$ref": "#/$defs/__schema1163"
-              },
-              "inserts": {
                 "$ref": "#/$defs/__schema1165"
               },
+              "height": {
+                "$ref": "#/$defs/__schema1167"
+              },
+              "inserts": {
+                "$ref": "#/$defs/__schema1169"
+              },
               "strip": {
-                "$ref": "#/$defs/__schema1168"
-              },
-              "feather": {
-                "$ref": "#/$defs/__schema1170"
-              },
-              "wear": {
                 "$ref": "#/$defs/__schema1172"
               },
-              "seed": {
+              "feather": {
                 "$ref": "#/$defs/__schema1174"
               },
+              "wear": {
+                "$ref": "#/$defs/__schema1176"
+              },
+              "seed": {
+                "$ref": "#/$defs/__schema1178"
+              },
               "tags": {
-                "$ref": "#/$defs/__schema1175"
+                "$ref": "#/$defs/__schema1179"
               },
               "solved": {
-                "$ref": "#/$defs/__schema1176"
+                "$ref": "#/$defs/__schema1180"
               }
             },
             "required": [
@@ -19073,24 +19149,24 @@
             "description": "A terrace held up by retaining walls: pad outline + drop + inserts; solved by `worldgen terrace-place`."
           }
         },
-        "__schema1148": {
+        "__schema1152": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9-]*$",
           "description": "Stable id; its derived height patch and clearing are `tw-<id>`."
         },
-        "__schema1149": {
+        "__schema1153": {
           "description": "Who wrote it (a town or POI id). `worldgen terrace` owns the `<town>-riser-*` terraces of the towns it steps and rewrites them.",
-          "$ref": "#/$defs/__schema1150"
+          "$ref": "#/$defs/__schema1154"
         },
-        "__schema1150": {
+        "__schema1154": {
           "type": "string"
         },
-        "__schema1151": {
+        "__schema1155": {
           "default": "masonry-common",
           "description": "masonry-common: coursed rubble (houses, lanes, fields). masonry-stone: dressed ashlar (civic works, capitals). natural: rock shelves from the rock kit.",
-          "$ref": "#/$defs/__schema1152"
+          "$ref": "#/$defs/__schema1156"
         },
-        "__schema1152": {
+        "__schema1156": {
           "type": "string",
           "enum": [
             "masonry-common",
@@ -19098,31 +19174,31 @@
             "natural"
           ]
         },
-        "__schema1153": {
+        "__schema1157": {
           "description": "natural only: the masonry style to build with while the natural shelf kit (world-kit rock-kit shelf-lookup.json) does not exist. Omitted = a natural terrace fails until it does.",
-          "$ref": "#/$defs/__schema1154"
+          "$ref": "#/$defs/__schema1158"
         },
-        "__schema1154": {
+        "__schema1158": {
           "type": "string",
           "enum": [
             "masonry-common",
             "masonry-stone"
           ]
         },
-        "__schema1155": {
+        "__schema1159": {
           "minItems": 3,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema1020"
+            "$ref": "#/$defs/__schema1024"
           },
           "description": "Outline of the upper pad, world XZ, any headings (wall runs are laid on a 2 m / 5 deg run grid from their first vertex; an all-axis outline snaps to the 2 m world grid). Either winding."
         },
-        "__schema1156": {
+        "__schema1160": {
           "default": "auto",
           "description": "Footprint edge indices that carry wall (the rest meet the hill as feathered banks). auto: every edge whose outside ground lies at least `minDrop` and 60 % of the steepest edge's drop below the pad.",
-          "$ref": "#/$defs/__schema1157"
+          "$ref": "#/$defs/__schema1161"
         },
-        "__schema1157": {
+        "__schema1161": {
           "anyOf": [
             {
               "type": "string",
@@ -19138,36 +19214,36 @@
             }
           ]
         },
-        "__schema1158": {
+        "__schema1162": {
           "default": 1.2,
           "description": "auto walls: smallest drop (m) worth a wall. With a dictated `height` an edge must also drop a quarter of it (the strip is cut down to the foot).",
-          "$ref": "#/$defs/__schema1159"
+          "$ref": "#/$defs/__schema1163"
         },
-        "__schema1159": {
+        "__schema1163": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1160": {
+        "__schema1164": {
           "description": "auto walls: the way the ground falls ([x, z], any length). Only edges whose outward normal is within 60 deg of it get wall — a wall running UP a slope would need its foot dug into the hill.",
-          "$ref": "#/$defs/__schema1020"
+          "$ref": "#/$defs/__schema1024"
         },
-        "__schema1161": {
+        "__schema1165": {
           "description": "Pad level. Omitted = solved from the ground (median over the footprint; nudged so a doorway keeps a roof).",
-          "$ref": "#/$defs/__schema1162"
+          "$ref": "#/$defs/__schema1166"
         },
-        "__schema1162": {
+        "__schema1166": {
           "type": "number"
         },
-        "__schema1163": {
+        "__schema1167": {
           "description": "Wall drop (m), snapped to the kit's 0.4 m courses (1.5 / 3 / 4.5 exact). Omitted = from the ground at the wall foot. A height the kit has no slices for is built by `build.mts make` on the first fit.",
-          "$ref": "#/$defs/__schema1164"
+          "$ref": "#/$defs/__schema1168"
         },
-        "__schema1164": {
+        "__schema1168": {
           "type": "number",
           "minimum": 0.8,
           "maximum": 6.4
         },
-        "__schema1165": {
+        "__schema1169": {
           "default": [],
           "type": "array",
           "items": {
@@ -19189,7 +19265,7 @@
               "edge": {
                 "default": 0,
                 "description": "Footprint edge index: the edge from footprint[edge] to footprint[edge + 1]. It must carry wall.",
-                "$ref": "#/$defs/__schema1166"
+                "$ref": "#/$defs/__schema1170"
               },
               "at": {
                 "type": "number",
@@ -19199,7 +19275,7 @@
               "run": {
                 "default": 4,
                 "description": "drain / buttress only: a 2 m or a 4 m module.",
-                "$ref": "#/$defs/__schema1167"
+                "$ref": "#/$defs/__schema1171"
               }
             },
             "required": [
@@ -19208,12 +19284,12 @@
             ]
           }
         },
-        "__schema1166": {
+        "__schema1170": {
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "__schema1167": {
+        "__schema1171": {
           "anyOf": [
             {
               "type": "number",
@@ -19225,49 +19301,49 @@
             }
           ]
         },
-        "__schema1168": {
+        "__schema1172": {
           "default": 2.5,
           "description": "Metres of low ground levelled at the wall foot (stairs and ramps take their own footprint + 1 m).",
-          "$ref": "#/$defs/__schema1169"
+          "$ref": "#/$defs/__schema1173"
         },
-        "__schema1169": {
+        "__schema1173": {
           "type": "number",
           "minimum": 1,
           "maximum": 8
         },
-        "__schema1170": {
+        "__schema1174": {
           "description": "Minimum width (m) over which levelled ground blends back into the hill. Default: 1.6 x the height difference, at least 4.",
-          "$ref": "#/$defs/__schema1171"
+          "$ref": "#/$defs/__schema1175"
         },
-        "__schema1171": {
+        "__schema1175": {
           "type": "number",
           "minimum": 2
         },
-        "__schema1172": {
+        "__schema1176": {
           "default": 0,
           "description": "0 kept, 1 weathered (drains), 2 run-down (buttresses, worn coping), 3 ruined (gaps in the coping).",
-          "$ref": "#/$defs/__schema1173"
+          "$ref": "#/$defs/__schema1177"
         },
-        "__schema1173": {
+        "__schema1177": {
           "type": "integer",
           "minimum": 0,
           "maximum": 3
         },
-        "__schema1174": {
+        "__schema1178": {
           "type": "string"
         },
-        "__schema1175": {
+        "__schema1179": {
           "default": [],
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "__schema1176": {
+        "__schema1180": {
           "description": "Written by `worldgen terrace-place`; never hand-edit. Absent = not fitted yet (nothing is built).",
-          "$ref": "#/$defs/__schema1177"
+          "$ref": "#/$defs/__schema1181"
         },
-        "__schema1177": {
+        "__schema1181": {
           "type": "object",
           "properties": {
             "style": {
@@ -19294,45 +19370,45 @@
             "runs": {
               "type": "array",
               "items": {
-                "$ref": "#/$defs/__schema1178"
+                "$ref": "#/$defs/__schema1182"
               },
               "description": "Footprint edges grouped into continuous wall runs."
             },
             "faces": {
               "type": "array",
               "items": {
-                "$ref": "#/$defs/__schema1179"
+                "$ref": "#/$defs/__schema1183"
               },
               "description": "Wall face lines and their low-side normals. The lattice step under them is the wall's: `worldgen lips` exempts it."
             },
             "pieces": {
               "type": "array",
               "items": {
-                "$ref": "#/$defs/__schema1011"
+                "$ref": "#/$defs/__schema1015"
               },
               "description": "Every body and coping piece, world placed. The streamer emits these; do not hand-edit."
             },
             "cuts": {
               "default": [],
               "description": "Oriented boxes the field carves (any heading): the low side of every face and each doorway's passage. The field reads these directly.",
-              "$ref": "#/$defs/__schema1180"
+              "$ref": "#/$defs/__schema1184"
             },
             "sockets": {
               "default": [],
               "description": "Doorway sockets (interior / portal / arrival), world placed.",
-              "$ref": "#/$defs/__schema1181"
+              "$ref": "#/$defs/__schema1185"
             },
             "derived": {
               "type": "object",
               "properties": {
                 "patch": {
-                  "$ref": "#/$defs/__schema1182"
+                  "$ref": "#/$defs/__schema1186"
                 },
                 "passages": {
-                  "$ref": "#/$defs/__schema1183"
+                  "$ref": "#/$defs/__schema1187"
                 },
                 "clearing": {
-                  "$ref": "#/$defs/__schema1184"
+                  "$ref": "#/$defs/__schema1188"
                 }
               },
               "required": [
@@ -19366,7 +19442,7 @@
             "ground"
           ]
         },
-        "__schema1178": {
+        "__schema1182": {
           "type": "object",
           "properties": {
             "edges": {
@@ -19386,17 +19462,17 @@
             "closed"
           ]
         },
-        "__schema1179": {
+        "__schema1183": {
           "type": "object",
           "properties": {
             "a": {
-              "$ref": "#/$defs/__schema1020"
+              "$ref": "#/$defs/__schema1024"
             },
             "b": {
-              "$ref": "#/$defs/__schema1020"
+              "$ref": "#/$defs/__schema1024"
             },
             "normal": {
-              "$ref": "#/$defs/__schema1020"
+              "$ref": "#/$defs/__schema1024"
             }
           },
           "required": [
@@ -19405,13 +19481,13 @@
             "normal"
           ]
         },
-        "__schema1180": {
+        "__schema1184": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema1017"
+            "$ref": "#/$defs/__schema1021"
           }
         },
-        "__schema1181": {
+        "__schema1185": {
           "type": "array",
           "items": {
             "type": "object",
@@ -19448,19 +19524,19 @@
             ]
           }
         },
-        "__schema1182": {
+        "__schema1186": {
           "type": "string"
         },
-        "__schema1183": {
+        "__schema1187": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "__schema1184": {
+        "__schema1188": {
           "type": "string"
         },
-        "__schema1185": {
+        "__schema1189": {
           "type": "array",
           "items": {
             "type": "object",
@@ -19472,7 +19548,7 @@
               "cells": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/__schema1186"
+                  "$ref": "#/$defs/__schema1190"
                 },
                 "description": "Lattice cells forced to air, flat (gx, gy, gz) triples; world position = index * voxelSize."
               }
@@ -19483,42 +19559,42 @@
             ]
           }
         },
-        "__schema1186": {
+        "__schema1190": {
           "type": "integer",
           "minimum": -9007199254740991,
           "maximum": 9007199254740991
         },
-        "__schema1187": {
+        "__schema1191": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema1188"
-              },
-              "polygon": {
-                "$ref": "#/$defs/__schema1189"
-              },
-              "center": {
                 "$ref": "#/$defs/__schema1192"
               },
-              "radius": {
-                "$ref": "#/$defs/__schema1194"
+              "polygon": {
+                "$ref": "#/$defs/__schema1193"
               },
-              "feather": {
+              "center": {
                 "$ref": "#/$defs/__schema1196"
               },
-              "keep": {
+              "radius": {
                 "$ref": "#/$defs/__schema1198"
               },
-              "scatter": {
+              "feather": {
                 "$ref": "#/$defs/__schema1200"
               },
-              "cover": {
+              "keep": {
                 "$ref": "#/$defs/__schema1202"
               },
-              "owner": {
+              "scatter": {
                 "$ref": "#/$defs/__schema1204"
+              },
+              "cover": {
+                "$ref": "#/$defs/__schema1206"
+              },
+              "owner": {
+                "$ref": "#/$defs/__schema1208"
               }
             },
             "required": [
@@ -19527,100 +19603,100 @@
             "description": "A patch where scatter and/or cover do not grow: a site's footprint, a hall pad, a quarry floor, a town's building plot, street or door path. Replaces burying additive blobs to suppress foliage. Terrain is untouched."
           }
         },
-        "__schema1188": {
+        "__schema1192": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9-]*$",
           "description": "Stable id; `worldgen vegetation --clearing` replaces by id. Prefix with the owner (`hrimgard-hall-pad`, `brinehold-plot-12`)."
         },
-        "__schema1189": {
+        "__schema1193": {
           "description": "Outline in world metres [x, z]. Give this OR center + radius.",
-          "$ref": "#/$defs/__schema1190"
+          "$ref": "#/$defs/__schema1194"
         },
-        "__schema1190": {
+        "__schema1194": {
           "minItems": 3,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema1191"
+            "$ref": "#/$defs/__schema1195"
           }
         },
-        "__schema1191": {
-          "type": "array",
-          "prefixItems": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "number"
-            }
-          ]
-        },
-        "__schema1192": {
-          "description": "Circle centre [x, z] (with `radius`).",
-          "$ref": "#/$defs/__schema1193"
-        },
-        "__schema1193": {
-          "type": "array",
-          "prefixItems": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "number"
-            }
-          ]
-        },
-        "__schema1194": {
-          "description": "Circle radius in metres (with `center`).",
-          "$ref": "#/$defs/__schema1195"
-        },
         "__schema1195": {
-          "type": "number",
-          "exclusiveMinimum": 0
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
         },
         "__schema1196": {
-          "default": 3,
-          "description": "Metres OUTSIDE the edge over which plants return, from `keep` to full. 0 = a hard edge (reads as a stencil).",
+          "description": "Circle centre [x, z] (with `radius`).",
           "$ref": "#/$defs/__schema1197"
         },
         "__schema1197": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 60
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
         },
         "__schema1198": {
-          "default": 0,
-          "description": "Fraction that survives inside: 0 clears, 0.3 leaves a thinned site.",
+          "description": "Circle radius in metres (with `center`).",
           "$ref": "#/$defs/__schema1199"
         },
         "__schema1199": {
           "type": "number",
-          "minimum": 0,
-          "maximum": 1
+          "exclusiveMinimum": 0
         },
         "__schema1200": {
-          "default": true,
-          "description": "Clear scatter props. A prop's canopy footprint counts, so a big tree keeps its whole crown off the clearing.",
+          "default": 3,
+          "description": "Metres OUTSIDE the edge over which plants return, from `keep` to full. 0 = a hard edge (reads as a stencil).",
           "$ref": "#/$defs/__schema1201"
         },
         "__schema1201": {
-          "type": "boolean"
+          "type": "number",
+          "minimum": 0,
+          "maximum": 60
         },
         "__schema1202": {
-          "default": true,
-          "description": "Clear ground cover.",
+          "default": 0,
+          "description": "Fraction that survives inside: 0 clears, 0.3 leaves a thinned site.",
           "$ref": "#/$defs/__schema1203"
         },
         "__schema1203": {
-          "type": "boolean"
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
         },
         "__schema1204": {
-          "description": "Who wrote it (a POI or town id) — installers remove their own by owner.",
+          "default": true,
+          "description": "Clear scatter props. A prop's canopy footprint counts, so a big tree keeps its whole crown off the clearing.",
           "$ref": "#/$defs/__schema1205"
         },
         "__schema1205": {
-          "type": "string"
+          "type": "boolean"
         },
         "__schema1206": {
+          "default": true,
+          "description": "Clear ground cover.",
+          "$ref": "#/$defs/__schema1207"
+        },
+        "__schema1207": {
+          "type": "boolean"
+        },
+        "__schema1208": {
+          "description": "Who wrote it (a POI or town id) — installers remove their own by owner.",
+          "$ref": "#/$defs/__schema1209"
+        },
+        "__schema1209": {
+          "type": "string"
+        },
+        "__schema1210": {
           "type": "array",
           "items": {
             "type": "object",
@@ -19633,10 +19709,10 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema1207"
+                    "$ref": "#/$defs/__schema1211"
                   },
                   {
-                    "$ref": "#/$defs/__schema1208"
+                    "$ref": "#/$defs/__schema1212"
                   }
                 ],
                 "description": "World-space XZ. Ground height is sampled from the field, so no Y is stored — the camp follows the terrain when it changes."
@@ -19644,70 +19720,70 @@
               "zone": {
                 "default": "",
                 "description": "Region id this camp sits in (recipe `regions`), or empty in an unzoned world. What a difficulty tier, a faction or a story hook keys on.",
-                "$ref": "#/$defs/__schema1209"
+                "$ref": "#/$defs/__schema1213"
               },
               "area": {
                 "type": "object",
                 "properties": {
                   "radius": {
-                    "$ref": "#/$defs/__schema1210"
-                  },
-                  "showRadius": {
-                    "$ref": "#/$defs/__schema1212"
-                  },
-                  "sleepRadius": {
                     "$ref": "#/$defs/__schema1214"
                   },
-                  "idleSeconds": {
+                  "showRadius": {
                     "$ref": "#/$defs/__schema1216"
                   },
-                  "spawns": {
+                  "sleepRadius": {
                     "$ref": "#/$defs/__schema1218"
                   },
-                  "leash": {
+                  "idleSeconds": {
                     "$ref": "#/$defs/__schema1220"
                   },
-                  "roam": {
+                  "spawns": {
                     "$ref": "#/$defs/__schema1222"
                   },
-                  "patrol": {
+                  "leash": {
                     "$ref": "#/$defs/__schema1224"
                   },
-                  "loop": {
+                  "roam": {
                     "$ref": "#/$defs/__schema1226"
                   },
-                  "hours": {
+                  "patrol": {
                     "$ref": "#/$defs/__schema1228"
                   },
-                  "placement": {
+                  "loop": {
                     "$ref": "#/$defs/__schema1230"
                   },
-                  "mix": {
+                  "hours": {
                     "$ref": "#/$defs/__schema1232"
                   },
+                  "placement": {
+                    "$ref": "#/$defs/__schema1234"
+                  },
+                  "mix": {
+                    "$ref": "#/$defs/__schema1236"
+                  },
                   "population": {
-                    "$ref": "#/$defs/__schema1239"
-                  },
-                  "respawn": {
-                    "$ref": "#/$defs/__schema1241"
-                  },
-                  "hiddenFrom": {
                     "$ref": "#/$defs/__schema1243"
                   },
-                  "roamRange": {
+                  "respawn": {
                     "$ref": "#/$defs/__schema1245"
                   },
-                  "unique": {
+                  "hiddenFrom": {
                     "$ref": "#/$defs/__schema1247"
                   },
-                  "temperament": {
+                  "roamRange": {
                     "$ref": "#/$defs/__schema1249"
                   },
-                  "territory": {
+                  "unique": {
                     "$ref": "#/$defs/__schema1251"
                   },
-                  "rares": {
+                  "temperament": {
                     "$ref": "#/$defs/__schema1253"
+                  },
+                  "territory": {
+                    "$ref": "#/$defs/__schema1255"
+                  },
+                  "rares": {
+                    "$ref": "#/$defs/__schema1257"
                   }
                 },
                 "description": "The spawnArea component emitted onto the scene entity, verbatim."
@@ -19715,7 +19791,7 @@
               "tags": {
                 "default": [],
                 "description": "Free-form. `worldgen spawn` writes a distance tier (\"near\", \"far\") off the zone hub.",
-                "$ref": "#/$defs/__schema1261"
+                "$ref": "#/$defs/__schema1265"
               }
             },
             "required": [
@@ -19724,35 +19800,18 @@
             ]
           }
         },
-        "__schema1207": {
-          "type": "number"
-        },
-        "__schema1208": {
-          "type": "number"
-        },
-        "__schema1209": {
-          "type": "string"
-        },
-        "__schema1210": {
-          "default": 80,
-          "description": "Metres from the area's origin within which a player wakes it: the packs simulate (spawning first if they have not been placed yet).",
-          "$ref": "#/$defs/__schema1211"
-        },
         "__schema1211": {
-          "type": "number",
-          "exclusiveMinimum": 0
+          "type": "number"
         },
         "__schema1212": {
-          "description": "Metres within which the packs are PLACED: spawned out of sight, settled on the ground, then paused standing in their idle until a player comes within `radius`. Default: the server's interest radius + 30, so a creature is already standing there when it first comes into view instead of appearing (and dropping) in front of the player.",
-          "$ref": "#/$defs/__schema1213"
+          "type": "number"
         },
         "__schema1213": {
-          "type": "number",
-          "exclusiveMinimum": 0
+          "type": "string"
         },
         "__schema1214": {
-          "default": 120,
-          "description": "Once awake, the area sleeps only when no player is within this (hysteresis — keep it larger than radius).",
+          "default": 80,
+          "description": "Metres from the area's origin within which a player wakes it: the packs simulate (spawning first if they have not been placed yet).",
           "$ref": "#/$defs/__schema1215"
         },
         "__schema1215": {
@@ -19760,15 +19819,32 @@
           "exclusiveMinimum": 0
         },
         "__schema1216": {
-          "default": 10,
-          "description": "Seconds with no player inside sleepRadius before the pack is paused in place. It does not despawn: a returning player finds it where it was.",
+          "description": "Metres within which the packs are PLACED: spawned out of sight, settled on the ground, then paused standing in their idle until a player comes within `radius`. Default: the server's interest radius + 30, so a creature is already standing there when it first comes into view instead of appearing (and dropping) in front of the player.",
           "$ref": "#/$defs/__schema1217"
         },
         "__schema1217": {
           "type": "number",
-          "minimum": 0
+          "exclusiveMinimum": 0
         },
         "__schema1218": {
+          "default": 120,
+          "description": "Once awake, the area sleeps only when no player is within this (hysteresis — keep it larger than radius).",
+          "$ref": "#/$defs/__schema1219"
+        },
+        "__schema1219": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema1220": {
+          "default": 10,
+          "description": "Seconds with no player inside sleepRadius before the pack is paused in place. It does not despawn: a returning player finds it where it was.",
+          "$ref": "#/$defs/__schema1221"
+        },
+        "__schema1221": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema1222": {
           "default": [],
           "type": "array",
           "items": {
@@ -19788,7 +19864,7 @@
               "spread": {
                 "default": 6,
                 "description": "Metres around the origin the pack is scattered in (uniform disc).",
-                "$ref": "#/$defs/__schema1219"
+                "$ref": "#/$defs/__schema1223"
               }
             },
             "required": [
@@ -19796,34 +19872,34 @@
             ]
           }
         },
-        "__schema1219": {
-          "type": "number",
-          "minimum": 0
-        },
-        "__schema1220": {
-          "default": 25,
-          "description": "Metres from home an enemy may chase before it must turn back. Handed to each NPC's root script as the `leash` param (with `home`, `roam`, `spawnArea`); the server also fences at 1.5× as a backstop.",
-          "$ref": "#/$defs/__schema1221"
-        },
-        "__schema1221": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema1222": {
-          "default": 10,
-          "description": "Idle wander radius around home, passed as the `roam` param.",
-          "$ref": "#/$defs/__schema1223"
-        },
         "__schema1223": {
           "type": "number",
           "minimum": 0
         },
         "__schema1224": {
-          "default": [],
-          "description": "Patrol route: points in metres relative to the area's origin, walked in order and back (ping-pong) while the pack is idle, instead of wandering inside `roam`. Handed to each NPC as the `patrol` param in world coordinates; the leash and the server's fence are then measured from the nearest point of the route, so the route itself may be longer than the leash. Empty = no patrol.",
+          "default": 25,
+          "description": "Metres from home an enemy may chase before it must turn back. Handed to each NPC's root script as the `leash` param (with `home`, `roam`, `spawnArea`); the server also fences at 1.5× as a backstop.",
           "$ref": "#/$defs/__schema1225"
         },
         "__schema1225": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema1226": {
+          "default": 10,
+          "description": "Idle wander radius around home, passed as the `roam` param.",
+          "$ref": "#/$defs/__schema1227"
+        },
+        "__schema1227": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema1228": {
+          "default": [],
+          "description": "Patrol route: points in metres relative to the area's origin, walked in order and back (ping-pong) while the pack is idle, instead of wandering inside `roam`. Handed to each NPC as the `patrol` param in world coordinates; the leash and the server's fence are then measured from the nearest point of the route, so the route itself may be longer than the leash. Empty = no patrol.",
+          "$ref": "#/$defs/__schema1229"
+        },
+        "__schema1229": {
           "type": "array",
           "items": {
             "type": "array",
@@ -19840,19 +19916,19 @@
             ]
           }
         },
-        "__schema1226": {
+        "__schema1230": {
           "default": false,
           "description": "`patrol` is a closed LOOP, walked round and round (the last point leads back to the first) instead of out and back: a roaming pack ranging a moor or a gorge rim. A road corridor stays out and back (false).",
-          "$ref": "#/$defs/__schema1227"
+          "$ref": "#/$defs/__schema1231"
         },
-        "__schema1227": {
+        "__schema1231": {
           "type": "boolean"
         },
-        "__schema1228": {
+        "__schema1232": {
           "description": "World-clock window [from, to) in hours (netState world/hour; wraps past midnight, [19, 5] = dusk to dawn) when the area is OUT. Outside it nothing spawns and every member no player is within `hiddenFrom` of is cleared (bats at dusk and night). `anywhere` / `route` only. Unset = always; no clock running = always.",
-          "$ref": "#/$defs/__schema1229"
+          "$ref": "#/$defs/__schema1233"
         },
-        "__schema1229": {
+        "__schema1233": {
           "type": "array",
           "prefixItems": [
             {
@@ -19867,12 +19943,12 @@
             }
           ]
         },
-        "__schema1230": {
+        "__schema1234": {
           "default": "pack",
           "description": "How the population is laid out. `pack` (the old behaviour): every spawn scattered within its `spread` of the origin, respawned in place by the server's NPC manager. `anywhere`: AMBIENT LIFE — each creature (or pair) spawns, and respawns after `respawn` seconds, at a random walkable open-air point anywhere inside `radius`, never within `hiddenFrom` metres of a player, so no spot can be camped; each one's `home` is its own spawn point and it roams `roamRange` metres round it. Use it for starter wildlife with a `mix` of singles and pairs. `route`: a WANDERING RARE — spawns at a random point along `patrol` (never its start), walks it in a random direction, and respawns after `respawn` seconds out of sight; `unique` keeps one alive per area. Caves: `pack` or `route` (`anywhere` samples the open-air surface).",
-          "$ref": "#/$defs/__schema1231"
+          "$ref": "#/$defs/__schema1235"
         },
-        "__schema1231": {
+        "__schema1235": {
           "type": "string",
           "enum": [
             "pack",
@@ -19880,12 +19956,12 @@
             "route"
           ]
         },
-        "__schema1232": {
+        "__schema1236": {
           "default": [],
           "description": "Weighted table of what spawns: each roll picks one row by `weight` and spawns `count` of it together, until `population` are alive. Singles and pairs ([1,1], [1,2]) read as roaming life; [3,5] reads as a camp. Works in every placement (in `pack` the rolls are scattered within 6 m of the origin, on top of `spawns`). Empty = `spawns` only (in `anywhere` / `route` the `spawns` entries are then the table, weighted by their counts, one creature per roll).",
-          "$ref": "#/$defs/__schema1233"
+          "$ref": "#/$defs/__schema1237"
         },
-        "__schema1233": {
+        "__schema1237": {
           "type": "array",
           "items": {
             "type": "object",
@@ -19898,7 +19974,7 @@
               "weight": {
                 "default": 1,
                 "description": "Relative chance this row is the one rolled.",
-                "$ref": "#/$defs/__schema1234"
+                "$ref": "#/$defs/__schema1238"
               },
               "count": {
                 "default": [
@@ -19906,21 +19982,21 @@
                   1
                 ],
                 "description": "[min, max] creatures spawned together by one roll: [1,1] a single, [1,2] a single or a pair. More than 2 reads as a pack, not ambient life.",
-                "$ref": "#/$defs/__schema1235"
+                "$ref": "#/$defs/__schema1239"
               },
               "temperament": {
                 "description": "This row's temperament (overrides the area's `temperament`).",
-                "$ref": "#/$defs/__schema1236"
+                "$ref": "#/$defs/__schema1240"
               },
               "near": {
                 "default": 4,
                 "description": "Metres the members of one roll stand from the first of them (a pair grazing together).",
-                "$ref": "#/$defs/__schema1237"
+                "$ref": "#/$defs/__schema1241"
               },
               "with": {
                 "default": [],
                 "description": "Companion templates spawned in the same roll, beside the row's own `count` (a band: a Bandit Footpad with a Cutpurse and a Lookout). On a `route` every member of one roll sets off the same way, so the band walks together. Each companion takes a population slot.",
-                "$ref": "#/$defs/__schema1238"
+                "$ref": "#/$defs/__schema1242"
               }
             },
             "required": [
@@ -19928,11 +20004,11 @@
             ]
           }
         },
-        "__schema1234": {
+        "__schema1238": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1235": {
+        "__schema1239": {
           "type": "array",
           "prefixItems": [
             {
@@ -19947,7 +20023,7 @@
             }
           ]
         },
-        "__schema1236": {
+        "__schema1240": {
           "type": "string",
           "enum": [
             "hostile",
@@ -19955,62 +20031,32 @@
             "passive"
           ]
         },
-        "__schema1237": {
+        "__schema1241": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1238": {
+        "__schema1242": {
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1
           }
         },
-        "__schema1239": {
+        "__schema1243": {
           "description": "Creatures alive at once across the area, rolled from `mix`. Default: the sum of the `spawns` counts in `anywhere` (6 with only a `mix`), 1 in `route`, and in `pack` 0 extra (a `pack` with a `mix` rolls this many on top of `spawns`; default the mix's row count). Ignored when `unique` is on.",
-          "$ref": "#/$defs/__schema1240"
+          "$ref": "#/$defs/__schema1244"
         },
-        "__schema1240": {
+        "__schema1244": {
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
         },
-        "__schema1241": {
+        "__schema1245": {
           "default": [
             60,
             150
           ],
           "description": "[min, max] seconds, jittered per death, before a dead creature's corpse is cleared and a replacement spawns somewhere out of sight. `anywhere` and `route` only — `pack` keeps the server's fixed respawn at the spawn point.",
-          "$ref": "#/$defs/__schema1242"
-        },
-        "__schema1242": {
-          "type": "array",
-          "prefixItems": [
-            {
-              "type": "number",
-              "minimum": 0
-            },
-            {
-              "type": "number",
-              "minimum": 0
-            }
-          ]
-        },
-        "__schema1243": {
-          "default": 60,
-          "description": "`anywhere` / `route`: no spawn or respawn lands within this many metres of any player, so no spot can be camped.",
-          "$ref": "#/$defs/__schema1244"
-        },
-        "__schema1244": {
-          "type": "number",
-          "minimum": 0
-        },
-        "__schema1245": {
-          "default": [
-            40,
-            80
-          ],
-          "description": "`anywhere` only: [min, max] metres each creature roams round its own spawn point (rolled per creature, replacing `roam`). Its leash is then at least that roam + 20 m, so a long wander is never mistaken for a chase gone too far.",
           "$ref": "#/$defs/__schema1246"
         },
         "__schema1246": {
@@ -20027,18 +20073,48 @@
           ]
         },
         "__schema1247": {
-          "default": false,
-          "description": "`route`: exactly one alive per area (a rare); its replacement waits `respawn` seconds and appears out of sight.",
+          "default": 60,
+          "description": "`anywhere` / `route`: no spawn or respawn lands within this many metres of any player, so no spot can be camped.",
           "$ref": "#/$defs/__schema1248"
         },
         "__schema1248": {
-          "type": "boolean"
+          "type": "number",
+          "minimum": 0
         },
         "__schema1249": {
-          "description": "Default temperament for every creature of the area (a `mix` row's own wins), handed to mob-brain as the `temperament` param: hostile (attacks on sight, today's mobs), territorial (attacks only who comes within `territory` metres of it or its home), passive (never starts a fight; hit it and it fights back, then wanders off; never shouts — the server hands passive creatures `alertRadius` 0). Unset = whatever the template's brain says (hostile).",
+          "default": [
+            40,
+            80
+          ],
+          "description": "`anywhere` only: [min, max] metres each creature roams round its own spawn point (rolled per creature, replacing `roam`). Its leash is then at least that roam + 20 m, so a long wander is never mistaken for a chase gone too far.",
           "$ref": "#/$defs/__schema1250"
         },
         "__schema1250": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "number",
+              "minimum": 0
+            }
+          ]
+        },
+        "__schema1251": {
+          "default": false,
+          "description": "`route`: exactly one alive per area (a rare); its replacement waits `respawn` seconds and appears out of sight.",
+          "$ref": "#/$defs/__schema1252"
+        },
+        "__schema1252": {
+          "type": "boolean"
+        },
+        "__schema1253": {
+          "description": "Default temperament for every creature of the area (a `mix` row's own wins), handed to mob-brain as the `temperament` param: hostile (attacks on sight, today's mobs), territorial (attacks only who comes within `territory` metres of it or its home), passive (never starts a fight; hit it and it fights back, then wanders off; never shouts — the server hands passive creatures `alertRadius` 0). Unset = whatever the template's brain says (hostile).",
+          "$ref": "#/$defs/__schema1254"
+        },
+        "__schema1254": {
           "type": "string",
           "enum": [
             "hostile",
@@ -20046,20 +20122,20 @@
             "passive"
           ]
         },
-        "__schema1251": {
+        "__schema1255": {
           "description": "Metres a `territorial` creature defends round itself and its home, handed to mob-brain as `territory`. Unset = the brain's default (7).",
-          "$ref": "#/$defs/__schema1252"
+          "$ref": "#/$defs/__schema1256"
         },
-        "__schema1252": {
+        "__schema1256": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1253": {
+        "__schema1257": {
           "default": [],
           "description": "PLACEHOLDER RARES: whenever one of this area's slots spawns or respawns (a camp member in `pack`, a roamer in `anywhere`, a walker in `route`) and a rare is neither alive nor locked out, the slot rolls its `chance`; on a hit the rare spawns in that slot instead, with the slot's spot, home, roam, patrol and temperament (or its own). When it dies the slot goes back to placeholder respawns. Listed on the area, not on a row: one rare may sit behind several rows, and one-alive is per area (or per `id`). The old `route` + `unique` wandering rare still works.",
-          "$ref": "#/$defs/__schema1254"
+          "$ref": "#/$defs/__schema1258"
         },
-        "__schema1254": {
+        "__schema1258": {
           "type": "array",
           "items": {
             "type": "object",
@@ -20078,7 +20154,7 @@
               "placeholders": {
                 "default": [],
                 "description": "Templates (of this area's `spawns` / `mix` rows) whose slots may roll the rare. Empty = any slot of the area.",
-                "$ref": "#/$defs/__schema1255"
+                "$ref": "#/$defs/__schema1259"
               },
               "lockout": {
                 "default": [
@@ -20086,23 +20162,23 @@
                   0
                 ],
                 "description": "[min, max] seconds after the rare dies (jittered per death) before any slot may roll it again. [0,0] = none.",
-                "$ref": "#/$defs/__schema1256"
+                "$ref": "#/$defs/__schema1260"
               },
               "id": {
                 "description": "Shared key: rares with the same id are one creature — at most one alive across every area naming it (and one lockout). Default: one per area and template.",
-                "$ref": "#/$defs/__schema1257"
+                "$ref": "#/$defs/__schema1261"
               },
               "temperament": {
                 "description": "The rare's own temperament (a rare is usually hostile or territorial). Unset = its placeholder slot's.",
-                "$ref": "#/$defs/__schema1258"
+                "$ref": "#/$defs/__schema1262"
               },
               "territory": {
                 "description": "The rare's own `territory` metres (territorial). Unset = the area's.",
-                "$ref": "#/$defs/__schema1259"
+                "$ref": "#/$defs/__schema1263"
               },
               "props": {
                 "description": "`prefab:` templates only: prefab props set on the rare (e.g. `level`, `maxHp`, `xpValue`, `aggroRange`), so a stock body can be the rare without a scene template.",
-                "$ref": "#/$defs/__schema1260"
+                "$ref": "#/$defs/__schema1264"
               }
             },
             "required": [
@@ -20111,14 +20187,14 @@
             ]
           }
         },
-        "__schema1255": {
+        "__schema1259": {
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1
           }
         },
-        "__schema1256": {
+        "__schema1260": {
           "type": "array",
           "prefixItems": [
             {
@@ -20131,11 +20207,11 @@
             }
           ]
         },
-        "__schema1257": {
+        "__schema1261": {
           "type": "string",
           "minLength": 1
         },
-        "__schema1258": {
+        "__schema1262": {
           "type": "string",
           "enum": [
             "hostile",
@@ -20143,65 +20219,65 @@
             "passive"
           ]
         },
-        "__schema1259": {
+        "__schema1263": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1260": {
+        "__schema1264": {
           "type": "object",
           "propertyNames": {
             "type": "string"
           },
           "additionalProperties": {}
         },
-        "__schema1261": {
+        "__schema1265": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "__schema1262": {
+        "__schema1266": {
           "type": "object",
           "properties": {
             "above": {
               "default": 14,
               "description": "World units of air polygonized above the highest ground in a cell — headroom for overhangs and arches.",
-              "$ref": "#/$defs/__schema1263"
+              "$ref": "#/$defs/__schema1267"
             },
             "below": {
               "default": 28,
               "description": "World units of rock polygonized below the lowest ground in a cell. This is what makes surface caves enterable, and it is THE vertical cost knob: it multiplies both the sampled volume AND the cave surface the mesher has to triangulate, so it hits twice. Deeper cave networks want vertical chunk sections, not a bigger band here.",
-              "$ref": "#/$defs/__schema1264"
+              "$ref": "#/$defs/__schema1268"
             }
           }
         },
-        "__schema1263": {
+        "__schema1267": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1264": {
+        "__schema1268": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1265": {
+        "__schema1269": {
           "type": "string",
           "enum": [
             "linear",
             "nearest"
           ]
         },
-        "__schema1266": {
+        "__schema1270": {
           "type": "object",
           "properties": {
             "scale": {
               "default": 90,
               "description": "World units per cycle of the broad band.",
-              "$ref": "#/$defs/__schema1267"
+              "$ref": "#/$defs/__schema1271"
             },
             "strength": {
               "default": 0.22,
               "description": "Brightness swing, plus and minus. 0 disables the whole overlay.",
-              "$ref": "#/$defs/__schema1268"
+              "$ref": "#/$defs/__schema1272"
             },
             "octaves": {
               "default": 3,
@@ -20211,7 +20287,7 @@
             },
             "detailScale": {
               "description": "Second band, near tile size (10-20). This is the one that hides the grid up close.",
-              "$ref": "#/$defs/__schema1269"
+              "$ref": "#/$defs/__schema1273"
             },
             "detailStrength": {
               "default": 0.1,
@@ -20228,11 +20304,11 @@
             "colorStrength": {
               "default": 0,
               "description": "How far the overlay shifts COLOUR, per channel, on top of the brightness swing. Brightness alone makes a large area read as one material under uneven light; letting the channels drift apart slightly — warmer here, greyer there — is what reads as the ground actually being different from place to place. 0.06-0.15 is a natural mottle; past ~0.25 the terrain goes tie-dye.",
-              "$ref": "#/$defs/__schema1270"
+              "$ref": "#/$defs/__schema1274"
             },
             "colorScale": {
               "description": "World units per cycle of the colour band. Defaults to `scale`. Set it larger for broad regional colour shifts that survive being seen from a distance.",
-              "$ref": "#/$defs/__schema1271"
+              "$ref": "#/$defs/__schema1275"
             },
             "colorOctaves": {
               "default": 3,
@@ -20243,32 +20319,14 @@
             "warp": {
               "default": 0,
               "description": "How far the texture PROJECTION is pushed around by noise before it is sampled, as a fraction of each layer's OWN tile, so one setting means the same thing to a 3.5m grass tile and a 9m cliff tile. This is the one that actually kills tiling: brightness noise can only shade OVER a grid, and the grid is still underneath it — on a big flat-lit face seen from a distance the eye finds it anyway. Warping the projection means neighbouring tiles no longer line up, so there is no grid left to find. 0.25-0.5 is usually enough; past about 0.6 the texture visibly smears.",
-              "$ref": "#/$defs/__schema1272"
+              "$ref": "#/$defs/__schema1276"
             },
             "warpScale": {
               "default": 18,
               "description": "World units per cycle of the warp. Measured: keep it near TWICE the tile size, not far above it. A warp much coarser than the tile slides whole tiles around and leaves the motif inside each one perfectly intact, so a strongly patterned texture still reads as a pattern; a warp at roughly tile scale distorts the motif itself, which is what stops a big rock face looking stamped.",
-              "$ref": "#/$defs/__schema1273"
+              "$ref": "#/$defs/__schema1277"
             }
           }
-        },
-        "__schema1267": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema1268": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "__schema1269": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema1270": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
         },
         "__schema1271": {
           "type": "number",
@@ -20276,55 +20334,73 @@
         },
         "__schema1272": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 1
         },
         "__schema1273": {
           "type": "number",
           "exclusiveMinimum": 0
         },
         "__schema1274": {
-          "type": "string"
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
         },
         "__schema1275": {
-          "type": "string"
+          "type": "number",
+          "exclusiveMinimum": 0
         },
         "__schema1276": {
-          "type": "string"
+          "type": "number",
+          "minimum": 0
         },
         "__schema1277": {
-          "type": "string"
+          "type": "number",
+          "exclusiveMinimum": 0
         },
         "__schema1278": {
+          "type": "string"
+        },
+        "__schema1279": {
+          "type": "string"
+        },
+        "__schema1280": {
+          "type": "string"
+        },
+        "__schema1281": {
+          "type": "string"
+        },
+        "__schema1282": {
           "type": "string",
           "enum": [
             "dense",
             "indexed"
           ]
         },
-        "__schema1279": {
+        "__schema1283": {
           "type": "object",
           "properties": {
             "band": {
               "default": 150,
               "description": "Width in metres of the blend across a zone border where a zone restyles its ground (`regions[].ground`): half outside the polygon, half inside, so two zones meet at 50/50 on the line and nothing is a seam.",
-              "$ref": "#/$defs/__schema1280"
+              "$ref": "#/$defs/__schema1284"
             },
             "jitter": {
               "default": 0.35,
               "description": "Noise on the border, as a fraction of `band`, so the blend does not follow a clean offset of the polygon.",
-              "$ref": "#/$defs/__schema1281"
+              "$ref": "#/$defs/__schema1285"
             }
           }
         },
-        "__schema1280": {
+        "__schema1284": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1281": {
+        "__schema1285": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1282": {
+        "__schema1286": {
           "type": "object",
           "propertyNames": {
             "type": "string",

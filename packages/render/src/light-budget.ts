@@ -101,6 +101,12 @@ function glowOf(light: THREE.Light): number {
   return typeof glow === "number" ? glow : DEFAULT_LIGHT_GLOW;
 }
 
+/** `light.glowReach` (userData `lightGlowReach`): metres the halo stays visible; unset = the default fade. */
+function glowReachOf(light: THREE.Light): number | undefined {
+  const reach = light.userData["lightGlowReach"];
+  return typeof reach === "number" ? reach : undefined;
+}
+
 export class LightBudgetSystem {
   private readonly lights = new Set<THREE.PointLight>();
   private readonly cameraPosition = new THREE.Vector3();
@@ -165,7 +171,7 @@ export class LightBudgetSystem {
         light.visible = true;
         const onness = timeOfDayScale(light);
         readWorldPosition(light, _lightPosition);
-        this.glows.add(light, _lightPosition, _lightPosition.distanceTo(this.cameraPosition), glowOf(light), onness);
+        this.glows.add(light, _lightPosition, _lightPosition.distanceTo(this.cameraPosition), glowOf(light), onness, glowReachOf(light));
         continue;
       }
       // Authored lights are data from here on: hidden once, never toggled
@@ -175,7 +181,7 @@ export class LightBudgetSystem {
       const onness = timeOfDayScale(light);
       if (onness < 0.01) continue;
       const distanceSq = readWorldPosition(light, _lightPosition).distanceToSquared(this.cameraPosition);
-      this.glows.add(light, _lightPosition, Math.sqrt(distanceSq), glowOf(light), onness);
+      this.glows.add(light, _lightPosition, Math.sqrt(distanceSq), glowOf(light), onness, glowReachOf(light));
       const entry = (candidates[count] ??= { light, importance: 1, distanceSq: 0 });
       entry.light = light;
       entry.importance = Math.max(0.001, Number(light.userData["lightImportance"]) || 1);

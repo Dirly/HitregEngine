@@ -108,15 +108,21 @@ export class LightGlows {
    * `scale` its current on-ness (time of day; a fire's flicker is already in
    * `light.intensity`).
    */
-  add(light: THREE.PointLight, position: THREE.Vector3, cameraDistance: number, glow: number, scale: number): void {
+  add(light: THREE.PointLight, position: THREE.Vector3, cameraDistance: number, glow: number, scale: number, reach?: number): void {
     if (glow <= 0 || scale <= 0.01) return;
-    const far = 1 - THREE.MathUtils.smoothstep(cameraDistance, FADE_NEAR, FADE_FAR);
+    // a far beacon (`light.glowReach`) fades over the last third of its reach instead of 90-140 m, and grows past
+    // 90 m (square root) so it keeps a readable size on screen
+    const beacon = reach !== undefined && reach > FADE_FAR;
+    const far = beacon
+      ? 1 - THREE.MathUtils.smoothstep(cameraDistance, reach * 0.67, reach)
+      : 1 - THREE.MathUtils.smoothstep(cameraDistance, FADE_NEAR, FADE_FAR);
     const near = THREE.MathUtils.smoothstep(cameraDistance, 0.3, CLOSE_FADE);
     // brightness follows intensity gently (a torch at 8 and a brazier at 15
     // should not differ by 2x in halo), size follows the room it lights
     const strength = glow * scale * far * near * THREE.MathUtils.clamp(Math.sqrt(light.intensity / 8), 0.25, 1.6) * 0.3;
     if (strength <= 0.002) return;
-    const radius = glow * THREE.MathUtils.clamp(0.3 + light.distance * 0.04, 0.3, 1.3);
+    const grow = beacon ? Math.sqrt(Math.max(1, cameraDistance / FADE_NEAR)) : 1;
+    const radius = glow * THREE.MathUtils.clamp(0.3 + light.distance * 0.04, 0.3, 1.3) * grow;
     if (this.count * STRIDE >= this.data.length) {
       const old = this.data;
       this.buffer = this.allocate((old.length / STRIDE) * 2);

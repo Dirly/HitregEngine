@@ -2833,6 +2833,7 @@ function populateEntityGroup(
         light.userData["lightImportance"] = lightData.importance ?? 1;
         if (lightData.when && lightData.when !== "always") light.userData["lightWhen"] = lightData.when;
         if (lightData.glow !== undefined) light.userData["lightGlow"] = lightData.glow;
+        if (lightData.glowReach !== undefined) light.userData["lightGlowReach"] = lightData.glowReach;
         if (lightData.flicker && lightData.flicker !== "none") light.userData["lightFlicker"] = lightData.flicker;
         group.add(light);
         options.onLight?.(id, light, lightData.importance ?? 1);

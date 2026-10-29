@@ -768,6 +768,16 @@ export const lightSchema = z.object({
         "budget still read as lit from afar. Size follows `range`, colour follows `color`, it fades with `when` and " +
         "flickers with the intensity. Turn it off for hidden fill lights that have no visible source.",
     ),
+  glowReach: z
+    .number()
+    .min(140)
+    .max(1200)
+    .optional()
+    .describe(
+      "point lights only: metres the halo stays visible (unset = 140, fading from 90). A beacon meant to read " +
+        "across a valley or a moor at night sets 300-600: the halo then fades over the last third of the reach and " +
+        "grows with distance (square root past 90 m) so it keeps a readable size on screen. Still one shared draw.",
+    ),
   flicker: z
     .enum(["none", "candle", "torch", "brazier"])
     .default("none")
