@@ -49,6 +49,22 @@ export const DESIGN_RULE = {
   /** rows: more than this share of the buildings facing within `rowsDeg` of one bearing is a town of rows */
   rowsShare: 0.6,
   rowsDeg: 8,
+  /** bands: a terrace whose long axis is at least this many times its depth is a BAND (a shelf along the contour) ... */
+  bandAspect: 1.8,
+  /** ... a street COUNTS on a terrace with at least this many metres of its centre-line on it ... */
+  bandStreetMin: 10,
+  /** ... a band holding ONE counted street within this many degrees of its long axis, with at least `bandStrung`
+   *  buildings opening on it, is a single-street band (houses strung along one street). A second street on the band
+   *  breaks it only when it is LINKED: it reaches another terrace, a stair/ramp or a square, or a building on the
+   *  band opens on it (a dead stub breaks nothing) ... */
+  bandAlongDeg: 25,
+  bandStrung: 2,
+  /** ... two bands are STACKED when their long axes are within this many degrees, their levels differ by 0.5 m or
+   *  more and they sit side by side ACROSS their axes (the offset across >= half the shallower band's depth) ... */
+  bandStackDeg: 15,
+  /** ... and this many (or more) stacked single-street bands is a town of rows on shelves (Saltharrow 10-28/29;
+   *  the 10-29 design round's lab towns passed `rows` this way) */
+  bandsStacked: 2,
   /** a ramp on ground steeper than this climbs ACROSS the slope: its run within 45 deg of the contour */
   acrossSlope: 0.1,
   /** a tread between the tiers of a stepped wall: RISER_RULE plans 2 m planted treads, but the wall fitter levels a

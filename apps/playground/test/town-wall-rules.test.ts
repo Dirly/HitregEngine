@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { keepOffRoads, overlook, polyDist, roadCrowding, ROAD_KEEP, TOWN_MASONRY, townOwnerOf, townWallMaterialFault, waterlineRuns, type Screen } from "../tools/_town-wall-rules.mts";
+import { buildWall, defaultWorldRecipe, worldRecipeSchema } from "@hitreg/core";
+import { handmadeFaults } from "../tools/handmade-check.mts";
+import { keepOffRoads, overlook, polyDist, roadCrowding, ROAD_KEEP, TOWN_MASONRY, townOwnerOf, townWallFinish, townWallHandmadeFault, townWallMaterialFault, waterlineRuns, type Screen } from "../tools/_town-wall-rules.mts";
 
 type V2 = [number, number];
 // a town on flat ground at y 0 inside x,z in [-20, 20]; a straight wall along x = 30 (z -40..40); a hill rising east of it
@@ -54,4 +56,29 @@ test(`road keep-off: a curtain within ${ROAD_KEEP} m of a road fails except insi
   assert.deepEqual(fixed[0], line[0], "the ends stay");
   // a vertex inside a gatehouse disc stays
   assert.deepEqual(keepOffRoads(line, [road], [{ at: [43, 0], r: 3 }], new Set(), [0, 0])[2], [43, 0]);
+});
+
+test("draw finish: a town wall is hand-made by default (top steps, rubble footing); --machine-top is the only opt-out and check fails it", () => {
+  const fin = townWallFinish();
+  assert.deepEqual(fin.handmade, {});
+  assert.equal(townWallMaterialFault({ id: "t-wall-1", materials: fin.materials }), null);
+  // the curtain and the gatehouse as draw writes them pass handmade-check (no flat top, not one tile) and build
+  const curtain = { id: "t-wall-1", op: "wall", variant: "free", smooth: false, points: [[0, 0], [40, 0], [60, 20]], height: 6, heightMode: "follow", thickness: 1.4, ...fin };
+  const gatehouse = { id: "t-wall-gatehouse", op: "wall", variant: "free", smooth: false, points: [[70, 0], [78, 0], [78, 8], [70, 8], [70, 0]], height: 10, heightMode: "level", topY: 10,
+    openings: [{ name: "gate-out", at: 4, width: 4.4, height: 5, arch: true }], face: "left", ends: { start: "none", end: "none" }, ...fin };
+  const base = worldRecipeSchema.parse(defaultWorldRecipe());
+  const world = worldRecipeSchema.parse({ ...base, features: { ...base.features, operators: [curtain, gatehouse] } });
+  assert.deepEqual(handmadeFaults(world), []);
+  const reader = { height: () => 0, density: (_x: number, y: number) => y, voxelSize: 2, seaLevel: 0, seed: 1 };
+  for (const d of [curtain, gatehouse]) {
+    const { id, op, ...params } = d; void op;
+    assert.ok(buildWall(params, reader as never, { id }).spec, id);
+  }
+  // the opt-out: a machine top, which the wall-line check (machine-top) and handmade-check both fail
+  const machine = { ...curtain, ...townWallFinish({ machineTop: true }) };
+  assert.equal(machine.handmade, null);
+  assert.match(townWallHandmadeFault(machine) ?? "", /machine top/);
+  assert.equal(townWallHandmadeFault(curtain), null);
+  assert.equal(townWallHandmadeFault({ ...machine, heightMode: "step" }), null);
+  assert.equal(townWallHandmadeFault({ ...machine, variant: "quay" }), null);
 });

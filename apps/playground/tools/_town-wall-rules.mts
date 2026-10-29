@@ -54,6 +54,22 @@ export function townWallMaterialFault(doc: { id?: unknown; materials?: Record<st
 }
 
 /**
+ * What every town wall `town-wall-line draw` writes carries (Derek 2026-10-29, "walls dont feel hand made"): the wall
+ * operator's HAND-MADE top (`handmade: {}` = the top steps a course in short seeded runs, a few coping stones dropped)
+ * and a rubble footing under the ashlar face (never one tile). `--machine-top` is the only opt-out (handmade: null).
+ */
+export function townWallFinish(opts: { machineTop?: boolean } = {}): { handmade: Record<string, never> | null; materials: { face: string; footing: string } } {
+  return { handmade: opts.machineTop ? null : {}, materials: { face: TOWN_MASONRY.ashlar, footing: TOWN_MASONRY.rubble } };
+}
+
+/** The fault of a town-owned wall doc with a MACHINE top (no `handmade`, not step mode), or null (handmade-check's rule). */
+export function townWallHandmadeFault(doc: { id?: unknown; op?: unknown; variant?: unknown; handmade?: unknown; heightMode?: unknown }): string | null {
+  if (doc.op !== "wall" || doc.variant === "ramp" || doc.variant === "quay" || doc.variant === "retaining") return null;
+  if ((doc.handmade === undefined || doc.handmade === null) && doc.heightMode !== "step") return `${String(doc.id)}: a machine top (no \`handmade\`): redraw with town-wall-line draw (hand-made by default) or add handmade: {} to the op, then worldgen op --apply + tools/landmark.mts`;
+  return null;
+}
+
+/**
  * Is this wall op the town's? Its id is named for the town (`<town>-...`, the town doc name or the recipe id), or its
  * line runs inside the town's radius (+ 20 m). Ramps (road causeways) are not walls of the town.
  */

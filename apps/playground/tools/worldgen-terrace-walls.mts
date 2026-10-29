@@ -12,7 +12,8 @@
  *        footprint = the upper pad's outline (axis-aligned, 2 m grid); path = the wall line with the pad on its LEFT
  *        (open: the last->first closing edge is the uphill side, a 2-point path gets a --depth deep pad).
  *   --refit [--id a,b | --all]         re-solve fitted terraces against the current ground (after a terrain rebuild)
- *   --check [--id a,b | --all]         gates only (and STALE when the ground under a fit has changed)
+ *   --check [--id a,b | --all]         gates only (and STALE when the ground under a fit has changed), plus the
+ *                                      hand-made judge (tools/handmade-check.mts) over the selection's risers and town walls
  *   --remove <id>                      drop a terrace and everything derived from it
  *   --dry-run, --no-gates
  *
@@ -56,6 +57,8 @@ import {
 import { closure, PROJECTS } from "./_closure.mjs";
 import { terraceRiserBand } from "./worldgen-lips.mts";
 import { measureTownRisers, riserRule, RISER_RULE, type RiserVerdict } from "./worldgen-riser-rule.mts";
+import { handmadeFaults, type HandmadeFault } from "./handmade-check.mts";
+import { townOwnerOf } from "./_town-wall-rules.mts";
 
 type V2 = [number, number];
 type V3 = [number, number, number];
@@ -1077,6 +1080,47 @@ function docsFromArgs(host: TerracePlaceHost): TerraceWallDoc[] {
   })];
 }
 
+/**
+ * `terrace-place --check`: every picked terrace wall's gates (lips, seated, riser probe, STALE), then the HAND-MADE judge
+ * (tools/handmade-check.mts) over every built riser and wall in the selection: the kit walls' copings, the DC risers and
+ * the town walls (wall operators a town owns; a place's skirt or yard wall is neither). --all judges every one in the
+ * world; --id a,b the named terrace walls, the DC risers named or owned by their owners (or a named owner), and those
+ * owners' town walls. A hand-made fault fails the check like a gate.
+ */
+export function terraceCheck(recipe: WorldRecipe, opts: { ids?: string[]; all?: boolean; list?: boolean; log?: (s: string) => void; field?: WorldField } = {}): { bad: number; handmade: HandmadeFault[] } {
+  const log = opts.log ?? (() => {});
+  const ids = opts.ids ?? [];
+  const field = opts.field ?? createWorldField(recipe);
+  const walls = (recipe.features.terraceWalls ?? []).filter((t) => opts.all || ids.includes(t.id));
+  let bad = 0;
+  for (const t of walls) {
+    const g = terraceGates(recipe, t, { field, faults: opts.list });
+    log(`${g.ok ? "ok  " : "FAIL"} terrace ${t.id}`);
+    for (const l of g.lines) log(l);
+    if (!g.ok) bad++;
+  }
+  // the hand-made judge over what this selection built
+  const owners = new Set([...ids, ...walls.map((t) => t.owner).filter((o): o is string => !!o)]);
+  const towns = recipe.features.towns.map((t) => ({ id: t.id, center: t.center as number[], radius: t.radius }));
+  const opOf = (id: string) => (recipe.features.operators ?? []).find((o) => o.id === id);
+  const keep = (key: string): boolean => {
+    const cut = key.indexOf("/"), kind = key.slice(0, cut), id = key.slice(cut + 1);
+    if (kind === "operators") {
+      const op = opOf(id);
+      const town = op ? townOwnerOf(op as never, towns) : null;
+      return !!town && (!!opts.all || owners.has(town));
+    }
+    if (opts.all) return true;
+    if (kind === "terraceWalls") return walls.some((t) => t.id === id);
+    const r = (recipe.features.dcRisers ?? []).find((x) => x.id === id);
+    return ids.includes(id) || (!!r?.owner && owners.has(r.owner));
+  };
+  const handmade = handmadeFaults(recipe, { field }).filter((f) => keep(f.wall));
+  for (const f of handmade) log(`FAIL hand-made ${f.kind} ${f.wall}: ${f.detail}`);
+  if (!handmade.length) log("ok   hand-made: every riser and town wall in the selection");
+  return { bad: bad + handmade.length, handmade };
+}
+
 /** Re-read the recipe file, apply `mutate`, validate, write: never clobbers what another tool wrote meanwhile. */
 function writeFresh(host: TerracePlaceHost, mutate: (r: WorldRecipe) => void): void {
   const { recipe, file } = host.loadRecipe();
@@ -1101,14 +1145,7 @@ export function commandTerracePlace(host: TerracePlaceHost): void {
   const existing = recipe.features.terraceWalls ?? [];
   const pick = () => (argv.includes("--all") ? existing : existing.filter((t) => ids.includes(t.id)));
   if (argv.includes("--check")) {
-    const field = createWorldField(recipe);
-    let bad = 0;
-    for (const t of pick()) {
-      const g = terraceGates(recipe, t, { field, faults: argv.includes("--list") });
-      console.log(`${g.ok ? "ok  " : "FAIL"} terrace ${t.id}`);
-      for (const l of g.lines) console.log(l);
-      if (!g.ok) bad++;
-    }
+    const { bad } = terraceCheck(recipe, { ids, all: argv.includes("--all"), list: argv.includes("--list"), log: console.log });
     if (bad) process.exitCode = 1;
     return;
   }

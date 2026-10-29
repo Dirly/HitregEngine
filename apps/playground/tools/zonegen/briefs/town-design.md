@@ -15,7 +15,7 @@ go on the real site, and you hand back a plan picture for approval. You cut no g
 **Work** (apps/playground)
 1. `npx tsx tools/town-design.mts propose --project {project} --town {town} --name {name} --world {world}` drafts
    `authoring/towns/{name}-design.json` from the old program bands and renders
-   `authoring/towns/survey/{name}-design.png`. The draft is straight bands: it fails `rows` on purpose.
+   `authoring/towns/survey/{name}-design.png`. The draft is straight bands: it fails `bands` (and often `rows`) on purpose.
 2. Open the picture. Redesign: platforms that follow the ground (irregular polygons, one level each), the main street
    from the gate across the slope, side lanes, a square at the gate or the harbour, every building at a kit-proven
    size facing its street, its back to the slope, the landmark closing the view from the gate.
@@ -27,7 +27,11 @@ go on the real site, and you hand back a plan picture for approval. You cut no g
 - A street climbs ACROSS the slope, switchbacking at the ends of the platforms; a straight stair lane may go up it.
 - A square where the town is entered: at the gate or at the harbour. The landmark (chapel, bell tower, hall) stands
   where the way in looks, so it closes the view (the sightline is checked; keep the line clear of roofs).
-- Buildings face the street, backs against the hill; blocks are irregular, not rows on parallel shelves.
+- Buildings face the street, backs against the hill; blocks are irregular, not rows on parallel shelves. `bands` fails
+  two or more parallel levels stacked up the slope that each carry ONE street along their length with the houses
+  strung on it (a switchback between such levels does not help): give every level a second street that crosses it
+  and is LINKED (the main street climbing across the levels through a ramp, a stair lane to the next level, a lane to
+  a square, or a block turned to open on it); a dead stub counts for nothing.
 - Banks by default (1 : 2, planted). A wall only where the riser rule says so (drop over 2.5 m, a street or lot within
   3 m of the top edge, no room for the bank's run); a drop over 2.5 m is a stepped wall with 4.5 m treads, or one
   wall where a stair goes through it (`edges: [{ edge, treatment: "wall" }]`).

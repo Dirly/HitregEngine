@@ -12,6 +12,8 @@
  *   landmark  the landmark's top seen from the gate eye (1.7 m) over the designed ground and the other buildings
  *   square    a square within 30 m of the gate or the harbour
  *   rows      not a town of rows (<= 60 % of the buildings on one bearing)
+ *   bands     not rows on stacked shelves: no 2+ parallel terraces stacked up the slope that each carry ONE street
+ *             along their long axis with their houses strung on it (terraceBands / stackedBands)
  *   across    a ramp on a slope over 10 % climbs across it (within 45 deg of the contour)
  * plus kit-fit (MMO/WFC/wfc/kit_fit.py), run by the CLI.
  */
@@ -344,6 +346,87 @@ export function resolveEdges(design: TownDesign, site: DesignSite, prints: Map<s
   return out;
 }
 
+// ---------------------------------------------------------------- bands (rows on stacked shelves)
+
+/** Principal axis of a point cloud: unit direction, its extent along and across. */
+export function principalAxis(pts: readonly V2[]): { axis: V2; along: number; across: number; centre: V2 } {
+  const n = pts.length || 1;
+  const cx = pts.reduce((s, p) => s + p[0], 0) / n, cz = pts.reduce((s, p) => s + p[1], 0) / n;
+  let sxx = 0, szz = 0, sxz = 0;
+  for (const p of pts) { const dx = p[0] - cx, dz = p[1] - cz; sxx += dx * dx; szz += dz * dz; sxz += dx * dz; }
+  const th = 0.5 * Math.atan2(2 * sxz, sxx - szz);
+  const axis: V2 = [Math.cos(th), Math.sin(th)];
+  const u = pts.map((p) => (p[0] - cx) * axis[0] + (p[1] - cz) * axis[1]), v = pts.map((p) => -(p[0] - cx) * axis[1] + (p[1] - cz) * axis[0]);
+  return { axis, along: Math.max(...u) - Math.min(...u), across: Math.max(...v) - Math.min(...v), centre: [cx, cz] };
+}
+/** Angle between two undirected lines, 0..90 deg. */
+const lineAngle = (a: V2, b: V2): number => (Math.acos(Math.min(1, Math.abs(a[0] * b[0] + a[1] * b[1]))) * 180) / Math.PI;
+
+export interface TerraceBand {
+  id: string;
+  level: number;
+  axis: V2;
+  axisDeg: number;
+  centre: V2;
+  /** long extent / short extent of the platform */
+  aspect: number;
+  depth: number;
+  /** the counted streets on it (>= bandStreetMin m on the platform, and linked or fronted) */
+  streets: { id: string; metres: number; offAxis: number; linked: boolean }[];
+  /** buildings on this terrace opening on its one street */
+  strung: number;
+  /** a band carrying ONE street along its long axis with its houses strung on it */
+  single: boolean;
+}
+
+/** Per terrace: its long axis, the streets on it and their bearing against that axis (DESIGN_RULE band* rows). */
+export function terraceBands(design: TownDesign): TerraceBand[] {
+  const R = DESIGN_RULE;
+  return design.terraces.map((t) => {
+    const pa = principalAxis(densify(t.polygon as V2[], 1, true));
+    const streets: TerraceBand["streets"] = [];
+    for (const st of design.streets) {
+      const pts = densify(st.points as V2[], 1);
+      const on = pts.filter((p) => inPoly(t.polygon, p[0], p[1]));
+      if (on.length < R.bandStreetMin) continue;
+      const dir = principalAxis(on).axis;
+      // linked: it reaches another terrace, a stair/ramp or a square; or a building on this terrace opens on it
+      const elsewhere = pts.some((p) => !inPoly(t.polygon, p[0], p[1]) && (design.terraces.some((o) => o.id !== t.id && inPoly(o.polygon, p[0], p[1])) || design.squares.some((s) => inPoly(s.polygon, p[0], p[1])) || design.connections.some((c) => lineDist(c.points, p[0], p[1]).d <= c.width / 2 + 0.5)));
+      const square = on.some((p) => design.squares.some((s) => inPoly(s.polygon, p[0], p[1])));
+      const fronted = design.buildings.some((b) => b.street === st.id && t.buildings.includes(b.id));
+      streets.push({ id: st.id, metres: on.length, offAxis: lineAngle(dir, pa.axis), linked: elsewhere || square || fronted });
+    }
+    // a second street breaks the band only when linked; the band's own street is the longest
+    streets.sort((a, b) => b.metres - a.metres);
+    const counted = streets.filter((s, i) => i === 0 || s.linked);
+    const main = counted[0];
+    const strung = main ? design.buildings.filter((b) => b.street === main.id && t.buildings.includes(b.id)).length : 0;
+    const aspect = pa.along / Math.max(1, pa.across);
+    const single = aspect >= R.bandAspect && counted.length === 1 && main!.offAxis <= R.bandAlongDeg && strung >= R.bandStrung;
+    return { id: t.id, level: t.level, axis: pa.axis, axisDeg: ((Math.atan2(pa.axis[1], pa.axis[0]) * 180) / Math.PI + 180) % 180, centre: pa.centre, aspect, depth: pa.across, streets: counted, strung, single };
+  });
+}
+
+/** Groups of single-street bands stacked up the slope (parallel, at different levels, side by side across), largest first. */
+export function stackedBands(bands: readonly TerraceBand[]): string[][] {
+  const R = DESIGN_RULE;
+  const single = bands.filter((b) => b.single);
+  const parent = new Map(single.map((b) => [b.id, b.id]));
+  const find = (k: string): string => (parent.get(k) === k ? k : find(parent.get(k)!));
+  for (let i = 0; i < single.length; i++)
+    for (let j = i + 1; j < single.length; j++) {
+      const a = single[i]!, b = single[j]!;
+      if (lineAngle(a.axis, b.axis) > R.bandStackDeg || Math.abs(a.level - b.level) < 0.5) continue;
+      const off: V2 = [b.centre[0] - a.centre[0], b.centre[1] - a.centre[1]];
+      const across = Math.abs(-off[0] * a.axis[1] + off[1] * a.axis[0]);
+      if (across < 0.5 * Math.min(a.depth, b.depth)) continue;
+      parent.set(find(a.id), find(b.id));
+    }
+  const groups = new Map<string, string[]>();
+  for (const b of single) { const r = find(b.id); groups.set(r, [...(groups.get(r) ?? []), b.id]); }
+  return [...groups.values()].sort((p, q) => q.length - p.length);
+}
+
 // ---------------------------------------------------------------- the check
 
 export interface DesignReport {
@@ -567,6 +650,15 @@ export function checkDesign(design: TownDesign, site: DesignSite, envelopes: Env
     const share = most / list.length;
     facts.push(`bearings: ${most} of ${list.length} buildings face within ${R.rowsDeg} deg of ${mostAt.toFixed(0)} deg`);
     if (share > R.rowsShare) fault("rows", `${most} of ${list.length} buildings face one way (${mostAt.toFixed(0)} deg +-${R.rowsDeg}): a town of rows on parallel shelves; bend the streets, turn the blocks, open a square`);
+  }
+  // ---- bands: parallel shelves stacked up the slope, each carrying ONE street with its houses strung along it
+  {
+    const bands = terraceBands(design);
+    for (const b of bands) facts.push(`band ${b.id}: ${b.aspect.toFixed(1)}:1 along ${b.axisDeg.toFixed(0)} deg, ${b.streets.length} street(s)${b.streets.length ? ` [${b.streets.map((s) => `${s.id} ${s.offAxis.toFixed(0)} deg off${s.linked ? "" : ", unlinked"}`).join("; ")}]` : ""}, ${b.strung} building(s) on its street${b.single ? " -> SINGLE-STREET BAND" : ""}`);
+    const groups = stackedBands(bands);
+    const worst = groups[0];
+    if (worst && worst.length >= R.bandsStacked)
+      fault("bands", `${worst.length} terraces (${worst.join(", ")}) are parallel bands stacked up the slope, each with ONE street along it and its buildings strung on it: a town of rows on shelves. Run a street that climbs ACROSS the levels through a stair/ramp, open a square on a band, turn blocks onto a cross street, or link the bands with a lane (a second street on a band must reach another level, a square or a door)`);
   }
   // ---- backs to the slope
   if (site.downhill && (site.slope ?? 0) > 0.05)

@@ -2,9 +2,10 @@
  * town-wall-line — a town wall that DEFENDS the town, in the town's masonry (tools/_town-wall-rules.mts).
  *
  *   npx tsx tools/town-wall-line.mts check --project <p> --town <name> [--json <file>]
- *   npx tsx tools/town-wall-line.mts draw  --project <p> --town <name> [--clear 12] [--height 6] [--out <file>] [--dry]
+ *   npx tsx tools/town-wall-line.mts draw  --project <p> --town <name> [--clear 12] [--height 6] [--out <file>] [--dry] [--machine-top]
  *
  * check (the `town <t>: wall line` row; writes authoring/towns/survey/<town>-wall-line.json, exit 1 on a fault):
+ *   - handmade: every town-owned curtain / gatehouse has the hand-made top (`handmade`, or step mode): a machine top fails;
  *   - material: every wall op the town owns (named `<town>-…` or inside its radius; ramps excluded) names a built
  *     material for its faces, never the zone cliff skin (`cliff-skin`);
  *   - overlooked: no ground outside the curtain within 60 m stands above the wall top (+ parapet) there and sees a
@@ -16,7 +17,9 @@
  *   shelf) ending on the lowest riser's corners (the sea side is the quay and the riser walls); vertices pushed up the
  *   hill until the overlook gate passes (then the wall raised a metre at a time, to 9 m); straight legs; a GATEHOUSE
  *   (square ring, level top, arched passage front and back) where each road from the town gate crosses the line, the
- *   curtain cut there; one wall-walk stair on the town side; town masonry on every role.
+ *   curtain cut there; one wall-walk stair on the town side; town masonry on every role (ashlar face, rubble footing);
+ *   every curtain and the gatehouse HAND-MADE (`handmade: {}`: the top steps in short runs, a few copings dropped).
+ *   --machine-top is the only opt-out (handmade: null; `check` then fails it).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -24,7 +27,7 @@ import { buildWall, createWorldField, operatorParams, worldRecipeSchema, type Wo
 import { operatorReader } from "./worldgen-operators.mts";
 import { townWallStyle } from "./worldgen-terrace-walls.mts";
 import {
-  densify, dist2, grow, hull, inPolygon, keepOffRoads, OVERLOOK_RULE, overlook, polyDist, ROAD_KEEP, roadCrowding, segDist, simplify, TOWN_MASONRY, townOwnerOf, townWallMaterialFault, waterlineRuns, type Screen,
+  densify, dist2, grow, hull, inPolygon, keepOffRoads, OVERLOOK_RULE, overlook, polyDist, ROAD_KEEP, roadCrowding, segDist, simplify, townOwnerOf, townWallFinish, townWallHandmadeFault, townWallMaterialFault, waterlineRuns, type Screen,
 } from "./_town-wall-rules.mts";
 
 type V2 = [number, number];
@@ -85,9 +88,10 @@ function judge(docs: Record<string, unknown>[], rc: WorldRecipe) {
   // the viewers stand outside of; a second pass is not needed for the sea side (viewers there stand below the shelves)
   const water = waterlineRuns({ height: H, screens: curtainScreens, shelves, sea });
   const material = docs.map((d) => townWallMaterialFault(d as never)).filter((x): x is string => !!x);
+  const machine = docs.map((d) => townWallHandmadeFault(d as never)).filter((x): x is string => !!x);
   const exempt = docs.filter((d) => String(d.id).endsWith("-gatehouse")).map((d) => { const p = (d.points as V2[]).slice(0, 4); return { at: [p.reduce((a, q) => a + q[0], 0) / p.length, p.reduce((a, q) => a + q[1], 0) / p.length] as V2, r: GATE_DISC }; });
   const road = roadCrowding(curtains.filter((d) => !String(d.id).endsWith("-gatehouse")).map((d) => ({ id: String(d.id), points: d.points as V2[] })), allRoads, exempt);
-  return { ov, water, material, road, screens };
+  return { ov, water, material, machine, road, screens };
 }
 
 // ================================================================ check
@@ -101,6 +105,7 @@ if (cmd === "check") {
   const j = docs.length ? judge(docs, recipe) : null;
   if (j) {
     for (const m of j.material) failures.push(`cliff-skin: ${m}`);
+    for (const m of j.machine) failures.push(`machine-top: ${m}`);
     if (j.ov.worst) failures.push(`overlooked: ${j.ov.overlooking} point(s) outside within ${OVERLOOK_RULE.band} m see into the town over the wall; worst at ${j.ov.worst.at.slice(0, 2).join(",")} ground ${j.ov.worst.at[2]} m, ${j.ov.worst.over} m over the top of ${j.ov.worst.wall}, sees ${j.ov.worst.sees}`);
     for (const r of j.road) failures.push(`road: ${r.wall} runs ${r.d} m from ${r.road} at ${r.at.join(",")} (keep ${ROAD_KEEP} m off a road except at the gatehouse)`);
     if (j.water.length) failures.push(`waterline: ${j.water.length} stretch(es) of ${[...new Set(j.water.map((w) => w.wall))].join(", ")} at the sea with tops below the shelves they front (worst ${j.water[0]!.at.join(",")}: top ${j.water[0]!.top} < shelf ${j.water[0]!.shelf})`);
@@ -118,9 +123,9 @@ if (cmd === "check") {
 // ================================================================ draw
 const clear = num("clear", 12);
 let height = num("height", 6);
-const masonry = TOWN_MASONRY.ashlar; // civic defence: dressed work (townWallStyle picks the risers' rubble or ashlar)
+// civic defence: dressed ashlar over a rubble footing, hand-made top (townWallFinish; townWallStyle picks the risers')
 void townWallStyle;
-const materials = { face: masonry };
+const { handmade, materials } = townWallFinish({ machineTop: argv.includes("--machine-top") });
 // 1. the protected outline: shipped lot corners + streets, hulled, grown
 const prot: V2[] = [...layout.buildings.flatMap((b) => b.full ?? b.corners), ...lanes.flatMap((r) => r.points.map((p) => [p[0]!, p[1]!] as V2))];
 const grown = grow(hull(prot), clear);
@@ -210,7 +215,7 @@ function docsFor(pts: V2[], hs: Record<string, number>): Record<string, unknown>
   const curtain = (id: string, p: V2[], ends: { start: string; end: string }) => ({
     id, op: "wall", variant: "free", smooth: false, points: p, height: hs[id] ?? height, heightMode: "follow", thickness: 1.4, batter: 0.06,
     footing: { depth: 1, projection: 0.3, plinth: 0.35 }, parapet: { height: 1.1, thickness: 0.45, side: "face", crenels: { merlon: 1.4, gap: 0.8 } },
-    buttresses: { every: 12, depth: 1, width: 1.2, side: "face" }, face, ends, materials,
+    buttresses: { every: 12, depth: 1, width: 1.2, side: "face" }, face, ends, materials, handmade,
   });
   // the gatehouse where a gate road crosses
   let cut: { p: V2; dir: V2 } | null = null;
@@ -235,7 +240,7 @@ function docsFor(pts: V2[], hs: Record<string, number>): Record<string, unknown>
     id: `${townName}-wall-gatehouse`, op: "wall", variant: "free", smooth: false, points: ring, height: r2(gTop - gLow + h + 3.5), heightMode: "level", topY: r2(gTop + h + 3.5),
     thickness: 1.4, batter: 0.02, footing: null, bury: 1.1, parapet: { height: 1.1, thickness: 0.45, side: "face", crenels: { merlon: 1.4, gap: 0.8 }, walked: false },
     openings: [{ name: "gate-out", at: GH, width: 4.4, height: 5, arch: true }, { name: "gate-in", at: 5 * GH, width: 4.4, height: 5, arch: true }],
-    face: "left", ends: { start: "none", end: "none" }, materials,
+    face: "left", ends: { start: "none", end: "none" }, materials, handmade,
   };
   const out: Record<string, unknown>[] = [];
   const runs = [runA, runB].filter((r) => r.length >= 2 && cum.length > 1);

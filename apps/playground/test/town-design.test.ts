@@ -2,38 +2,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createWorldField, defaultWorldRecipe, worldRecipeSchema, type WorldRecipe } from "@hitreg/core";
 import { townDesignSchema, type TownDesign } from "../tools/town-design-schema.mts";
-import { checkDesign, footprintOf, polyEdges, siteFall } from "../tools/town-design-check.mts";
+import { checkDesign, footprintOf, polyEdges, stackedBands, terraceBands } from "../tools/town-design-check.mts";
+import { climbingTown, draftBands, hill, hillSite as site, rowTown, rowTownDoc } from "./fixtures/town-designs.mts";
 import { measurePlatforms, planEarthworks } from "../tools/worldgen-terrace-from-plan.mts";
 
-// a planar hillside: 20 m at z = 0, rising 0.15 m per metre toward -Z
-const RISE = 0.15;
-const hill = (_x: number, z: number) => 20 - z * RISE;
-const site = { height: hill, sea: 0, ...siteFall(hill, [0, 10], 40) };
-const house = { system: "common", size: [5, 3], storeys: 2, roof: "gable", features: ["fireplace"] };
-
-/** Two platforms on the hillside, a bank between them, a ramp round the east end, four lots on two streets. */
+/** The design round's two-shelf fixture (test/fixtures/town-designs.mts rowTown) with a lane that follows the ramp
+ *  between the shelves (so each shelf carries a linked cross street and the town is no longer rows on shelves). */
 function design(over: (d: Record<string, any>) => void = () => {}): TownDesign {
-  const d: Record<string, any> = {
-    town: "t", world: "w", name: "fixture", status: "approved",
-    gate: { at: [0, 38], facing: [0, 1] },
-    terraces: [
-      { id: "low", level: 16.2, polygon: [[-30, 14], [30, 14], [30, 38], [-30, 38]], buildings: ["h1", "h2"] },
-      { id: "high", level: 18.6, polygon: [[-30, -18], [30, -18], [30, 8], [-30, 8]], buildings: ["h3", "h4"] },
-    ],
-    streets: [
-      { id: "low-street", name: "Low Street", kind: "main", points: [[-28, 32], [28, 32]], width: 5 },
-      { id: "high-street", name: "High Street", kind: "lane", points: [[-28, -14], [28, -14]], width: 5 },
-    ],
-    squares: [{ id: "gate-square", name: "Gate Square", terrace: "low", polygon: [[-8, 28], [8, 28], [8, 35], [-8, 35]] }],
-    connections: [{ id: "ramp", kind: "ramp", from: "low", to: "high", points: [[28, 20], [36, 14], [36, 4], [28, 2]], width: 4 }],
-    landmark: { building: "h3", height: 12 },
-    buildings: [
-      { id: "h1", name: "H1", at: [-18, 21.94], facing: [0, 1], street: "low-street", request: house },
-      { id: "h2", name: "H2", at: [18, 21.94], facing: [0, 1], street: "low-street", request: house },
-      { id: "h3", name: "H3", at: [-16, -3.94], facing: [0, -1], street: "high-street", request: house },
-      { id: "h4", name: "H4", at: [16, -3.94], facing: [0, -1], street: "high-street", model: "h3" },
-    ],
-  };
+  const d = rowTownDoc();
+  d.streets.push({ id: "ramp-lane", name: "Ramp Lane", kind: "lane", points: [[29.6, 32], [29.6, 21], [36, 14], [36, 4], [28, 2], [28.5, -10]], width: 3 });
   over(d);
   return townDesignSchema.parse(d);
 }
@@ -155,4 +132,30 @@ test("from-plan cut on a fixture world: level platforms, a 1 : 2 bank, a ramp at
   // the town's records: flatten-0 shelves tagged plan, street roads at their levels
   assert.ok(plan.terraces.every((t) => t.flatten === 0 && t.tags.includes("plan")));
   assert.deepEqual([...new Set(plan.roads.find((r) => r.id === "t-street-low-street")!.surfaceY)], [16.2]);
+});
+
+test("bands: the design round's row towns fail as rows on stacked shelves; a dead stub does not save them", () => {
+  // the round's own two-shelf fixture passed `rows` (two bearings over four buildings) and must fail `bands` alone
+  const row = checkDesign(rowTown(), site);
+  assert.deepEqual(row.faults.map((f) => f.split(":")[0]), ["bands"]);
+  assert.match(row.faults[0]!, /low, high.*climbs ACROSS the levels/);
+  // the propose-style draft: three stacked shelves, one street each
+  assert.ok(checkDesign(draftBands(), site).faults.some((f) => /^bands: 3 terraces \(t1, t2, t3\)/.test(f)));
+  assert.deepEqual(stackedBands(terraceBands(draftBands()))[0], ["t1", "t2", "t3"]);
+  // a 12 m cross stub on each shelf that reaches nothing and fronts no door is not a second street
+  const stub = rowTownDoc();
+  stub.streets.push({ id: "stub-low", name: "Stub", kind: "close", points: [[-12, 30], [-12, 18]], width: 4 }, { id: "stub-high", name: "Stub", kind: "close", points: [[2, -12], [2, 0]], width: 4 });
+  const sb = terraceBands(townDesignSchema.parse(stub));
+  assert.ok(sb.every((b) => b.single), JSON.stringify(sb.map((b) => b.streets)));
+});
+
+test("bands: a town that climbs (gate square, street across the slope through a ramp, a stair lane) passes every rule", () => {
+  const r = checkDesign(climbingTown(), site);
+  assert.deepEqual(r.faults, []);
+  assert.deepEqual(r.warnings, []);
+  const bands = terraceBands(climbingTown());
+  assert.ok(bands.every((b) => !b.single));
+  // the climb crosses the low level well off its long axis, and the stair lane crosses the high one
+  assert.ok(bands.find((b) => b.id === "low")!.streets.some((s) => s.id === "climb" && s.offAxis > 35));
+  assert.ok(bands.find((b) => b.id === "high")!.streets.some((s) => s.id === "stair-lane" && s.offAxis > 60 && s.linked));
 });

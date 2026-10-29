@@ -21,7 +21,10 @@ cut from a radius and read as rows). From apps/playground:
   propose --project <p> --town <id> --name <stem> --world <w>`, reshapes `authoring/towns/<stem>-design.json`
   (platform polygons at levels, streets, squares, stairs/ramps, every building at a kit-proven size facing its street,
   the landmark) and iterates `town-design check` to `TOWN DESIGN <stem>: ok` (fit, doors, reach <= 12 % ramps / 50 %
-  stairs, cut/fill <= 6 m, the per-riser rule, landmark sightline, square at the gate or harbour, not rows, kit-fit).
+  stairs, cut/fill <= 6 m, the per-riser rule, landmark sightline, square at the gate or harbour, not rows, not `bands`, kit-fit).
+  `bands` fails parallel levels stacked up the slope that each carry ONE street with their houses strung along it:
+  every level needs a second, LINKED street crossing it (the main street climbing across the levels, a stair lane, a
+  lane to a square, or a block turned onto it).
 - **Approve**: the coordinator or Derek opens `authoring/towns/survey/<stem>-design.png` (+ the concept on the site)
   and sets `status: "approved"` + `approval`. A draft is never cut.
 - **Cut**: `npx tsx tools/worldgen.mts terrace <w> --project <p> --from-plan authoring/towns/<stem>-design.json` (one
