@@ -20,6 +20,12 @@
  *   - every palette style's share of the palette lots is within +-15 points of its weight;
  *   - with --results (wfc/build.py's <town>_results.json): the distinct-shell gate — no two lots with the same `shell`
  *     digest, and every lot's seed differs from every other's.
+ *   - the READ gate (k-kit2, 2026-10-29): from the mean colour of each palette style's wall and roof TILES (resolved like
+ *     wfc/style_make.py tile_for: theme.map, walls.material, the theme folder): two palette styles' walls differ in value
+ *     by >= 25 % (|a-b| / max) or in hue by >= 30 deg (both saturated), unless one wall reads by pattern (timber-frame,
+ *     plank, log); every style's roof differs from its own wall by
+ *     >= 15 % value or 30 deg hue. Redstrand's first palette passed adjacency with stone, render and roof all one
+ *     orange (luma 68 / 75 / 65): the mix was invisible from the street.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -42,19 +48,21 @@ export interface PlanBuilding { id: string; type?: string; style?: string; reque
 export function hash01(s: string): number { return parseInt(crypto.createHash("sha1").update(s).digest("hex").slice(0, 8), 16) / 0x100000000; }
 
 /** A style's wall material and roof family, from the palette entry else the style file (its `extends` chain). */
+/** A style file merged over its `extends` chain (style_make.py load_style). */
+export function loadStyle(n: string, stylesDir = STYLES_DIR): Record<string, unknown> {
+  const f = path.join(stylesDir, `${n}.json`);
+  if (!fs.existsSync(f)) return {};
+  const st = JSON.parse(fs.readFileSync(f, "utf8")) as Record<string, unknown>;
+  const base = (st.extends as string | undefined) ?? (n !== "default" ? "default" : undefined);
+  const merged = base ? { ...loadStyle(base, stylesDir) } : {};
+  for (const [k, v] of Object.entries(st)) merged[k] = typeof v === "object" && v && !Array.isArray(v) && typeof merged[k] === "object" ? { ...(merged[k] as object), ...(v as object) } : v;
+  return merged;
+}
+
 export function lookOf(style: string, pal: Palette, stylesDir = STYLES_DIR): { wall: string; roof: string } {
   const e = pal.styles.find((s) => s.style === style);
   if (e?.wall && e?.roof) return { wall: e.wall, roof: e.roof };
-  const load = (n: string): Record<string, unknown> => {
-    const f = path.join(stylesDir, `${n}.json`);
-    if (!fs.existsSync(f)) return {};
-    const st = JSON.parse(fs.readFileSync(f, "utf8")) as Record<string, unknown>;
-    const base = (st.extends as string | undefined) ?? (n !== "default" ? "default" : undefined);
-    const merged = base ? { ...load(base) } : {};
-    for (const [k, v] of Object.entries(st)) merged[k] = typeof v === "object" && v && !Array.isArray(v) && typeof merged[k] === "object" ? { ...(merged[k] as object), ...(v as object) } : v;
-    return merged;
-  };
-  const st = load(style);
+  const st = loadStyle(style, stylesDir);
   return { wall: e?.wall ?? ((st.walls as { material?: string } | undefined)?.material ?? "timber-frame"), roof: e?.roof ?? ((st.roof as { family?: string } | undefined)?.family ?? "gable45") };
 }
 
@@ -158,6 +166,76 @@ export function paletteFindings(inp: CheckInput): string[] {
   return f;
 }
 
+const WALL_TILE: Record<string, string> = { plank: "WoodWall", log: "WoodWall", wattle: "StickWall", stick: "StickWall", stucco: "StuccoWall", stone: "Stone" };
+/** The wall and roof tile files a style shows (style_make.py tile_for): theme.map first, then the wall material's
+ *  tile, then the role name; the style's theme folder first, then the kit root. null where no file exists. */
+export function styleTiles(style: string, stylesDir = STYLES_DIR): { wall: string | null; roof: string | null } {
+  const st = loadStyle(style, stylesDir);
+  const wfc = path.dirname(stylesDir);
+  const th = (st.theme ?? {}) as { folder?: string | null; map?: Record<string, string> };
+  const tdir = th.folder ? path.join(wfc, th.folder) : path.join(stylesDir, "themes", style);
+  const map = th.map ?? {};
+  const material = (st.walls as { material?: string } | undefined)?.material;
+  const family = (st.roof as { family?: string } | undefined)?.family;
+  const find = (...roles: (string | undefined)[]): string | null => {
+    for (const r of roles) for (const d of [tdir, wfc]) if (r && fs.existsSync(path.join(d, `${r}.png`))) return path.join(d, `${r}.png`);
+    return null;
+  };
+  return {
+    wall: find(map.ExteriorNormal ?? (material ? WALL_TILE[material] : undefined), "ExteriorNormal"),
+    roof: find(map.Roofing ?? (family === "thatch" ? "ThatchRoof" : undefined), "Roofing"),
+  };
+}
+
+export interface Rgb { r: number; g: number; b: number }
+/** Rec. 709 luma, 0..255. */
+export const luma = (c: Rgb): number => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+/** HSV hue (deg) and saturation (0..1). */
+export function hueSat(c: Rgb): { h: number; s: number } {
+  const mx = Math.max(c.r, c.g, c.b), mn = Math.min(c.r, c.g, c.b), d = mx - mn;
+  if (!d) return { h: 0, s: 0 };
+  const h = mx === c.r ? ((c.g - c.b) / d + 6) % 6 : mx === c.g ? (c.b - c.r) / d + 2 : (c.r - c.g) / d + 4;
+  return { h: h * 60, s: mx ? d / mx : 0 };
+}
+/** Mean colour of a PNG (alpha ignored). */
+export async function meanColour(file: string): Promise<Rgb> {
+  const sharp = (await import("sharp")).default;
+  const { data, info } = await sharp(file).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  let r = 0, g = 0, b = 0;
+  for (let i = 0; i < data.length; i += info.channels) { r += data[i]!; g += data[i + 1]!; b += data[i + 2]!; }
+  const n = data.length / info.channels;
+  return { r: r / n, g: g / n, b: b / n };
+}
+
+export interface StyleColours { style: string; wall: Rgb; roof: Rgb; material?: string }
+/** Walls whose read is their PATTERN (beams, boards), not their mean colour: a pair with one of these is not held to the
+ *  wall value rule (fs-timber and fs-stucco share a mean ochre and still read apart). */
+export const PATTERN_WALLS = new Set(["timber-frame", "plank", "log"]);
+export const READ_LIMITS = { wallValue: 0.25, roofValue: 0.15, hue: 30, minSat: 0.2 };
+/** Two colours separate when their value differs by `value` (|a-b| / max) or, both saturated, their hue by `hue` deg. */
+export function separated(a: Rgb, b: Rgb, value: number, lim = READ_LIMITS): { ok: boolean; dv: number; dh: number } {
+  const la = luma(a), lb = luma(b), dv = Math.abs(la - lb) / Math.max(la, lb, 1);
+  const ha = hueSat(a), hb = hueSat(b);
+  const dh = Math.min(Math.abs(ha.h - hb.h), 360 - Math.abs(ha.h - hb.h));
+  return { ok: dv >= value || (ha.s >= lim.minSat && hb.s >= lim.minSat && dh >= lim.hue), dv, dh };
+}
+/** The READ gate's findings (empty = pass). Pure: walls of every two palette styles apart, each roof apart from its wall. */
+export function readFindings(looks: StyleColours[], lim = READ_LIMITS): string[] {
+  const f: string[] = [];
+  const fmt = (c: Rgb): string => `rgb ${Math.round(c.r)},${Math.round(c.g)},${Math.round(c.b)} luma ${luma(c).toFixed(0)}`;
+  for (let i = 0; i < looks.length; i++) for (let j = i + 1; j < looks.length; j++) {
+    const a = looks[i]!, b = looks[j]!;
+    if (PATTERN_WALLS.has(a.material ?? "") || PATTERN_WALLS.has(b.material ?? "")) continue;
+    const s = separated(a.wall, b.wall, lim.wallValue, lim);
+    if (!s.ok) f.push(`walls of ${a.style} (${fmt(a.wall)}) and ${b.style} (${fmt(b.wall)}) read as one material: value ${(100 * s.dv).toFixed(0)} % apart (< ${100 * lim.wallValue}), hue ${s.dh.toFixed(0)} deg (< ${lim.hue})`);
+  }
+  for (const l of looks) {
+    const s = separated(l.wall, l.roof, lim.roofValue, lim);
+    if (!s.ok) f.push(`${l.style}: roof (${fmt(l.roof)}) does not separate from its wall (${fmt(l.wall)}): value ${(100 * s.dv).toFixed(0)} % apart (< ${100 * lim.roofValue}), hue ${s.dh.toFixed(0)} deg`);
+  }
+  return f;
+}
+
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   const projectName = opt("project", ""), townName0 = opt("town", "");
@@ -198,6 +276,16 @@ if (isMain) {
     const results = resultsFile ? (JSON.parse(fs.readFileSync(resultsFile, "utf8")) as CheckInput["results"]) : undefined;
     const pairs = neighbours(planB.buildings, layout);
     const f = paletteFindings({ buildings: planB.buildings, styles, pal, pairs, results });
+    // the READ gate: every palette style's wall/roof tiles, by mean colour
+    const looks: StyleColours[] = [];
+    for (const e of pal.styles) {
+      const t = styleTiles(e.style);
+      if (!t.wall || !t.roof) { f.push(`${e.style}: no ${t.wall ? "roof" : "wall"} tile found (theme folder or kit root)`); continue; }
+      const c = { style: e.style, wall: await meanColour(t.wall), roof: await meanColour(t.roof), material: lookOf(e.style, pal).wall };
+      looks.push(c);
+      console.log(`  read ${e.style.padEnd(16)} wall ${path.basename(t.wall)} luma ${luma(c.wall).toFixed(0)}, roof ${path.basename(t.roof)} luma ${luma(c.roof).toFixed(0)}`);
+    }
+    f.push(...readFindings(looks));
     const counts = new Map<string, number>();
     for (const s of styles.values()) counts.set(s, (counts.get(s) ?? 0) + 1);
     console.log(`palette ${palName}: ${planB.buildings.length} lots, ${pairs.length} adjacent pairs (${layout ? "layout outlines <= 6 m" : "plan order; no layout yet"}): ${[...counts].map(([s, n]) => `${s} ${n}`).join(", ")}${results ? `; shells ${new Set(results.map((r) => r.shell)).size} distinct of ${results.length}` : ""}`);

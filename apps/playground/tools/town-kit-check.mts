@@ -3,6 +3,7 @@
  *
  *   npx tsx tools/town-kit-check.mts seams <model.glb> [more.glb ...] [--allow ExteriorNormal,ExteriorBottom,Stone]
  *   npx tsx tools/town-kit-check.mts smoke <model.glb> [more.glb ...] [--expect N | --markers <model>.markers.json]
+ *   npx tsx tools/town-kit-check.mts overlap --layout <town>-layout.json --glb-dir <dir of <lot>.glb>
  *
  * A face is EXTERIOR when a horizontal ray along its normal from its centre hits nothing of the model (it looks out at
  * the street), so a notch wall, an open bay's back wall and a face behind entry steps all count, and a door reveal, a
@@ -26,6 +27,13 @@
  *               saturation > 0.35, green > 0.4): Derek's root RoofInterior.png is a saturated blue plank tile and showed
  *               through the hall's open grand door as "a blue hole" (review fault 2). Kit tiles are browns (hue 13-40),
  *               the pane tile a pale grey-green (hue 152, sat 0.15).
+ * overlap (k-kit2, 2026-10-29), the PLACED town: every lot's built WALL footprint (the box of its wall-role faces, in
+ *   its own frame, turned by the layout yaw and moved to its centre) is measured against the others and its own ground
+ *   outline. Two wall footprints that intersect (> 0.05 m both ways) are a finding: one building's walls stand inside
+ *   the other and its tile shows through as shards (the Thirstgate street: the render dry-cup's walls 5.5 m into the
+ *   stone tithe-vault, pale wedges on a stone face). Walls more than 0.25 m outside the lot's ground outline are a
+ *   finding too: the layout sized the lot from the REQUEST, and wings, outshuts, stable wings, apses and towers build
+ *   past it. Roof eaves are not walls and may overhang.
  * smoke (row 5; s2-fix faults 1 and 4), per model:
  *   found       every chimney-top marker has a cap the engine's detector finds within 1.5 m (packages/render
  *               chimney-smoke.ts findChimneys: small, squarish, flat, high, nothing above, EVERY side dropping away) and
@@ -274,8 +282,59 @@ export function smokeFindings(tops: THREE.Vector3[], chimneys: Marker[], ridge: 
   return f;
 }
 
+/** A built wall footprint in its own frame: x0, x1, z0, z1 (metres) of the wall-role faces above 1.2 m. null when it has none. */
+export function wallBox(faces: Face[]): [number, number, number, number] | null {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  // above the grade band only: entry steps and plinth blocks (low ExteriorBottom faces) may stand out on the street
+  for (const f of faces) if (WALL_IMAGES.includes(f.img) && f.cy > 1.2) { x0 = Math.min(x0, f.cx); x1 = Math.max(x1, f.cx); z0 = Math.min(z0, f.cz); z1 = Math.max(z1, f.cz); }
+  return x0 <= x1 ? [x0, x1, z0, z1] : null;
+}
+/** A local box turned by yaw degrees about +Y (three.js: x' = x cos + z sin, z' = -x sin + z cos) and moved to centre [x, z]. */
+export function placeBox(b: [number, number, number, number], yaw: number, center: [number, number]): [number, number, number, number] {
+  const t = (yaw * Math.PI) / 180, c = Math.cos(t), s = Math.sin(t);
+  const xs: number[] = [], zs: number[] = [];
+  for (const x of [b[0], b[1]]) for (const z of [b[2], b[3]]) { xs.push(c * x + s * z + center[0]); zs.push(-s * x + c * z + center[1]); }
+  return [Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)];
+}
+export type PlacedLot = { id: string; walls: [number, number, number, number]; ground?: [number, number][] };
+/** The overlap gate's findings (empty = pass). Pure. */
+export function overlapFindings(lots: PlacedLot[], tol = 0.05, outside = 0.25): string[] {
+  const f: string[] = [];
+  for (let i = 0; i < lots.length; i++) for (let j = i + 1; j < lots.length; j++) {
+    const a = lots[i]!.walls, b = lots[j]!.walls;
+    const ox = Math.min(a[1], b[1]) - Math.max(a[0], b[0]), oz = Math.min(a[3], b[3]) - Math.max(a[2], b[2]);
+    if (ox > tol && oz > tol) f.push(`${lots[i]!.id} and ${lots[j]!.id}: built walls intersect by ${ox.toFixed(1)} x ${oz.toFixed(1)} m (one building's walls stand inside the other)`);
+  }
+  for (const l of lots) {
+    if (!l.ground?.length) continue;
+    const gx0 = Math.min(...l.ground.map((p) => p[0])), gx1 = Math.max(...l.ground.map((p) => p[0])), gz0 = Math.min(...l.ground.map((p) => p[1])), gz1 = Math.max(...l.ground.map((p) => p[1]));
+    const d = Math.max(gx0 - l.walls[0], l.walls[1] - gx1, gz0 - l.walls[2], l.walls[3] - gz1);
+    if (d > outside) f.push(`${l.id}: built walls stand ${d.toFixed(1)} m outside its ground outline (the lot was sized from the request; wings/outshuts/towers build past it)`);
+  }
+  return f;
+}
+
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
+  if (cmd === "overlap") {
+    const layoutFile = opt("layout", ""), dir = opt("glb-dir", "");
+    if (!layoutFile || !dir) { console.error("usage: town-kit-check overlap --layout <town>-layout.json --glb-dir <dir>"); process.exit(2); }
+    const layout = JSON.parse(fs.readFileSync(layoutFile, "utf8")) as { buildings: { id: string; yaw?: number; center: [number, number]; ground?: [number, number][] }[] };
+    const lots: PlacedLot[] = [];
+    for (const b of layout.buildings) {
+      const glb = path.join(dir, `${b.id}.glb`);
+      if (!fs.existsSync(glb)) { console.log(`  ! ${b.id}: no ${glb}`); continue; }
+      const box = wallBox(verticalFaces(glbTriangles(glb)));
+      if (!box) continue;
+      const walls = placeBox(box, b.yaw ?? 0, b.center);
+      lots.push({ id: b.id, walls, ground: b.ground });
+      console.log(`${b.id}: walls x ${walls[0].toFixed(1)}..${walls[1].toFixed(1)} z ${walls[2].toFixed(1)}..${walls[3].toFixed(1)}`);
+    }
+    const f = overlapFindings(lots);
+    for (const x of f) console.log(`  ! ${x}`);
+    console.log(f.length ? `OVERLAP FAILED (${f.length})` : "OVERLAP OK");
+    process.exit(f.length ? 1 : 0);
+  }
   if (!["seams", "smoke"].includes(cmd) || !files.length) { console.error("usage: town-kit-check seams|smoke <model.glb> [...] [--allow a,b] [--expect N | --markers f]"); process.exit(2); }
   let bad = 0;
   for (const file of files) {
