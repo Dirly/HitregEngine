@@ -24,7 +24,8 @@
  *
  * Acceptance: >= DOGFOOD_PASS_SHARE (80 %) of the seeds pass every rule. Flags: --seeds 10 (seed list = the world's seed
  * and N-1 more at +101 steps; --seed-list a,b,c), --look proving (the look init borrows), --tile 560 (map px),
- * --keep (keep the scratch project), --only relief,lakes (print only those columns in the table; all are judged).
+ * --keep (keep the scratch project), --only relief,lakes (print only those columns in the table; all are judged),
+ * --needs grand-entrance:55:250,walled-town,harbour-town (the run's site needs measured per seed: tools/worldgen-dogfood-needs.mts; a report, not a rule).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -33,6 +34,7 @@ import { createWorldField, worldRecipeSchema, type WorldRecipe } from "@hitreg/c
 import { decodePng, encodePng } from "./_png.mjs";
 import { drawText } from "./_map-text.mts";
 import { biomeFindings, describeBiomes, type BiomeReport } from "./worldgen-climate.mts";
+import { parseNeedSpecs, seedNeedLine, seedNeeds, type SeedNeed } from "./worldgen-dogfood-needs.mts";
 import {
   INTERIOR_LAKES_MIN,
   RELIEF_MIN_M,
@@ -95,6 +97,8 @@ export interface SeedResult {
   notes: string[];
   /** the biomes rule: anchor shares, adjacency pairs, feature inventory */
   biomes: BiomeReport | null;
+  /** --needs: the run's site needs measured on the seed (report, not a rule) */
+  needs: SeedNeed[];
 }
 
 function opt(argv: string[], name: string): string | null {
@@ -163,14 +167,24 @@ export function commandDogfood(host: DogfoodHost): void {
     : Array.from({ length: count }, (_, i) => source.seed + i * 101);
   const keep = argv.includes("--keep");
   const only = (opt(argv, "only") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  let needSpecs: ReturnType<typeof parseNeedSpecs> = [];
+  try { needSpecs = parseNeedSpecs(opt(argv, "needs") ?? ""); } catch (e) { host.fail((e as Error).message); }
 
   // the continent flags the real world was laid with (count 1: make() lays radius x 0.8)
   const continents = source.bounds?.continents ?? [];
   const main = continents[0];
   if (!main) host.fail("the world has no continents yet — run worldgen continents first");
   const contFlags = ["--count", "1", "--islands", "0", "--radius", String(Math.round(main.radius / 0.8)), "--lobes", String(main.lobes.length), "--limit", "auto"];
-  // the anchor set stays as wide as the look's: continents picks per cell from the ground (2026-10-28, several biomes)
-  const anchors: string[] = [];
+  // the WORLD's climate rides into every seed (2026-10-29 redstrand: the anchors were dropped here, so a dry world was
+  // judged on the look's sixteen temperate-to-tropical anchors): its anchor set, aridity and riparian ribbon. A world
+  // that kept every anchor of its look passes none and continents picks per cell from the ground as before.
+  const srcZones = source.climate.zones;
+  const anchors: string[] = srcZones ? srcZones.anchors.map((a) => a.id) : [];
+  const climateFlags: string[] = [];
+  if (anchors.length > 0) climateFlags.push("--anchors", anchors.join(","));
+  if (srcZones?.aridity) climateFlags.push("--aridity", String(srcZones.aridity));
+  if (srcZones?.warmth) climateFlags.push("--warmth", String(srcZones.warmth));
+  if (srcZones?.riparian) climateFlags.push("--riparian", `${srcZones.riparian.anchor}:${srcZones.riparian.reach}:${srcZones.riparian.rise}`);
 
   // the scratch project: the world's dependencies, nothing of its own
   const scratchDir = path.join(playground, "projects", SCRATCH_PROJECT);
@@ -191,10 +205,11 @@ export function commandDogfood(host: DogfoodHost): void {
   for (const seed of seeds) {
     const t0 = performance.now();
     const name = `${worldName}-s${seed}`;
-    const r: SeedResult = { seed, name, ladder: null, widthKm: 0, landKm2: 0, uplandShare: 0, silhouette: 0, lakes: 0, interiorLakes: 0, woodland: 0, coastOk: false, coastShares: "", dangling: -1, lakesNoRiver: -1, undeclared: 0, uphill: -1, waterFindings: -1, borderFindings: -1, rivers: 0, riverKm: 0, failed: [], mapPng: null, seconds: 0, error: null, notes: [], biomes: null };
+    const r: SeedResult = { seed, name, ladder: null, widthKm: 0, landKm2: 0, uplandShare: 0, silhouette: 0, lakes: 0, interiorLakes: 0, woodland: 0, coastOk: false, coastShares: "", dangling: -1, lakesNoRiver: -1, undeclared: 0, uphill: -1, waterFindings: -1, borderFindings: -1, rivers: 0, riverKm: 0, failed: [], mapPng: null, seconds: 0, error: null, notes: [], biomes: null, needs: [] };
     results.push(r);
     const stages: [string, string[]][] = [
       ["init", ["init", name, "--from", look, "--seed", String(seed)]],
+      ...(climateFlags.length ? [["climate", ["climate", name, ...climateFlags]] as [string, string[]]] : []),
       ["continents", ["continents", name, ...contFlags]],
       ["coast", ["coast", name]],
       ["coast-check", ["coast", name, "--check"]],
@@ -252,6 +267,7 @@ export function commandDogfood(host: DogfoodHost): void {
         const types = new Map<string, number>();
         for (const s of recipe.features.coastSegments ?? []) types.set(s.type, (types.get(s.type) ?? 0) + 1);
         r.coastShares = [...types.entries()].map(([k, v]) => `${k.replace(/-.*/, "")} ${v}`).join(" ");
+        if (needSpecs.length) r.needs = seedNeeds(recipe, needSpecs);
       } catch (e) {
         r.error = `judging: ${(e as Error).message.split("\n")[0]}`;
       }
@@ -274,6 +290,7 @@ export function commandDogfood(host: DogfoodHost): void {
     console.log(
       `  seed ${String(seed).padStart(6)}  ${r.failed.length ? "FAIL" : "pass"}  relief ${L ? r1(L.relief) : "-"} m  upland ${pct(r.uplandShare)}  silhouette ${r.silhouette}  lakes ${r.interiorLakes}/${r.lakes}  woodland ${pct(r.woodland)}  coast ${r.coastOk ? "ok" : "FAIL"}  hydrology ${r.dangling}/${r.lakesNoRiver}(${r.undeclared} undeclared)/${r.uphill}  water ${r.waterFindings}  border ${r.borderFindings}  rivers ${r.rivers} (${r.riverKm} km)  biomes ${r.biomes ? [...r.biomes.shares.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => k + " " + (v * 100).toFixed(0) + "%").join("/") + " kinds " + r.biomes.kindCount : "-"}  ${r.seconds}s${r.failed.length ? `  <- ${r.failed.join(", ")}` : ""}${r.error ? `  ${r.error}` : ""}`,
     );
+    for (const n of r.needs) console.log(`      needs ${seedNeedLine(n)}`);
   }
 
   // the contact sheet
@@ -283,11 +300,12 @@ export function commandDogfood(host: DogfoodHost): void {
   writeContactSheet(sheet, results, tile, only);
   // the sidecar: every seed's numbers and the gate lines behind them, so a fault is diagnosable without re-running the seed
   const sidecar = path.join(sheetDir, `${worldName}-seeds.md`);
-  const md: string[] = [`# dogfood ${worldName} — ${new Date().toISOString()}`, "", `seeds ${seeds.join(", ")}; look ${look}; anchors ${anchors.join(", ") || "-"}; continents ${contFlags.join(" ")}`, ""];
+  const md: string[] = [`# dogfood ${worldName} — ${new Date().toISOString()}`, "", `seeds ${seeds.join(", ")}; look ${look}; climate ${climateFlags.join(" ") || "-"}; continents ${contFlags.join(" ")}`, ""];
   for (const r of results) {
     const L = r.ladder;
     md.push(`## seed ${r.seed} — ${r.failed.length ? "FAIL: " + r.failed.join(", ") : "pass"}`);
     md.push(`relief ${L ? r1(L.relief) : "-"} m (p05 ${L ? r1(L.p05) : "-"}, p98 ${L ? r1(L.p98) : "-"}), upland ${pct(r.uplandShare)}, silhouette ${r.silhouette}, land ${r.landKm2} km² / ${r.widthKm} km wide, lakes ${r.interiorLakes} interior of ${r.lakes}, woodland ${pct(r.woodland)}, coast ${r.coastOk ? "ok" : "FAIL"} (${r.coastShares}), rivers ${r.rivers} (${r.riverKm} km), hydrology dangling ${r.dangling} / no-river ${r.lakesNoRiver} / uphill ${r.uphill}, water ${r.waterFindings}, border ${r.borderFindings}, ${r.seconds} s${r.error ? `, ${r.error}` : ""}`);
+    for (const n of r.needs) md.push(`- needs: ${seedNeedLine(n)}`);
     for (const n of r.notes) md.push(`- ${n}`);
     md.push("");
   }
@@ -306,7 +324,7 @@ export function commandDogfood(host: DogfoodHost): void {
 function writeContactSheet(file: string, results: SeedResult[], tile: number, only: string[]): void {
   const cols = Math.min(5, Math.max(1, results.length));
   const rows = Math.ceil(results.length / cols);
-  const caption = 12 * 9 + 6;
+  const caption = (12 + Math.max(0, ...results.map((r) => r.needs.length))) * 9 + 6;
   const pad = 6;
   const cw = tile + pad * 2;
   const ch = tile + caption + pad * 2;
@@ -351,6 +369,7 @@ function writeContactSheet(file: string, results: SeedResult[], tile: number, on
       ...(show("hydrology") ? [[`HYDROLOGY DANGLING ${r.dangling} NO-RIVER ${r.lakesNoRiver} UPHILL ${r.uphill}  WATER ${r.waterFindings}  BORDER ${r.borderFindings}`, bad(r.failed.includes("water") ? "water" : r.failed.includes("border") ? "border" : "hydrology")] as [string, [number, number, number]]] : []),
       ...(r.biomes ? describeBiomes(r.biomes).map((line, i) => [line.toUpperCase().slice(0, 92), i === 1 && r.biomes!.pairs.some((p) => !p.legal) ? bad("biomes") : i === 2 && r.biomes!.kindCount < 5 ? bad("biomes") : [200, 220, 200]] as [string, [number, number, number]]) : []),
       ...(r.biomes ? r.biomes.findings.slice(0, 1).map((f) => [("! " + f).toUpperCase().slice(0, 92), [255, 120, 110]] as [string, [number, number, number]]) : []),
+      ...r.needs.map((n) => [`NEEDS ${n.label} ${n.met}/${n.measured} MET`.toUpperCase().slice(0, 92), n.met > 0 ? [150, 220, 255] : [255, 200, 120]] as [string, [number, number, number]]),
       ...(r.error ? [[r.error.toUpperCase().slice(0, 80), [255, 120, 110]] as [string, [number, number, number]]] : []),
     ];
     lines.forEach(([text, c], i) => drawText(rgb, W, ox + 4, oy + tile + 6 + i * 9, text, c, 1));

@@ -274,7 +274,9 @@ const HELP = `worldgen — procedural world pipeline
                    recipe, as init --scene does; refuses to replace an existing scene without --force
   climate <world>  which zone KINDS the world may draw and how big a climate cell is: --anchors forest,grassland,moor
                    keeps only those (init --from borrows all of the source's), --size N / --border N; a cell bigger
-                   than the land puts ONE anchor over it
+                   than the land puts ONE anchor over it; --aridity 0..1 (a dry climate: cells want moisture x (1-N));
+                   --warmth -0.5..0.5 (every cell's latitude shifted toward the hot pole);
+                   --riparian <anchor>[:reach[:rise]] (an oasis ribbon of that anchor along every wet river) | off
   zone-name <world> --zone <id> --name "<name>" [--landmarks a,b,c] [--hub x,z] [--border coast[:loop]]: name a zone (or
                    town zone) from its landmarks and drop its draft tag — the zone-names / town-names rows, through the
                    tool; --border coast gives a one-landmass zone the coast plan's shoreline as its border
@@ -311,7 +313,8 @@ const HELP = `worldgen — procedural world pipeline
                    climate, continents + derived relief, coast, rivers, towns, zones) into a scratch project, judged by
                    the rules (relief, upland, silhouette, interior lakes, woodland, coast, hydrology, water-logic,
                    border); ONE contact sheet authoring/dogfood/<world>-seeds.png + a table; >= 80 % must pass; a
-                   failing seed is a generator fault (fix recipe-derived defaults, never the seed); --keep, --tile 560
+                   failing seed is a generator fault (fix recipe-derived defaults, never the seed); --keep, --tile 560;
+                   --needs grand-entrance:55:250,walled-town,harbour-town,large-poi measures the run's site needs per seed
   relief <world>   re-derive the recipe's relief from THIS landmass (continents runs it by itself): --scale <km>
                    (default: the largest landmass's measured width) sets the continent /
                    mountains / mountainMask / mesas frequencies by (7 km / scale), then bisects mountains.amplitude
@@ -490,7 +493,8 @@ const HELP = `worldgen — procedural world pipeline
                    [--height m] [--top-y m] [--insert stair-turn@4:1 …] [--walls auto|0,2]; fits the pad patch, wall
                    cuts and kit pieces (build.mts make for a new height), runs lips + seated + riser gates (exit 1).
                    --refit [--id a,b | --all] [--upward: keep the risers below the named one] [--feather m]
-                   after a terrain rebuild (writes an inverse); --check; --remove id; --dry-run
+                   after a terrain rebuild (writes an inverse); --check (gates + the hand-made judge:
+                   tools/handmade-check.mts over the risers and town walls); --remove id; --dry-run
   bridge-place <world>  a REAL bridge across a gap (features.bridgeSpans, world-kit bridge kits): --spec doc.json, or
                    --id x --a "x,z[,y|ground]" --b "x,z[,y|ground]" [--kind arch|rope] [--style gnawspur|coastal]
                    [--channel] [--tiers auto|1|2] [--bay 6..16] [--sag 0.035] [--width 1.8] [--seat pad|rock];
@@ -8000,6 +8004,24 @@ function commandClimate(): void {
   }
   if (flag("size")) zones.size = option("size", zones.size);
   if (flag("border")) zones.border = option("border", zones.border);
+  // --aridity N: a dry climate (cells want moisture x (1 - N)); --riparian <anchor>[:reach[:rise]] | off: the oasis ribbon
+  if (flag("aridity")) {
+    const v = option("aridity", 0);
+    if (!(v >= 0 && v <= 1)) fail("--aridity wants 0..1");
+    zones.aridity = v;
+  }
+  if (flag("warmth")) {
+    const v = option("warmth", 0);
+    if (!(v >= -0.5 && v <= 0.5)) fail("--warmth wants -0.5..0.5");
+    zones.warmth = v;
+  }
+  const rip = stringOption("riparian", "");
+  if (rip === "off") delete zones.riparian;
+  else if (rip) {
+    const [anchor, reach, rise] = rip.split(":");
+    if (!zones.anchors.some((a) => a.id === anchor)) fail(`--riparian ${anchor}: not an anchor of this world (${zones.anchors.map((a) => a.id).join(", ")})`);
+    zones.riparian = { anchor: anchor!, reach: reach ? Number(reach) : 140, rise: rise ? Number(rise) : 14, strength: 1 };
+  }
   if (flag("report")) {
     const field = createWorldField(recipe);
     const wild = recipe.regions.filter((g) => !g.within && g.polygon.length >= 3);
@@ -8015,8 +8037,11 @@ function commandClimate(): void {
     const sites = assignClimateSites(recipe, createWorldField(recipe), (line) => console.log(line));
     zones.sites = sites.map((s) => ({ cell: s.cell, anchor: s.anchor }));
   }
-  if (keep.length === 0 && !flag("size") && !flag("border") && !flag("auto")) fail("nothing to change: --anchors a,b,c, --size N, --border N, --auto (pin every cell's anchor from the ground) or --report (the biomes rule)");
+  if (keep.length === 0 && !flag("size") && !flag("border") && !flag("auto") && !flag("aridity") && !flag("warmth") && !rip) fail("nothing to change: --anchors a,b,c, --size N, --border N, --aridity 0..1, --warmth -0.5..0.5, --riparian <anchor>[:reach[:rise]] | off, --auto (pin every cell's anchor from the ground) or --report (the biomes rule)");
   writeRecipe(recipe, file);
+  if (zones.aridity) console.log(`  aridity ${zones.aridity}: cells want moisture x ${1 - zones.aridity}`);
+  if (zones.warmth) console.log(`  warmth ${zones.warmth}: every cell judged ${zones.warmth} nearer the hot pole`);
+  if (zones.riparian) console.log(`  riparian: ${zones.riparian.anchor} greens ${zones.riparian.anchors?.join(", ") ?? "every drier anchor"} within ${zones.riparian.reach} m of a wet river and ${zones.riparian.rise} m over its water`);
   const land = recipe.bounds?.continents.map((c) => c.radius + c.falloff * (1 - (recipe.bounds?.shelf ?? 0.58))) ?? [];
   console.log(`  climate cells ${zones.size} m (border ${zones.border} m)${land.length ? `; the largest landmass is ~${Math.round(Math.max(...land) * 2)} m across` : ""}`);
 }

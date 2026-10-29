@@ -3500,6 +3500,57 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
    * for. It reuses the moisture jitter field so it costs nothing extra and is
    * uncorrelated with the temperature that decides the snow.
    */
+  // ------------------------------------------------------------ riparian (oasis)
+  // A wet green ribbon along every wet river through drier land: within `reach` of the channel and `rise` above its
+  // water, the drier anchors' zone weight hands over to the riparian anchor. Paint/biome only (climateAt is never read
+  // by the terrain shape), so the hydrology the ribbon follows does not move under it.
+  const riparian = hasZones ? zones!.riparian : undefined;
+  const ripIndex = riparian ? (anchorIndex.get(riparian.anchor) ?? -1) : -1;
+  const ripGreens = new Uint8Array(Math.max(anchorCount, 1));
+  if (ripIndex >= 0) {
+    const ra = anchors[ripIndex]!;
+    anchors.forEach((a, i) => {
+      if (i === ripIndex) return;
+      ripGreens[i] = (riparian!.anchors ? riparian!.anchors.includes(a.id) : a.moisture < ra.moisture) ? 1 : 0;
+    });
+  }
+  let ripSegs: FeatureBuckets<PolySegment> | null = null;
+  let ripFor: FeatureBuckets<PolySegment> | null = null;
+  const ripHits: OwnerHit[] = [];
+  function riparianBuckets(): FeatureBuckets<PolySegment> {
+    if (ripFor !== riverSegs) {
+      ripFor = riverSegs;
+      const docs = riverDocs;
+      ripSegs = segmentBuckets(
+        segmentsOf(docs, (r) => r.bedY, (r) => {
+          const surface = surfaceOf(r);
+          return surface ? [surface, surface] : [undefined, undefined];
+        }),
+        (i) => riverWidest(docs[i]!) / 2 + riparian!.reach,
+      );
+    }
+    return ripSegs!;
+  }
+  /** 0..1: how much of the drier anchors' weight the riparian anchor takes at (x, z) on ground `groundY`. */
+  function riparianAt(x: number, z: number, groundY: number): number {
+    if (ripIndex < 0 || riverDocs.length === 0) return 0;
+    const count = nearestPerOwner(riparianBuckets(), x, z, ripHits);
+    let best = 0;
+    for (let k = 0; k < count; k++) {
+      const hit = ripHits[k]!;
+      const river = riverDocs[hit.owner]!;
+      if (!river.water || Number.isNaN(hit.value)) continue;
+      const half = (Number.isNaN(hit.width) ? river.width : hit.width) / 2;
+      const across = 1 - smoothstep(half, half + riparian!.reach, hit.distance);
+      if (across <= 0) continue;
+      const water = riverSurface(river, hit.value, hit.side);
+      const up = 1 - smoothstep(0, riparian!.rise, groundY - water);
+      const f = across * up;
+      if (f > best) best = f;
+    }
+    return best * riparian!.strength;
+  }
+
   function climateAt(x: number, z: number, groundY: number): typeof climateScratch {
     let sx = x;
     let sz = z;
@@ -3513,6 +3564,23 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       zoneAt(sx, sz); // sx/sz already carry the edge warp: identical to zoneAtWarped(x, z)
       temperature = zoneForm.temperature + fbm2(tempSpec, sx, sz, seed) * ZONE_CLIMATE_DRIFT;
       moisture = zoneForm.moisture + fbm2(moistSpec, sx, sz, seed) * ZONE_CLIMATE_DRIFT;
+      if (ripIndex >= 0) {
+        const f = riparianAt(x, z, groundY);
+        if (f > 0) {
+          const ra = anchors[ripIndex]!;
+          let moved = 0;
+          for (let i = 0; i < anchorCount; i++) {
+            if (!ripGreens[i]) continue;
+            const w = zoneScratch[i]! * f;
+            if (w <= 0) continue;
+            zoneScratch[i] = zoneScratch[i]! - w;
+            temperature += (ra.temperature - anchors[i]!.temperature) * w;
+            moisture += (ra.moisture - anchors[i]!.moisture) * w;
+            moved += w;
+          }
+          zoneScratch[ripIndex] = zoneScratch[ripIndex]! + moved;
+        }
+      }
     } else {
       temperature = spread(fbm2(tempSpec, sx, sz, seed) * 0.5 + 0.5);
       moisture = spread(fbm2(moistSpec, sx, sz, seed) * 0.5 + 0.5);

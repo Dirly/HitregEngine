@@ -2039,6 +2039,44 @@ const zonesSchema = z.object({
     })
     .prefault({}),
   anchors: z.array(zoneAnchorSchema).min(1),
+  aridity: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0)
+    .describe(
+      "How dry the world's climate is, 0..1 (default 0 = moisture from the ground alone). `worldgen climate --auto` " +
+        "(run by `continents`) wants a cell's moisture = its wet trait (shore, lowland, windward) x (1 - aridity): on a " +
+        "3-4 km island every cell is near the sea, so without it no dry anchor (badlands, savanna, desert) ever wins a " +
+        "cell. Red scrub behind sea cliffs wants ~0.5. `worldgen climate --aridity N` sets it.",
+    ),
+  warmth: z
+    .number()
+    .min(-0.5)
+    .max(0.5)
+    .default(0)
+    .describe(
+      "Where the world sits between the cold pole and the hot one, added to every cell's latitude when " +
+        "`worldgen climate --auto` (run by `continents`) picks its anchor (default 0 = temperate, the look's centre). " +
+        "A 3-4 km island spans a few hundredths of latitude, so a hot world (red scrub, savanna) is said here: ~0.2. " +
+        "`worldgen climate --warmth N` sets it.",
+    ),
+  riparian: z
+    .object({
+      anchor: z.string().describe("The anchor whose biome rules take over along the water (forest: a green ribbon). Never picked for a climate cell: it is a ribbon, not a region."),
+      anchors: z.array(z.string()).optional().describe("Anchors it greens (default: every anchor drier than it). Their zone weight hands over to `anchor` near the water."),
+      reach: z.number().positive().default(140).describe("Metres from a wet river's centreline over which the ribbon fades out."),
+      rise: z.number().positive().default(14).describe("Metres above the river's water over which it fades out: the valley floor greens, the cliff top above it does not."),
+      strength: z.number().min(0).max(1).default(1).describe("Share of the drier anchors' weight handed over at the water's edge."),
+    })
+    .optional()
+    .describe(
+      "An OASIS: a wet green ribbon along every wet river through drier land (2026-10-29 redstrand, \"a river-valley " +
+        "oasis inside the dry land\" could not be drawn — climate cells are 600+ m regions, never a ribbon). Within " +
+        "`reach` of a river and `rise` above its water, the drier anchors' zone weight hands over to `anchor`, so its " +
+        "biome rules, cover and scatter (trees) grow there. Paint and biome only: the terrain shape and `field.zone()` " +
+        "(the anchor shares the biomes rule measures) are untouched. `worldgen climate --riparian <anchor>[:reach]` sets it.",
+    ),
   sites: z
     .array(z.object({ cell: z.tuple([z.number().int(), z.number().int()]), anchor: z.string() }))
     .optional()

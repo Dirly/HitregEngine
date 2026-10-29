@@ -151,7 +151,7 @@ function sitingDir(host: SiteNeedsHost): string {
 const dirOf = (b: number): V2 => [Math.sin((b * Math.PI) / 180), -Math.cos((b * Math.PI) / 180)];
 
 /** Grid cells worth measuring for a role, best prescore first. */
-function prescored(g: NeedGround, recipe: WorldRecipe, role: SiteRole, radius: number, step: number): { x: number; z: number; pre: number }[] {
+export function prescored(g: NeedGround, recipe: WorldRecipe, role: SiteRole, radius: number, step: number): { x: number; z: number; pre: number }[] {
   const limit = recipe.bounds?.limit ?? 3000;
   const out: { x: number; z: number; pre: number }[] = [];
   for (let z = -limit; z <= limit; z += step)

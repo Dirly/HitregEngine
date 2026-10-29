@@ -17,12 +17,14 @@
  *                        the land each and none over BIOME_SHARE_MAX
  */
 import type { WorldField, WorldRecipe } from "@hitreg/core";
-import { pointInPolygon } from "@hitreg/core";
+import { createWorldField, pointInPolygon } from "@hitreg/core";
 import { INTERIOR_SHORE_M, UPLAND_RISE_M, WOODLAND_DENSITY, WOODLAND_SHARE_MIN, altitudeLadder, interiorLakes, samplePoints, treeSampler, woodlandShare } from "./worldgen-relief.mts";
 
 /** Climate cells the largest landmass carries: 3.5 -> a 5 km² island reads three or four biomes. */
 export const CLIMATE_CELLS_PER_LANDMASS = 3.5;
 export const CLIMATE_CELL_MIN_M = 600;
+/** Distinct anchors the climate assignment spreads over a landmass when it has that many (three to four biomes). */
+export const SPREAD_ANCHORS = 4;
 /** Anchors a zone must carry at >= BIOME_SHARE_MIN of its land each; none over BIOME_SHARE_MAX. */
 export const BIOME_KINDS_MIN = 3;
 export const BIOME_SHARE_MIN = 0.1;
@@ -81,12 +83,15 @@ function landSamples(recipe: WorldRecipe, field: WorldField, polygon: readonly (
   return { land, step };
 }
 
+/** The latitude a cell is judged at: the lattice position along the latitude axis, shifted by the world's `warmth`. */
 function latitudeOf(recipe: WorldRecipe, x: number, z: number): number {
-  const lat = recipe.climate.zones?.latitude;
-  if (!lat) return 0.5;
+  const zones = recipe.climate.zones;
+  const lat = zones?.latitude;
+  const warmth = zones?.warmth ?? 0;
+  if (!lat) return Math.max(0, Math.min(1, 0.5 + warmth));
   const along = lat.axis === "x" ? x : z;
   const u = 0.5 + along / lat.scale;
-  return Math.max(0, Math.min(1, lat.flip ? 1 - u : u));
+  return Math.max(0, Math.min(1, (lat.flip ? 1 - u : u) + warmth));
 }
 
 export interface SiteAssignment {
@@ -113,7 +118,10 @@ export function assignClimateSites(recipe: WorldRecipe, field: WorldField, log: 
   const zones = recipe.climate.zones;
   if (!zones || zones.anchors.length === 0) return [];
   const t = recipe.climate.transitions;
-  const anchors = zones.anchors;
+  // the riparian (oasis) anchor is a ribbon along the rivers, never a region: no cell picks it
+  const anchors = zones.anchors.filter((a) => a.id !== zones.riparian?.anchor);
+  if (anchors.length === 0) return [];
+  const aridity = zones.aridity ?? 0;
   const { land } = landSamples(recipe, field, null, 2500);
   if (land.length === 0) return [];
   const ladder = altitudeLadder(land.map((p) => p.h - recipe.seaLevel));
@@ -138,13 +146,25 @@ export function assignClimateSites(recipe: WorldRecipe, field: WorldField, log: 
     const wet01 = Math.max(0, Math.min(1, 0.45 * (1 - shore01) + 0.3 * (1 - alt01) + 0.25 * exposure01));
     sites.push({ cell: s.cell, x: s.x, z: s.z, anchor: "", alt01, shore01, exposure01, wet01, land: mine.length });
   }
+  // a cell's traits average a ~1 km disc, so on a 3-4 km island every cell reads mid-altitude (redstrand 2026-10-29:
+  // 0.24..0.58) and the upland anchor landed on the LOWEST cell: stretch the cells' altitude over 0..1 among themselves
+  // (the highest cell of the landmass is its upland), and re-derive the wet trait from it
+  const altLo = Math.min(...sites.map((s) => s.alt01));
+  const altHi = Math.max(...sites.map((s) => s.alt01));
+  if (sites.length >= 2 && altHi - altLo > 0.02) {
+    for (const s of sites) {
+      s.alt01 = (s.alt01 - altLo) / (altHi - altLo);
+      s.wet01 = Math.max(0, Math.min(1, 0.45 * (1 - s.shore01) + 0.3 * (1 - s.alt01) + 0.25 * s.exposure01));
+    }
+  }
   sites.sort((a, b) => b.land - a.land);
   const used = new Map<string, number>();
   const neighbours = (i: number): SiteAssignment[] => sites.filter((o, j) => j !== i && o.anchor && Math.hypot(o.x - sites[i]!.x, o.z - sites[i]!.z) <= size * 1.6);
   const fit = (a: Anchor, s: SiteAssignment): number => {
     const lat = latitudeOf(recipe, s.x, s.z);
     const wantT = Math.max(0, Math.min(1, lat + 0.2 - 0.45 * s.alt01));
-    const wantM = s.wet01;
+    // a dry climate (aridity) scales the wet trait down: on a small island every cell is near the sea
+    const wantM = s.wet01 * (1 - aridity);
     let c = (a.temperature - wantT) ** 2 + (a.moisture - wantM) ** 2;
     if (a.latitude !== undefined && zones.latitude) c += 0.25 * ((a.latitude - lat) / 0.3) ** 2;
     if (isWet(a, t) && !(s.alt01 < 0.35 && s.shore01 < 0.5)) c += 4;
@@ -157,7 +177,6 @@ export function assignClimateSites(recipe: WorldRecipe, field: WorldField, log: 
     let c = fit(a, s);
     for (const n of neighbours(i)) if (!legalPair(a, anchors.find((q) => q.id === n.anchor)!, t).legal) c += 3;
     if (diversity) {
-      if (!used.has(a.id) && used.size < 5) c -= 0.15;
       if (isWet(a, t) && ![...used.keys()].some((id) => isWet(anchors.find((q) => q.id === id)!, t)) && s.alt01 < 0.35 && s.shore01 < 0.4) c -= 0.3;
     }
     return c;
@@ -188,6 +207,29 @@ export function assignClimateSites(recipe: WorldRecipe, field: WorldField, log: 
     }
     if (fixed === 0) break;
   }
+  // spread: the greedy pass picks each cell's best fit, so a small island can draw two anchors. Until SPREAD_ANCHORS
+  // (or every anchor) are on the land, the unused anchor whose switch costs least takes that cell — never an anchor's
+  // last cell, never a switch that makes an illegal pair. (Before 2026-10-29 an "unused" bonus inside the greedy pass
+  // did this, and handed the upland anchor to whichever cell came first by size: redstrand's pines on the lowest cell.)
+  const target = Math.min(anchors.length, SPREAD_ANCHORS);
+  for (let round = 0; round < anchors.length; round++) {
+    const counts = new Map<string, number>();
+    for (const s of sites) counts.set(s.anchor, (counts.get(s.anchor) ?? 0) + 1);
+    if (counts.size >= target) break;
+    let pick: { i: number; a: Anchor; d: number } | null = null;
+    for (const a of anchors) {
+      if (counts.has(a.id)) continue;
+      for (let i = 0; i < sites.length; i++) {
+        const cur = sites[i]!.anchor;
+        if ((counts.get(cur) ?? 0) <= 1) continue;
+        if (neighbours(i).some((n) => !legalPair(a, anchors.find((q) => q.id === n.anchor)!, t).legal)) continue;
+        const d = cost(a, i, false) - cost(anchors.find((q) => q.id === cur)!, i, false);
+        if (!pick || d < pick.d) pick = { i, a, d };
+      }
+    }
+    if (!pick) break;
+    sites[pick.i]!.anchor = pick.a.id;
+  }
   // dominance: one anchor over BIOME_SHARE_MAX of the land sites hands its worst-fitting sites to their runner-up
   const total = sites.reduce((a, s) => a + s.land, 0);
   for (let round = 0; round < 4; round++) {
@@ -200,6 +242,59 @@ export function assignClimateSites(recipe: WorldRecipe, field: WorldField, log: 
     if (!victim) break;
     const alt = best(victim.i, new Set([top[0]]));
     victim.s.anchor = alt.id;
+  }
+  // balance on the MEASURED shares: the site discs above overlap and a cell's Voronoi region is not its disc, so the
+  // cells' land counts said 18 % where the drawn zone held 0-6 % (redstrand dogfood loop 1, 2026-10-29: 3 of 4 seeds
+  // failed the biomes rule's ">= 3 anchors at >= 10 %, none over 60 %"). Pin the sites into a copy, sample field.zone()
+  // on the land as the rule does, and move one cell per round: an anchor over BIOME_SHARE_MAX gives its worst-fitting
+  // cell away; with fewer than BIOME_KINDS_MIN anchors at BIOME_SHARE_MIN, the cheapest legal cell of the largest anchor
+  // goes to the most-needed one. Each move is kept only if the measured shares get closer to the rule.
+  const measure = (): Map<string, number> => {
+    const copy = structuredClone(recipe);
+    copy.climate.zones!.sites = sites.map((s) => ({ cell: s.cell, anchor: s.anchor }));
+    const f = createWorldField(copy);
+    const m = new Map<string, number>();
+    for (const p of land) { const id = f.zone(p.x, p.z).id; m.set(id, (m.get(id) ?? 0) + 1 / land.length); }
+    return m;
+  };
+  const miss = (m: Map<string, number>): number => {
+    let d = 0;
+    for (const v of m.values()) d += Math.max(0, v - BIOME_SHARE_MAX);
+    const ranked = [...m.values()].sort((a, b) => b - a);
+    for (let k = 0; k < Math.min(BIOME_KINDS_MIN, anchors.length); k++) d += Math.max(0, BIOME_SHARE_MIN - (ranked[k] ?? 0));
+    return d;
+  };
+  {
+    let shares = measure();
+    for (let round = 0; round < 8 && miss(shares) > 0; round++) {
+      const ranked = [...shares.entries()].sort((a, b) => b[1] - a[1]);
+      const top = ranked[0]![0];
+      const counts = new Map<string, number>();
+      for (const s of sites) counts.set(s.anchor, (counts.get(s.anchor) ?? 0) + 1);
+      const moves: { i: number; to: string; c: number }[] = [];
+      const needed = anchors.filter((a) => (shares.get(a.id) ?? 0) < BIOME_SHARE_MIN).map((a) => a.id);
+      for (let i = 0; i < sites.length; i++) {
+        const cur = sites[i]!.anchor;
+        if (cur !== top || (counts.get(cur) ?? 0) <= 1) continue;
+        for (const to of [...needed, ...anchors.map((a) => a.id)]) {
+          if (to === cur) continue;
+          const a = anchors.find((q) => q.id === to)!;
+          if (neighbours(i).some((n) => !legalPair(a, anchors.find((q) => q.id === n.anchor)!, t).legal)) continue;
+          moves.push({ i, to, c: cost(a, i, false) - (needed.includes(to) ? 1 : 0) });
+        }
+      }
+      moves.sort((p, q) => p.c - q.c);
+      let moved = false;
+      for (const mv of moves.slice(0, 6)) {
+        const was = sites[mv.i]!.anchor;
+        sites[mv.i]!.anchor = mv.to;
+        const next = measure();
+        if (miss(next) < miss(shares)) { shares = next; moved = true; break; }
+        sites[mv.i]!.anchor = was;
+      }
+      if (!moved) break;
+    }
+    log(`climate: measured shares ${[...shares.entries()].sort((a, b) => b[1] - a[1]).map(([id, v]) => `${id} ${(v * 100).toFixed(0)}%`).join(", ")}${miss(shares) > 0 ? " (the biomes rule's shares still missed)" : ""}`);
   }
   const share = new Map<string, number>();
   for (const s of sites) share.set(s.anchor, (share.get(s.anchor) ?? 0) + s.land / total);
