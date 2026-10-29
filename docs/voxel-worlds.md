@@ -3044,8 +3044,7 @@ the world-kit retaining-wall kit: an agent dictates the outline, the drop and th
 `worldgen terrace-place` solves the rest into `solved` (pieces, oriented `cuts` the field carves) plus a derived
 `tw-<id>` patch and clearing.
 `--refit` re-solves after a terrain rebuild; `--check` runs the gates and says STALE when the bare ground
-under a fit moved. With `townTerraces.walls` on (proving: on), `worldgen terrace` builds every stepped
-town's risers this way (`<town>-riser-<n>`, style from the town's tier, its ramps and stairs as inserts).
+under a fit moved. Per riser (s1g, `tools/worldgen-riser-rule.mts`, `terraceSchema.riser`): `worldgen terrace` makes a riser a 1 : 2 planted bank by default and a wall only where the bank does not fit, a street/building is within 3 m of its top, or it drops over 2.5 m (`--evaluate` prints the verdicts); a walled riser is built this way (`<town>-riser-<n>`, style from the town's tier, its ramps and stairs as inserts).
 
 What the fit has to get right, all found by measuring:
 
@@ -3077,7 +3076,7 @@ What the fit has to get right, all found by measuring:
   per-placement `rockCap` from the same resolver scatter uses.
 - **Town shelves:** a shelf that gets a wall stops carving (`flatten` 0; the patch is its flat ground), all
   shelf levels are set before the first fit (a level moved after a fit stales it), steps are capped at
-  `townTerraces.maxStep`, and a link no wall edge can take as a stair leaves that riser a voxel riser with
+  `--max-step` (6), and a link no wall edge can take as a stair leaves that riser a voxel riser with
   the stage's graded ramp (a road may not run into masonry); before that it tries the stage's kind, a
   straight stair and a ramp on every wall edge. A shelf's outline is its centreline offset both ways
   (mitred), so walls follow the contour. Only the stage's own `town-riser` walls are rewritten.
@@ -3105,7 +3104,7 @@ What the fit has to get right, all found by measuring:
     higher): the hard nearest-point switch drew a seam of the wall's height times the feather weight.
   - **Stepped-end banks** climb back to the pad over 1.5 x the end piece's run, the crease rounded over
     1.2 m: a 6 m wall's bank over its own 6 m run was a 1.5 slope whose crease aliased.
-- **Too tall for one wall:** a drop over the tallest riser (`townTerraces.maxStep`, never over the kit's
+- **Too tall for one wall:** a drop over the tallest riser (`--max-step` (6), never over the kit's
   6.4 m) by more than 1 m is SPLIT into two stacked terraces with a new shelf between (`splitShelf`, tag
   `split`), where the two shelves run along each other (within 35 deg) with 18 m between centrelines. Within
   1 m the wall is held and the shelf moves down. Otherwise (no room, a shelf climbing across the one below,

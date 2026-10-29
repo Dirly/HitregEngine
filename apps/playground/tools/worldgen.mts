@@ -110,6 +110,7 @@ import { commandWaterEdges } from "./water-edges.mts";
 import { commandWaterLogic } from "./worldgen-water-logic.mts";
 import { COAST_COLOURS, coastStageCheck, commandCoast, commandCoastTop } from "./worldgen-coast.mts";
 import { riverWaterDoc } from "./_river-water.mts";
+import { measureTownRisers, riserRule } from "./worldgen-riser-rule.mts";
 import { commandTerracePlace, kerbTownRisers, loadTerraceKit, recipeInverse, removeTownTerraceWalls, townTerraceWalls, type TownRiserLink } from "./worldgen-terrace-walls.mts";
 import { commandBridgePlace } from "./worldgen-bridge-spans.mts";
 import { CLIMB_NEEDS_PLACE, PLACE_REACH } from "./zonegen/commands/_site-finder.mts";
@@ -357,8 +358,10 @@ const HELP = `worldgen — procedural world pipeline
                    --town <id> for one town; --step-height 6 --max-terraces 5 --riser 5 --min-shelf 9
                    --max-shelf --ramp-grade 0.12 --ramp-width 7 --sample 4 set the middle of each range.
                    Idempotent (lifts the last run's pads and ramps off first); re-run "paths" after.
-                   --walls / --no-walls (default: recipe townTerraces.walls): risers become retaining walls
-                   (terraceWalls <town>-riser-<n>, ramps/stairs as wall inserts); pinned towns untouched
+                   RISERS, per riser (tools/worldgen-riser-rule.mts): a graded 1 : 2 planted bank by default; a kit
+                   retaining wall (terraceWalls <town>-riser-<n>, ramps/stairs as inserts) only where the bank does not
+                   fit, a street/building is within 3 m of its top edge, or it drops over 2.5 m; prints each verdict and
+                   why. --evaluate: the verdicts for the town's CURRENT shelves, nothing written. --no-walls: all banks
                    PROGRAM: a town with a plan (authoring/towns/<name>-plan.json) or a recipe \`program\` is sized
                    from it (tools/worldgen-town-program.mts): straight street-shaped bands along the contour, as
                    long and as many (--max-terraces) as the program's flat area needs, radius grown to take them,
@@ -3866,6 +3869,18 @@ function fitShelf(
 function commandTerrace(): void {
   const { recipe: original, file } = loadRecipe();
   const only = stringOption("town", "");
+  if (flag("evaluate")) {
+    // the per-riser rule on the town's shelves as they stand (an INSTALLED town is judged, not re-cut)
+    for (const t of original.features.towns.filter((t) => (only ? t.id === only : t.terraces.length > 0))) {
+      const walls = new Map((original.features.terraceWalls ?? []).filter((w) => w.owner === t.id).map((w) => [w.id, w]));
+      console.log(`  ${t.id}:`);
+      for (const v of measureTownRisers(original, t.id).map(riserRule)) {
+        const built = walls.get(v.id);
+        console.log(`    ${v.id}: ${v.kind.toUpperCase()} — ${v.why}; built now: ${built ? `wall ${built.solved?.height ?? built.height ?? "?"} m` : "bank"}${built && v.kind === "bank" ? " (rule says bank)" : !built && v.kind === "wall" ? " (rule says wall)" : ""}`);
+      }
+    }
+    return;
+  }
   // PROGRAMS (2026-10-29, s1f): a town with a plan (authoring/towns/<name>-plan.json, the frozen program) or a
   // recorded `program` is sized from it; --program-area <m2> overrides the number, --no-program sizes from the radius
   const projectDir = path.resolve(path.dirname(file), "..", "..");
@@ -3954,8 +3969,10 @@ function terraceTowns(
   // RETAINING WALLS (recipe `townTerraces.walls`, or --walls / --no-walls): every riser becomes a terrace wall from
   // the retaining-wall kit (`features.terraceWalls`, owner = the town, ids `<town>-riser-<n>`), its ramp or stair
   // a wall insert. Steps are capped at `townTerraces.maxStep` so each riser is one kit wall.
-  const wallsOn = !flag("no-walls") && (flag("walls") || recipe.townTerraces?.walls === true);
-  const maxStep = option("max-step", recipe.townTerraces?.maxStep ?? 6);
+  // per riser (tools/worldgen-riser-rule.mts): every stepped town goes through the wall fitter, which builds a wall
+  // only where the rule says so; --no-walls makes every riser a bank. Steps stay <= --max-step (one kit wall).
+  const wallsOn = !flag("no-walls");
+  const maxStep = option("max-step", 6);
   // a re-cut town's old riser walls go too (they are derived from the shelves this run replaces)
   for (const t of targets) removeTownTerraceWalls(recipe, t.id);
 

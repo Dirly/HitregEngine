@@ -53,6 +53,7 @@ import {
 } from "@hitreg/core";
 import { closure, PROJECTS } from "./_closure.mjs";
 import { terraceRiserBand } from "./worldgen-lips.mts";
+import { measureTownRisers, riserRule, RISER_RULE, type RiserVerdict } from "./worldgen-riser-rule.mts";
 
 type V2 = [number, number];
 type V3 = [number, number, number];
@@ -1507,9 +1508,18 @@ export function townTerraceWalls(
     return near !== undefined && Math.abs(near - want) <= 0.4 ? near : kit.plan.snapHeight(want);
   };
   const tooTall = new Set<object>();
+  // THE PER-RISER RULE (s1g): bank by default, wall only where the rule says (tools/worldgen-riser-rule.mts). Judged on
+  // the planned levels, before any is snapped to a kit height; a bank riser keeps its level.
+  const verdicts = new Map<object, RiserVerdict>();
+  for (const v of measureTownRisers({ ...recipe, features: { ...recipe.features, towns: recipe.features.towns.map((t) => (t.id === town.id ? { ...t, terraces: shelves } : t)) } }, town.id).map(riserRule)) {
+    verdicts.set(shelves[v.k]!, v);
+    log(`    ${v.id}: ${v.kind.toUpperCase()} — ${v.why}`);
+  }
+  const isBank = (sh: object) => verdicts.get(sh)?.kind === "bank";
   let prevTop: number | null = null;
   for (let k = 0; k < shelves.length; k++) {
     const shelf = shelves[k]!;
+    if (prevTop !== null && isBank(shelf)) { prevTop = shelf.groundY; continue; }
     if (prevTop !== null) {
       const drop = shelf.groundY - prevTop;
       // TOO TALL FOR ONE WALL (by more than SPLIT_OVER): split the drop into two stacked terraces, a shelf of its own
@@ -1568,11 +1578,14 @@ export function townTerraceWalls(
   // THE FALLBACK where no wall fits: the shelf carves its own flat ground again and its riser is the field's graded
   // voxel slope, never steeper than 1 : 1.25 over the drop to the shelf below (a 6 m drop over the stage's ~4.5 m
   // falloff drew as lattice steps beside the walls either side of it)
-  const voxelRiser = (k: number) => {
+  const voxelRiser = (k: number, fallback = true) => {
     const sh = shelves[k]!;
     sh.flatten = 1;
-    const drop = k > 0 ? Math.abs(sh.groundY - shelves[k - 1]!.groundY) : 0;
-    sh.falloff = r2(Math.max(sh.falloff, 1.25 * drop));
+    const v = verdicts.get(sh);
+    const drop = k > 0 ? Math.abs(sh.groundY - shelves[k - 1]!.groundY) : (v?.height ?? 0);
+    // a bank grades at the rule's 1 : 2 (a fallback wall at least at the voxel riser's 1 : 1.25)
+    sh.falloff = r2(Math.max(sh.falloff, (fallback ? 1.25 : RISER_RULE.bankRun) * drop));
+    sh.riser = { kind: "bank", height: r2(drop), why: fallback ? `wanted a wall (${v?.why ?? "?"}) but none fits: graded voxel riser` : v!.why };
     restored = true;
   };
   for (const [k, shelf] of shelves.entries()) {
@@ -1581,6 +1594,7 @@ export function townTerraceWalls(
     const hold = holdOf(fits, voxel);
     if (!footprint) { log(`    ${shelf.id}: nothing 8 m wide fits inside the shelf - left as a voxel riser`); voxelRiser(k); continue; }
     if (tooTall.has(shelf)) { voxelRiser(k); continue; }
+    if (isBank(shelf)) { voxelRiser(k, false); continue; }
     // walls on the edges that face DOWN the town (toward the shelf below); the lowest shelf decides by the ground
     const centroid = (pts: readonly (readonly [number, number])[]): V2 => [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
     const walls = "auto" as const;
@@ -1650,6 +1664,7 @@ export function townTerraceWalls(
     }
     applyTerraceFit(recipe, fit);
     fits.push(fit);
+    { const v = verdicts.get(shelf); shelf.riser = { kind: "wall", height: r2(fit.doc.solved!.height), why: v?.why ?? "wall" }; }
     const s = fit.doc.solved!;
     const ups = s.pieces.filter((p) => /stair|ramp/.test(p.role)).map((p) => p.role);
     log(`    ${fit.doc.id}: ${s.style} ${s.height} m, pad ${s.topY}; ${s.pieces.filter((p) => !p.role.startsWith("cap")).length} pieces${ups.length ? ` incl. ${ups.join(", ")}` : ""}`);

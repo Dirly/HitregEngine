@@ -4631,12 +4631,26 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     for (const town of bucketAt(towns, x, z) as readonly TownDoc[]) {
       if (town.excludeScatter === false || (cover && town.cover)) continue;
+      // a shelf riser the terrace rule made a graded BANK (`terraceSchema.riser`) is planted: ground cover grows on
+      // its falloff, off every shelf's and pad's flat (scatter stays out; streets keep clear by the road clearance)
+      if (cover && onTownBank(town, x, z)) continue;
       best = Math.min(best, Math.sqrt((x - town.center[0]) ** 2 + (z - town.center[1]) ** 2) - town.radius);
       // a shelf cut below the pad's edge is still the town's ground, and a
       // tree standing on it is a tree in the street
       for (const terrace of town.terraces) best = Math.min(best, distanceToPolyline(terrace.points, x, z) - terrace.radius);
     }
     return best;
+  }
+
+  /** On a town shelf's graded bank riser (its falloff) and off every shelf's and pad's flat ground. */
+  function onTownBank(town: TownDoc, x: number, z: number): boolean {
+    let bank = false;
+    for (const terrace of town.terraces) {
+      const d = distanceToPolyline(terrace.points, x, z) - terrace.radius;
+      if (d <= 0) return false;
+      if (terrace.riser?.kind === "bank" && d <= terrace.falloff) bank = true;
+    }
+    return bank;
   }
 
   /** Surface height of a river's water over its bed: most of the LOCAL channel depth, never above the banks. */

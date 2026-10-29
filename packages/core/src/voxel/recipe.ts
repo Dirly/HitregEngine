@@ -509,6 +509,22 @@ export const terraceSchema = z.object({
         "(`townSchema.program`): the street the band was cut for. town-layout's frame for the band is its centreline, so a lane on it " +
         "is `axis` + `offset`. Absent on a contour-fitted or disc shelf.",
     ),
+  riser: z
+    .object({
+      kind: z.enum(["bank", "wall"]).describe("`bank` = a graded earth bank (the shelf carves its own falloff at 1 : 2) with ground cover; `wall` = a kit retaining wall (`features.terraceWalls` `<town>-riser-<n>`)."),
+      height: z.number().describe("The riser's drop (m): to the shelf below, or for the lowest shelf to the natural ground beyond its downhill edge."),
+      why: z.string().describe("The rule's reason, as `worldgen terrace` printed it."),
+    })
+    .optional()
+    .describe(
+      "What holds this shelf's DOWNHILL riser up, decided per riser by `worldgen terrace` (s1g, 2026-10-29; Derek: \"why does " +
+        "every town have a retaining wall?\"). Default a graded earth bank with ground cover, run 2 m per metre of drop " +
+        "(1 : 2, a planted bank; gentler than the 1 : 1.25 voxel-riser limit). A built retaining wall ONLY where (a) the bank's run does not fit the ground " +
+        "between the shelves (it would reach a building pad or plot, a street or lane on the shelf below, the sea, or an " +
+        "unlaid shelf below would keep under its 9 m half-width), (b) a street or a building stands within 3 m of the " +
+        "riser's top edge (the 2.5 m street kerb + 0.5 m), or (c) the drop is over 2.5 m (= one 5 m street width of run " +
+        "at 1 : 2: a taller bank takes a lot's worth of ground); a built riser over 2.5 m is planned as 2-3 low walls with 2 m planted treads. Absent on a shelf written before the rule or never stepped.",
+    ),
   tags: z.array(z.string()).default([]),
 });
 
@@ -2444,20 +2460,6 @@ export const worldRecipeSchema = z.object({
         "it (unknown biome/surface names, missing textures, realized density per biome).",
     ),
 
-  townTerraces: z
-    .object({
-      walls: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Build every stepped town's shelf risers as retaining walls (`features.terraceWalls`, owner = the town) instead of " +
-            "voxel slopes, with the stage's ramps and stairs as wall inserts. Towns tagged `pinned` are never touched.",
-        ),
-      maxStep: z.number().min(1.6).max(6.4).default(6).describe("With walls on: tallest shelf step (m) a town draws, so every riser fits one kit wall."),
-    })
-    .optional()
-    .describe("Options for `worldgen terrace` (the town shelf stage). Omitted = walls off."),
-
   pipeline: z
     .record(z.string(), z.string())
     .default({})
@@ -2591,7 +2593,7 @@ export const worldRecipeSchema = z.object({
           "Terraces held up by real retaining walls (pad outline, drop, inserts) — authoring truth. `worldgen terrace-place` " +
             "fits each to the ground and writes its `solved` pieces plus the derived `tw-<id>*` height patch, passages and " +
             "clearing; `--refit` re-solves them after the terrain changes. `worldgen terrace` writes the `<town>-riser-*` ones " +
-            "for towns when `townTerraces.walls` is on.",
+            "where a town shelf's riser rule says wall (`terraceSchema.riser`).",
         ),
       floaterClears: z
         .array(
