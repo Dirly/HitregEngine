@@ -171,15 +171,24 @@ export function scatterEmbed(rule: ScatterDoc): number {
   return Math.max(ROCK_EMBED, -rule.yOffset * 0.5);
 }
 
-function seatRock(probe: SolidProbe, rule: ScatterDoc, x: number, z: number, base: number, yaw: number, scale: number, colliderSize?: readonly [number, number, number]): number | null {
+function seatRock(probe: SolidProbe, rule: ScatterDoc, x: number, z: number, base: number, yaw: number, scale: number, colliderSize?: readonly [number, number, number], dense?: () => SolidProbe): number | null {
   const size = scatterSeatSize(rule, scale, colliderSize);
-  const r = seatObject(probe, { x, z, y: base, yaw, ...size, align: rule.alignToNormal }, "embed", { embed: scatterEmbed(rule), embedMin: scatterEmbed(rule), reachDown: Math.max(4, size.height * 2) });
+  const opts = { embed: scatterEmbed(rule), embedMin: scatterEmbed(rule), reachDown: Math.max(4, size.height * 2) };
+  const fp = { x, z, y: base, yaw, ...size, align: rule.alignToNormal };
+  const r = seatObject(probe, fp, "embed", opts);
   if (r.status === "unsupported") return null;
   // the placer seats on the HEIGHTFIELD, the float gate re-measures on the DENSITY (0.25 m steps, overhang and bank
   // shaping included): on river and lake banks the two differ by 0.05-0.15 m, and rocks seated to the 15 % target there
   // read "embedded 2-9 % (< 10 %)" (firstshore 2026-10-28, the river-2 gorge and lake-1 shore-rocks). Bedded a little
   // deeper than the heightfield asks, never more than a quarter of the rock.
-  return (r.y ?? base) - Math.min(SEAT_PROBE_MARGIN, size.height * 0.25);
+  const y = (r.y ?? base) - Math.min(SEAT_PROBE_MARGIN, size.height * 0.25);
+  if (!dense) return y;
+  // ...and checked on the density the gate measures, with the gate's own rule: a rock the margin did not bed (a small
+  // one: a quarter of 0.5 m covers little) is sunk to the target there, one that straddles a step only the density shows
+  // (a bank cut under a river stone) is dropped (redstrand 2026-10-29: 3 rocks off by 0.01-0.26 m in a 27788-rock sweep)
+  const d = seatObject(dense(), { ...fp, y }, "embed", opts);
+  if (d.status === "unsupported") return null;
+  return d.status === "off" && d.y !== null ? d.y : y;
 }
 /** Metres a scatter rock is sunk past its heightfield seat to cover the density the float gate measures. */
 export const SEAT_PROBE_MARGIN = 0.25;
@@ -954,6 +963,8 @@ export function scatterCell(
   // rocks are seated on the ground under their whole footprint (seat.ts): sunk where the ground falls below their
   // underside, dropped where they straddle a step taller than themselves. A preview (fastGround) skips it.
   const seatProbe = options.fastGround || options.seat === false ? null : scatterGroundProbe(field);
+  let denseSeat: SolidProbe | null = null;
+  const dense = (): SolidProbe => (denseSeat ??= fieldSolidProbe(field));
   // shaped sea stacks (terrain.seaCliffs[].stacks.shape): nothing grows on a boulder apron round a stack's foot
   const seaBare = field.seaCliffs?.()?.shaped ? field.seaCliffs()! : null;
   const limit = field.worldLimit;
@@ -1341,7 +1352,7 @@ export function scatterCell(
           members.forEach((m, i) => {
             const own = !m.anchor && list ? list[m.pick] : undefined;
             const memberSize = own ? own.colliderSize : emit.modelVariants && m.pick >= 0 ? emit.modelVariants[m.pick]?.colliderSize : undefined;
-            const my = seats ? seatRock(seatProbe!, emit, m.x, m.z, m.ground + emit.yOffset * m.scale, quatYawOf(m.rotation), m.scale, own?.colliderSize) : m.ground + emit.yOffset * m.scale;
+            const my = seats ? seatRock(seatProbe!, emit, m.x, m.z, m.ground + emit.yOffset * m.scale, quatYawOf(m.rotation), m.scale, own?.colliderSize, dense) : m.ground + emit.yOffset * m.scale;
             if (my === null) return;
             out.push({
               rule: emit.id,
@@ -1378,7 +1389,7 @@ export function scatterCell(
         let baseY = groundY + emit.yOffset * scale;
         if (seatProbe && scatterContact(emit) === "embed") {
           // the rule's collider, not a variant's: adding variants or caps never moves a rock (rock-cap.test)
-          const seated = seatRock(seatProbe, emit, wx, wz, baseY, r4 * Math.PI * 2, scale);
+          const seated = seatRock(seatProbe, emit, wx, wz, baseY, r4 * Math.PI * 2, scale, undefined, dense);
           if (seated === null) continue;
           baseY = seated;
         }

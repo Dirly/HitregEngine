@@ -11,6 +11,8 @@
  *   2. registers each tile as a palette surface `<palette>-<role>` (texture, average colour, tile scale);
  *   3. sets every cast zone's `regions[].ground` (role -> that surface), which the field blends in by zone
  *      membership over `zoneGround.band`;
+ *   3b. gives every sea-cliff stretch its zone's cliff (`turf.zone` + `turf.cliff`): the wall stands on the zone
+ *      polygon's edge, so without it the face draws a share of the base `cliff` (the row faults a stretch without it);
  *   4. switches the world to `splat: "indexed"` (four layers per vertex from one texture array) and
  *      re-emits the terrain material so its layers match the palette.
  *
@@ -39,7 +41,7 @@ import { motifScore } from "./texture-swatch.mjs";
 import { groundPaletteSchema, type GroundPalette } from "./zonegen/schemas.mts";
 import { closure, findAsset } from "./_closure.mjs";
 import { writeRockSkinTemplate } from "./rock-skins.mts";
-import { paletteRefusals, zoneOf, zonePalette } from "./_zone-palette.mts";
+import { paletteRefusals, zoneAt, zoneOf, zonePalette } from "./_zone-palette.mts";
 
 export interface ZoneTexturesHost {
   argv: string[];
@@ -231,6 +233,9 @@ export function commandZoneTextures(host: ZoneTexturesHost, world: string): void
     console.log(`  ${row.zone} (${region.name}) <- ${row.palette}: ${Object.entries(ground).map(([r, s]) => `${r}=${s}`).join(", ")}`);
   }
   if (applied === 0) host.fail("no zone had a ground look to apply");
+  // 4b. sea cliffs are the zone's cliff: each stretch's turf names its zone and carries the cliff tile onto the wall
+  const sea = seaCliffTurf(recipe);
+  if (sea.length) console.log(`  sea cliffs take their zone's cliff: ${sea.join(", ")}`);
   recipe.splat = "indexed";
   // 5. the stone follows the place: each zone's cliff gets a slice of the world's rock material (recipe.rockSkins)
   // its small rocks (under 4 m) a grainy small-rock tile in the parallel slot of the small rock material, and its
@@ -242,6 +247,78 @@ export function commandZoneTextures(host: ZoneTexturesHost, world: string): void
     `${recipe.surfaces.length} surfaces, splat ${recipeSplatIndexed(recipe) ? "indexed" : "dense"}; nothing to bake — cells mesh from the recipe as they stream.\n` +
       `towns in these zones take the paving once their streets carry role "paving": npx tsx tools/town-ground.mts paving --project ${project} --town <town>`,
   );
+}
+
+type SeaCliffLite = { id?: string; region?: string; along?: [number, number][]; turf?: { zone?: string; surface?: string; amount?: number; cliff?: boolean } };
+
+/** Distance from (x, z) to a polygon's edges. */
+function polygonDistance(x: number, z: number, poly: readonly (readonly number[])[]): number {
+  let best = Infinity;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [ax, az] = poly[j]! as [number, number], [bx, bz] = poly[i]! as [number, number];
+    const dx = bx - ax, dz = bz - az, len = dx * dx + dz * dz;
+    const t = len > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / len)) : 0;
+    best = Math.min(best, Math.hypot(x - (ax + dx * t), z - (az + dz * t)));
+  }
+  return best;
+}
+
+/**
+ * The zone a sea-cliff stretch is the coast of: its `region`'s zone, else the zone whose polygon holds most of its
+ * `along` points, else the nearest zone polygon (the wall runs on the coastline, the polygon's edge, often just outside).
+ */
+export function seaCliffZone(recipe: WorldRecipe, doc: SeaCliffLite): string | null {
+  if (doc.region) return zoneOf(recipe, doc.region)?.id ?? null;
+  const zones = recipe.regions.filter((r) => !r.within && r.polygon && r.polygon.length >= 3);
+  if (zones.length === 0 || !doc.along?.length) return null;
+  const votes = new Map<string, number>();
+  for (const [x, z] of doc.along) {
+    let id = zoneAt(recipe, x, z);
+    if (!id) {
+      let bd = Infinity;
+      for (const r of zones) { const d = polygonDistance(x, z, r.polygon!); if (d < bd) { bd = d; id = r.id; } }
+    }
+    if (id) votes.set(id, (votes.get(id) ?? 0) + 1);
+  }
+  let best: string | null = null, bv = 0;
+  for (const [id, v] of votes) if (v > bv) { bv = v; best = id; }
+  return best;
+}
+
+/** The zone ground's cliff of a zone (or null): what its sea cliffs should draw. */
+function zoneCliffTile(recipe: WorldRecipe, zone: string): string | null {
+  return (recipe.regions.find((r) => r.id === zone)?.ground as Record<string, string> | undefined)?.cliff ?? null;
+}
+
+/**
+ * Sea cliffs take the zone's cliff tile (redstrand 2026-10-29: the Weeping Sun's face and its cape drew the base
+ * palette's grey `cliff` because the wall stands on the zone polygon's edge, half outside its membership band). Sets
+ * `turf.zone` + `turf.cliff` on every stretch of a zone with a ground cliff, keeping the rest of its turf. Returns the
+ * stretches changed, as "id->zone".
+ */
+export function seaCliffTurf(recipe: WorldRecipe): string[] {
+  const docs = ((recipe.terrain as { seaCliffs?: SeaCliffLite[] }).seaCliffs ?? []);
+  const changed: string[] = [];
+  for (const doc of docs) {
+    const zone = seaCliffZone(recipe, doc);
+    if (!zone || !zoneCliffTile(recipe, zone)) continue;
+    if (doc.turf?.zone === zone && doc.turf.cliff === true) continue;
+    doc.turf = { ...(doc.turf ?? {}), zone, cliff: true };
+    changed.push(`${doc.id ?? "?"}->${zone}`);
+  }
+  return changed;
+}
+
+/** Stretches of a zone with a ground cliff whose wall does not take it (the row's fault; zone-textures re-sets them). */
+export function seaCliffTurfFaults(recipe: WorldRecipe): string[] {
+  const docs = ((recipe.terrain as { seaCliffs?: SeaCliffLite[] }).seaCliffs ?? []);
+  const out: string[] = [];
+  for (const doc of docs) {
+    const zone = seaCliffZone(recipe, doc);
+    if (!zone || !zoneCliffTile(recipe, zone)) continue;
+    if (doc.turf?.zone !== zone || doc.turf.cliff !== true) out.push(`sea cliff ${doc.id ?? "?"} does not take ${zone}'s cliff (turf.zone + turf.cliff; re-run zone-textures)`);
+  }
+  return out;
 }
 
 /**
@@ -295,6 +372,7 @@ export function zoneTexturesStageCheck(recipe: WorldRecipe, project: string, ass
       }
     }
   }
+  problems.push(...seaCliffTurfFaults(recipe));
   const materialFile = path.join(assetsRoot, "materials", `${recipe.material ?? `terrain/${recipe.name}`}.json`);
   if (fs.existsSync(materialFile)) {
     const mat = JSON.parse(fs.readFileSync(materialFile, "utf8")) as { splat?: { source?: string; layers?: { map?: string }[] } };

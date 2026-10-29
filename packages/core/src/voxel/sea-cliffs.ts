@@ -176,6 +176,14 @@ export const seaCliffSchema = z
           .optional()
           .describe("A palette surface (e.g. the zone's `rockCap.layer` turf) laid over the flat tops of the cliff and the stacks."),
         amount: z.number().min(0).max(1).default(1).describe("How much of the zone's ground (and `surface`) the stretch takes."),
+        cliff: z
+          .boolean()
+          .optional()
+          .describe(
+            "true: the wall and the stacks' sides take the zone's CLIFF tile too (regions[].ground.cliff), not only its tops. The " +
+              "wall stands on the zone polygon's edge, where membership fades over zoneGround.band, so without this a sea cliff " +
+              "draws a share of the base palette's `cliff`. `worldgen zone-textures` sets it on every stretch of a zone with a cliff tile.",
+          ),
       })
       .optional()
       .describe(

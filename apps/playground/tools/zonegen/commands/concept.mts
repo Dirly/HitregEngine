@@ -172,6 +172,8 @@ export async function run(ctx: Ctx): Promise<number> {
   const renders = { approach: file("-approach.site.png"), far: file("-far.site.png"), plan: file("-plan.site.png") };
   const frames = { approach: file("-approach.png"), far: file("-far.png") };
   const briefText = conceptBrief(text, fit, height);
+  // the two cameras as light-shots spots: a pre-freeze look at the bare site renders them with tools/light-shots.mts --spots
+  if (ctx.flag("dry-run")) console.log(`cameras: ${JSON.stringify([approach, far].map((v, i) => ({ name: `${id}-${i ? "far" : "approach"}`, x: Math.round((v.eye[0] + v.target[0]) / 2), z: Math.round((v.eye[2] + v.target[2]) / 2), camera: v.eye, target: v.target, note: v.note })))}`);
   if (ctx.flag("dry-run")) { console.log(`\n--- repaint brief ---\n${briefText}\n--- (dry run: nothing rendered) ---`); return 0; }
 
   // ---- render the bare site ------------------------------------------------------------------------------------------

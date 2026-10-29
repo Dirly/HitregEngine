@@ -2035,6 +2035,21 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return d.turf && id !== undefined ? groundZones.findIndex((g) => g.id === id) : -1;
   }));
   const seaTurfSurface = Int16Array.from(seaTurfDocs.map((d) => (d?.surface ? surfaceIndex(d.surface) : -1)));
+  /** Stretches whose turf carries the zone's cliff onto the wall and the stacks' sides (`turf.cliff`). */
+  const seaTurfCliff = seaTurfDocs.map((d) => d?.cliff === true);
+  /** Per stretch: which ground zones are its turf zone or nested in it (1), by `groundZones` index. */
+  const seaTurfFamily = Array.from(seaTurfZone, (tz) => {
+    const fam = new Uint8Array(Math.max(1, groundZones.length));
+    if (tz < 0) return fam;
+    for (let k = 0; k < groundZones.length; k++) {
+      let p = k;
+      for (let hop = 0; p >= 0 && hop < 8; hop++) {
+        if (p === tz) { fam[k] = 1; break; }
+        p = groundZones[p]!.parent;
+      }
+    }
+    return fam;
+  });
   const turfHit = { k: -1, w: 0 };
   const turfM = new Float32Array(Math.max(1, groundZones.length));
   const CLIFF_ROLE = surfaceRoleIndex("cliff");
@@ -2053,13 +2068,16 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const flatShare = 1 - smoothstep(FLAT_CLIFF_START, FLAT_CLIFF_END, steep);
     let zm: Float32Array = zoneM;
     if (hasSeaTurf && seaTurfAt(x, z) > 0 && seaTurfZone[turfHit.k]! >= 0) {
-      // the turf's zone holds at least the turf's share; the others give up what that leaves short
-      const tz = seaTurfZone[turfHit.k]!, tw = turfHit.w;
+      // the turf's zone (with the regions nested in it: a corridor cut out of the zone IS the zone there) holds at least
+      // the turf's share; the others give up what that leaves short
+      const tz = seaTurfZone[turfHit.k]!, tw = turfHit.w, fam = seaTurfFamily[turfHit.k]!;
       zoneWeights(x, z);
-      let others = 0;
-      for (let k = 0; k < groundZones.length; k++) if (k !== tz) others += zoneM[k]!;
-      const own = Math.max(zoneM[tz]!, tw), room = Math.max(0, 1 - own), scale = others > room ? room / others : 1;
-      for (let k = 0; k < groundZones.length; k++) turfM[k] = k === tz ? own : zoneM[k]! * scale;
+      let others = 0, family = 0;
+      for (let k = 0; k < groundZones.length; k++) if (fam[k]) family += zoneM[k]!; else others += zoneM[k]!;
+      const own = Math.max(family, tw), room = Math.max(0, 1 - own), scale = others > room ? room / others : 1;
+      // the family scales up together (a nested region keeps its share of it); with no family weight the zone takes it all
+      const lift = family > 1e-6 ? own / family : 0;
+      for (let k = 0; k < groundZones.length; k++) turfM[k] = fam[k] ? (family > 1e-6 ? zoneM[k]! * lift : k === tz ? own : 0) : zoneM[k]! * scale;
       zm = turfM;
     } else if (zoneWeights(x, z) <= 1e-4) return;
     const base = zoneRoles.baseRole;
@@ -2068,8 +2086,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       if (role < 0) continue;
       const w = out[offset + s]!;
       if (w <= 0) continue;
-      // (turf leaves the CLIFF role alone: the wall and the stacks' sides keep the stretch's own rock)
-      const turfOnly = zm === turfM && role === CLIFF_ROLE;
+      // (turf leaves the CLIFF role alone unless the stretch sets `turf.cliff`: else the wall and the stacks' sides keep
+      // whatever share of the zone the border band hands them)
+      const turfOnly = zm === turfM && role === CLIFF_ROLE && !seaTurfCliff[turfHit.k];
       for (let k = 0; k < groundZones.length; k++) {
         const m = turfOnly ? zoneM[k]! : zm[k]!;
         if (m <= 0) continue;
