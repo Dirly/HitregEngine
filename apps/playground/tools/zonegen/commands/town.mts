@@ -11,7 +11,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createWorldField } from "@hitreg/core";
+import { createWorldField, type WorldField } from "@hitreg/core";
+import { programFitFindings } from "../../worldgen-town-program.mts";
 import { exists, finish, load, loadRecipe, readJson, type Ctx, type Finding } from "../lib.mts";
 import { zoneBriefSchema } from "../schemas.mts";
 import { err, requireZone, townNames, warn, WEALTH, type Tier } from "./_shared.mts";
@@ -86,7 +87,7 @@ const COAST_REACH = 60;
  * Coastal without a survey: tagged so in the recipe, or sea-level ground within COAST_REACH of the pad. The second needs
  * ground heights, so the world field is built ONCE, lazily, only when some town has no survey and no tag.
  */
-let field: { height(x: number, z: number): number } | null = null;
+let field: WorldField | null = null;
 let recipeCache: ReturnType<typeof loadRecipe> | null = null;
 function coastalFromRecipe(ctx: Ctx, townId: string): { coastal: boolean; how: string } {
   const recipe = (recipeCache ??= loadRecipe(ctx.paths));
@@ -189,6 +190,16 @@ export async function run(ctx: Ctx): Promise<number> {
         inputs.push(p.recipe);
         const c = coastalFromRecipe(ctx, t.id);
         if (c.coastal && !structures.some((s) => s.kind === "dock")) err(f, "dock", `${name}: coastal by the recipe (${c.how}; no survey yet) and the plan has no dock structure`, ref);
+      }
+      // PROGRAM FIT (2026-10-29, s1f): the plan's buildings at the kit's footprints + streets + wall clearance against the
+      // level ground the recipe's shelves hold, measured on the built field — fails here, before the freeze, not at layout
+      {
+        const recipe = (recipeCache ??= loadRecipe(p));
+        field ??= createWorldField(recipe);
+        inputs.push(p.recipe);
+        const env = path.join(p.projectDir, "authoring", "towns", `${name}-envelopes.json`);
+        if (exists(env)) inputs.push(env);
+        for (const m of programFitFindings(recipe, field, p.projectDir, (town) => town.id === t.id)) err(f, "program-fit", `${name}: ${m}`, ref);
       }
       const people = new Set(residents.map((r) => r.id));
       for (const rel of plan.relationships ?? []) {

@@ -497,6 +497,18 @@ export const terraceSchema = z.object({
   falloff: z.number().min(0).default(6).describe("Distance beyond `radius` over which the shelf's height blends into what is around it — the step's face."),
   groundY: z.number().describe("The shelf's height. Unlike a town pad this is never inferred: a terrace exists to be at a chosen level."),
   flatten: z.number().min(0).max(1).default(1),
+  street: z
+    .object({
+      axis: z.tuple([z.number(), z.number()]).describe("Unit XZ direction the street runs: the band's centreline, first point to last."),
+      offset: z.number().describe("Metres from the centreline to the street's middle, + to the axis's left ([-axis.z, axis.x]). 0 = down the middle with a row of lots each side; otherwise one row with the street along the band's seaward (downhill) edge."),
+      width: z.number().positive().describe("Street width, metres."),
+    })
+    .optional()
+    .describe(
+      "A STREET-SHAPED shelf (a straight band along the contour) written by `worldgen terrace` when it sizes a town from its program " +
+        "(`townSchema.program`): the street the band was cut for. town-layout's frame for the band is its centreline, so a lane on it " +
+        "is `axis` + `offset`. Absent on a contour-fitted or disc shelf.",
+    ),
   tags: z.array(z.string()).default([]),
 });
 
@@ -591,6 +603,24 @@ export const townSchema = z.object({
     .describe(
       "Shelves stepped up the site, for a town with verticality. Written by `worldgen terrace`, which also cuts the ramps " +
         "between them as ordinary roads (`<town>-ramp-*`). Empty for a town on the flat.",
+    ),
+  program: z
+    .object({
+      area: z.number().positive().describe("Required flat ground, m2."),
+      lots: z.number().int().min(0).describe("Buildings in the program (every building of the plan: optional and dropped lots count; the program is not cut to fit)."),
+      across: z.number().min(0).describe("The deepest lot ACROSS a band (its shorter side + 1 m setback; a long lot turns onto a cross lane), m: some shelf must be this + a 5 m street deep."),
+      source: z.string().describe("Where it was derived from: the town plan (authoring/towns/<name>-plan.json) or 'recipe'."),
+    })
+    .optional()
+    .describe(
+      "The town's PROGRAM as flat ground (tools/worldgen-town-program.mts PROGRAM_RULE), written by `worldgen terrace` from the town plan + " +
+        "the kit's footprints: required = sum over lots of (request size x 3.2 m kit cell + measured envelope, else town-layout's default " +
+        "envelope) x 1.15 (lot air, setback, the 0.6 m raised pad's skirt) + streets (sum of frontages + 1 m, x 5 m / 2 x 1.2 for crossings) " +
+        "+ wall clearance (4 m x half the perimeter of a disc of that area). `terrace` cuts street-shaped bands along the contour until " +
+        "their usable area (length x depth less the retaining-wall inset) holds it — longer bands, more bands up to --max-terraces, the " +
+        "town radius grown to take them — and FAILS (writes nothing) with the shortfall when the ground cannot. The `program-fit` row " +
+        "(`worldgen status`, `zonegen town`) fails while the measured level ground on the built shelves is under it; the plan on disk wins " +
+        "over this recorded number. Absent: no plan, the shelves are sized from the radius.",
     ),
   gates: z
     .array(townGateSchema)

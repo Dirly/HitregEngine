@@ -117,18 +117,30 @@ export interface CheckInput { buildings: PlanBuilding[]; styles: Map<string, str
 export function paletteFindings(inp: CheckInput): string[] {
   const f: string[] = [];
   const look = inp.lookOf ?? ((s: string) => lookOf(s, inp.pal));
+  // stone BY TYPE (system stone, or a stone_types type) is not a palette draw, so it does not count in the shares
+  // (z1-town3: Saltharrow's vault, chapel and Bell Watch made fs-stone read 60 % of a 10 % weight)
+  const stoneTypes = [...(inp.pal.stone_types ?? [])];
+  const byType = (b: PlanBuilding): boolean => !!inp.pal.stone_style && inp.styles.get(b.id) === inp.pal.stone_style
+    && (b.request.system === "stone" || stoneTypes.some((k) => (b.type ?? b.id).toLowerCase().includes(k)));
+  const bOf = new Map(inp.buildings.map((b) => [b.id, b]));
+  const kindOf = (b: PlanBuilding): string => JSON.stringify([...(b.request.features ?? [])].sort());
   for (const [a, b] of inp.pairs) {
     const sa = inp.styles.get(a), sb = inp.styles.get(b);
     if (!sa || !sb) continue;
+    // two stone-by-type neighbours of DIFFERENT types (chapel beside the vault) differ by their form, not their wall
+    const ba = bOf.get(a), bb = bOf.get(b);
+    if (ba && bb && byType(ba) && byType(bb) && kindOf(ba) !== kindOf(bb)) continue;
     const la = look(sa), lb = look(sb);
     if (la.wall === lb.wall && la.roof === lb.roof) f.push(`adjacent ${a} (${sa}) and ${b} (${sb}) share wall ${la.wall} and roof ${la.roof}`);
   }
-  const owned = inp.buildings.filter((b) => inp.pal.styles.some((s) => s.style === inp.styles.get(b.id)));
+  const owned = inp.buildings.filter((b) => !byType(b) && inp.pal.styles.some((s) => s.style === inp.styles.get(b.id)));
   const total = inp.pal.styles.reduce((x, s) => x + s.weight, 0);
+  // a share can only move in steps of one lot: a small town is held to +-max(15, one lot) points
+  const tol = Math.max(15, owned.length ? 100 / owned.length : 100);
   for (const s of inp.pal.styles) {
     const n = owned.filter((b) => inp.styles.get(b.id) === s.style).length;
     const share = owned.length ? (100 * n) / owned.length : 0, want = (100 * s.weight) / total;
-    if (Math.abs(share - want) > 15) f.push(`${s.style}: ${n}/${owned.length} palette lots = ${share.toFixed(0)} %, the palette wants ${want.toFixed(0)} % (+-15)`);
+    if (Math.abs(share - want) > tol) f.push(`${s.style}: ${n}/${owned.length} palette lots = ${share.toFixed(0)} %, the palette wants ${want.toFixed(0)} % (+-${tol.toFixed(0)})`);
   }
   if (inp.results) {
     const byLot = new Map(inp.results.map((r) => [r.lot ?? r.name, r]));
@@ -179,6 +191,8 @@ if (isMain) {
     if (!flag("dry")) { fs.writeFileSync(planFile, `${JSON.stringify(plan, null, 1)}\n`); console.log(`palette ${palName}: ${changed} fields written to ${path.relative(process.cwd(), planFile)}`); }
     else console.log(`palette ${palName}: ${changed} fields would change (--dry)`);
   } else {
+    // with a layout, the town is the lots it PLACED: an optional lot the layout skipped is not built (z1-town3)
+    if (layout?.buildings?.length) { const ids = new Set(layout.buildings.map((b) => b.id)); planB.buildings = planB.buildings.filter((b) => ids.has(b.id)); }
     const styles = new Map(planB.buildings.map((b) => [b.id, b.request.style ?? b.style ?? "default"]));
     const resultsFile = opt("results", "");
     const results = resultsFile ? (JSON.parse(fs.readFileSync(resultsFile, "utf8")) as CheckInput["results"]) : undefined;

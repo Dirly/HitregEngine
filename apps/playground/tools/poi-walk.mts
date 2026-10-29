@@ -210,10 +210,11 @@ function plannerTo(to: Pt): { stuckAt: P3 | null } {
 }
 
 // ---- routes, both ways, cold
-interface LegRow extends LegResult { k: number; from: Pt; to: Pt; resumed: boolean; trace: Array<[number, number]> }
+interface LegRow extends LegResult { k: number; from: Pt; to: Pt; resumed: boolean; trace: Array<[number, number, number]> }
 interface RouteRow { id: string; source: string; dir: "forward" | "back"; ok: boolean; legs: LegRow[] }
 const routeRows: RouteRow[] = [];
-const thin = (s: Sample[]): Array<[number, number]> => s.filter((_, i) => i % 6 === 0 || i === s.length - 1).map((q) => [r2(q.x), r2(q.z)]);
+// [x, z, feet y]: the y says where a body walked ON something (a FALL off a ledge vs a stair run), 2026-10-29
+const thin = (s: Sample[]): Array<[number, number, number]> => s.filter((_, i) => i % 6 === 0 || i === s.length - 1).map((q) => [r2(q.x), r2(q.z), r2(q.y)]);
 function walkRoute(r: Route, dir: "forward" | "back"): RouteRow {
   const pts = r.points;
   const start = pts[0]!;
@@ -260,7 +261,7 @@ for (const r of onlyRoutes) {
 }
 
 // ---- targets: reach from the nearest route point (or walk through), then a body must be held there
-interface TargetRow { id: string; kind: string; at: Pt; from: Pt | null; reach: (LegResult & { trace: Array<[number, number]> }) | null; through: LegResult | null; hold: { ok: boolean; feet: P3; surface?: number } | null; portal: { sent: boolean; refusal: string | null } | null; ok: boolean }
+interface TargetRow { id: string; kind: string; at: Pt; from: Pt | null; reach: (LegResult & { trace: Array<[number, number, number]> }) | null; through: LegResult | null; hold: { ok: boolean; feet: P3; surface?: number } | null; portal: { sent: boolean; refusal: string | null } | null; ok: boolean }
 const targetRows: TargetRow[] = [];
 const travels: unknown[] = [];
 const refusals: string[] = [];

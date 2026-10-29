@@ -142,6 +142,28 @@ export function baseOutline(tris: Tri3[], cell = 0.5, band = 0.35): BaseOutline 
   const material = [...area].sort((x, y) => y[1] - x[1])[0]?.[0];
   return { cells, perimeter, extent: [Math.round((mx[0]! - mn[0]!) * 100) / 100, Math.round((mx[2]! - mn[2]!) * 100) / 100], fill: Math.round(Math.min(1, (cells.length * cell * cell) / Math.max(1e-6, (mx[0]! - mn[0]!) * (mx[2]! - mn[2]!))) * 100) / 100, ...(material ? { material } : {}) };
 }
+/** A unit quaternion [x, y, z, w] (three.js order). */
+export type Quat = [number, number, number, number];
+export const qMul = (a: Quat, b: Quat): Quat => [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0], a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]];
+export const qRotate = (q: Quat, v: [number, number, number]): [number, number, number] => { const [x, y, z, w] = q, ix = w * v[0] + y * v[2] - z * v[1], iy = w * v[1] + z * v[0] - x * v[2], iz = w * v[2] + x * v[1] - y * v[0], iw = -x * v[0] - y * v[1] - z * v[2];
+  return [ix * w + iw * -x + iy * -z - iz * -y, iy * w + iw * -y + iz * -x - ix * -z, iz * w + iw * -z + ix * -y - iy * -x]; };
+/** LEAN (KNUCKLECROWN 2026-10-29: nine finger-pillars stood upright because a layout gave yaw only): the rotation of a piece
+ *  turned `yaw` radians about +Y, then tipped `leanDeg` so its +Y leans toward the world XZ direction `dir` (radians,
+ *  atan2(dx, dz): 0 = +Z). Pure yaw when leanDeg is 0. */
+export function leanQuat(yaw: number, leanDeg: number, dir: number): Quat {
+  const qy: Quat = [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)]; if (!leanDeg) return qy;
+  const ux = Math.sin(dir), uz = Math.cos(dir), h = (leanDeg * Math.PI) / 360, s = Math.sin(h); // axis (uz, 0, -ux) tips +Y toward u
+  return qMul([uz * s, 0, -ux * s, Math.cos(h)], qy);
+}
+/** A base outline turned by a full rotation into world axes (yaw 0): each cell [x, z, y] rotated in 3D, so a LEANED piece's
+ *  raised uphill edge and sunk downhill edge are what the seat and the seated gate measure. */
+export function orientBase(b: BaseOutline, q: Quat): BaseOutline {
+  const t = (c: [number, number, number]): [number, number, number] => { const v = qRotate(q, [c[0], c[2], c[1]]); return [v[0], v[2], v[1]]; };
+  const cells = b.cells.map(t), xs = cells.map((c) => c[0]), zs = cells.map((c) => c[1]);
+  return { ...b, cells, perimeter: b.perimeter.map(t), extent: [Math.round((Math.max(...xs) - Math.min(...xs)) * 100) / 100, Math.round((Math.max(...zs) - Math.min(...zs)) * 100) / 100] };
+}
+/** True when a rotation is more than a yaw (a leaned piece): its x or z component is not ~0. */
+export const isLeaned = (q: number[]) => Math.abs(q[0] ?? 0) > 1e-4 || Math.abs(q[2] ?? 0) > 1e-4;
 /** Local (x, z) of the root frame -> world, for a structure at `at` turned `yaw` radians about +Y (three.js rotation). */
 export const toWorldYaw = (at: V2, yaw: number, x: number, z: number): V2 => [at[0] + x * Math.cos(yaw) + z * Math.sin(yaw), at[1] - x * Math.sin(yaw) + z * Math.cos(yaw)];
 /** Ground fall (m) under a base above which a stone skirt runs round it too (below it the raised ground alone seats it). */

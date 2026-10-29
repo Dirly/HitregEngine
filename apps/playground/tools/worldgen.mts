@@ -64,6 +64,7 @@ import {
   storySchema,
   planarCliffsSchema,
   auditRegions,
+  townGroundPoints,
   regionAt,
   recipeSplatIndexed,
   BORDER_CLASSES,
@@ -112,6 +113,7 @@ import { riverWaterDoc } from "./_river-water.mts";
 import { commandTerracePlace, loadTerraceKit, removeTownTerraceWalls, townTerraceWalls, type TownRiserLink } from "./worldgen-terrace-walls.mts";
 import { commandBridgePlace } from "./worldgen-bridge-spans.mts";
 import { CLIMB_NEEDS_PLACE, PLACE_REACH } from "./zonegen/commands/_site-finder.mts";
+import { PROGRAM_RULE, bandStreet, loadTownProgram, measureShelfFlat, planProgramShelves, programFitFindings, programLandGate, type TownProgram } from "./worldgen-town-program.mts";
 import { COASTAL_TOWN, TERRACE_DEFAULTS, coastalTownFindings, findCoastalSites, landGate, terraceReach } from "./worldgen-coastal-towns.mts";
 import { commandVegetation } from "./worldgen-vegetation.mts";
 import { commandRoad } from "./worldgen-road.mts";
@@ -3853,8 +3855,70 @@ function fitShelf(
  * character is seeded from the id, so nothing reshuffles.
  */
 function commandTerrace(): void {
-  const { recipe, file } = loadRecipe();
+  const { recipe: original, file } = loadRecipe();
   const only = stringOption("town", "");
+  // PROGRAMS (2026-10-29, s1f): a town with a plan (authoring/towns/<name>-plan.json, the frozen program) or a
+  // recorded `program` is sized from it; --program-area <m2> overrides the number, --no-program sizes from the radius
+  const projectDir = path.resolve(path.dirname(file), "..", "..");
+  const programs = new Map<string, TownProgram>();
+  if (!flag("no-program")) {
+    const forced = option("program-area", 0);
+    for (const t of original.features.towns) {
+      if (only ? t.id !== only : t.tags.includes("pinned")) continue;
+      const fromPlan = loadTownProgram(projectDir, t.id, original.name);
+      const p: TownProgram | null =
+        fromPlan ??
+        (t.program
+          ? { area: t.program.area, lots: t.program.lots, lotArea: 0, streetArea: 0, wallArea: 0, across: t.program.across, acrossTypical: t.program.across, detail: [], source: t.program.source }
+          : null);
+      if (p) programs.set(t.id, forced > 0 ? { ...p, area: forced } : p);
+    }
+  }
+  // MEASURED, not assumed: the planner counts length x usable depth; what a lot can stand on is the level dry ground
+  // on the BUILT field once the walls, their trims and the ramps are in. Short of the program, the target grows by the
+  // shortfall and the stage re-plans (twice); still short, it fails and writes nothing.
+  const scale = new Map<string, number>();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const recipe = structuredClone(original);
+    const failures: string[] = [];
+    const done = terraceTowns(recipe, only, programs, scale, failures);
+    if (failures.length > 0) {
+      for (const f of failures) console.error(`  ! PROGRAM DOES NOT FIT ${f}`);
+      fail(`terrace: ${failures.length} town(s) cannot hold their program on this ground — nothing written (move the town, --program-reach, --max-terraces, or cut the plan before the freeze)`);
+    }
+    const short: string[] = [];
+    if (programs.size > 0) {
+      const field = createWorldField(recipe);
+      for (const [id, program] of programs) {
+        const town = recipe.features.towns.find((t) => t.id === id)!;
+        town.program = { area: Math.round(program.area), lots: program.lots, across: program.across, source: program.source };
+        const flat = measureShelfFlat(field, town, recipe.seaLevel);
+        const per = Object.entries(flat.perShelf).map(([k, v]) => `${k.replace(`${id}-`, "")} ${v}`).join(", ");
+        console.log(`  ${id}: flat ground ${flat.area} m2 achieved vs ${Math.round(program.area)} m2 required (${per})${flat.area >= program.area ? " — fits" : ` — SHORT ${Math.round(program.area - flat.area)}`}`);
+        if (flat.area < program.area) {
+          short.push(`${id}: ${flat.area} of ${Math.round(program.area)} m2`);
+          scale.set(id, (scale.get(id) ?? 1) * Math.min(1.6, (program.area / Math.max(1, flat.area)) * 1.03));
+        }
+      }
+    }
+    if (short.length === 0) {
+      writeRecipe(recipe, file);
+      console.log(`terraced ${done.stepped} town(s) with ${done.ramps} ramps; ${done.flat} left flat${done.walled !== null ? `; ${done.walled} riser wall(s)` : ""}`);
+      if (done.stepped > 0) console.log(`  the ground moved — re-run: worldgen paths ${worldName}${project ? ` --project ${project}` : ""}`);
+      return;
+    }
+    console.log(`  attempt ${attempt + 1}: ${short.join("; ")} — re-planning with the target grown by the shortfall`);
+  }
+  fail(`terrace: the built shelves stay short of the program after 3 attempts — nothing written`);
+}
+
+function terraceTowns(
+  recipe: WorldRecipe,
+  only: string,
+  programs: Map<string, TownProgram>,
+  scale: Map<string, number>,
+  failures: string[],
+): { stepped: number; flat: number; ramps: number; walled: number | null } {
   // A PINNED town has been built on — its ground is load-bearing for whatever
   // stands on it, and re-cutting it into shelves drops a baked WFC town onto a
   // staircase. Naming one with --town terraces it anyway, for the case where
@@ -3926,6 +3990,82 @@ function commandTerrace(): void {
       flat += 1;
       console.log(`  ${town.id} (${tierOf(town)}): ${relief.toFixed(1)} m of fall — ${why}, flat at ${town.groundY}`);
     };
+    // A TOWN WITH A PROGRAM (its plan on disk, or `program` in the recipe) is sized from it, not from its radius
+    // (2026-10-29, s1f; tools/worldgen-town-program.mts): street-shaped bands along the contour, as long and as many
+    // as the program needs, the radius grown to take them — and a LOUD failure, nothing written, when the ground
+    // cannot hold it. Saltharrow lost 6 of its 11 buildings over three layouts to radius-sized disc shelves.
+    const program = programs.get(town.id);
+    if (program && relief >= minRelief) {
+      const required = program.area * (scale.get(town.id) ?? 1);
+      const inset = wallsOn ? 1.5 : 0;
+      const reach = option("program-reach", Math.max(60, town.radius * 1.8));
+      const planned = planProgramShelves({
+        height: (x, z) => bareField.height(x, z),
+        sea: recipe.seaLevel,
+        centre: [town.center[0], town.center[1]],
+        radius: town.radius,
+        required,
+        across: program.across,
+        acrossTypical: program.acrossTypical,
+        street: PROGRAM_RULE.street,
+        riser: me.riser,
+        maxStep: wallsOn ? maxStep : stepHeight,
+        minStep: Math.max(1.5, stepHeight * 0.4),
+        maxTerraces: base.maxTerraces,
+        reach,
+        cutTol: option("program-cut", 3),
+        maxRelief: base.maxTerraces * base.stepHeight,
+        inset,
+      });
+      if (!planned.ok) {
+        failures.push(
+          `${town.id}: its program (${program.lots} lots, ${program.source}) needs ${Math.round(required)} m2 of flat ground; ` +
+            `the ground within ${reach} m of the centre gives ${planned.capacity} m2 (fall line ${(planned.slope * 100).toFixed(0)} %, ` +
+            `--max-terraces ${base.maxTerraces}, steps <= ${wallsOn ? maxStep : stepHeight.toFixed(1)} m, cut/fill <= ${option("program-cut", 3)} m):\n      ` +
+            planned.why.join("\n      "),
+        );
+        continue;
+      }
+      const terraces: TerraceDoc[] = planned.bands.map((b, i) => ({
+        id: `${town.id}-terrace-${i + 1}`,
+        points: [
+          [round(b.a[0]), round(b.a[1])],
+          [round(b.b[0]), round(b.b[1])],
+        ],
+        radius: round(b.depth / 2),
+        falloff: round(me.riser),
+        groundY: b.level,
+        flatten: 1,
+        street: bandStreet(b, planned.downhill, program.acrossTypical, PROGRAM_RULE.street, inset),
+        tags: ["program"],
+      }));
+      town.terraces = terraces;
+      town.flatten = 0;
+      town.groundY = terraces[0]!.groundY;
+      // the radius takes the bands (corners + 2 m): scatter, the zone and the routing wall follow the town's real extent
+      let far = 0;
+      for (const b of planned.bands) {
+        const n: [number, number] = [planned.downhill[0] * (b.depth / 2), planned.downhill[1] * (b.depth / 2)];
+        for (const e of [b.a, b.b]) for (const s of [1, -1]) far = Math.max(far, Math.hypot(e[0] + n[0] * s - town.center[0], e[1] + n[1] * s - town.center[1]));
+      }
+      const radiusWas = town.radius;
+      town.radius = round(Math.max(town.radius, far + 2));
+      town.program = { area: Math.round(program.area), lots: program.lots, across: program.across, source: program.source };
+      if (town.coastal) {
+        const gate = programLandGate(recipe, town, planned, (x, z) => bareField.height(x, z));
+        town.gates = [...town.gates.filter((g) => g.id !== "land-gate"), gate.gate];
+        console.log(`    land-gate at [${gate.gate.at.join(", ")}] facing (${gate.gate.facing.join(", ")}), off the ${gate.end} end of the top band: a straight lead needs ${(gate.grade * 100).toFixed(0)} % at most`);
+      }
+      stepped += 1;
+      plans.set(town.id, { town, terraces, character: me });
+      console.log(
+        `  ${town.id} (${tierOf(town)}): PROGRAM ${program.lots} lots -> ${Math.round(required)} m2 required (${program.lotArea} lots + ${program.streetArea} streets + ${program.wallArea} wall; ${program.source}); ` +
+          `${terraces.length} street bands, ${planned.capacity} m2 usable, fall line ${(planned.slope * 100).toFixed(0)} %, radius ${radiusWas} -> ${town.radius}`,
+      );
+      for (const [i, b] of planned.bands.entries())
+        console.log(`    ${terraces[i]!.id}: ${b.level} m, ${b.length.toFixed(0)} x ${b.depth.toFixed(1)} m along (${terraces[i]!.street!.axis.join(", ")}), street offset ${terraces[i]!.street!.offset} — ends: ${b.stops.join(" / ")}`);
+      continue;
+    }
     // Its own bar, and its own coin. A site with `--dramatic` times the minimum
     // fall across it steps whatever the coin says: a town that ignores twenty
     // metres of hill is the pool table this stage exists to stop.
@@ -4218,9 +4358,7 @@ function commandTerrace(): void {
       walled += fits.length;
     }
   }
-  writeRecipe(recipe, file);
-  console.log(`terraced ${stepped} town(s) with ${ramps.length} ramps; ${flat} left flat${wallsOn ? `; ${walled} riser wall(s)` : ""}`);
-  if (stepped > 0) console.log(`  the ground moved — re-run: worldgen paths ${worldName}${project ? ` --project ${project}` : ""}`);
+  return { stepped, flat, ramps: ramps.length, walled: wallsOn ? walled : null };
 }
 
 /** Flood-fill land (8-connected, above sea level) into components. 0 = water. */
@@ -5122,6 +5260,26 @@ function commandZones(): void {
 }
 
 /**
+ * How far a town's built ground reaches from its centre along the ray at angle `a` (radians, x = cos, z = sin),
+ * within +-`half` of it: the furthest point of any shelf (its band outline grown by its riser) or its gate, + 4 m.
+ * Null for a town with no shelves (its pad disc is its ground).
+ */
+function townFloorAlong(town: TownDoc, a: number, half: number): number | null {
+  const pts = townGroundPoints(town);
+  if (!pts) return null;
+  let best = 0;
+  for (const [x, z] of pts) {
+    const dx = x - town.center[0], dz = z - town.center[1];
+    const d = Math.hypot(dx, dz);
+    if (d < 1e-6) continue;
+    let da = Math.abs(Math.atan2(dz, dx) - a) % (Math.PI * 2);
+    if (da > Math.PI) da = Math.PI * 2 - da;
+    if (da <= half * 2) best = Math.max(best, d * Math.cos(Math.min(da, Math.PI / 2)));
+  }
+  return best > 0 ? best + 4 : town.radius * 0.5;
+}
+
+/**
  * A zone of its own per town, CUT OUT of the wilderness zone around it
  * (docs/world-editing/barriers.md → "Towns are zones of their own"): a
  * 12-gon on the town's outskirts (radius + falloff, plus a hand so the
@@ -5178,7 +5336,10 @@ function townZones(wilderness: readonly RegionDoc[], towns: readonly TownDoc[], 
       // own town puts a player standing in the market square in the wilderness
       // zone, which loses the town's safety. A zone that pokes out of its
       // parent is only an inexact `within`.
-      const floor = town.radius + town.falloff;
+      // The PAD is the town's built ground, not its radius disc: a coastal town sized from its program (s1f, 2026-10-29)
+      // has a 77 m radius whose seaward half is sea, and the zone could not be pulled in to the coast border at all.
+      // With shelves, the floor along this ray is the furthest shelf ground (band + its riser) in this sector + 4 m.
+      const floor = townFloorAlong(town, a, Math.PI / sides) ?? town.radius + town.falloff;
       for (let pull = 0; pull < 24 && !pointInPolygon(parent.polygon, vx, vz); pull++) {
         const next: [number, number] = [town.center[0] + (vx - town.center[0]) * 0.88, town.center[1] + (vz - town.center[1]) * 0.88];
         if (Math.hypot(next[0] - town.center[0], next[1] - town.center[1]) < floor) break;
@@ -7177,6 +7338,18 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
       how: "worldgen terrace <world>",
       // ran (stamped) and found no town that wants shelves = done; never ran = MISSING
       check: (r) => (r.features.towns.some((t) => t.terraces.length > 0) || r.pipeline?.terrace ? null : "no town has been stepped — has it run?"),
+    },
+    {
+      // the town PROGRAM fits its flat ground, measured on the built shelves, BEFORE the plan freezes (2026-10-29, s1f):
+      // Saltharrow froze 11 buildings onto ~2,400 m2 of radius-sized disc shelves and lost 6 of them at layout
+      name: "program-fit",
+      after: ["terrace"],
+      by: "procedural",
+      how: "worldgen terrace <world> --town <id>   (sizes the shelves from the town plan; tools/worldgen-town-program.mts)",
+      check: (r) => {
+        const faults = programFitFindings(r, statusField(r), projectDir);
+        return faults.length > 0 ? faults.join("; ") : null;
+      },
     },
     {
       name: "zones",

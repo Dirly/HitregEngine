@@ -586,8 +586,16 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
     const job = path.join(p.zoneDir(zone), "pois", l.id);
     const progress = path.join(job, "progress.json");
     const how = `npx tsx tools/zonegen.mts poi-brief ${ctx.world} --project ${project} --zone ${zone} --location ${l.id}  -> then ONE fresh owner (poi-creator skill) on ${path.relative(process.cwd(), job).replaceAll("\\", "/")}`;
+    // L (KNUCKLECROWN 2026-10-29: four sub-sites built inside their parent's job read "MISSING no POI job"): a location whose
+    // `place` names another location is a SUB-SITE: covered by the parent's job, its row follows the parent's stage
+    const parentId = (l as { place?: string }).place, parentProgress = parentId && parentId !== l.id ? path.join(p.zoneDir(zone), "pois", parentId, "progress.json") : null;
+    if (!exists(progress) && parentProgress && exists(parentProgress)) {
+      const ps = (readJson(parentProgress) as { stage?: string }).stage ?? "?";
+      rows.push({ stage: `poi ${l.id}`, who: "opus", state: ps === "installed" ? "ok" : "MISSING", why: `sub-site of ${parentId}: built in its job (stage ${ps})`, how: `the ${parentId} owner (pois/${parentId}/)` });
+      continue;
+    }
     if (!exists(progress)) {
-      rows.push({ stage: `poi ${l.id}`, who: "opus", state: "MISSING", why: "no POI job", how });
+      rows.push({ stage: `poi ${l.id}`, who: "opus", state: "MISSING", why: parentId && parentId !== l.id ? `sub-site of ${parentId}, which has no POI job yet` : "no POI job", how });
       continue;
     }
     const stage = (readJson(progress) as { stage?: string }).stage ?? "?";

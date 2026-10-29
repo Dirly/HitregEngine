@@ -209,6 +209,7 @@ export {
   regionAt,
   townRegionOf,
   polygonEnclosesCircle,
+  townGroundPoints,
   auditRegions,
   type RegionDoc,
   type RegionInput,

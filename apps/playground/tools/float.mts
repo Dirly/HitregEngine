@@ -139,6 +139,36 @@ function dressingOf(assets: string, prefabId: string): { contact?: SeatContact; 
 /** A generated chain link of a hanging prop (`<placement>--chain-<n>` / `.../chain-<n>: ...`, dress.mts). */
 const CHAIN_LINK = /(--|\/)chain-\d+(:|$)/;
 
+/** How far back from each end of a taut span its hold is looked for: a chain end threads its ring / sinks into its block. */
+export const TAUT_END_M = 2.5;
+/**
+ * The two ends of a TAUT span (a long chain run between two anchored pieces) and whether each is held. The axis is the
+ * span's farthest vertex pair (any slope, not only a plan axis); each end is the CENTRE of the vertices within 0.3 m of
+ * the extreme along it (never one edge vertex, which hangs off the link's side). An end is held when a point of its last
+ * TAUT_END_M along the axis touches solid (inside it, a top within 0.6 m, or a wall within 0.6 m across the axis: the
+ * ring it threads, the block it sinks into) or lies inside another span's bounds (the next span of the run, 0.3 m slack).
+ */
+export function tautSpanEnds(w: ArrayLike<number>, probe: SolidProbe, others: ArrayLike<number>[]): { at: [number, number, number]; held: boolean }[] {
+  const n = w.length / 3, P = (k: number): [number, number, number] => [w[3 * k]!, w[3 * k + 1]!, w[3 * k + 2]!];
+  if (n < 2) return [];
+  const c = [0, 0, 0]; for (let k = 0; k < n; k++) for (let a = 0; a < 3; a++) c[a]! += w[3 * k + a]! / n;
+  const far = (from: number[]) => { let best = 0, bd = -1; for (let k = 0; k < n; k++) { const p = P(k), d = (p[0] - from[0]!) ** 2 + (p[1] - from[1]!) ** 2 + (p[2] - from[2]!) ** 2; if (d > bd) { bd = d; best = k; } } return P(best); };
+  const A = far(c), B = far(A), len = Math.hypot(B[0] - A[0], B[1] - A[1], B[2] - A[2]) || 1, u = [(B[0] - A[0]) / len, (B[1] - A[1]) / len, (B[2] - A[2]) / len];
+  let lo = Infinity, hi = -Infinity; const t = new Float64Array(n);
+  for (let k = 0; k < n; k++) { const p = P(k); t[k] = (p[0] - c[0]!) * u[0]! + (p[1] - c[1]!) * u[1]! + (p[2] - c[2]!) * u[2]!; lo = Math.min(lo, t[k]!); hi = Math.max(hi, t[k]!); }
+  const centre = (edge: number): [number, number, number] => { const s = [0, 0, 0]; let m = 0; for (let k = 0; k < n; k++) if (Math.abs(t[k]! - edge) <= 0.3) { const p = P(k); s[0]! += p[0]; s[1]! += p[1]; s[2]! += p[2]; m++; } return [s[0]! / m, s[1]! / m, s[2]! / m]; };
+  const bounds = others.map((v) => { const b = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]; for (let q = 0; q < v.length; q += 3) for (let a = 0; a < 3; a++) { b[a] = Math.min(b[a]!, v[q + a]!); b[a + 3] = Math.max(b[a + 3]!, v[q + a]!); } return b; });
+  const inSpan = (p: number[]) => bounds.some((b) => p.every((v, a) => v >= b[a]! - 0.3 && v <= b[a + 3]! + 0.3));
+  const h = Math.hypot(u[0]!, u[2]!), across = h > 1e-6 ? [[-u[2]! / h, u[0]! / h], [u[2]! / h, -u[0]! / h]] : [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const touches = (p: number[]) => probe.floor(p[0]!, p[2]!, p[1]! + 0.6, p[1]! - 0.6) !== null || across.some(([dx, dz]) => { const d = probe.wall?.(p[0]!, p[1]!, p[2]!, dx!, dz!, 0.6); return d !== null && d !== undefined; });
+  return [[lo, 1], [hi, -1]].map(([edge, inward]) => {
+    const at = centre(edge!);
+    let held = inSpan(at);
+    for (let s = 0; !held && s <= TAUT_END_M + 1e-9; s += 0.25) { const p = [at[0] + u[0]! * inward! * s, at[1] + u[1]! * inward! * s, at[2] + u[2]! * inward! * s]; held = touches(p); }
+    return { at, held };
+  });
+}
+
 /**
  * The contact a scene object is measured by. A HANGING piece is checked for its hook, never for ground contact: a
  * prop whose dressing mount is `ceiling` (or `hang`), and every link of a hanging prop's chain (the prefab a ceiling
@@ -250,6 +280,18 @@ export function floatScene(assets: string, doc: SceneDoc, field: WorldField | nu
     if (!contact) contactCache.set(g.prefabId, (contact = contactOf(dressing(g.prefabId), g.prefabId, "", "", chains)));
     const own = tris.excluding(i);
     const probe: SolidProbe = fieldProbe ? unionSolidProbe(fieldProbe, own) : own;
+    // L (Wristgate 2026-10-29): a TAUT chain span (a "--chain-<n>" link longer than 6 m: the fist's chains run 14 m spans
+    // from a wrist lug to an anchor eye) hangs from neither end alone; it is held when BOTH ends of its long axis are held
+    // (tautSpanEnds: the end CENTRE on the 3D axis, its last 2.5 m threading a ring / sunk into a block, or the next span)
+    if (contact === "hang" && Math.max(fp.halfX, fp.halfZ, fp.height / 2) * 2 > 6) {
+      const others = geo.filter((o, j) => j !== i && CHAIN_LINK.test(o.id)).map((o) => o.world as ArrayLike<number>);
+      const ends = tautSpanEnds(g.world as ArrayLike<number>, probe, others);
+      checked++;
+      if (ends.every((e) => e.held)) return;
+      const miss = ends.filter((e) => !e.held).map((e) => `[${e.at.map((v) => r2(v)).join(", ")}]`);
+      rows.push({ kind: "scene", id: g.id, what: g.prefabId, contact, x: r3(fp.x), y: r3(fp.y), z: r3(fp.z), status: "unsupported", gap: Infinity, support: null as never, reason: `taut span: ${miss.length === 2 ? "neither end" : "an end"} (${miss.join(" ")}) runs into no solid or next span in its last ${TAUT_END_M} m`, fix: { y: fp.y } } as never);
+      return;
+    }
     // a structure (anything over 4 m across) is seated by its base like a building: the probe reaches further down
     const big = Math.max(fp.halfX, fp.halfZ) > 2;
     // a seated figure rests where its own underside touches (hips on the seat, feet on a step)
@@ -460,8 +502,13 @@ export function commandFloat(host: { argv: string[]; loadRecipe(): { recipe: Wor
   const { area, text } = parseArea(argv, host.fail);
   const field = createWorldField(recipe);
   const { assets } = projectOfRecipe(file);
-  const sceneFile = opt(argv, "scene") ?? path.join(assets, "scenes", `${recipe.name}.scene.json`);
-  const scene = !argv.includes("--no-scene") && fs.existsSync(sceneFile) ? floatScene(assets, readJson(sceneFile), field, area, tol) : null;
+  // L (Wristgate 2026-10-29): a place-build lab keeps the recipe's name (firstshore) in a world file named for the lab
+  // (pbwristgate.json, scene pbwristgate.scene.json): the scene was looked up by recipe.name, not found, and SKIPPED in
+  // silence ("0 scene objects ... OK"). The scene is the world FILE's scene first, then the recipe name; none is a stop.
+  const byFile = path.join(assets, "scenes", `${path.basename(file).replace(/.json$/, "")}.scene.json`);
+  const sceneFile = opt(argv, "scene") ?? [byFile, path.join(assets, "scenes", `${recipe.name}.scene.json`)].find((f) => fs.existsSync(f)) ?? byFile;
+  if (!argv.includes("--no-scene") && !fs.existsSync(sceneFile)) host.fail(`float: no scene ${sceneFile} (give --scene <file>, or --no-scene to measure scatter only)`);
+  const scene = !argv.includes("--no-scene") ? floatScene(assets, readJson(sceneFile), field, area, tol) : null;
   const legacy = argv.includes("--legacy-scatter");
   const stamp = argv.includes("--stamp");
   if (stamp && (area.near || area.rect)) host.fail("--stamp sweeps the whole world; drop --near/--rect");

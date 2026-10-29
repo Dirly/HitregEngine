@@ -10,8 +10,8 @@
  */
 import { z } from "zod";
 import { facesDir } from "./_compass.mts";
-import { fitRibbon, pathParamsSchema } from "@hitreg/core";
-import { densityNeed, heightForPx, POCKET_FLOOR_M, READ_PX_MIN, readPixels, SEAT_GAP_M, scaleBase, seatStructure, SINK_MAX_M, SKIRT_BURY_M, wearsCliffTile, type BaseOutline } from "./_place-quality.mts";
+import { fitRibbon, pathParamsSchema, regionVegetationSchema } from "@hitreg/core";
+import { densityNeed, heightForPx, leanQuat, orientBase, POCKET_FLOOR_M, READ_PX_MIN, readPixels, SEAT_GAP_M, scaleBase, seatStructure, SINK_MAX_M, SKIRT_BURY_M, wearsCliffTile, type BaseOutline } from "./_place-quality.mts";
 /** Skirt wall thickness (m): its outer face stands ~0.15 m past the structure's base edge (a plinth). */
 export const SKIRT_THICK_M = 0.8;
 
@@ -51,6 +51,15 @@ export const CLOSE_VIEW_M = 8;
 /** Composites and hero parts that are not offered by `props menu` but may be placed whole as a STRUCTURE. */
 const HULL_RE = /\bhull|wreck-(hull|side|wall)/i;
 
+/** LEAN (KNUCKLECROWN 2026-10-29: the review RETURNED nine finger-pillars standing upright: a layout piece had yaw only, no
+ *  tilt, so a concept leaning each WHOLE pillar 15-25 deg from the foot could not be said). */
+export const LEAN_MAX_DEG = 30;
+export const leanSchema = z.object({
+  deg: z.number().min(0).max(LEAN_MAX_DEG).describe("Degrees the WHOLE piece tips from the vertical at its foot (a menhir 10-15 deg toward a pool)."),
+  toward: xz.optional().describe("Place-frame x,z the top leans toward (the pool centre [0,0] of a ring). One of `toward` / `dir`."),
+  dir: z.number().optional().describe("Direction of the lean in degrees about +Y in the place frame (0: toward the approach, +z), when there is no point (the Thumb bent toward the falls). One of `toward` / `dir`."),
+}).strict().refine((l) => (l.toward === undefined) !== (l.dir === undefined), { message: "lean names exactly one of toward / dir" })
+  .describe("Tilt of the whole piece (a rotation about a horizontal axis after its yaw). A leaned piece is SUNK to the lowest ground under its turned base outline: its raised uphill edge meets the ground, the downhill edge is buried; the seated gate measures the turned outline.");
 const landmarkSchema = z.object({
   fogReach: z.number().min(100).max(1500).default(450).describe("Metres the landmark reads through the zone fog (`landmark` component / wall operator `fog`)."),
   silhouette: z.number().min(0).max(1).default(0.6).describe("How dark it stands against the fog."),
@@ -70,6 +79,7 @@ export const placeStructureSchema = z.object({
   landmark: landmarkSchema.nullable().default(null).describe("Present on the ONE landmark (a structure or a wall; L: every place reads from its approaches)."),
   on: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of an earlier structure of the pocket (a crag, a rock): the piece stands on that piece's own mesh top at its spot (a cairn on a crag top), never on the ground."),
   stone: z.string().optional().describe("A stone piece of a BUILT structure (a weighting stone in a basin): the material it draws with instead of the zone's rock skin (a material id, or `@wall:<id>` = that wall's face stone); written as the entity tag `stone:<material>`, read by rock-skins. Set by the planner on a basin's rock-kit contents."),
+  lean: leanSchema.optional(),
   onWall: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of a level-topped built wall (kind tower / keep / gatehouse) in the same pocket: the piece stands on its wall walk (the coping top), not on the ground, and is not seated. `at` must lie on the wall line (a tower's ring: [0, size] = its front). L (LANDMARKS 2026-10-21): a wizard's tower is read at dusk by the fire ON its top."),
 }).strict();
 
@@ -276,6 +286,8 @@ export const GROUND_KINDS = ["wear", "mud", "ash", "paving", "rubble"] as const;
  *  least this wide (radius, metres) with a 1 m feather. */
 export const GROUND_MIN_RADIUS_M = 4, GROUND_FEATHER_M = 1;
 /** `rubble`: small rock-kit stones scattered in the disc (catalogued; rock-skins gives them the zone's small-rock skin). */
+/** Metres (x the stone's scale) a rubble stone sits in the ground: it is seated on the field BEFORE the walls/operators regrade it (KNUCKLECROWN 2026-10-29: 3.5 m terraces moved the tread 0.12 m and 8 stones showed their undersides, float FAIL). */
+export const RUBBLE_EMBED_M = 0.3;
 export const RUBBLE_STONES = ["rock-kit/boulder-s-1", "rock-kit/boulder-s-2", "rock-kit/boulder-s-3"];
 const layoutPieceSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/).describe("Piece id, unique in the layout (entity `<poi>-core-<id>`; refusals name it)."),
@@ -291,6 +303,7 @@ const layoutPieceSchema = z.object({
   over: z.array(z.string()).default([]).describe("Piece ids this piece is MEANT to overlap (a hoist gantry straddling the bell, a tarp standing over a crate): those footprint pairs are exempt from the overlap refusal, both directions. L (Exiles' Bell 2026-10-24)."),
   quest: z.string().regex(/^[a-z0-9-]+$/).optional().describe("A quest slot (the quest plan's object id, `--set quest.<slot>=<prop>`): the slot's prop (the set's prop; this piece's `prefab` when the set names none) is placed HERE as the quest entity (a fixed floor item of the core plan at this `at`/`yaw`), never at the dressing plan's auto spot; the piece is not also built as a structure."),
   lift: z.number().min(0).max(2).default(0).describe("Metres the piece stands above its seat (raised foundations: a kit building whose floor slab is at y=0 stands 0.6 m up, like town buildings, so the slab never shares the pad surface — Ashen Vow 2026-10-24: a 410 m2 z-fight)."),
+  lean: leanSchema.optional().describe("Tilt the WHOLE piece from its foot (leanSchema): yaw turns it, lean tips it. L (KNUCKLECROWN 2026-10-29)."),
   wet: z.boolean().default(false).describe("The piece may stand at or in water (drowned steps, a pier, a reed clump): wet ground under its footprint is not a refusal. Default: wet ground refuses the piece (Drowning Pools 2026-10-24: the ordeal sanctuary whose steps run into the loch)."),
 }).strict();
 export const placeLayoutSchema = z.object({
@@ -329,6 +342,7 @@ export const placeLayoutSchema = z.object({
     keep: z.number().min(0).max(1).default(0.15).describe("Share of trees and scatter kept inside (0.15: a heath with a few stripped trees)."),
     feather: z.number().min(0).max(60).default(20).describe("Metres outside the edge over which the woods return."),
   }).strict()).max(6).default([]).describe("HEATH / SIGHTLINE clearings as data (recipe vegetation clearings, scatter only, ground cover kept): a landmark in woodland is hidden from its own roads by the trees, not the terrain. L (KNUCKLECROWN 2026-10-28: 25 m pillars on a forested crown were invisible from all three roads at 300 m)."),
+  vegetation: regionVegetationSchema.optional().describe("The place's OWN region vegetation (recipe regions[id = the poi].vegetation, a place region): species swaps, thinning and cover filters over the whole place, applied by build/install (removed by --uninstall). Clearings only thin; this says WHAT grows (broadleaf -> dead pines on a heath crown). L (KNUCKLECROWN 2026-10-29: a heath crown stood in lush broadleaf with no data path to say otherwise)."),
 }).strict().superRefine((l, ctx) => {
   const ids = l.pieces.map((p) => p.id);
   for (const id of new Set(ids)) if (ids.filter((x) => x === id).length > 1) ctx.addIssue({ code: "custom", path: ["pieces"], message: `piece id ${id} repeats` });
@@ -391,7 +405,7 @@ export function boxesOverlap(a: { at: [number, number]; half: [number, number]; 
 export function withLayout(a: PlaceArchetype, l: PlaceLayout, info?: (prefab: string) => { size?: number[] } | null): PlaceArchetype {
   const pieces = l.pieces.filter((p) => p.kind !== "decal" && !p.quest).map((p) => {
     const half = pieceHalf(p, info?.(p.prefab)?.size);
-    return { id: p.id, role: pieceRole(p), prefab: p.prefab, choices: [], at: p.at, yaw: p.yaw, footprint: Math.min(20, Math.max(0.5, half ? Math.round(Math.hypot(half[0], half[1]) * 100) / 100 : 1)), scale: p.scale, lift: p.lift ?? 0, landmark: p.landmark ?? null } as PlaceArchetype["pockets"][number]["structures"][number];
+    return { id: p.id, role: pieceRole(p), prefab: p.prefab, choices: [], at: p.at, yaw: p.yaw, footprint: Math.min(20, Math.max(0.5, half ? Math.round(Math.hypot(half[0], half[1]) * 100) / 100 : 1)), scale: p.scale, lift: p.lift ?? 0, landmark: p.landmark ?? null, ...(p.lean && p.lean.deg > 0 ? { lean: p.lean } : {}) } as PlaceArchetype["pockets"][number]["structures"][number];
   });
   // L (Exiles' Bell 2026-10-24): spreadToFloor had multiplied the core walls' `at` by floor / fit (x1.8), so a chapel the
   // owner drew at [28,-4] stood 51 m out while the pieces beside it stood exactly: under a layout the walls stand where
@@ -1166,8 +1180,13 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       if (s.on && !under) faults.push(`structure ${p.id}.${s.id}: on ${s.on} is no earlier structure of the pocket`);
       if (under) { const dx = w[0] - under.w[0], dz = w[1] - under.w[1], c = Math.cos(under.ang), sn = Math.sin(under.ang), lx = (dx * c - dz * sn) / under.k, lz = (dx * sn + dz * c) / under.k, t = inp.topOf?.(under.prefab, lx, lz);
         if (t == null) faults.push(`structure ${p.id}.${s.id}: no top of ${s.on} under it`); else onY = under.y + t * under.k - 0.1; }
-      const b0 = host || under || s.role === "fire" || s.role === "boat" ? null : inp.structureBase?.(s.prefab) ?? null, base = b0 && s.scale !== 1 ? scaleBase(b0, s.scale) : b0;
-      const seat = base ? seatStructure(base, w, ang, planned, { rock: /^rock-kit\//.test(s.prefab), sinkMax: s.role === "dwelling" ? 0 : SINK_MAX_M }) : null, sy0 = r2(kerbTop != null ? kerbTop : host ? y + host.height + 0.3 : onY != null ? onY : seat ? seat.y : planned(w[0], w[1]));
+      // LEAN: the whole piece tipped toward a place-frame point or direction; its base outline turned with it, sunk (rooted)
+      const lean = s.lean && s.lean.deg > 0 && !host && !under ? s.lean : null;
+      const leanDir = lean ? (lean.toward ? (() => { const t = toWorld(pk.at, front, lean.toward!); return Math.atan2(t[0] - w[0], t[1] - w[1]); })() : yaw + ((lean.dir ?? 0) * Math.PI) / 180) : 0;
+      const q = leanQuat(ang, lean?.deg ?? 0, leanDir);
+      const b0 = host || under || s.role === "fire" || s.role === "boat" ? null : inp.structureBase?.(s.prefab) ?? null, bs = b0 && s.scale !== 1 ? scaleBase(b0, s.scale) : b0, base = bs && lean ? orientBase(bs, q) : bs;
+      if (lean && s.role === "dwelling") faults.push(`structure ${p.id}.${s.id}: a dwelling never leans (lean is for menhirs, pillars, posts)`);
+      const seat = base ? seatStructure(base, w, lean ? 0 : ang, planned, { rock: /^rock-kit\//.test(s.prefab) || !!lean, sinkMax: s.role === "dwelling" ? 0 : SINK_MAX_M }) : null, sy0 = r2(kerbTop != null ? kerbTop : host ? y + host.height + 0.3 : onY != null ? onY : seat ? seat.y : planned(w[0], w[1]));
       const sy = r2(sy0 + (s.lift ?? 0)); // raised foundations for a piece that asks for it (`lift`)
       placed.set(s.id, { w, ang, y: sy, prefab: s.prefab, k: s.scale });
       // raised foundations: the ground under the base is lifted to it (level, raise-only, feathered with the fall)
@@ -1180,12 +1199,13 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
         notes.push(`structure ${p.id}.${s.id}: ${seat.relief} m of ground fall under its base: seated on the highest ground, a skirt (${own ?? "zone built stone"}) runs round it ${SKIRT_BURY_M} m into the ground`);
       } else if (seat?.raise) notes.push(`structure ${p.id}.${s.id}: ${seat.relief} m of ground fall under its base: seated on the highest ground, the ground raised to its base (r ${seat.raise.radius} m)`);
       else if (seat?.sunk && seat.relief > SEAT_GAP_M) notes.push(`structure ${p.id}.${s.id}: sunk to its lowest ground (${seat.relief} m of fall under it: its uphill side rooted, no terrain edit)`);
-      const comps: any = { transform: { position: [r2(w[0] - core.at[0]), r2(sy - padY), r2(w[1] - core.at[1])], rotation: [0, r2(Math.sin(ang / 2) * 1e4) / 1e4, 0, r2(Math.cos(ang / 2) * 1e4) / 1e4], ...(s.scale !== 1 ? { scale: [s.scale, s.scale, s.scale] } : {}) }, prefab: { prefabId: s.prefab, props: {} } };
+      const comps: any = { transform: { position: [r2(w[0] - core.at[0]), r2(sy - padY), r2(w[1] - core.at[1])], rotation: q.map((c) => r2(c * 1e4) / 1e4), ...(s.scale !== 1 ? { scale: [s.scale, s.scale, s.scale] } : {}) }, prefab: { prefabId: s.prefab, props: {} } };
+      if (lean) notes.push(`structure ${p.id}.${s.id}: leans ${lean.deg} deg toward ${Math.round(((leanDir * 180) / Math.PI + 360) % 360)} deg (world, 0 = +z), sunk ${seat ? r2(Math.max(0, ...base!.cells.map((c) => planned(w[0] + c[0], w[1] + c[1]) - (seat.y + c[2])))) : 0} m at its downhill foot`);
       if (s.scale !== 1) { const tx = inp.texelsOf?.(s.prefab); if (tx != null && tx / s.scale < MIN_SCALED_TEXELS) faults.push(`structure ${p.id}.${s.id}: ${s.prefab} at scale ${s.scale} is ${r2(tx / s.scale)} tx/m, under the ${MIN_SCALED_TEXELS} tx/m floor: a taller piece is a prop request (Codex), never a stretched one`); }
       if (s.landmark) { comps.landmark = { fogReach: s.landmark.fogReach, silhouette: s.landmark.silhouette }; landmark = { at: w, foot: sy, top: sy + s.landmark.height, fogReach: s.landmark.fogReach }; }
       if (!host) solids.push({ at: w, r: s.footprint });
       if (SMOKE_READ_M[s.prefab]) smokes.push({ at: [r2(w[0]), r2(w[1])], top: r2(sy + SMOKE_READ_M[s.prefab]!), fogReach: s.landmark?.fogReach ?? 600 });
-      ops.push({ op: "add-entity", id: `${poi}-${p.id}-${s.id}`, entity: { name: `${s.id} (${s.prefab})`, parent: `poi-${poi}`, tags: [...tags.slice(1), `slot:${s.role}`, ...(s.on ? [`on:${s.on}`] : s.onWall ? [`on:${s.onWall}`] : []), ...(s.stone ? [`stone:${stoneOf(s.stone)}`] : []), ...(s.lift ? [`lift:${s.lift}`] : [])], components: comps } });
+      ops.push({ op: "add-entity", id: `${poi}-${p.id}-${s.id}`, entity: { name: `${s.id} (${s.prefab})`, parent: `poi-${poi}`, tags: [...tags.slice(1), `slot:${s.role}`, ...(s.on ? [`on:${s.on}`] : s.onWall ? [`on:${s.onWall}`] : []), ...(s.stone ? [`stone:${stoneOf(s.stone)}`] : []), ...(s.lift ? [`lift:${s.lift}`] : []), ...(lean ? [`lean:${lean.deg}`] : [])], components: comps } });
       if (host || under) continue; // up on the wall: no ground cleared, nothing kept clear on the ground
       if (dist(w, pk.at) + s.footprint > fitR + 2) clear(`${p.id}-${s.id}`, w, s.footprint + 1.5, false); // L: cover cleared under every structure
       keepClear.push({ id: `${p.id}-${s.id}`, why: `structure ${s.prefab}`, at: [r2(w[0]), r2(w[1])], radius: s.footprint });
@@ -1310,7 +1330,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
           const t = i * 2.39996 + (h % 360) * (Math.PI / 180), s = radius * 0.85 * Math.sqrt((i + 0.5) / n), w: V2 = [c[0] + Math.cos(t) * s, c[1] + Math.sin(t) * s];
           if (g.wet(w[0], w[1])) continue;
           const ang = (i * 137 + h) % 360, sc = r2(0.6 + ((h >> (i % 8)) % 5) * 0.1);
-          ops.push({ op: "add-entity", id: `${poi}-core-${q.id}-${i + 1}`, entity: { name: `${q.id} stone ${i + 1}`, parent: `poi-${poi}`, tags: [...tags.slice(1), "slot:rubble", "layout"], components: { transform: { position: [r2(w[0] - core.at[0]), r2(g.height(w[0], w[1]) - padY), r2(w[1] - core.at[1])], rotation: [0, r2(Math.sin((ang * Math.PI) / 360) * 1e4) / 1e4, 0, r2(Math.cos((ang * Math.PI) / 360) * 1e4) / 1e4], scale: [sc, sc, sc] }, prefab: { prefabId: stones[i % stones.length]!, props: {} } } } });
+          ops.push({ op: "add-entity", id: `${poi}-core-${q.id}-${i + 1}`, entity: { name: `${q.id} stone ${i + 1}`, parent: `poi-${poi}`, tags: [...tags.slice(1), "slot:rubble", "layout"], components: { transform: { position: [r2(w[0] - core.at[0]), r2(g.height(w[0], w[1]) - RUBBLE_EMBED_M * sc - padY), r2(w[1] - core.at[1])], rotation: [0, r2(Math.sin((ang * Math.PI) / 360) * 1e4) / 1e4, 0, r2(Math.cos((ang * Math.PI) / 360) * 1e4) / 1e4], scale: [sc, sc, sc] }, prefab: { prefabId: stones[i % stones.length]!, props: {} } } } });
         }
         continue;
       }
@@ -1577,6 +1597,8 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   for (const v of a.read.views) look(`far-${v.name}-${Math.round(dist(v.at, lm?.at ?? core.at))}m`, v.at, lm?.at ?? core.at);
   const handoff = {
     version: 1, poiId: poi, ownerAgentId: "place-build", builder: { tool: "place-build", archetype: a.id },
+    // L (KNUCKLECROWN 2026-10-29): the dress-site brief prints handoff `idea`; a place-build handoff had none ("undefined")
+    idea: (inp.place.text ?? inp.place.name).split(/(?<=\.)\s/)[0]!.slice(0, 300),
     stage: "blockout", integration: { sceneOps: "ops.json", worldOps: "world-ops.json + operators.json", clearings: "clearings.json" },
     measurements: { adventureSize: place.size, features, approaches: reservation.approaches.filter((l) => l.length).map((_, i) => `approach-${i + 1}`) },
     navigation: { routes, network: lines.map((l) => l.map((q) => q.map(r2))) },
@@ -1602,6 +1624,10 @@ export function approachLines(recipe: any, reservations: any[], res: { center: V
     const id = ap.from as string, road = (f.roads ?? []).find((r: any) => r.id === id), river = (f.rivers ?? []).find((r: any) => r.id === id);
     if (road || river) {
       const pts: V2[] = ((road ?? river).points as number[][]).map(xz);
+      // L (KNUCKLECROWN 2026-10-29): a road approach named by one LEG (`path-...-crown.s2`) was judged on that leg alone, so
+      // the place read never saw the leg the road runs on into the place (s3, where the ring shows 28-46 px at 257-275 m):
+      // the road's later legs that chain on from its end (start within 25 m of the last point) are part of the same line
+      if (road) { const m = /^(.*)\.s(\d+)$/.exec(id); if (m) for (let k = Number(m[2]) + 1; ; k++) { const nx = (f.roads ?? []).find((r: any) => r.id === `${m[1]}.s${k}`); if (!nx) break; const np = (nx.points as number[][]).map(xz); if (dist(np[0]!, pts[pts.length - 1]!) > 25) break; pts.push(...np); } }
       const ni = pts.reduce((m, q, i) => (dist(q, c) < dist(pts[m]!, c) ? i : m), 0);
       let i0 = ni, i1 = ni; while (i0 > 0 && dist(pts[i0 - 1]!, c) <= 600) i0--; while (i1 < pts.length - 1 && dist(pts[i1 + 1]!, c) <= 600) i1++;
       const l = road && i1 > i0 ? pts.slice(i0, i1 + 1) : [pts[ni]!, c];

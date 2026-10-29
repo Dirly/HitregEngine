@@ -377,6 +377,30 @@ export function townRegionOf(regions: readonly RegionDoc[], townId: string): Reg
   return null;
 }
 
+/**
+ * A STEPPED town's built ground as points: every shelf's centreline sampled every 4 m, ringed at its half-width +
+ * riser (the band and its step face), plus its gates. Null for a town without shelves (its pad disc is its ground).
+ * A terraced town's radius is only a bound: a coastal town sized from its program spans its shore with a radius
+ * whose seaward half is sea, so its zone encloses this ground rather than the disc.
+ */
+export function townGroundPoints(town: { center: readonly [number, number]; terraces?: readonly { points: readonly (readonly [number, number])[]; radius: number; falloff: number }[]; gates?: readonly { at: readonly [number, number] }[] }): [number, number][] | null {
+  if (!town.terraces || town.terraces.length === 0) return null;
+  const pts: [number, number][] = (town.gates ?? []).map((g) => [g.at[0], g.at[1]]);
+  for (const t of town.terraces) {
+    const line = t.points.length === 1 ? [t.points[0]!, t.points[0]!] : t.points;
+    const r = t.radius + t.falloff;
+    for (let i = 0; i + 1 < line.length; i++) {
+      const p = line[i]!, q = line[i + 1]!;
+      const steps = Math.max(1, Math.ceil(Math.hypot(q[0] - p[0], q[1] - p[1]) / 4));
+      for (let k = 0; k <= steps; k++) {
+        const x = p[0] + ((q[0] - p[0]) * k) / steps, z = p[1] + ((q[1] - p[1]) * k) / steps;
+        for (let j = 0; j < 16; j++) pts.push([x + Math.cos((j / 16) * Math.PI * 2) * r, z + Math.sin((j / 16) * Math.PI * 2) * r]);
+      }
+    }
+  }
+  return pts;
+}
+
 /** Whether every point of the circle (cx, cz, r) lies inside the polygon (sampled around the rim). */
 export function polygonEnclosesCircle(polygon: readonly (readonly [number, number])[], cx: number, cz: number, r: number, samples = 16): boolean {
   if (!pointInPolygon(cx, cz, polygon)) return false;
@@ -501,7 +525,13 @@ export function auditRegions(
         continue;
       }
       const reach = (town.radius ?? 45) + (town.falloff ?? 35);
-      if (!polygonEnclosesCircle(own.polygon, town.center[0], town.center[1], reach))
+      // a stepped town: its shelves (band + riser) and gates; a flat one: its pad disc + falloff
+      const ground = townGroundPoints(town);
+      if (ground) {
+        const out = ground.filter(([x, z]) => !pointInPolygon(x, z, own.polygon)).length;
+        if (out > 0 || !pointInPolygon(town.center[0], town.center[1], own.polygon))
+          findings.push(`town "${town.id}": its zone "${own.id}" does not enclose the town (${out} of ${ground.length} shelf/riser/gate points outside) — a border runs through it`);
+      } else if (!polygonEnclosesCircle(own.polygon, town.center[0], town.center[1], reach))
         findings.push(`town "${town.id}": its zone "${own.id}" does not enclose the town (radius + falloff = ${reach} m) — a border runs through it`);
     }
   }

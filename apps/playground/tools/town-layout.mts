@@ -9,7 +9,8 @@
  * the street, `setback` metres back from the road edge. Footprints are the WFC request's size in 3.2 m cells
  * (width along the street, depth away from it).
  *
- * Checks (exit 1 on any): the footprint is on its shelf (inside radius), the ground under it is flat
+ * Checks (exit 1 on any): every request is one the kit has proven it builds at that size and storey count
+ * (kit-fit, MMO/WFC/wfc/kit_fit.py; --kit-probe builds the unproven ones), the footprint is on its shelf (inside radius), the ground under it is flat
  * (<= 0.8 m spread on the topmost solid), it is dry, it keeps 0.5 m off every road's edge, it keeps 1 m
  * off every other lot (so jetties, dormers and chimneys have air), every resident's home and work exist,
  * and the plan covers every required service.
@@ -165,6 +166,30 @@ const MAX_SPREAD = Number(opt("max-spread", PADS ? "3" : "0.8"));
 const problems: string[] = [];
 const placed: Placed[] = [];
 
+// KIT-FIT (2026-10-29, z1-town3): every lot's request (footprint, storeys, roof, features) must be one the kit has
+// PROVEN it builds at that size (MMO/WFC/wfc/kit_fit.py: rule refusals via request.plan(), then a green build of the
+// same request from the style runs, town builds or a probe) BEFORE the lots are placed or the plan freezes. Saltharrow
+// froze 11 lots at sizes the kit cannot build and lost two rounds finding out in the build. --kit-probe builds the
+// unproven requests headless (Blender, one at a time); --no-kit-fit skips it only for a plan-only debug run.
+if (!argv.includes("--no-kit-fit")) {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const wfc = process.env.HITREG_WFC_DIR ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../MMO/WFC");
+  const planFile = path.join(townsDir, `${townName}-plan.json`);
+  const r = spawnSync("py", [path.join(wfc, "wfc/kit_fit.py"), planFile, "--json", ...(argv.includes("--kit-probe") ? ["--probe"] : [])], { cwd: wfc, encoding: "utf8", maxBuffer: 1 << 24 });
+  const line = (r.stdout ?? "").trim().split(/\r?\n/).filter((l) => l.startsWith("[")).at(-1);
+  if (!line) problems.push(`kit-fit did not run (${(r.stderr || r.error?.message || "no output").split(/\r?\n/).slice(-2).join(" ")})`);
+  else {
+    const rows = JSON.parse(line) as { name: string; status: string; reason?: string; proven?: string[] }[];
+    for (const k of rows) {
+      const optional = (plan.buildings as { id: string; optional?: boolean }[]).find((b) => b.id === k.name)?.optional;
+      const msg = `${k.name}: kit-fit ${k.status}${k.reason ? ` (${k.reason})` : ""}${k.proven?.length ? `; proven sizes for this feature set: ${k.proven.join(", ")}` : ""}`;
+      if (k.status !== "ok") problems.push(optional ? `${msg} [optional lot]` : msg);
+    }
+    console.log(`KIT-FIT ${rows.filter((k) => k.status === "ok").length}/${rows.length} requests proven by the kit`);
+  }
+}
+
 /** The terrace polyline's offset `v` at chord-frame `uu` (frame origin a, axes u/v): a bent shelf's crown line. */
 function shelfV(pts: P[], a: P, u: P, v: P, uu: number): number {
   const f = pts.map((q) => [(q[0] - a[0]) * u[0] + (q[1] - a[1]) * u[1], (q[0] - a[0]) * v[0] + (q[1] - a[1]) * v[1]] as P);
@@ -172,13 +197,31 @@ function shelfV(pts: P[], a: P, u: P, v: P, uu: number): number {
   for (let k = 1; k < f.length; k++) if (uu <= f[k]![0]) { const t = (uu - f[k - 1]![0]) / ((f[k]![0] - f[k - 1]![0]) || 1); return f[k - 1]![1] + (f[k]![1] - f[k - 1]![1]) * t; }
   return f.at(-1)![1];
 }
+/** The street frame of a shelf: its polyline, or for a DISC shelf (one point, the terrace stage's `--min-shelf` cut,
+ * 2026-10-29) a chord through the centre across the slope (perpendicular to centre -> first gate, or the lane's
+ * `axis`), so u runs 0..2r along the contour. A one-point polyline gave a zero frame and no lot could be placed. */
+function chordOf(t: { points: number[][]; radius: number }, axis?: P): P[] {
+  if (t.points.length >= 2) return t.points as P[];
+  const c = t.points[0] as P;
+  let ax: P | undefined = axis;
+  if (!ax) {
+    const g = (town!.gates[0]?.at ?? town!.center) as P;
+    const dx = g[0] - c[0], dz = g[1] - c[1], l = Math.hypot(dx, dz) || 1;
+    ax = [dz / l, -dx / l];
+  }
+  const l = Math.hypot(ax[0], ax[1]) || 1;
+  const u: P = [ax[0] / l, ax[1] / l];
+  return [[c[0] - u[0] * t.radius, c[1] - u[1] * t.radius], [c[0] + u[0] * t.radius, c[1] + u[1] * t.radius]];
+}
+const laneAxis = (laneId: string | undefined): P | undefined => ((plan.lanes ?? []).find((l: { id: string }) => l.id === laneId) as { axis?: P } | undefined)?.axis;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function evaluate(b: any, bu: number, sideName: string, setback: number, terraceId: string): Placed | null {
   const terrace = town!.terraces.find((t) => t.id === terraceId);
   if (!terrace) return null;
   b = { ...b, u: bu, side: sideName, setback, terrace: terraceId };
-  const a = terrace.points[0] as P;
-  const e = terrace.points.at(-1) as P;
+  const chord = chordOf(terrace, laneAxis(b.street));
+  const a = chord[0]!;
+  const e = chord.at(-1)!;
   const len = Math.hypot(e[0] - a[0], e[1] - a[1]) || 1;
   const u: P = [(e[0] - a[0]) / len, (e[1] - a[1]) / len];
   const v: P = [-u[1], u[0]];
@@ -193,7 +236,7 @@ function evaluate(b: any, bu: number, sideName: string, setback: number, terrace
   // `brow`: the street follows the SHELF, `brow` metres off the terrace polyline at this u (+ = east side), so a lane
   // on a bent shelf stays on it (a constant chord-frame `v` ran 4.5 m off a bent shelf's crown, z1-town 2026-10-28)
   const browLane = lane as { brow?: number; width?: number } | undefined;
-  if (browLane && typeof browLane.brow === "number") { streetV = shelfV(terrace.points as P[], a, u, v, bu) + browLane.brow; streetHalf = (browLane.width ?? 4) / 2; }
+  if (browLane && typeof browLane.brow === "number") { streetV = shelfV(chord, a, u, v, bu) + browLane.brow; streetHalf = (browLane.width ?? 4) / 2; }
   for (const r of laneRoads) {
     const pts = r.points as P[];
     for (let k = 1; k < pts.length; k++) {
@@ -272,7 +315,10 @@ function evaluate(b: any, bu: number, sideName: string, setback: number, terrace
       const g = ground(p[0], p[1]);
       lo = Math.min(lo, g);
       hi = Math.max(hi, g);
-      if (distToPolyline(terrace.points as P[], p[0], p[1]) > terrace.radius + 0.5) off++;
+      // off the shelf AND not at its height: unterraced ground inside the town that already lies level with the shelf
+      // takes a lot too (z1-town3: the terrace stage cuts disc shelves; the level ground beside them is just as good);
+      // with --pads the building's own foundation pad levels up to --max-spread, so ground within that of the shelf counts
+      if (distToPolyline(terrace.points as P[], p[0], p[1]) > terrace.radius + 0.5 && Math.abs(g - terrace.groundY) > (PADS ? MAX_SPREAD : 0.4)) off++;
       const water = field.waterY(p[0], p[1]);
       if (g < recipe.seaLevel + 0.2 || (water !== null && water > g)) wet++;
     }
@@ -281,7 +327,9 @@ function evaluate(b: any, bu: number, sideName: string, setback: number, terrace
       const p = local(Math.min(gw0 + i, gw1), Math.min(gd0 + j, gd1));
       for (const r of allRoads) if (!road && distToPolyline(r.points as P[], p[0], p[1]) < r.width / 2 + 0.3) road = r.id;
     }
-  if (hi - lo > MAX_SPREAD) mine.push(`ground spread ${(hi - lo).toFixed(2)} m (${lo.toFixed(1)}..${hi.toFixed(1)})`);
+  // a lot may carry its own `maxSpread` (its pad cuts deeper into a slope; with --pads only): the plan says why
+  const spreadCap = PADS && typeof b.maxSpread === "number" ? b.maxSpread : MAX_SPREAD;
+  if (hi - lo > spreadCap) mine.push(`ground spread ${(hi - lo).toFixed(2)} m (${lo.toFixed(1)}..${hi.toFixed(1)})`);
   if (off) mine.push(`${off} sample(s) off the ${terrace.id} shelf`);
   if (wet) mine.push(`${wet} sample(s) in water`);
   if (road) mine.push(`footprint within 0.5 m of road ${road}`);
@@ -403,16 +451,18 @@ for (const b of [...plan.buildings].sort((p, q) => (Number(!!(p as { optional?: 
   let found: Placed | null = null;
   for (const shelf of shelves) {
     const t = town.terraces.find((x) => x.id === shelf)!;
-    const len = Math.hypot(t.points.at(-1)![0] - t.points[0]![0], t.points.at(-1)![1] - t.points[0]![1]);
+    const ch = chordOf(t, laneAxis(b.street));
+    const len = Math.hypot(ch.at(-1)![0] - ch[0]![0], ch.at(-1)![1] - ch[0]![1]);
     const cands: [number, string, number][] = [];
-    for (let du = 0; du <= len + 20; du += 1)
+    const lnR = (plan.lanes ?? []).find((l: { id: string }) => l.id === b.street) as { uMin?: number; uMax?: number } | undefined;
+    const span = Math.max(len + 20, Math.abs((lnR?.uMax ?? 0) - b.u), Math.abs(b.u - (lnR?.uMin ?? 0)));
+    for (let du = 0; du <= span; du += 1)
       for (const uu of du === 0 ? [b.u] : [b.u + du, b.u - du])
         for (const side of [b.side, b.side === "east" ? "west" : "east"])
           for (const sb of [b.setback ?? 1, 0.5, 2, 3, 4]) cands.push([uu, side, sb]);
     for (const [uu, side, sb] of cands) {
-      if (uu < -10 || uu > len + 10) continue;
       const ln_ = (plan.lanes ?? []).find((l: { id: string }) => l.id === b.street) as { uMin?: number; uMax?: number } | undefined;
-      if (ln_ && ((ln_.uMin !== undefined && uu < ln_.uMin) || (ln_.uMax !== undefined && uu > ln_.uMax))) continue;
+      if (uu < (ln_?.uMin ?? -10) || uu > (ln_?.uMax ?? len + 10)) continue;
       const c = evaluate(b, uu, side, sb, shelf);
       if (process.env.LAYOUT_WHY === b.id && c && whyCount++ < 12) console.log("WHY", uu, side, sb, c.problems.join(";"), "clash", clash(c), "reach", c.problems.length ? "-" : reachable(c), "door", c.door.map((v) => v.toFixed(1)).join(","));
       if (c && c.problems.length === 0 && !clash(c) && reachable(c)) { found = c; break; }
@@ -547,8 +597,9 @@ if (argv.includes("--write-lanes")) {
     const t = town.terraces.find((x) => x.id === lane.terrace);
     const onIt = placed.filter((q) => (plan.buildings as { id: string; street?: string }[]).find((b) => b.id === q.id)?.street === lane.id);
     if (!t || onIt.length === 0) continue;
-    const a = t.points[0] as P;
-    const e = t.points.at(-1) as P;
+    const chord = chordOf(t, (lane as { axis?: P }).axis);
+    const a = chord[0]!;
+    const e = chord.at(-1)!;
     const len = Math.hypot(e[0] - a[0], e[1] - a[1]) || 1;
     const u: P = [(e[0] - a[0]) / len, (e[1] - a[1]) / len];
     const v: P = [-u[1], u[0]];
@@ -556,7 +607,7 @@ if (argv.includes("--write-lanes")) {
     const us = onIt.flatMap((q) => q.corners.map(toU));
     const u0 = Math.min(...us) - 4;
     const u1 = Math.max(...us) + 4;
-    const laneV = (uu: number): number => (typeof brow === "number" ? shelfV(t.points as P[], a, u, v, uu) + brow : lane.v!);
+    const laneV = (uu: number): number => (typeof brow === "number" ? shelfV(chord, a, u, v, uu) + brow : lane.v!);
     const at = (uu: number): P => [a[0] + u[0] * uu + v[0] * laneV(uu), a[1] + u[1] * uu + v[1] * laneV(uu)];
     // a brow lane follows the bent shelf: one point every ~4 m (a chord lane stays a straight two-point line)
     const steps = typeof brow === "number" ? Math.max(1, Math.ceil((u1 - u0) / 4)) : 1;

@@ -408,6 +408,26 @@ function worldScene(file: string, world: string): { assets: string; doc: SceneDo
 }
 
 /** `worldgen water-edges <world>`: every curtain (and with the world's scene, every placed body). `--stamp` stamps the stage. */
+/** PLACED POOLS (KNUCKLECROWN 2026-10-29: water-edges counted 0 bodies at a place whose pool is a hand-placed recipe lake,
+ *  so the pool was never edge-checked): every round placed pool (recipe lake, carve: true, no polygon) in the area is judged on rings round its centre — inside
+ *  (radius - 1 m) the field's water must be there at the lake's ONE level (no buried patch, no second level); outside
+ *  (radius + bank + 1 m) the shore must stand at least POOL_RIM_M over the water (no spill, no water ending in the air). */
+export const POOL_RIM_M = 0.2;
+export function worldPools(field: WorldField, recipe: WorldRecipe, area: Area = {}): { rows: WaterEdgeRow[]; bodies: number } {
+  const rows: WaterEdgeRow[] = []; let bodies = 0;
+  for (const l of ((recipe as any).features?.lakes ?? []) as any[]) {
+    if (l.carve !== true || l.polygon || !Array.isArray(l.center) || typeof l.waterY !== "number" || !inArea(area, l.center[0], l.center[1])) continue; // round placed pools (hand-placed, carved); generated lakes follow their own shore
+    bodies++;
+    const ring = (r: number) => Array.from({ length: 24 }, (_, i) => { const a = (i / 24) * Math.PI * 2; return [l.center[0] + Math.sin(a) * r, l.center[1] + Math.cos(a) * r] as [number, number]; });
+    for (const [x, z] of ring(Math.max(1, (l.radius ?? 6) - 1))) { const wy = field.waterY(x, z);
+      if (wy === null) rows.push({ kind: "edge", id: l.id, what: "pool", x: r2(x), y: r2(l.waterY), z: r2(z), issue: "no water inside the pool's radius (buried or drained)" });
+      else if (Math.abs(wy - l.waterY) > 0.05) rows.push({ kind: "edge", id: l.id, what: "pool", x: r2(x), y: r2(wy), z: r2(z), issue: `second level: water at ${r2(wy)} m, the pool's level is ${l.waterY} m` }); }
+    for (const [x, z] of ring((l.radius ?? 6) + (l.bank ?? 6) + 1)) { const h = field.height(x, z);
+      if (h < l.waterY + POOL_RIM_M) rows.push({ kind: "edge", id: l.id, what: "pool", x: r2(x), y: r2(h), z: r2(z), issue: `shore ${r2(h)} m is under the water ${l.waterY} m + ${POOL_RIM_M}: the pool spills` }); }
+  }
+  return { rows, bodies };
+}
+
 export function commandWaterEdges(host: { argv: string[]; loadRecipe(): { recipe: WorldRecipe; file: string }; fail(m: string): never; writeRecipe?(recipe: WorldRecipe, file: string): void }): WaterEdgesReport {
   const t0 = performance.now();
   const { argv } = host;
@@ -424,7 +444,7 @@ export function commandWaterEdges(host: { argv: string[]; loadRecipe(): { recipe
     return matCache.get(name);
   };
   const curtains = worldCurtains(field, area, materialOf);
-  const parts: Parameters<typeof summarize>[3] = [curtains];
+  const parts: Parameters<typeof summarize>[3] = [curtains, worldPools(field, recipe, area)];
   const ws = argv.includes("--no-scene") ? null : worldScene(file, world);
   if (ws) parts.push(sceneWaterEdges(ws.assets, ws.doc, field, area));
   const rep = summarize(world, text, t0, parts);

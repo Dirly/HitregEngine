@@ -143,7 +143,8 @@ export function recipeProjection(recipe: J, zone: string, reservations?: J): J {
   return {
     region: pick(regions.find((r) => r.id === zone && r.within === undefined), ["id", "name", "level", "polygon"]),
     townZones: townZones.map((r) => pick(r, ["id", "name", "polygon", "landmarks"])),
-    towns: towns.filter((t) => townIds.has(t.id)).map((t) => pick(t, ["id", "tier"])),
+    // the shelves are planning ground: the town plan is laid on them and `program-fit` judges the plan against them
+    towns: towns.filter((t) => townIds.has(t.id)).map((t) => pick(t, ["id", "tier", "terraces", "program"])),
     sites: pois.filter((x) => sites.has(x.id)).map((x) => pick(x, ["id", "kind", "position"])),
     approaches: [...named].sort().map((id) => [id, known.has(id)]),
   };

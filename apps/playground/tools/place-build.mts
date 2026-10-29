@@ -62,7 +62,7 @@ import {
 } from "./_place-archetype.mts";
 import os from "node:os";
 import { baseGap, lowerPatch, planBridge } from "./_place-bridge.mts";
-import { baseOutline, coverClearedShare, scaleBase, seatGap, SEAT_GAP_M, type BaseOutline } from "./_place-quality.mts";
+import { baseOutline, coverClearedShare, isLeaned, orientBase, scaleBase, seatGap, SEAT_GAP_M, type BaseOutline } from "./_place-quality.mts";
 import { prefabGeometry, projectedTexels, texelDensity } from "./_prop-geometry.mts";
 import { CLASS_FOOTPRINT_M, gradeScore, heightForPx, POCKET_FLOOR_M, READ_PX_MIN, readPixels, spanOf, wearsCliffTile, type QualityRow, type Tier } from "./_place-quality.mts";
 // @ts-ignore untyped engine tool module
@@ -463,7 +463,7 @@ async function layoutPropsSheet() {
 function makeLab() {
   const live = path.join(PROJECTS, project), dir = path.join(PROJECTS, lab), pj = read(path.join(live, "project.json"));
   write(path.join(dir, "project.json"), { version: 1, name: lab, title: `place-build lab: ${poi} (scratch)`, description: `Scratch copy of ${world} world + scene for place-build ${poi}. Never installed; delete when done.`, group: "Worlds", menuOrder: 99,
-    scenes: [{ id: labWorld, label: `place-build lab ${poi}`, variants: [] }], engine: pj.engine ?? "^0.1", multiplayer: pj.multiplayer ?? "server", tools: [], dependsOn: [...new Set([...(pj.dependsOn ?? []), project])] });
+    scenes: [{ id: labWorld, label: `place-build lab ${poi}`, variants: [] }], engine: pj.engine ?? "^0.1", multiplayer: pj.multiplayer ?? "server", tools: [], dependsOn: [...new Set([...(pj.dependsOn ?? []), project, ...portalProjects()])] });
   const wt = fs.readFileSync(worldFile(project, world), "utf8");
   write(worldFile(lab, labWorld), withoutPlace(JSON.parse(wt)));
   fs.writeFileSync(path.join(dir, "source-world.sha1"), `${crypto.createHash("sha1").update(wt).digest("hex")} *${project}/assets/worlds/${world}.json\n`);
@@ -485,6 +485,15 @@ function makeLab() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+/** L (Wristgate 2026-10-29: portal-play FAILED "shackle-halls is not in pb-wristgate's dependsOn closure"): the lab depends on
+ *  every project its job's portals lead into (a `dungeon:<id>` tag on a scene op whose project exists), or the editor cannot
+ *  open the instance at the door. The live world lists them itself (install). */
+function portalProjects(): string[] {
+  const f = path.join(JOB, "ops.json"); if (!fs.existsSync(f)) return [];
+  const ids = [...new Set([...fs.readFileSync(f, "utf8").matchAll(/"dungeon:([a-z0-9-]+)"/g)].map((m) => m[1]!))];
+  return ids.filter((id) => fs.existsSync(path.join(PROJECTS, id, "project.json")));
+}
+
 /** Apply (or with `remove` only take out) this place in a project's world + scene. The lab build and the live install. */
 function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) {
   const reg = new ComponentRegistry(); registerCoreComponents(reg); registerChunkComponents(reg);
@@ -511,6 +520,11 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
   if (!remove) {
     const parsed = applyRecipeEdits(worldRecipeSchema.parse(w2), worldOps as never); // validates every patch
     for (const o of worldOps) (w2.features[o.kind] ??= []).push((parsed.recipe.features as any)[o.kind].find((f: any) => f.id === o.feature.id));
+  }
+  { // the layout's place-region vegetation (layout `vegetation`): set on regions[id = poi], taken off on remove
+    const lf = path.join(JOB, "layout.json"), veg = fs.existsSync(lf) ? read(lf).vegetation : undefined, region = (w2.regions ?? []).find((r: any) => r.id === poi);
+    if (veg && !region) fail(`layout vegetation: the world has no place region ${poi} (worldgen regions) to carry it`);
+    if (veg && region) { if (remove) delete region.vegetation; else region.vegetation = veg; worldRecipeSchema.parse(w2); }
   }
   write(WF, w2);
   if (remove) { console.log(`removed ${poi} from ${p}/${w}: ${removes.length} entity roots, ${ownOps.length} operators, own patches + clearings`); return; }
@@ -614,10 +628,22 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
   try { setStage(JOB, "installed"); } catch (e) { console.log(`WARN stage not moved to installed: ${String((e as Error).message).slice(0, 200)}`); }
 }
 
+/** L (Wristgate 2026-10-29: `gates` crashed on reports/plan.json): a HERO place's owner writes its own build (build-spec, no
+ *  `plan`), so the gates take the area from its handoff instead: centre = the landmark (else the first dressing area), pockets
+ *  = the dressing areas' centres. A planned place keeps its plan. */
+export function gatePlan(job: string, hand: any): { centre: V2; pockets: { at: V2 }[]; requested?: unknown } {
+  const f = path.join(job, "reports", "plan.json");
+  if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, "utf8"));
+  const areas = (hand?.siteDressing?.areas ?? []).filter((a: any) => Array.isArray(a.centre)).map((a: any) => ({ at: [a.centre[0], a.centre[1]] as V2 }));
+  const centre = (Array.isArray(hand?.landmark?.at) ? [hand.landmark.at[0], hand.landmark.at[1]] : areas[0]?.at) as V2 | undefined;
+  if (!centre) throw new Error(`no reports/plan.json and no handoff landmark.at / siteDressing.areas in ${job}: cannot place the gates`);
+  return { centre, pockets: areas };
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 const GATES = ["design", "size", "fine", "roads", "lips", "scatter-float", "float", "seated", "rock-skins", "water-edges", "zfight", "op-check", "art", "walk", "dress", "place"] as const;
 function gates(onlyArg?: string[]) {
-  const hand = read(path.join(JOB, "handoff.json")), plan = read(path.join(JOB, "reports", "plan.json"));
+  const hand = read(path.join(JOB, "handoff.json")), plan = gatePlan(JOB, hand);
   const pts = [plan.centre, ...plan.pockets.map((k: any) => k.at)] as V2[], c = plan.centre as V2;
   const R = Math.ceil(Math.max(...pts.map((q) => Math.hypot(q[0] - c[0], q[1] - c[1]))) + 30), near = `${Math.round(c[0])},${Math.round(c[1])},${R}`;
   const only = onlyArg ?? opt("only")?.split(","), rows: any[] = [], rep = (n: string) => path.join(JOB, "reports", `${n}.json`);
@@ -723,7 +749,8 @@ function seatedCheck(): { ok: boolean; detail: string } {
     if (!prefab || !slot || slot === "fire" || slot === "boat" || slot === "ring" || (o.entity?.tags ?? []).some((t: string) => t.startsWith("on:"))) continue; // a piece on another piece is not seated on the ground
     const e = E[o.id]; if (!e) { rows.push({ id: o.id, prefab, fault: "not in the lab scene" }); continue; }
     const b0 = structureBase(prefab); if (!b0) { rows.push({ id: o.id, prefab, gap: null, note: "no base outline (no triangles)" }); continue; }
-    const t = e.components.transform, base = scaleBase(b0, t.scale?.[0] ?? 1), q = t.rotation ?? [0, 0, 0, 1], yawR = 2 * Math.atan2(q[1], q[3]), at: V2 = [root[0] + t.position[0], root[2] + t.position[2]], lift = Number((o.entity?.tags ?? []).find((t: string) => t.startsWith("lift:"))?.slice(5) ?? 0) || 0, y = root[1] + t.position[1] - lift; // a lifted piece (layout `lift`) is seated at its footing, `lift` below its base plane
+    // L (KNUCKLECROWN 2026-10-29): a LEANED piece (layout `lean`) is measured on its outline turned in 3D, never by its yaw alone
+    const t = e.components.transform, q = t.rotation ?? [0, 0, 0, 1], leaned = isLeaned(q), base = leaned ? orientBase(scaleBase(b0, t.scale?.[0] ?? 1), q) : scaleBase(b0, t.scale?.[0] ?? 1), yawR = leaned ? 0 : 2 * Math.atan2(q[1], q[3]), at: V2 = [root[0] + t.position[0], root[2] + t.position[2]], lift = Number((o.entity?.tags ?? []).find((t: string) => t.startsWith("lift:"))?.slice(5) ?? 0) || 0, y = root[1] + t.position[1] - lift; // a lifted piece (layout `lift`) is seated at its footing, `lift` below its base plane
     const sk = walls.find((w) => w.id === `pb-${poi}-skirt-${o.id.slice(poi.length + 1)}`);
     const m = seatGap(base, at, y, yawR, (x, z) => g.height(x, z), sk ? { hull: sk.points, top: sk.topY, reach: sk.thickness / 2 + 0.3 } : null);
     rows.push({ id: o.id, prefab, gap: m.gap, at: m.at, skirt: sk?.id ?? null, ok: m.gap <= SEAT_GAP_M });

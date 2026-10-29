@@ -822,7 +822,10 @@ console.log(`saved ${sheetFile}\nsaved ${path.join(OUT, `${stem}.json`)} — ${s
 // L (Wristgate 2026-10-28: after a spot timeout the reloaded page drew 4 of 5 frames black, luma 14, and the run passed):
 // a frame whose whole-picture luma is under BLACK_FRAME_LUMA is a failed render, never evidence; the run exits 1 naming them
 const BLACK_FRAME_LUMA = 20;
-const black = shots.map((s, i) => ({ s, m: result.measures[i] })).filter(({ m }) => typeof m?.frame === "number" && m.frame < BLACK_FRAME_LUMA);
+// L (Wristgate 2026-10-29): a gorge at 23:00 lit by two braziers measured luma 14-20 and was called a FAILED render four
+// times; a night hour (20-04) keeps the failed-render line at 8 (a blank night frame reads 0-5, a lit dark scene 9+)
+const NIGHT_BLACK_LUMA = 8, nightHour = (t: number | null | undefined) => typeof t === "number" && (t >= 20 || t < 5);
+const black = shots.map((s, i) => ({ s, m: result.measures[i] })).filter(({ s, m }) => typeof m?.frame === "number" && m.frame < (nightHour(s.time as number | null) ? NIGHT_BLACK_LUMA : BLACK_FRAME_LUMA));
 if (black.length) { console.error(`STOP: ${black.length} black frame(s) (luma < ${BLACK_FRAME_LUMA}: a failed render, not a dark scene): ${black.map(({ s, m }) => `${s.spot}${s.time === null ? "" : `@${s.time}`} (${m.frame.toFixed(0)})`).join(", ")} — re-run those spots`); process.exitCode = 1; }
 } finally {
   await browser.close().catch(() => {});

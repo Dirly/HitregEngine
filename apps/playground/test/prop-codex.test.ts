@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { propName, writeBrief, kindRange, helperContext, exampleContext } from "../tools/prop-codex/brief.mts";
-import { gateFaults, type GeometryRecord } from "../tools/prop-codex/check.mts";
+import { gateFaults, unpaintedMonolithFaults, type GeometryRecord } from "../tools/prop-codex/check.mts";
 import { runJob, ledgerLine, NOT_A_PROP, type Req, type Runner } from "../tools/prop-codex/run.mts";
 
 const human = { id: "human", height: 1.8 }, scales = [human, { id: "giant", height: 6 }];
@@ -57,6 +57,14 @@ test("helper + example context: town-craft's helper section (no emit, no build),
 const good: GeometryRecord = { name: "chain-coil", design: "coil", category: "tool", mount: "floor", solid: true, setting: "both", cultures: ["crypt"], size: [0.7, 0.2, 0.7], triangles: 400, texel: 39.8,
   parts: [{ part: "coil", role: "iron", faces: 300, extent: [0.7, 0.7, 0.2] }, { part: "loose end", role: "iron", faces: 40, extent: [0.4, 0.1, 0.1] }] };
 const job = { name: "chain-coil", culture: "crypt", scale: human, worldKit: "" };
+
+test("gateFaults: painted surfaces that overflow the one 1024 px page are refused at design time", () => {
+  const surf = (name: string, w: number, h: number) => ({ name, part: "coil", projection: "front", detail: "x", metres: [w / 40, h / 40], pixels: [w, h], triangles: [], faces: 1 });
+  const fits = { ...good, paintPlan: { surfaces: [surf("a", 400, 400)], roles: ["stone"] } } as unknown as GeometryRecord;
+  assert.deepEqual(gateFaults(fits, job, scales), []);
+  const over = { ...good, paintPlan: { surfaces: [surf("a", 900, 900), surf("b", 600, 400)], roles: ["stone", "iron"] } } as unknown as GeometryRecord;
+  assert.match(gateFaults(over, job, scales).join(" | "), /paint page: .* over one 1024 px page/);
+});
 
 test("gateFaults: a landmark request is built at full height, never a small prop scaled up", () => {
   const tall: GeometryRecord = { ...good, size: [5, 18.2, 9], triangles: 2100 };
@@ -144,4 +152,14 @@ test("request reopen: a made request goes back to open with the reason kept", as
   assert.equal(readRequests(p)[0]!.made, undefined);
   assert.match((readRequests(p)[0] as any).reopened[0], /was made \(codex-craft\/kelp-burning-pit\): smoke modelled as blobs/);
   assert.throws(() => reopenRequest(p, r.id, "again"), /already open/);
+});
+
+test("unpaintedMonolithFaults: a stone part left out of the paint regions of a painted stone piece is flagged", () => {
+  const surf = (part: string) => ({ name: part.replace(/\W+/g, "-"), part, projection: "front", detail: "x", metres: [1, 1], pixels: [40, 40] });
+  const parts = [{ part: "fist", role: "stone", faces: 10 }, { part: "wrist seat", role: "stone", faces: 8 }, { part: "masonry plinth", role: "stone", faces: 6 }, { part: "band", role: "iron", faces: 4 }];
+  const f = unpaintedMonolithFaults({ parts, size: [8, 11, 5], paintPlan: { surfaces: [surf("fist")], roles: ["stone", "iron"] } as never });
+  assert.deepEqual(unpaintedMonolithFaults({ parts, size: [7, 2, 3], paintPlan: { surfaces: [surf("fist")], roles: ["stone"] } as never }), [], "a low dressed block is not a monolith");
+  assert.equal(f.length, 1); assert.match(f[0]!, /wrist seat/); assert.doesNotMatch(f[0]!, /masonry plinth|band/);
+  assert.deepEqual(unpaintedMonolithFaults({ parts, size: [8, 11, 5], paintPlan: { surfaces: [surf("fist"), surf("wrist seat")], roles: ["stone"] } as never }), []);
+  assert.deepEqual(unpaintedMonolithFaults({ parts, paintPlan: null }), []);
 });

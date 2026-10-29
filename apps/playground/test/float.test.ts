@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { applyOps, ComponentRegistry, createWorldField, defaultWorldRecipe, registerCoreComponents, worldRecipeSchema } from "@hitreg/core";
-import { commandFloat, fixOnCurrent, fixOps, floatScatter, floatScene, inverseState, LANDMARK_SUPPORT, sceneDigest, withLandmarkSupport } from "../tools/float.mts";
+import { commandFloat, fixOnCurrent, fixOps, floatScatter, floatScene, inverseState, LANDMARK_SUPPORT, sceneDigest, tautSpanEnds, withLandmarkSupport } from "../tools/float.mts";
 import { standardStages } from "../../../tools/dungeon-pipeline/pipeline.mjs";
 import { floatBlock } from "../../../tools/poi-review/job.mjs";
 
@@ -197,4 +197,24 @@ test("float --fix writes onto the scene as it is NOW: another job's edit made du
   other.entities.a.components.transform.position = [5, 3, 5];
   fs.writeFileSync(file, JSON.stringify(other));
   assert.throws(() => fixOnCurrent(file, loaded, { doc: res.doc as never, ops, inverse: res.inverse }), /changed under the fix/);
+});
+
+test("tautSpanEnds: a sloped 14 m span is held when both ends thread solid, not by an edge vertex or a plan axis", () => {
+  // a sloped bar from (0, 10, 0) to (12, 4, 7): a box-ish cloud of vertices round its axis, 0.4 m thick
+  const a = [0, 10, 0], b = [12, 4, 7], w: number[] = [];
+  for (let s = 0; s <= 1.0001; s += 0.05) for (const [ox, oy, oz] of [[0.4, 0, 0], [-0.4, 0, 0], [0, 0.4, 0], [0, -0.4, 0], [0, 0, 0.4], [0, 0, -0.4]]) w.push(a[0]! + (b[0]! - a[0]!) * s + ox!, a[1]! + (b[1]! - a[1]!) * s + oy!, a[2]! + (b[2]! - a[2]!) * s + oz!);
+  // solid: a block round the high end (the wrist) and, optionally, one round the low end (the anchor)
+  const probeOf = (blocks: number[][]) => ({
+    floor: (x: number, z: number, hi: number, lo: number) => { for (const k of blocks) if (x >= k[0]! && x <= k[3]! && z >= k[2]! && z <= k[5]! && lo <= k[4]!) { if (hi <= k[4]! && hi >= k[1]!) return hi; if (k[4]! <= hi) return k[4]!; } return null; },
+    wall: () => null,
+  });
+  const wrist = [-2, 8, -2, 1.5, 12, 1.5], anchor = [10.5, 0, 5.5, 14, 4.5, 9];
+  const both = tautSpanEnds(w, probeOf([wrist, anchor]) as never, []);
+  assert.equal(both.length, 2);
+  assert.ok(both.every((e) => e.held), JSON.stringify(both));
+  const one = tautSpanEnds(w, probeOf([wrist]) as never, []);
+  assert.equal(one.filter((e) => e.held).length, 1, "the low end over air is not held");
+  // the next span of the run holds an end
+  const next = [11, 3.5, 6.5, 13, 5, 8]; // two corners of the next span's bounds
+  assert.ok(tautSpanEnds(w, probeOf([wrist]) as never, [next]).every((e) => e.held));
 });
