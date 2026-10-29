@@ -473,7 +473,8 @@ const HELP = `worldgen — procedural world pipeline
                    --footprint "x,z …" | --path "x,z …" (pad on the left) [--style masonry-common|masonry-stone|natural]
                    [--height m] [--top-y m] [--insert stair-turn@4:1 …] [--walls auto|0,2]; fits the pad patch, wall
                    cuts and kit pieces (build.mts make for a new height), runs lips + seated + riser gates (exit 1).
-                   --refit [--id a,b | --all] after a terrain rebuild; --check; --remove id; --dry-run
+                   --refit [--id a,b | --all] [--upward: keep the risers below the named one] [--feather m]
+                   after a terrain rebuild (writes an inverse); --check; --remove id; --dry-run
   bridge-place <world>  a REAL bridge across a gap (features.bridgeSpans, world-kit bridge kits): --spec doc.json, or
                    --id x --a "x,z[,y|ground]" --b "x,z[,y|ground]" [--kind arch|rope] [--style gnawspur|coastal]
                    [--channel] [--tiers auto|1|2] [--bay 6..16] [--sag 0.035] [--width 1.8] [--seat pad|rock];

@@ -366,7 +366,16 @@ function plan(from: P2, to: P2): P2[] | null {
       if (cost < g[k]!) { g[k] = cost; came[k] = c; f[k] = cost + hx(k); open.push(k); }
     }
   }
+  // a goal ON a ledge's lip (a town centre the street kerb moved a riser face under, Saltharrow 10-29: the open cell at
+  // the riser top was an island the shoulder margin cut off, 1 m from the street below it) is reached from the open
+  // cell beside it: within 2.5 m the route ends there, and the physics walk judges the rest. Farther is a real fault.
+  let goalAt = goal;
   if (came[goal] === -1 && goal !== start) {
+    let near = -1, nd = Infinity;
+    for (let k = 0; k < w * h; k++) if (closed[k]) { const d = hx(k); if (d < nd) (nd = d), (near = k); }
+    if (near >= 0 && nd <= 2.5) { if (process.env.TOWN_WALK_WHY) console.log(`  WHY ${from.map(Math.round)} -> ${to.map(Math.round)}: goal on an island, ending ${nd.toFixed(1)} m short on open ground`); goalAt = near; }
+  }
+  if (came[goalAt] === -1 && goalAt !== start) {
     if (process.env.TOWN_WALK_WHY) {
       // where the search stalled: the reached cell nearest the goal, and the grid round it (# closed, . open, s/g ends)
       let near = start, nd = Infinity, reached = 0;
@@ -382,7 +391,7 @@ function plan(from: P2, to: P2): P2[] | null {
     return null;
   }
   const out: P2[] = [];
-  for (let k = goal; k !== -1; k = came[k]!) out.push([x0 + (k % w), z0 + Math.floor(k / w)]);
+  for (let k = goalAt; k !== -1; k = came[k]!) out.push([x0 + (k % w), z0 + Math.floor(k / w)]);
   return out.reverse();
 }
 const unplanned: string[] = [];
@@ -397,6 +406,7 @@ for (const [id, pts] of tours) {
     if (dist(a, b) > 4 && !leg) console.log(`  note ${id}: no planned way from [${a.map(Math.round)}] to [${b.map(Math.round)}]; walking the straight line`);
     out.push(...(leg ? leg.slice(1) : [b]));
   }
+  if (process.env.TOWN_WALK_WHY) console.log(`  tour ${id} waypoints: ${pts.map((q) => q.map(Math.round).join(",")).join(" ")}`);
   routes.find((r) => r.id === id)!.points = densify(out, 1);
 }
 const toOpt = opt("to", "");

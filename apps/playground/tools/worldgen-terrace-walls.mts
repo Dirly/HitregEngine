@@ -1017,9 +1017,13 @@ export function commandTerracePlace(host: TerracePlaceHost): void {
   if (!docs.length) host.fail("terrace-place: nothing to fit (no matching --id, or no terraceWalls in the recipe)");
   const kit = loadTerraceKit(host.project);
   const work = structuredClone(recipe);
+  // --refit --feather <m>: a wider bank feather on the named risers (a pad corner notched into a bank the default
+  // feather steepens past the lips gate's 1.6 rise/run: Saltharrow riser-2, 10-29, 4.28 m over 2 m behind the vault pad)
+  const featherArg = str(argv, "feather");
+  if (argv.includes("--refit") && featherArg !== undefined) for (const t of work.features.terraceWalls ?? []) if (docs.some((d) => d.id === t.id)) t.feather = Number(featherArg);
   const t0 = Date.now();
   // a town's risers share ground: refitting one refits the whole town, bottom-up (solveTerraceChain)
-  const fits: TerraceFit[] = argv.includes("--refit") ? refitGrouped(work, docs, kit, console.log) : docs.map((d) => { const f = fitTerraceWall(work, d, kit, console.log); applyTerraceFit(work, f); return f; });
+  const fits: TerraceFit[] = argv.includes("--refit") ? refitGrouped(work, docs, kit, console.log, { upward: argv.includes("--upward") }) : docs.map((d) => { const f = fitTerraceWall(work, d, kit, console.log); applyTerraceFit(work, f); return f; });
   for (const fit of fits) {
     const s = fit.doc.solved!;
     console.log(`terrace ${fit.doc.id}: ${s.style} ${s.height} m wall, pad ${s.topY} over foot ${s.baseY}; ${s.runs.length} run(s), ${s.pieces.length} pieces, ${s.cuts.length} cut(s), patch ${fit.patch.columns}x${fit.patch.rows}`);
@@ -1036,8 +1040,19 @@ export function commandTerracePlace(host: TerracePlaceHost): void {
       if (!g.ok) bad++;
     }
   }
-  if (!dry) writeFresh(host, (r) => { for (const f of fits) applyTerraceFit(r, f); });
-  else console.log("(dry run: nothing written)");
+  if (!dry) {
+    // the inverse, as terrace-kerb writes it (worldgen op --undo <it>): every feature edit this fit made
+    const { recipe: before } = host.loadRecipe();
+    const after = structuredClone(before); for (const f of fits) applyTerraceFit(after, f);
+    const edits = recipeInverse(before, after);
+    writeFresh(host, (r) => { for (const f of fits) applyTerraceFit(r, f); });
+    if (edits.length) {
+      const inv = path.join("projects", host.project, "authoring", "terrain", "undo", `${before.name}.terrace-place.${new Date().toISOString().replace(/[:.]/g, "-")}.inverse.json`);
+      fs.mkdirSync(path.dirname(inv), { recursive: true });
+      fs.writeFileSync(inv, JSON.stringify({ world: before.name, what: `terrace-place ${fits.map((f) => f.doc.id).join(",")}`, edits }, null, 1) + "\n");
+      console.log(`  inverse: ${inv}  (worldgen op ${before.name} --undo <it>)`);
+    }
+  } else console.log("(dry run: nothing written)");
   if (bad) process.exitCode = 1;
 }
 
@@ -1071,14 +1086,18 @@ export function solveTerraceChain(
   kit: TerraceKit,
   log: (s: string) => void = () => {},
   onFit?: (fit: TerraceFit, k: number) => TerraceFit | null,
+  /** Risers below the solved ones, kept AS THEY STAND (not lifted, not refitted): their foot strips still hold. */
+  below: readonly TerraceWallDoc[] = [],
 ): TerraceFit[] {
   const chain = chainOrder(docs);
   // docs and derived features both: each riser goes back in (applyTerraceFit) as it is fitted, in chain order
   for (const d of chain) removeTerrace(recipe, d.id);
   const fits: TerraceFit[] = [];
   const voxel = recipe.cellSize / recipe.resolution;
+  // holdOf reads only doc.strip + doc.solved.faces: a kept riser stands in as a fit by its doc
+  const kept = below.filter((d) => d.solved).map((d) => ({ doc: d }) as TerraceFit);
   for (const [k, d] of chain.entries()) {
-    let fit = fitTerraceWall(recipe, { ...d, solved: undefined }, kit, log, { hold: holdOf(fits, voxel) });
+    let fit = fitTerraceWall(recipe, { ...d, solved: undefined }, kit, log, { hold: holdOf([...kept, ...fits], voxel) });
     if (onFit) {
       const kept = onFit(fit, k);
       if (!kept) continue;
@@ -1120,14 +1139,20 @@ export function holdOf(fits: readonly TerraceFit[], voxelSize: number): ((x: num
   };
 }
 
-/** Refit a list of terraces: a town's risers as one chain (the whole town, whichever of them was named), the rest one by one. */
-export function refitGrouped(recipe: WorldRecipe, docs: readonly TerraceWallDoc[], kit: TerraceKit, log: (s: string) => void = () => {}): TerraceFit[] {
+/**
+ * Refit a list of terraces: a town's risers as one chain (the whole town, whichever of them was named), the rest one
+ * by one. `upward`: only the lowest named riser and every riser ABOVE it are solved; the risers below stand as they
+ * are (a feather changed on riser 2 must not re-solve riser 1 under an installed quay and wall: Saltharrow 10-29).
+ */
+export function refitGrouped(recipe: WorldRecipe, docs: readonly TerraceWallDoc[], kit: TerraceKit, log: (s: string) => void = () => {}, opts: { upward?: boolean } = {}): TerraceFit[] {
   const out: TerraceFit[] = [];
   const towns = new Set(docs.filter(isTownRiser).map((t) => t.owner!));
   for (const town of towns) {
-    const chain = (recipe.features.terraceWalls ?? []).filter((t) => isTownRiser(t) && t.owner === town);
-    log(`  ${town}: ${chain.length} riser(s) solved together, bottom-up`);
-    out.push(...solveTerraceChain(recipe, chain, kit, log));
+    const all = chainOrder((recipe.features.terraceWalls ?? []).filter((t) => isTownRiser(t) && t.owner === town));
+    const lowest = opts.upward ? Math.min(...docs.filter((d) => d.owner === town).map((d) => all.findIndex((t) => t.id === d.id)).filter((i) => i >= 0)) : 0;
+    const chain = all.slice(lowest), below = all.slice(0, lowest);
+    log(`  ${town}: ${chain.length} riser(s) solved together, bottom-up${below.length ? ` (${below.map((t) => t.id).join(", ")} kept as they stand)` : ""}`);
+    out.push(...solveTerraceChain(recipe, chain, kit, log, undefined, below));
   }
   for (const t of docs.filter((d) => !isTownRiser(d))) {
     const fit = fitTerraceWall(recipe, t, kit, log);

@@ -242,19 +242,30 @@ function docsFor(pts: V2[], hs: Record<string, number>): Record<string, unknown>
   runs.forEach((run, k) => out.push(curtain(`${townName}-wall-${k + 1}`, run, k === 0 ? { start: "pier", end: "none" } : { start: "none", end: "pier" })));
   // a wall-walk stair on the town side of EACH run (the gatehouse top is not walked, so each run is its own walk): on
   // the FLATTEST straight leg long enough for the flight (a followed top on a steep leg puts the flight's head on a
-  // sloping walk), 2 m in from the leg's start
+  // sloping walk), clear of the corners at both ends of the leg: the wall operator drops every tread whose block reaches
+  // a corner's mitre (|tan(turn/2)| x the flight's reach out from the line), so a flight ending 0.5 m short of a 58 deg
+  // corner lost its top treads and never met the walk (Saltharrow wall-2, 10-29: stair-top + walk-mid unreached).
+  // The flight may shorten to 1.5 m per metre of rise (treads >= 0.42 m at 0.28 m risers) to fit a leg.
   out.forEach((w) => {
-    const ps = w.points as V2[], flight = (Number(w.height) || h) * 1.9 + 1;
-    let st: { from: number; grade: number; len: number } | null = null, s = 0;
+    const ps = w.points as V2[], hw = Number(w.height) || h, full = hw * 1.9 + 1, least = hw * 1.5 + 1;
+    const reach = Number(w.thickness ?? 1.4) / 2 + Number(w.batter ?? 0) * hw + 1.6 + 0.3;
+    const clearAt = (i: number): number => { // the corner clearance at vertex i (0 at the line's ends)
+      if (i <= 0 || i >= ps.length - 1) return 0;
+      const a = ps[i - 1]!, b = ps[i]!, c = ps[i + 1]!;
+      const t = Math.abs(Math.atan2((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]), (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1])));
+      return Math.abs(Math.tan(t / 2)) * reach + 0.4;
+    };
+    let st: { from: number; flight: number; grade: number; len: number } | null = null, s = 0;
     for (let i = 0; i + 1 < ps.length; i++) {
-      const a = ps[i]!, b = ps[i + 1]!, l = dist2(a, b);
-      if (l >= flight + 2.5) { // 2 m in from the leg start, 0.5 m short of its end
+      const a = ps[i]!, b = ps[i + 1]!, l = dist2(a, b), c0 = Math.max(2, clearAt(i)), c1 = Math.max(0.5, clearAt(i + 1));
+      const flight = Math.min(full, l - c0 - c1);
+      if (flight >= least) {
         const grade = Math.abs(H(b[0], b[1]) - H(a[0], a[1])) / l;
-        if (!st || grade < st.grade - 0.02 || (Math.abs(grade - st.grade) <= 0.02 && l > st.len)) st = { from: s + 2, grade, len: l };
+        if (!st || grade < st.grade - 0.02 || (Math.abs(grade - st.grade) <= 0.02 && flight > st.flight + 0.5) || (Math.abs(grade - st.grade) <= 0.02 && Math.abs(flight - st.flight) <= 0.5 && l > st.len)) st = { from: s + c0, flight, grade, len: l };
       }
       s += l;
     }
-    if (st) w.stairs = [{ from: r2(st.from), to: r2(st.from + flight), width: 1.6, riser: 0.28, side: "back" }];
+    if (st) w.stairs = [{ from: r2(st.from), to: r2(st.from + st.flight), width: 1.6, riser: 0.28, side: "back" }];
   });
   void back; void L;
   return [...out, gatehouse];

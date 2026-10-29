@@ -483,12 +483,13 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
       // waterline run under the shelves, no curtain within 6 m of a road but at its gatehouse (Saltharrow, 2026-10-29).
       // Re-judged after any ground change round the town, a wall/quay op edit, a road edit or a layout change.
       const lineReport = path.join(towns, "survey", `${name}-wall-line.json`);
-      const nearTown = (o: { points?: number[][] }) => (o.points ?? []).some((q) => Math.hypot(q[0]! - t.center[0]!, q[1]! - t.center[1]!) <= t.radius + 120);
+      // (the brief town carries no centre: the recipe town of the same id does)
+      const nearTown = (rc: { features?: { towns?: { id: string; center: number[]; radius: number }[] } }) => { const w = (rc.features?.towns ?? []).find((x) => x.id === t.id); return (o: { points?: number[][] }) => !!w && (o.points ?? []).some((q) => Math.hypot(q[0]! - w.center[0]!, q[1]! - w.center[1]!) <= w.radius + 120); };
       step("wall line", "procedural", `npx tsx tools/town-wall-line.mts check --project ${project} --town ${name}  (a failure: town-wall-line.mts draw, then worldgen op --apply + tools/landmark.mts per op)`, lineReport, () => {
         const r = json<{ ok?: boolean; failures?: string[] }>(lineReport);
         return r.ok ? null : `${(r.failures ?? []).length} fault(s): ${(r.failures ?? []).slice(0, 2).join("; ") || "report not ok"}`;
       }, [{ file: layout, authored: false, proj: (l) => (l.buildings ?? []).map((b: { id: string; full?: unknown; corners?: unknown; door?: unknown }) => [b.id, b.full ?? b.corners, b.door]) },
-        { file: p.recipe, authored: false, proj: (rc) => ({ ground: groundNear(t.id, 200, false)(rc), walls: (rc.features?.operators ?? []).filter((o: { op: string; points?: number[][] }) => o.op === "wall" && nearTown(o)), roads: (rc.features?.roads ?? []).filter(nearTown) }) }], (r: { at?: unknown }) => ({ ...r, at: 0 }));
+        { file: p.recipe, authored: false, proj: (rc) => ({ ground: groundNear(t.id, 200, false)(rc), walls: (rc.features?.operators ?? []).filter((o: { op: string; points?: number[][] }) => o.op === "wall" && nearTown(rc)(o)), roads: (rc.features?.roads ?? []).filter(nearTown(rc)) }) }], (r: { at?: unknown }) => ({ ...r, at: 0 }));
     }
     // paths: a footpath from every placed door to the nearest street, painted AFTER install (town-ground doors writes
     // <town>-paths.json); stale when the layout or the building models (manifest, .glb) change, so moved doors re-run it
