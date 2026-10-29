@@ -205,3 +205,16 @@ describe("LightBudgetSystem glow, pools and fog lamps", () => {
     budget.dispose();
   });
 });
+
+describe("light.glowReach (far beacons)", () => {
+  it("keeps a beacon's halo past 140 m and lets a plain light's fade", async () => {
+    const { LightGlows } = await import("../src/light-glow.js");
+    const g = new LightGlows();
+    const light = new THREE.PointLight("#ff9a48", 90, 36);
+    const at = new THREE.Vector3();
+    g.begin(); g.add(light, at, 243, 4, 1); expect(g.stats()).toBe(0);
+    g.begin(); g.add(light, at, 243, 4, 1, 450); expect(g.stats()).toBe(1);
+    g.begin(); g.add(light, at, 460, 4, 1, 450); expect(g.stats()).toBe(0);
+    g.dispose();
+  });
+});

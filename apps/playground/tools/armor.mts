@@ -8,7 +8,8 @@
  *   brief lint <id>         check it (TODOs, ornaments rare+ only, one helm base, the models' `rules`)
  *   brief schema            the brief's JSON Schema (every field described)
  *   gen <id> [--dry-run]    ONE image-request gen-set manifest in the doc's order; existing sheets are skipped
- *                           (--force regenerates); --dry-run prints the manifest, the sessions and every prompt
+ *                           (--force regenerates all; --redo body|female|helm|shoulder[,…] regenerates those and
+ *                           every sheet painted from them); --dry-run prints the manifest, the sessions and every prompt
  *   import <id>             import all four sheets, composite the woman's chest (<id>-f), match-material, measure
  *                           (holes on the body's real UVs, cut-out free edges, texels/m) — fail = nothing installed
  *   bake <id>               body-page + weapon-page (helm, shoulder: every theme on the page) + icons
@@ -33,7 +34,7 @@ const opt = (n: string, d = "") => {
   const i = argv.indexOf(`--${n}`);
   return i >= 0 && argv[i + 1] && !argv[i + 1]!.startsWith("--") ? argv[i + 1]! : d;
 };
-const VALUE_FLAGS = new Set(["--project"]);
+const VALUE_FLAGS = new Set(["--project", "--redo"]);
 const words = argv.filter((a, i) => !a.startsWith("--") && !VALUE_FLAGS.has(argv[i - 1] ?? ""));
 const [cmd, ...rest] = words;
 const project = opt("project");
@@ -44,7 +45,9 @@ function usage(msg = ""): never {
 }
 if (!cmd) usage();
 if (cmd !== "brief" || rest[0] !== "schema") if (!project) usage("give --project (foundation)");
-const ctx: Ctx = { project, force: flag("force"), dryRun: flag("dry-run"), log: (s) => console.log(s) };
+const redo = opt("redo").split(",").filter(Boolean);
+if (redo.some((r) => !["body", "female", "helm", "shoulder"].includes(r))) usage(`--redo takes body|female|helm|shoulder, got ${redo.join(",")}`);
+const ctx: Ctx = { project, force: flag("force"), dryRun: flag("dry-run"), log: (s) => console.log(s), redo };
 
 function runStages(id: string, stages: readonly Stage[]): boolean {
   const b = readBrief(project, id);

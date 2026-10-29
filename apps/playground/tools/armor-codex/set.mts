@@ -264,8 +264,14 @@ export function sessionImages(wave: GenImage[]): GenImage[] {
  * Which images to request now, in sessions. Done images are skipped (unless `force`); an image whose ref is another
  * image of the set still to be made waits for a later session (the body sheet first, then everything painted to it).
  */
-export function genWaves(images: GenImage[], done: (img: GenImage) => boolean, force = false): GenImage[][] {
-  let todo = images.filter((i) => force || !done(i));
+export function genWaves(images: GenImage[], done: (img: GenImage) => boolean, force = false, redo: readonly string[] = []): GenImage[][] {
+  // `redo` roles are made again with every image painted from them (refs, transitively): a new body means new art for all
+  const again = new Set(images.filter((i) => redo.includes(i.role)).map((i) => i.target));
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const i of images) if (!again.has(i.target) && i.ref.some((r) => again.has(r))) { again.add(i.target); grew = true; }
+  }
+  let todo = images.filter((i) => force || again.has(i.target) || !done(i));
   const made = new Set(images.filter((i) => !todo.includes(i)).map((i) => i.target));
   const waves: GenImage[][] = [];
   while (todo.length) {

@@ -533,6 +533,24 @@ test("approach lines: a road named twice is judged once", () => {
   assert.equal(lines.length, 1);
 });
 
+test("approach lines: a road's legs are ONE line named by its base id, whichever leg is named (knucklecrown close)", () => {
+  const recipe = { features: { roads: [{ id: "p", points: [[0, 0, 500], [0, 0, 300]] }, { id: "p.s2", points: [[10, 0, 280], [0, 0, 20]] }, { id: "q", points: [[400, 0, 0], [50, 0, 0]] }] } };
+  const r = approachLines(recipe, [], { center: [0, 0], approach: { from: "p.s3", points: [] }, approaches: [{ from: "p.s2", points: [] }, { from: "q", points: [] }, { from: "p", points: [] }] });
+  assert.deepEqual(r.unresolved, ["p.s3"]);
+  assert.deepEqual(r.names, ["p", "q"], "p and p.s2 judged once, as the road p; the unresolved leg shifts nothing after it");
+  assert.equal(r.lines[0]!.length, 4, "both legs of p");
+});
+
+test("approach read: judged at the road's first-sight point, sampled finely enough to land on it (knucklecrown close)", () => {
+  // a lip at z 256.5..261.5 hides the target from beyond it; the first spot on it (260 m) sees it, 15 m sampling stepped over it
+  const lip: PlaceGround = { height: (_x, z) => (z > 256.5 && z < 261.5 ? 6 : 0), wet: () => false };
+  const spots = approachSpots([0, 0], [[[0, 400], [0, 0]]], [255, 450]);
+  assert.ok(spots.some((q) => q.d > 255 && q.d < 262), "a spot between the lip and the band edge");
+  const r = approachRead(lip, { at: [0, 0], top: 12, fogReach: 600, foot: 0 }, spots);
+  assert.ok(r.ok, JSON.stringify(r.rows));
+  assert.ok((r.rows[0] as any).firstSight.distance < 262);
+});
+
 test("install guard: same ground installs, a drift under 0.5 m installs and re-seats, more refuses", () => {
   assert.equal(installGuard(0.03), "same");
   assert.equal(installGuard(0.24), "reseat");

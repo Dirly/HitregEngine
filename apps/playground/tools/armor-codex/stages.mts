@@ -24,7 +24,7 @@ const ATLAS = path.join(ENGINE, "tools/atlas");
 export const STAGES = ["brief", "gen", "import", "bake", "items", "review"] as const;
 export type Stage = (typeof STAGES)[number];
 
-export interface Ctx { project: string; force: boolean; dryRun: boolean; log: (s: string) => void }
+export interface Ctx { project: string; force: boolean; dryRun: boolean; log: (s: string) => void; /** gen: roles to make again, with every sheet painted from them */ redo?: string[] }
 export interface StageResult { ok: boolean; lines: string[]; tokens?: number }
 
 export const paths = (project: string, id = "") => {
@@ -164,7 +164,7 @@ export function stageBrief(ctx: Ctx, b: ArmorBrief): StageResult {
 export function planGen(ctx: Ctx, b: ArmorBrief): { manifest: { images: GenImage[] }; waves: GenImage[][]; file: string } {
   const manifest = buildManifest(b, loadTemplates());
   const done = (i: GenImage) => fs.existsSync(path.resolve(PG, i.target));
-  const waves = genWaves(manifest.images, done, ctx.force).map(sessionImages);
+  const waves = genWaves(manifest.images, done, ctx.force, ctx.redo ?? []).map(sessionImages);
   return { manifest, waves, file: path.join(paths(ctx.project, b.id).stage, "gen-set.json") };
 }
 
@@ -187,7 +187,7 @@ export function stageGen(ctx: Ctx, b: ArmorBrief): StageResult {
     const wf = path.join(path.dirname(file), `session-${n + 1}.json`);
     fs.writeFileSync(wf, JSON.stringify({ images: wave.map(({ role: _role, ...i }) => i) }, null, 2) + "\n");
     ctx.log(`  gen ${b.id}: session ${n + 1}/${waves.length} — ${wave.map((i) => i.role).join(", ")} (Codex)`);
-    const r = node([path.join(PG, "tools/image-request.mjs"), "gen-set", "--manifest", wf, "--timeout", "2400", ...(ctx.force ? ["--force"] : [])], ctx);
+    const r = node([path.join(PG, "tools/image-request.mjs"), "gen-set", "--manifest", wf, "--timeout", "2400", ...(ctx.force || ctx.redo?.length ? ["--force"] : [])], ctx);
     const json = (() => { try { return JSON.parse(r.out.slice(r.out.indexOf("{"), r.out.lastIndexOf("}") + 1)); } catch { return null; } })();
     const tokens = typeof json?.tokens === "number" ? json.tokens : null;
     if (tokens) total += tokens;
@@ -296,7 +296,7 @@ export function stageImport(ctx: Ctx, b: ArmorBrief): StageResult {
         repaired += clearFreeEdges(atlas, key, hex, spec);
         lines.push(`  free edge ${set} ${e.slot}: ${opaque}/${e.edge} opaque — cleared (a stray touch)`);
         opaque = 0;
-      } else lines.push(`  free edge ${set} ${e.slot}: ${opaque}/${e.edge} opaque${opaque ? "  <-- paint runs off the cut-out: regenerate this sheet" : ""}`);
+      } else lines.push(`  free edge ${set} ${e.slot}: ${opaque}/${e.edge} opaque${opaque ? `  <-- paint runs off the cut-out: regenerate this sheet (armor gen ${b.id} --redo ${set.replace("human-", "")} --project ${ctx.project}, then armor run ${b.id})` : ""}`);
       if (opaque) ok = false;
     }
     if (repaired) {

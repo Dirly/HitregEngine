@@ -35,7 +35,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { SceneDoc } from "@hitreg/core";
-import { portalDigest, walkThroughPortals } from "./_portal-veil-ops.mts";
+import { portalDigest, returnSceneFault, walkThroughPortals } from "./_portal-veil-ops.mts";
 // @ts-expect-error plain JS module
 import { loadPlaywright as loadPlaywrightModule } from "./_playwright.mjs";
 
@@ -311,6 +311,8 @@ if (!process.argv.includes("--no-inside")) {
     if (!exitParams) throw new Fail(`${EXIT} in ${DEST} is not a portal`);
     const fallback = String(exitParams["scene"] ?? "");
     if (!fallback) throw new Fail(`${EXIT} has no fallback scene: a player who did not come in by the door (a reload, a GM move) cannot leave`);
+    const fault = returnSceneFault(PG, destInfo!.project, fallback);
+    if (fault) throw new Fail(`${EXIT}'s fallback: ${fault} (tools/portal-return.mts --to <world scene> <anchor>)`);
     await openInPlay(DEST);
     const start = (await me())!;
     const outAt = await goThrough(DEST, EXIT, await toExitFrom(DEST) ?? start, fallback, `${fallback}-from-${DEST}-reloaded.png`);
@@ -318,7 +320,7 @@ if (!process.argv.includes("--no-inside")) {
     const anchor = String(exitParams["anchor"] ?? "");
     const anchorAt = anchor ? await where(anchor) : null;
     if (anchorAt && flat(outAt, anchorAt) > 4) throw new Fail(`landed ${flat(outAt, anchorAt).toFixed(1)} m from the exit's anchor ${anchor}`);
-    return `from ${fmt(start)} out to ${fallback} at ${fmt(outAt)}${anchorAt ? `, ${flat(outAt, anchorAt).toFixed(1)} m from ${anchor}` : ""}`;
+    return `from ${fmt(start)} out to ${fallback} at ${fmt(outAt)}${anchorAt ? `, ${flat(outAt, anchorAt).toFixed(1)} m from ${anchor}` : ` (anchor ${anchor} not in ${fallback} yet: it installs with the place)`}`;
   });
 }
 await browser.close().catch(() => {});

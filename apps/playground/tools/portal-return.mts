@@ -18,6 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyOps, ComponentRegistry, portalAnchorOf, portalVolumeForCorridor, registerChunkComponents, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
 import { applyOpsToSceneFile } from "./_scene-write.mts";
+import { returnSceneFault } from "./_portal-veil-ops.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argi = (n: string) => process.argv.indexOf(n);
@@ -40,6 +41,9 @@ if (flag("--remove")) {
   const ti = argi("--to");
   const scene = ti >= 0 ? process.argv[ti + 1] : undefined, anchor = ti >= 0 ? process.argv[ti + 2] : undefined;
   if (!scene || !anchor || scene.startsWith("--") || anchor.startsWith("--")) fail("--to needs <scene> <anchor>");
+  // the fallback must be a real world scene the instance can open on a reload (tools/_portal-veil-ops.mts returnSceneFault)
+  const sceneFault = returnSceneFault(PG, project!, scene!);
+  if (sceneFault) fail(`--to ${scene}: ${sceneFault}`);
   const vol = portalVolumeForCorridor(portalAnchorOf(doc.entities, exit!).corridor);
   ops.push(
     { op: "set-tags", id: exit!, tags: [...new Set([...e!.tags, "portal"])] },

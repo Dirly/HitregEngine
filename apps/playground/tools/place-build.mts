@@ -774,13 +774,15 @@ function placeChecks(hand: any) {
   if (planFaults.length) faults.push(`plan: ${planFaults.length} FIT fault(s): ${planFaults.slice(0, 2).join("; ")}`);
   const recipe = read(worldFile(lab, labWorld)), g = ground(recipe), lm = hand.landmark;
   const res = (read(path.join(ZONE, "reservations.json")).reservations ?? []).find((r: any) => r.location === poi);
-  const lines = res ? approachLines(recipe, read(path.join(ZONE, "reservations.json")).reservations ?? [], res).lines : [];
+  const apl = res ? approachLines(recipe, read(path.join(ZONE, "reservations.json")).reservations ?? [], res) : null, lines = apl?.lines ?? [], lineName = (l: number) => apl?.names[l] ?? `line ${l}`;
   const band = readBand(hand.measurements?.adventureSize, hand.read?.band); out.band = band;
   if (!lm) faults.push("no landmark");
   else { // L: judged along the approach the place's own footpath joins (the plan's approach); every other line is reported, not charged
     const need = typeof hand.read?.approachLine === "number" ? [hand.read.approachLine] : undefined;
     out.read = approachReadAny(g, [{ at: lm.at, top: lm.top, fogReach: lm.fogReach, foot: lm.foot }, ...((hand.smoke ?? []) as any[]).map((q) => ({ ...q, foot: g.height(q.at[0], q.at[1]) }))], lines, band, need);
-    if (!out.read.ok) faults.push(`approach read: ${out.read.note || `approach line(s) ${out.read.unread.join(", ")} never show the landmark ${READ_PX_MIN} px tall at ${band[0]}-${band[1]} m (${hand.measurements?.adventureSize ?? "medium"} tier; best ${out.read.rows.map((r: any) => r.reason ?? `${r.px ?? "-"} px @ ${r.distance} m`).join(", ")})`}`); }
+    // rows name their road (a line index alone hid which road failed and shifted when a leg was renumbered)
+    out.read.rows = out.read.rows.map((r: any) => ({ road: lineName(r.line), ...r }));
+    if (!out.read.ok) faults.push(`approach read: ${out.read.note || `approach line(s) ${out.read.unread.map((l: number) => `${l} (${lineName(l)})`).join(", ")} never show the landmark ${READ_PX_MIN} px tall at ${band[0]}-${band[1]} m (${hand.measurements?.adventureSize ?? "medium"} tier; best ${out.read.rows.map((r: any) => `${r.road}: ${r.reason ?? `${r.px ?? "-"} px @ ${r.distance} m`}`).join(", ")})`}`); }
   // L (art, Hagsheer 2026-10-21): a built wall never wears the terrain cliff tile (the zone's built stone: zone defaults builtStone)
   const cliffWalls = (read(path.join(JOB, "operators.json")) as any[]).filter((o) => o.op === "wall" && wearsCliffTile(o.materials)).map((o) => o.id);
   if (cliffWalls.length) faults.push(`walls in the terrain cliff tile (no face material): ${cliffWalls.slice(0, 4).join(", ")}`);

@@ -63,6 +63,7 @@ import { loadPlaywright as loadPlaywrightModule } from "./_playwright.mjs";
 import { READ_ONLY_POSTS } from "./_readonly-posts.mjs";
 import { frameWatchdog } from "./_frame-watchdog.mts";
 import { SHOT_SPOT_TIMEOUT_S, withSpotTimeout } from "./_run-capped.mts";
+import { changedShare, showVerdict, type ShowRect, type ShowResult } from "./_shot-shows.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -103,7 +104,7 @@ const W = 1280, H = 720;
 const stem = `${SCENE}${LABEL ? `-${LABEL}` : ""}`;
 fs.mkdirSync(path.join(OUT, stem), { recursive: true });
 
-type Spot = { name: string; x: number; z: number; facing?: number; y?: number; pitch?: number; distance?: number; camera?: [number, number, number]; target?: [number, number, number] };
+type Spot = { name: string; x: number; z: number; facing?: number; y?: number; pitch?: number; distance?: number; camera?: [number, number, number]; target?: [number, number, number]; shows?: string[] };
 type V3 = [number, number, number];
 
 // -- scene + world (read-only) -------------------------------------------------------------------
@@ -451,6 +452,49 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const H_ = <T,>(fn: (h: any, ...a: any[]) => T, ...a: unknown[]) => page.evaluate(([src, args]: [string, unknown[]]) => {
   const h = (window as any).__hitreg; return new Function("h", "args", `return (${src})(h, ...args)`)(h, args);
 }, [fn.toString(), a]) as Promise<Awaited<T>>;
+// a spot's `shows` ids (tools/_shot-shows.mts): each must be in frame AND change the pixels of its rect (frame with it
+// hidden vs the frame just taken)
+async function showsCheck(ids: string[], file: string): Promise<ShowResult[]> {
+  const out: ShowResult[] = [];
+  for (const id of ids) {
+    const rect = await H_((h, eid: string) => {
+      const o = h.object(eid); if (!o) return null;
+      const cam = h.camera; cam.updateMatrixWorld(true); o.updateMatrixWorld(true);
+      const v = cam.position.clone(); let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, front = 0;
+      o.traverse((m: any) => {
+        if (!m.isMesh || !m.geometry) return;
+        if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+        const b = m.geometry.boundingBox;
+        for (const cx of [b.min.x, b.max.x]) for (const cy of [b.min.y, b.max.y]) for (const cz of [b.min.z, b.max.z]) {
+          v.set(cx, cy, cz).applyMatrix4(m.matrixWorld).project(cam);
+          if (v.z < -1 || v.z > 1) continue;
+          front++;
+          const sx = (v.x * 0.5 + 0.5) * innerWidth, sy = (-v.y * 0.5 + 0.5) * innerHeight;
+          x0 = Math.min(x0, sx); y0 = Math.min(y0, sy); x1 = Math.max(x1, sx); y1 = Math.max(y1, sy);
+        }
+      });
+      if (!front || !(x1 > x0) || !(y1 > y0)) return null;
+      const cx0 = Math.max(0, x0), cy0 = Math.max(0, y0), cx1 = Math.min(innerWidth, x1), cy1 = Math.min(innerHeight, y1);
+      const share = cx1 > cx0 && cy1 > cy0 ? ((cx1 - cx0) * (cy1 - cy0)) / ((x1 - x0) * (y1 - y0)) : 0;
+      return { x0: Math.round(cx0), y0: Math.round(cy0), x1: Math.round(cx1), y1: Math.round(cy1), share: +share.toFixed(3) };
+    }, id).catch(() => null) as ShowRect | null;
+    let changed = 0;
+    if (rect && rect.share > 0 && rect.x1 - rect.x0 >= 2 && rect.y1 - rect.y0 >= 2) {
+      const clip = { x: rect.x0, y: rect.y0, width: rect.x1 - rect.x0, height: rect.y1 - rect.y0 };
+      await H_((h, eid: string) => { const o = h.object(eid); if (o) o.visible = false; }, id);
+      await sleep(600);
+      const hidden: Buffer = await page.screenshot({ clip });
+      await H_((h, eid: string) => { const o = h.object(eid); if (o) o.visible = true; }, id);
+      await sleep(400);
+      const sharp = (await import("sharp")).default;
+      const a = await sharp(file).extract({ left: clip.x, top: clip.y, width: clip.width, height: clip.height }).removeAlpha().raw().toBuffer();
+      const b = await sharp(hidden).resize(clip.width, clip.height, { fit: "fill" }).removeAlpha().raw().toBuffer();
+      changed = changedShare(a, b, 3);
+    }
+    out.push(showVerdict(id, rect, changed));
+  }
+  return out;
+}
 async function waitFor(cond: () => Promise<boolean>, ms: number, what: string) {
   const t = Date.now();
   while (Date.now() - t < ms) { if (await cond().catch(() => false)) return; await sleep(300); }
@@ -562,7 +606,7 @@ await openSession();
 const times = hasClock ? TIMES : [NaN];
 
 type Box = { x0: number; y0: number; x1: number; y1: number };
-type Shot = { rig?: unknown; spot: string; row: string; weather: string; weatherLine: string; time: number | null; clock: string; mood: string; file: string; boxes: Record<string, Box | null>; camera: { pos: V3; target: V3; distance: number } };
+type Shot = { rig?: unknown; spot: string; row: string; weather: string; weatherLine: string; time: number | null; clock: string; mood: string; file: string; boxes: Record<string, Box | null>; camera: { pos: V3; target: V3; distance: number }; shows?: ShowResult[] };
 const shots: Shot[] = [];
 const spotInfo: Array<Record<string, unknown>> = [];
 
@@ -688,8 +732,9 @@ async function shootSpot(spot: Spot): Promise<void> {
     const file = path.join(OUT, stem, `${spot.name}${MULTI_WEATHER ? `-${weatherName}` : ""}-${tag}.png`);
     await page.screenshot({ path: file });
     watchdog.frame();
+    const shows = spot.shows?.length ? await showsCheck(spot.shows, file) : undefined;
     const cam = await H_((h) => [h.camera.position.x, h.camera.position.y, h.camera.position.z]);
-    shots.push({ spot: spot.name, row, weather: weatherName, weatherLine, time: Number.isFinite(hour) ? hour : null, clock, mood, rig, file, boxes, camera: { pos: cam as V3, target: placed.pivot as V3, distance: placed.dist } });
+    shots.push({ spot: spot.name, row, weather: weatherName, weatherLine, time: Number.isFinite(hour) ? hour : null, clock, mood, rig, file, boxes, camera: { pos: cam as V3, target: placed.pivot as V3, distance: placed.dist }, ...(shows ? { shows } : {}) });
   }
   }
   console.log(`  ${spot.name} (${region?.zone ?? "-"}${region?.place ? `/${region.place}` : ""}): ${times.length * WEATHERS.length} frames, camera ${placed.dist.toFixed(1)} m — ${((Date.now() - t0) / 1000).toFixed(0)} s`);
@@ -814,7 +859,7 @@ const report = {
   spots: spotInfo,
   weathers: MULTI_WEATHER ? WEATHERS : null,
   ...(abResults.length ? { ab: abResults } : {}),
-  shots: shots.map((s, i) => ({ spot: s.spot, weather: s.weather, weatherLine: s.weatherLine, time: s.time, clock: s.clock, mood: s.mood, rig: s.rig, file: path.relative(OUT, s.file).replace(/\\/g, "/"), camera: s.camera, boxes: s.boxes, ...result.measures[i] })),
+  shots: shots.map((s, i) => ({ spot: s.spot, weather: s.weather, weatherLine: s.weatherLine, time: s.time, clock: s.clock, mood: s.mood, rig: s.rig, file: path.relative(OUT, s.file).replace(/\\/g, "/"), camera: s.camera, boxes: s.boxes, ...(s.shows ? { shows: s.shows } : {}), ...result.measures[i] })),
   pageErrors: logs.slice(0, 20),
 };
 fs.writeFileSync(path.join(OUT, `${stem}.json`), JSON.stringify(report, null, 1) + "\n");
@@ -827,6 +872,18 @@ const BLACK_FRAME_LUMA = 20;
 const NIGHT_BLACK_LUMA = 8, nightHour = (t: number | null | undefined) => typeof t === "number" && (t >= 20 || t < 5);
 const black = shots.map((s, i) => ({ s, m: result.measures[i] })).filter(({ s, m }) => typeof m?.frame === "number" && m.frame < (nightHour(s.time as number | null) ? NIGHT_BLACK_LUMA : BLACK_FRAME_LUMA));
 if (black.length) { console.error(`STOP: ${black.length} black frame(s) (luma < ${BLACK_FRAME_LUMA}: a failed render, not a dark scene): ${black.map(({ s, m }) => `${s.spot}${s.time === null ? "" : `@${s.time}`} (${m.frame.toFixed(0)})`).join(", ")} — re-run those spots`); process.exitCode = 1; }
+// a spot that must SHOW an entity (`shows`): every such spot needs at least one frame where each id passes (day frames
+// carry it; a dark veil in a dark night recess may change too few pixels), else the run exits 1 naming it
+const showFails: string[] = [];
+for (const name of new Set(shots.filter((s) => s.shows).map((s) => s.spot))) {
+  const frames = shots.filter((s) => s.spot === name && s.shows);
+  for (const id of frames[0]!.shows!.map((r) => r.id)) {
+    const rs = frames.map((s) => s.shows!.find((r) => r.id === id)!);
+    console.log(`  shows ${name} ${id}: ${rs.map((r, i) => `${frames[i]!.time ?? "-"}h ${r.ok ? "ok" : "FAIL"} (${r.why})`).join("; ")}`);
+    if (!rs.some((r) => r.ok)) showFails.push(`${name} -> ${id}`);
+  }
+}
+if (showFails.length) { console.error(`STOP: ${showFails.length} shot(s) do not show what they must: ${showFails.join(", ")}`); process.exitCode = 1; }
 } finally {
   await browser.close().catch(() => {});
   stopVite();

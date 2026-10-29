@@ -65,6 +65,18 @@ export function siteMapDir(projectDir: string, mapId: string, poi: string): stri
   return has(projectDir) || !poi || !has(lab) ? projectDir : lab;
 }
 
+/** L (KNUCKLECROWN close 2026-10-29: four Sonnet dressers passed chain-coils, skulls, spades and camp gear that the
+ *  place-build dress gate then refused as wrong-culture): the dresser's `props menu` and `dress check` ran with no culture.
+ *  The place's dressing SPACE { kind, scale, cultures } is the one place-build wrote into the job's first plan for that area
+ *  (`<job>/dressing/<poi>-<area>.json`, the cultures its install check uses); else the job brief's `culture` set. Null: none. */
+export function siteSpace(zoneDir: string, poi: string, area: string): { kind: string; scale: string; cultures: string[] } | null {
+  const job = path.join(zoneDir, "pois", poi), first = path.join(job, "dressing", `${poi}-${area}.json`);
+  try { const sp = (readJson(first) as { space?: { kind?: string; scale?: string; cultures?: string[] } }).space; if (sp?.cultures?.length) return { kind: sp.kind ?? "site", scale: sp.scale ?? "human", cultures: sp.cultures }; } catch { /* no first plan */ }
+  try { const set = ((readJson(path.join(job, "brief.json")) as { sets?: string[] }).sets ?? []).find((x) => x.startsWith("culture="));
+    if (set) { const v = set.slice("culture=".length).replace(/^\[|\]$/g, "").split(",").map((x) => x.trim().replace(/^"|"$/g, "")).filter(Boolean); if (v.length) return { kind: "site", scale: "human", cultures: v }; } } catch { /* no brief */ }
+  return null;
+}
+
 /** The area role site-sockets measured the map as ("(site camp, ..." in its source line). */
 function siteRole(projectDir: string, mapId: string): string {
   const f = path.join(projectDir, "authoring", "dressing", "sockets", `${mapId}.json`);
@@ -142,6 +154,8 @@ export async function run(ctx: Ctx): Promise<number> {
     siteMap: `${ctx.opt("poi")}-${ctx.opt("area")}`,
     role: siteRole(siteDir, `${ctx.opt("poi")}-${ctx.opt("area")}`),
     siteProject: path.basename(siteDir),
+    ...(() => { const sp = stage === "dress-site" && zone ? siteSpace(p.zoneDir(zone), ctx.opt("poi"), ctx.opt("area")) : null;
+      return { space: sp ? JSON.stringify(sp) : '{ "kind": "site", "scale": "human", "cultures": ["<the people of the place>"] }', spaceFlags: sp ? ` --scale ${sp.scale} --culture ${sp.cultures.join(",")}` : "" }; })(),
     questObjects: stage === "dress-site" || BUILDING_STAGES.includes(stage) ? questObjectsFor(p.projectDir, world, stage === "dress-site" ? ctx.opt("poi") : ctx.opt("town")) : "",
   };
   const text = fs.readFileSync(path.join(briefsDir, `${stage}.md`), "utf8").replace(/\{(\w+)\}/g, (m, k: string) => vars[k] ?? m);

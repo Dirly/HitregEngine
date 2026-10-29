@@ -40,7 +40,8 @@ const projectDir = path.resolve("projects", projectName);
 const townsDir = path.join(projectDir, "authoring/towns");
 const townDoc = JSON.parse(fs.readFileSync(path.join(townsDir, `${townName}.json`), "utf8"));
 const plan = JSON.parse(fs.readFileSync(path.join(townsDir, `${townName}-plan.json`), "utf8"));
-const recipeFile = path.join(projectDir, "assets/worlds", `${townDoc.world}.json`);
+// --recipe <file>: a scratch copy (pads/lanes trials and their lips/seated gates before the coordinator installs)
+const recipeFile = opt("recipe", "") ? path.resolve(opt("recipe", "")) : path.join(projectDir, "assets/worlds", `${townDoc.world}.json`);
 const recipeRaw = readJsonTracked(recipeFile); // tracked: the writes below refuse if another tool wrote the recipe since
 // EARTHWORKS: --terrace "id=radius[:groundY],…" widens (or re-levels) shelves in memory; --write-earthworks persists
 // them to the world recipe (validated) once the lots fit. The program decides how much flat ground a town needs.
@@ -214,17 +215,29 @@ function chordOf(t: { points: number[][]; radius: number }, axis?: P): P[] {
   return [[c[0] - u[0] * t.radius, c[1] - u[1] * t.radius], [c[0] + u[0] * t.radius, c[1] + u[1] * t.radius]];
 }
 const laneAxis = (laneId: string | undefined): P | undefined => ((plan.lanes ?? []).find((l: { id: string }) => l.id === laneId) as { axis?: P } | undefined)?.axis;
+/** The frame lots on a lane are placed in: origin a, u along the street, v to its left (east = +v), len = its run.
+ * A CROSS lane (plan lane `cross`: metres along the band's centreline where it crosses; z1-town4 2026-10-29) runs
+ * ACROSS a street-shaped band, up the band (the band's +v) from its centreline: a long lot (the chapel's 8-cell nave
+ * with its door on the short end) stands ALONG the band with its front on the cross street. The terrace stage sizes a
+ * band for a long lot's SHORTER side ("a long lot turns onto a cross lane"); without this frame no lane could face it. */
+function laneFrame(t: { points: number[][]; radius: number }, laneId: string | undefined): { a: P; u: P; v: P; len: number } {
+  const lane = (plan.lanes ?? []).find((l: { id: string }) => l.id === laneId) as { axis?: P; cross?: number } | undefined;
+  const chord = chordOf(t, lane?.axis);
+  const a0 = chord[0]!;
+  const e0 = chord.at(-1)!;
+  const len0 = Math.hypot(e0[0] - a0[0], e0[1] - a0[1]) || 1;
+  const u0: P = [(e0[0] - a0[0]) / len0, (e0[1] - a0[1]) / len0];
+  const v0: P = [-u0[1], u0[0]];
+  if (typeof lane?.cross !== "number") return { a: a0, u: u0, v: v0, len: len0 };
+  return { a: [a0[0] + u0[0] * lane.cross, a0[1] + u0[1] * lane.cross], u: v0, v: [-v0[1], v0[0]], len: 2 * t.radius };
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function evaluate(b: any, bu: number, sideName: string, setback: number, terraceId: string): Placed | null {
   const terrace = town!.terraces.find((t) => t.id === terraceId);
   if (!terrace) return null;
   b = { ...b, u: bu, side: sideName, setback, terrace: terraceId };
   const chord = chordOf(terrace, laneAxis(b.street));
-  const a = chord[0]!;
-  const e = chord.at(-1)!;
-  const len = Math.hypot(e[0] - a[0], e[1] - a[1]) || 1;
-  const u: P = [(e[0] - a[0]) / len, (e[1] - a[1]) / len];
-  const v: P = [-u[1], u[0]];
+  const { a, u, v } = laneFrame(terrace, b.street);
   const at = (uu: number, vv: number): P => [a[0] + u[0] * uu + v[0] * vv, a[1] + u[1] * uu + v[1] * vv];
   // the street across this stretch: the building's LANE (plan.lanes: a road, or a line at shelf height `v` off
   // the centreline), else the nearest town road whose frame-u passes b.u, else the centreline
@@ -451,8 +464,7 @@ for (const b of [...plan.buildings].sort((p, q) => (Number(!!(p as { optional?: 
   let found: Placed | null = null;
   for (const shelf of shelves) {
     const t = town.terraces.find((x) => x.id === shelf)!;
-    const ch = chordOf(t, laneAxis(b.street));
-    const len = Math.hypot(ch.at(-1)![0] - ch[0]![0], ch.at(-1)![1] - ch[0]![1]);
+    const len = laneFrame(t, b.street).len;
     const cands: [number, string, number][] = [];
     const lnR = (plan.lanes ?? []).find((l: { id: string }) => l.id === b.street) as { uMin?: number; uMax?: number } | undefined;
     const span = Math.max(len + 20, Math.abs((lnR?.uMax ?? 0) - b.u), Math.abs(b.u - (lnR?.uMin ?? 0)));
@@ -598,11 +610,7 @@ if (argv.includes("--write-lanes")) {
     const onIt = placed.filter((q) => (plan.buildings as { id: string; street?: string }[]).find((b) => b.id === q.id)?.street === lane.id);
     if (!t || onIt.length === 0) continue;
     const chord = chordOf(t, (lane as { axis?: P }).axis);
-    const a = chord[0]!;
-    const e = chord.at(-1)!;
-    const len = Math.hypot(e[0] - a[0], e[1] - a[1]) || 1;
-    const u: P = [(e[0] - a[0]) / len, (e[1] - a[1]) / len];
-    const v: P = [-u[1], u[0]];
+    const { a, u, v } = laneFrame(t, lane.id);
     const toU = (q: P): number => (q[0] - a[0]) * u[0] + (q[1] - a[1]) * u[1];
     const us = onIt.flatMap((q) => q.corners.map(toU));
     const u0 = Math.min(...us) - 4;

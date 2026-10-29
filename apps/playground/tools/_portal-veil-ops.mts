@@ -55,6 +55,25 @@ export function triggerOf(params: Record<string, unknown>): { halfExtents: V3; o
   return { halfExtents: vec(params["halfExtents"], [1.2, 1.3, 0.75]), offset: vec(params["offset"], [0, 1.3, 0]) };
 }
 
+
+/** The veil's turn: a plane lies flat and a quarter turn about x stands it across the passage facing the portal's +z.
+ *  L (Wristgate 2026-10-29): a single-sided veil material faced INTO the dungeon (the door's +z points inward) and the
+ *  portal shot never showed it; the veil now faces its portal's way-out side, read from the return anchor (a sibling
+ *  of the portal: the spot a traveller stands on when they come back out, i.e. the side they walk in from). */
+export const VEIL_TURN: [number, number, number, number] = [Math.SQRT1_2, 0, 0, Math.SQRT1_2];
+export const VEIL_TURN_BACK: [number, number, number, number] = [0, Math.SQRT1_2, -Math.SQRT1_2, 0];
+export function veilFacesBack(doc: SceneDoc, portalId: string, params: Record<string, unknown>): boolean {
+  const p = doc.entities[portalId], ra = typeof params["returnAnchor"] === "string" ? doc.entities[params["returnAnchor"] as string] : undefined;
+  if (!p || !ra || ra.parent !== p.parent) return false;
+  const pt = p.components["transform"] as { position?: number[]; rotation?: number[] } | undefined, at = ra.components["transform"] as { position?: number[] } | undefined;
+  const pp = pt?.position ?? [0, 0, 0], ap = at?.position ?? [0, 0, 0], q = pt?.rotation ?? [0, 0, 0, 1];
+  const d = [ap[0]! - pp[0]!, ap[1]! - pp[1]!, ap[2]! - pp[2]!];
+  // rotate d by the inverse of q (x, y, z, w): v' = q* v q
+  const [x, y, z, w] = [-q[0]!, -q[1]!, -q[2]!, q[3]!];
+  const ix = w * d[0]! + y * d[2]! - z * d[1]!, iy = w * d[1]! + z * d[0]! - x * d[2]!, iz = w * d[2]! + x * d[1]! - y * d[0]!, iw = -x * d[0]! - y * d[1]! - z * d[2]!;
+  const lz = iz * w + iw * -z + ix * -y - iy * -x;
+  return lz < -0.05;
+}
 /** The veil a portal gets: stated, else on the trigger box's centre plane, 25% larger than its opening. */
 export function veilOf(params: Record<string, unknown>, stated?: StatedPortal): { size: [number, number]; at: V3; stated: boolean } {
   const { halfExtents: half, offset } = stated?.trigger ?? triggerOf(params);
@@ -100,7 +119,7 @@ export function portalVeilOps(doc: SceneDoc, sceneId: string, stated: StatedFile
         name: `Instance boundary veil (${id})`, parent: id, tags: ["zone-boundary", "visual-only"],
         components: {
           // a plane lies flat; a quarter turn about x stands it across the passage (local z is the way through)
-          transform: { position: v.at, rotation: [Math.SQRT1_2, 0, 0, Math.SQRT1_2], scale: [1, 1, 1] },
+          transform: { position: v.at, rotation: veilFacesBack(doc, id, sc!.params!) ? VEIL_TURN_BACK : VEIL_TURN, scale: [1, 1, 1] },
           mesh: { source: { kind: "primitive", shape: "plane", size: [v.size[0], 1, v.size[1]], segments: [1, 1] }, material: s?.material ?? VEIL_MATERIAL, castShadow: false, receiveShadow: false, static: false },
         },
       },
@@ -134,4 +153,43 @@ export function veilFinish(material: string, json: Record<string, unknown> | nul
   const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255) as [number, number, number];
   const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
   return lum <= 0.3 ? { pass: true, why: `dark colour (luminance ${lum.toFixed(2)})` } : { pass: false, why: `veil material "${material}" is ${json["color"]} (luminance ${lum.toFixed(2)}): a light panel in the doorway reads as sky` };
+}
+
+/** The project closure of `project` (itself + project.json dependsOn, transitively). */
+export function projectClosure(pg: string, project: string): Set<string> {
+  const closure = new Set<string>();
+  const visit = (p: string): void => {
+    if (closure.has(p)) return;
+    closure.add(p);
+    const f = path.join(pg, "projects", p, "project.json");
+    const deps = fs.existsSync(f) ? ((JSON.parse(fs.readFileSync(f, "utf8")) as { dependsOn?: string[] }).dependsOn ?? []) : [];
+    deps.forEach(visit);
+  };
+  visit(project);
+  return closure;
+}
+
+/** A scratch / lab project (place-build labs `pb-*`, anything that calls itself scratch): never a portal's destination. */
+export function isLabProject(pg: string, project: string): boolean {
+  if (/^pb-/.test(project)) return true;
+  const f = path.join(pg, "projects", project, "project.json");
+  if (!fs.existsSync(f)) return false;
+  const j = JSON.parse(fs.readFileSync(f, "utf8")) as { title?: string; description?: string };
+  return /\bscratch\b|place-build lab/i.test(`${j.title ?? ""} ${j.description ?? ""}`);
+}
+
+/**
+ * Why a return portal's fallback `scene` (the way out for a traveller with no recorded way back: a page reload inside,
+ * a GM move) is wrong, or null. L (Wristgate 2026-10-29): the Shackle Halls exit fell back to the LAB scene
+ * `pbwristgate`; a reload inside the instance could not open it ("could not open scene") because a lab is outside the
+ * instance's closure, and the live install would have shipped the lab's name. The fallback must be a real world scene
+ * in the instance project's dependsOn closure.
+ */
+export function returnSceneFault(pg: string, instanceProject: string, scene: string): string | null {
+  const projects = fs.existsSync(path.join(pg, "projects")) ? fs.readdirSync(path.join(pg, "projects")) : [];
+  const owner = projects.find((p) => fs.existsSync(path.join(pg, "projects", p, "assets", "scenes", `${scene}.scene.json`)));
+  if (!owner) return `scene ${scene} exists in no project`;
+  if (isLabProject(pg, owner)) return `scene ${scene} is the lab project ${owner}'s (scratch): a return portal falls back to the WORLD scene (the lab's source world), never a lab`;
+  if (owner !== instanceProject && !projectClosure(pg, instanceProject).has(owner)) return `scene ${scene} (project ${owner}) is outside ${instanceProject}'s dependsOn closure: a reload inside cannot open it — add "${owner}" to projects/${instanceProject}/project.json dependsOn`;
+  return null;
 }

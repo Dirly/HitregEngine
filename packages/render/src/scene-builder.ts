@@ -711,6 +711,8 @@ interface LightData {
   when?: "always" | "night" | "day";
   /** point only: halo strength (see the schema). */
   glow?: number;
+  /** point only: metres the halo stays visible (see the schema). */
+  glowReach?: number;
   /** point only: flame unsteadiness (see the schema). */
   flicker?: "none" | "candle" | "torch" | "brazier";
   /** directional + castShadow only — shadow camera ortho frustum half-width. */

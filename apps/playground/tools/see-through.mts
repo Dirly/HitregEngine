@@ -20,7 +20,7 @@
  *   --step 3.5 --size 128 --min-px 6 --hour 12 --far 600
  *   --batch k/n             this run does every n-th sample from k (1-based); parts merge when all n are present
  *   --out <report.json>     default <project>/reports/see-through.json (prop: reports/see-through-prop-<entity>.json)
- *   --port 5284 | --url <dev app>     --force (ignore the cache)   --headed
+ *   --port 5284 | --url <dev app>     --force (ignore the cache)   --headed   --boot-timeout 240 (seconds to open the scene)
  *   --within 40             scene mode: a site on world meshes only (scatter, terrain — no scene entity) farther than
  *                           this (XZ) from every route sample is OUT OF PLACE: listed, not counted (_see-through-scope.mts)
  *
@@ -179,6 +179,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const H_ = <T,>(fn: (h: any, ...a: any[]) => T, ...a: unknown[]) => page.evaluate(([src, args]: [string, unknown[]]) => {
   const h = (window as any).__hitreg; return new Function("h", "args", `return (${src})(h, ...args)`)(h, args);
 }, [fn.toString(), a]) as Promise<Awaited<T>>;
+// --boot-timeout <s> (default 240): a lab copy of a whole world can take longer than 240 s to open headless (Wristgate 2026-10-29:
+// `timed out waiting for scene pbwristgate`); a bigger wait, never a skipped gate
+const BOOT_MS = (() => { const i = argv.indexOf("--boot-timeout"); const v = i >= 0 ? Number(argv[i + 1]) : NaN; return (Number.isFinite(v) && v > 0 ? v : 240) * 1000; })();
 async function waitFor(cond: () => Promise<boolean>, ms: number, what: string) { const t = Date.now(); while (Date.now() - t < ms) { if (await cond().catch(() => false)) return; await sleep(300); } throw new Error(`timed out waiting for ${what}`); }
 const cmd = (line: string) => page.evaluate((line: string) => { const f = document.querySelector(".hitreg-console-field") as HTMLInputElement | null; if (!f) return "! no console"; f.value = line; f.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); return "sent"; }, line) as Promise<string>;
 
@@ -187,8 +190,8 @@ const holes: Hole[] = [];
 let done = 0;
 try {
   await page.goto(`${base}/?scene=${encodeURIComponent(SCENE)}`, { waitUntil: "load" });
-  await waitFor(() => page.evaluate(() => !!(window as any).__hitreg?.playerId), 240000, "the dev app");
-  await waitFor(() => H_((h, s: string) => h.sceneName() === s, SCENE), 240000, `scene ${SCENE}`);
+  await waitFor(() => page.evaluate(() => !!(window as any).__hitreg?.playerId), BOOT_MS, "the dev app");
+  await waitFor(() => H_((h, s: string) => h.sceneName() === s, SCENE), BOOT_MS, `scene ${SCENE}`);
   await sleep(2000);
   // the probe module, from the same dev server (same three instance as the app)
   const modUrl = "/@fs/" + PROBE_SRC.replace(/\\/g, "/").replace(/^\//, "");

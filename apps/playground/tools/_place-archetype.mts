@@ -1616,31 +1616,41 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
  *  and the read check with "no approach line to judge from"). A road/path/trail id -> its points within 600 m of the
  *  centre (the stretch round its nearest point), else [nearest point, centre]; a river -> [nearest point, centre]; a town,
  *  recipe POI, region (hub or polygon centroid) or another reservation -> [its centre, this centre]. Unresolved -> none. */
-export function approachLines(recipe: any, reservations: any[], res: { center: V2; approach?: any; approaches?: any[] }): { lines: V2[][]; resolved: string[]; unresolved: string[] } {
-  const c = res.center, lines: V2[][] = [], resolved: string[] = [], unresolved: string[] = [], f = recipe.features ?? {};
+/** Metres between one road leg's end and the next leg's start that still make them one road (approachLines). */
+export const ROAD_LEG_JOIN_M = 40;
+export function approachLines(recipe: any, reservations: any[], res: { center: V2; approach?: any; approaches?: any[] }): { lines: V2[][]; resolved: string[]; unresolved: string[]; names: string[] } {
+  const c = res.center, lines: V2[][] = [], names: string[] = [], resolved: string[] = [], unresolved: string[] = [], f = recipe.features ?? {};
   const xz = (q: number[]): V2 => (q.length >= 3 ? [q[0]!, q[2]!] : [q[0]!, q[1]!]);
   for (const ap of [res.approach, ...(res.approaches ?? [])].filter(Boolean)) {
-    if ((ap.points ?? []).length >= 2) { lines.push(ap.points as V2[]); continue; }
+    if ((ap.points ?? []).length >= 2) { lines.push(ap.points as V2[]); names.push(ap.from ?? `points-${lines.length}`); continue; }
     const id = ap.from as string, road = (f.roads ?? []).find((r: any) => r.id === id), river = (f.rivers ?? []).find((r: any) => r.id === id);
     if (road || river) {
       const pts: V2[] = ((road ?? river).points as number[][]).map(xz);
-      // L (KNUCKLECROWN 2026-10-29): a road approach named by one LEG (`path-...-crown.s2`) was judged on that leg alone, so
-      // the place read never saw the leg the road runs on into the place (s3, where the ring shows 28-46 px at 257-275 m):
-      // the road's later legs that chain on from its end (start within 25 m of the last point) are part of the same line
-      if (road) { const m = /^(.*)\.s(\d+)$/.exec(id); if (m) for (let k = Number(m[2]) + 1; ; k++) { const nx = (f.roads ?? []).find((r: any) => r.id === `${m[1]}.s${k}`); if (!nx) break; const np = (nx.points as number[][]).map(xz); if (dist(np[0]!, pts[pts.length - 1]!) > 25) break; pts.push(...np); } }
+      // L (KNUCKLECROWN 2026-10-29): a road approach named by one LEG (`path-...-crown.s2`) was judged on that leg alone.
+      // L (KNUCKLECROWN close 2026-10-29: "line 0 reads 0 px" while the first-sight frame showed 28-46 px): the legs were
+      // still separate lines (the road from Saltharrow was line 5 + line 0, each judged on its own stretch). A ROAD is one
+      // line: every leg of its chain (`<base>`, `<base>.s2`, ... joined end to start within ROAD_LEG_JOIN_M), named by its
+      // base id, so naming any leg (or a renumbered one's neighbour) judges the whole road once.
+      let chainName = id;
+      if (road) { const m = /^(.*?)(?:\.s(\d+))?$/.exec(id)!, base = m[1]!, legOf = (k: number) => (f.roads ?? []).find((r: any) => r.id === (k === 1 ? base : `${base}.s${k}`));
+        const legPts = (r: any) => (r.points as number[][]).map(xz);
+        let k0 = Number(m[2] ?? 1); while (k0 > 1) { const pv = legOf(k0 - 1), cur = legOf(k0); if (!pv || !cur) break; const pp = legPts(pv); if (dist(pp[pp.length - 1]!, legPts(cur)[0]!) > ROAD_LEG_JOIN_M) break; k0--; }
+        pts.length = 0; pts.push(...legPts(legOf(k0) ?? road));
+        for (let k = k0 + 1; ; k++) { const nx = legOf(k); if (!nx) break; const np = legPts(nx); if (dist(np[0]!, pts[pts.length - 1]!) > ROAD_LEG_JOIN_M) break; pts.push(...np); }
+        chainName = base; }
       const ni = pts.reduce((m, q, i) => (dist(q, c) < dist(pts[m]!, c) ? i : m), 0);
       let i0 = ni, i1 = ni; while (i0 > 0 && dist(pts[i0 - 1]!, c) <= 600) i0--; while (i1 < pts.length - 1 && dist(pts[i1 + 1]!, c) <= 600) i1++;
       const l = road && i1 > i0 ? pts.slice(i0, i1 + 1) : [pts[ni]!, c];
-      lines.push(l.map((q) => [r2(q[0]), r2(q[1])] as V2)); resolved.push(`${id} (${road ? "road" : "river"})`); continue;
+      lines.push(l.map((q) => [r2(q[0]), r2(q[1])] as V2)); names.push(chainName); resolved.push(`${id} (${road ? "road" : "river"})`); continue;
     }
     const town = (f.towns ?? []).find((t: any) => t.id === id), poi = (f.pois ?? []).find((t: any) => t.id === id), reg = (recipe.regions ?? []).find((t: any) => t.id === id), other = reservations.find((r: any) => r.location === id);
     const at: V2 | null = town ? xz(town.center) : poi ? xz(poi.position) : other ? (other.center as V2) : reg ? (reg.hub ? xz(reg.hub.position ?? reg.hub) : (() => { const P = reg.polygon as V2[]; return [P.reduce((t, q) => t + q[0], 0) / P.length, P.reduce((t, q) => t + q[1], 0) / P.length] as V2; })()) : null;
-    if (at && Number.isFinite(at[0]) && Number.isFinite(at[1]) && dist(at, c) > 1) { lines.push([[r2(at[0]), r2(at[1])], [r2(c[0]), r2(c[1])]]); resolved.push(`${id} (${town ? "town" : poi ? "poi" : other ? "reservation" : "region"})`); }
+    if (at && Number.isFinite(at[0]) && Number.isFinite(at[1]) && dist(at, c) > 1) { lines.push([[r2(at[0]), r2(at[1])], [r2(c[0]), r2(c[1])]]); names.push(id); resolved.push(`${id} (${town ? "town" : poi ? "poi" : other ? "reservation" : "region"})`); }
     else unresolved.push(id);
   }
   // a reservation naming one road twice (approach + approaches: wreck-road, coffin-road) judged it twice: one line each
-  const seen = new Set<string>(), uniq = lines.filter((l) => { const k = JSON.stringify(l); if (seen.has(k)) return false; seen.add(k); return true; });
-  return { lines: uniq, resolved, unresolved };
+  const seen = new Set<string>(), keep = lines.map((l) => { const k = JSON.stringify(l); if (seen.has(k)) return false; seen.add(k); return true; });
+  return { lines: lines.filter((_, i) => keep[i]), names: names.filter((_, i) => keep[i]), resolved, unresolved };
 }
 
 /** L (art, zfight): catalogue pieces the gates reject (camp-props/tent and spoilgate/chain-post were lifted 2026-10-21 by
@@ -1881,11 +1891,15 @@ export function readBand(tier: string | undefined, override?: V2 | null): V2 {
 
 /** Spots along each approach inside the read window (every 15 m of path). A line that never gets that far from the
  *  place is judged from its far end. */
-export function approachSpots(c: V2, lines: V2[][], band: V2, ok: (p: V2) => boolean = () => true): { p: V2; d: number; line: number; reason?: string }[] {
+/** Metres between judged spots along an approach. L (KNUCKLECROWN close 2026-10-29): at 15 m the Saltharrow road's only
+ *  in-band spots were [-418,260] (behind the saddle lip, 0 px) and the next at 254 m (out of the band): its first-sight
+ *  point [-420,256] (266 m, 39.5 px) fell between two samples. */
+export const APPROACH_SPOT_M = 4;
+export function approachSpots(c: V2, lines: V2[][], band: V2, ok: (p: V2) => boolean = () => true, step = APPROACH_SPOT_M): { p: V2; d: number; line: number; reason?: string }[] {
   const out: { p: V2; d: number; line: number; reason?: string }[] = [];
   lines.forEach((l, li) => {
     const samples: V2[] = [];
-    for (let i = 0; i + 1 < l.length; i++) { const a = l[i]!, b = l[i + 1]!, n = Math.max(1, Math.ceil(dist(a, b) / 15)); for (let k = 0; k < n; k++) samples.push([a[0] + ((b[0] - a[0]) * k) / n, a[1] + ((b[1] - a[1]) * k) / n]); }
+    for (let i = 0; i + 1 < l.length; i++) { const a = l[i]!, b = l[i + 1]!, n = Math.max(1, Math.ceil(dist(a, b) / step)); for (let k = 0; k < n; k++) samples.push([a[0] + ((b[0] - a[0]) * k) / n, a[1] + ((b[1] - a[1]) * k) / n]); }
     if (l.length) samples.push(l[l.length - 1]!);
     const reaches = samples.some((p) => dist(p, c) >= band[0]);
     // L: judged where a player can stand (an approach drawn along the shore dips into the sea)
@@ -1922,7 +1936,13 @@ export function approachRead(g: PlaceGround, landmark: { at: V2; top: number; fo
     return { at: s.p.map(r2), line: s.line, distance: Math.round(d), inFog: d <= landmark.fogReach, blockedAt: blocked, px, reads: !s.reason && blocked === null && d <= landmark.fogReach && (px === null || px >= READ_PX_MIN), ...(s.reason ? { reason: s.reason } : {}) };
   });
   const lines = [...new Set(all.map((r) => r.line))];
-  const rows = lines.map((l) => { const mine = all.filter((r) => r.line === l).sort((a, b) => b.distance - a.distance); return mine.find((r) => r.reads) ?? [...mine].sort((a, b) => (b.px ?? 0) - (a.px ?? 0))[0]!; });
+  // L (KNUCKLECROWN close 2026-10-29): each line is judged at its FIRST-SIGHT point, the farthest judged spot along the
+  // road from which any of the target shows (px > 0, nothing blocking, inside fog): the row is the first spot from there
+  // in that reads, and carries where the target first shows (`firstSight`) so the evidence frame is shot on that spot
+  const rows = lines.map((l) => { const mine = all.filter((r) => r.line === l).sort((a, b) => b.distance - a.distance);
+    const fs0 = mine.find((r) => !r.reason && r.blockedAt === null && r.inFog && (r.px === null || r.px > 0));
+    const row = mine.find((r) => r.reads) ?? [...mine].sort((a, b) => (b.px ?? 0) - (a.px ?? 0))[0]!;
+    return fs0 ? { ...row, firstSight: { at: fs0.at, distance: fs0.distance, px: fs0.px } } : row; });
   const unread = rows.filter((r) => !r.reads).map((r) => r.line);
   return { ok: rows.length > 0 && unread.length === 0, rows, unread, note: rows.length ? "" : "no approach line to judge from" };
 }

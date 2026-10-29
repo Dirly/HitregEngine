@@ -1662,6 +1662,12 @@
           "minimum": 0,
           "maximum": 4
         },
+        "glowReach": {
+          "description": "point lights only: metres the halo stays visible (unset = 140, fading from 90). A beacon meant to read across a valley or a moor at night sets 300-600: the halo then fades over the last third of the reach and grows with distance (square root past 90 m) so it keeps a readable size on screen. Still one shared draw.",
+          "type": "number",
+          "minimum": 140,
+          "maximum": 1200
+        },
         "flicker": {
           "default": "none",
           "description": "point lights only: a living flame's unsteadiness, applied to the light, its halo, its pool and its fog glow — candle = a slow shiver, torch = a lively gutter, brazier = deep slow surges. Costs nothing per frame beyond a sine or two per light. Standing-fire VFX lights already flicker on their own; use this for plain lights placed in a lantern, sconce or hearth.",

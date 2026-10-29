@@ -118,6 +118,9 @@ test("gen sessions: the body first, then everything painted to it; done images s
   assert.deepEqual(genWaves(m, (i) => i.role !== "female").map((w) => w.map((i) => i.role)), [["female"]]);
   assert.deepEqual(genWaves(m, () => true), []);
   assert.equal(genWaves(m, () => true, true).length, 2);
+  // --redo: that sheet and everything painted from it; a helm redo leaves the rest alone
+  assert.deepEqual(genWaves(m, () => true, false, ["helm"]).map((w) => w.map((i) => i.role)), [["helm"]]);
+  assert.deepEqual(genWaves(m, () => true, false, ["body"]).map((w) => w.map((i) => i.role)), [["body"], ["female", "helm", "shoulder"]]);
   // one session attaches each ref once: prompts get told which attachment is their FIRST and SECOND
   const s = sessionImages(genWaves(m, () => false)[1]!);
   assert.match(s[0]!.prompt, /^ATTACHMENTS FOR THIS IMAGE: this session has 4 attached images; the FIRST image this prompt names is attachment 1 \(sets\/human-body\/key-female.png\); the SECOND image this prompt names is attachment 2/);

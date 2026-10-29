@@ -108,6 +108,29 @@ export async function run(ctx: Ctx): Promise<number> {
     // (2026-10-28 s1e: the Knucklecrown's peak trail came back as trail-peak-6). Writes reservations.json, schema-validated.
     if (ctx.flag("adopt-roads")) {
       let adopted = 0;
+      // L (KNUCKLECROWN close 2026-10-29: `approach-renumbered` warned on the knucklecrown and chisel-camp for
+      // path-town-1-site-crown.s3, and no flag could rename it, so the owner had to ask the coordinator): an approach
+      // naming a road PIECE that no longer exists is re-pointed at the piece of the same road nearest the reservation
+      // (the leg that runs into the place); a secondary that then repeats another approach of the same reservation goes
+      const pieceBase = (id: string) => id.replace(/(\.s?\d+)+$/, "");
+      for (const r of res.reservations) {
+        for (const a of [r.approach, ...r.approaches]) {
+          if (roads.some((x) => x.id === a.from) || rivers.some((x) => x.id === a.from)) continue;
+          const pieces = roads.filter((x) => pieceBase(x.id) === pieceBase(a.from));
+          if (!pieces.length) continue;
+          const near = pieces.reduce((m, x) => (distToPolyline(r.center[0], r.center[1], x.points) < distToPolyline(r.center[0], r.center[1], m.points) ? x : m));
+          console.log(`  renamed ${r.location} approach "${a.from}" -> "${near.id}" (the piece of ${pieceBase(a.from)} nearest the reservation)`);
+          a.from = near.id;
+          adopted++;
+        }
+        const seen = new Set([r.approach.from]);
+        r.approaches = r.approaches.filter((a) => {
+          if (a.points.length >= 2 || !seen.has(a.from)) { seen.add(a.from); return true; }
+          console.log(`  dropped ${r.location} approach "${a.from}": it repeats another approach of the reservation`);
+          adopted++;
+          return false;
+        });
+      }
       for (const r of res.reservations) {
         for (const road of roads) {
           if (builtBy(road.id) || namedWays(r).includes(road.id)) continue;
