@@ -1,6 +1,6 @@
 /**
  * zonegen concept <world> --project <p> --zone <z> --poi <id>   (or --town <name> for a town, zone optional)
- *   [--height <m>] [--port 5317] [--spot-timeout 240] [--renders-only | --paint-only] [--dry-run] [--keep-bare] [--style "..."] [--timeout 1800]
+ *   [--height <m>] [--port 5317] [--spot-timeout 240] [--renders-only | --paint-only | --measure] [--views gate,street,square] [--dry-run] [--keep-bare] [--style "..."] [--timeout 1800]
  *
  * CONCEPT ON SITE (Derek 2026-10-29: "do you take a snapshot of the area then feed those for the concept art?"). Every
  * firstshore concept frame was drawn from text; Codex invented a cliff tall enough for a 50 m gate and the owner built
@@ -11,6 +11,14 @@
  *  2. picks two cameras: APPROACH = the first-sight point on the road(s) it is reached from, at player height (the
  *     farthest point within 1.25 x read where a --height mark shows >= 16 px); FAR = from >= the read distance, the
  *     bearing that shows most, player height (raised only when nothing shows, and said so);
+ *     a TOWN adds the NEAR set (Derek 2026-10-30: "you only have far away views ... it's honestly so far"): GATE on the
+ *     main road 40-70 m out from the gatehouse, STREET just inside the gate down the main street, SQUARE across the
+ *     square to the chapel, all at player height, on a plan STAKED from the site (_concept-site.mts townStakePlan: wall
+ *     ring at the radius, gatehouse where the road crosses it, street, square, chapel lot, street lots), the stakes
+ *     drawn over those bare renders for scale and kept as `stakes` in the manifest. `--views a,b` renders/paints only
+ *     those views (the others' records kept while the ground is unchanged);
+ *     `--measure`: the painted outline in <id>.concept-marks.json (`extent`, the place-scale schema) back-projected
+ *     through its view's camera to metres, written as `extent` into the manifest and outlined on the sheet;
  *  3. renders the BARE site in play mode (tools/light-shots.mts, its own vite on --port, fixed cameras, noon, no
  *     reference characters): the world with the place's own features and entities taken out (a scratch copy
  *     projects/concept-<id>/, deleted after the run; the live scene itself when the place has none yet), plus a
@@ -37,7 +45,9 @@ import { findAsset } from "../../_closure.mjs";
 import { runCapped } from "../../_run-capped.mts";
 import { tallScatterRules, treeSampler } from "../../worldgen-relief.mts";
 import { groundSpread, GROUNDLESS_STD } from "../../_far-camera.mts";
-import { approachView, conceptBrief, farView, measureSite, readDistance, type PromptText, type SiteFit, type View } from "../../_concept-site.mts";
+import { approachView, conceptBrief, farView, GATEHOUSE_M, measureSite, NEAR_VIEWS, readDistance, seenOverGround, stakeLines, townNearViews, townStakePlan, WALL_M, type PromptText, type SiteFit, type TownPlan, type View, type ViewName } from "../../_concept-site.mts";
+import { extentSchema, groundAxes, groundHit, pixelRay, polyArea, projector, type ScaleCamera } from "../../_place-scale.mts";
+import { z } from "zod";
 // @ts-ignore plain JS engine tool module
 import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership, ownsFeature } from "../../../../../tools/poi-review/concept-site.mjs";
 import { decodePng, encodePng } from "../../_png.mjs";
@@ -152,6 +162,20 @@ export async function run(ctx: Ctx): Promise<number> {
   // a town is approached from OUTSIDE its walls (radius + 25 m); a POI from 10 m (its reservation is the whole site)
   const approach = approachView(field, center, height, read, roads, approachPts, canopy, clutter, townName ? radius + 25 : 10);
   const far = farView(field, center, height, read, [approach.eye[0], approach.eye[2]], canopy, clutter);
+  // a TOWN also gets the NEAR set (Derek 2026-10-30: "you only have far away views"): gate, street and square at player
+  // height, on a plan staked from the site (wall ring, gatehouse on the main road, street, square, chapel, lots)
+  let plan: TownPlan | null = null;
+  const allViews: View[] = [approach, far];
+  if (townName) {
+    // the main road: the one whose nearest point comes closest to the centre
+    const near = (r: V2[]) => Math.min(...r.map((p) => Math.hypot(p[0] - center[0], p[1] - center[1])));
+    const main = [...roads].sort((a, b) => near(a) - near(b))[0] ?? null;
+    plan = townStakePlan(field, center, radius, main, fit.water.nearest?.at ?? null);
+    allViews.push(...townNearViews(field, plan));
+  }
+  const want = ctx.opt("views") ? new Set(ctx.opt("views").split(",").map((s) => s.trim())) : null;
+  if (want) for (const v of want) if (!allViews.some((x) => x.name === v)) { console.error(`zonegen concept: --views ${v}: this place has ${allViews.map((x) => x.name).join(", ")}`); return 2; }
+  const views = allViews.filter((v) => !want || want.has(v.name));
   let wall: string | null = null;
   if (townName) {
     const r = spawnSync(process.execPath, [...TSX, "tools/town-wall-line.mts", "check", "--project", ctx.project, "--town", townName], { encoding: "utf8", maxBuffer: 64 << 20 });
@@ -166,53 +190,89 @@ export async function run(ctx: Ctx): Promise<number> {
     `apron ${fit.apronM2} m2 standable round the centre`,
     `water ${fit.water.atCentre !== null ? `at centre y ${fit.water.atCentre}` : fit.water.nearest ? `y ${fit.water.nearest.y} at ${fit.water.nearest.from} m` : "none within the terrain radius"}`,
     `read distance ${read} m; mark ${height} m`,
-    `approach: ${approach.from} m, ${approach.px} px — ${approach.note}`,
-    `far: ${far.from} m, ${far.px} px — ${far.note}`,
+    ...allViews.map((v) => `${v.name}: ${v.from} m${v.name === "approach" || v.name === "far" ? `, ${v.px} px` : ""} — ${v.note}`),
+    ...(plan ? [`stakes: wall ${WALL_M} m at r ${radius}, gatehouse ${GATEHOUSE_M} m, chapel tower ${plan.chapel.tower} m, ${plan.stakes.filter((s) => s.kind === "lot").length} lots 8 x 11 m (${plan.note})`] : []),
     ...(wall ? [`wall overlook: ${wall}`] : []),
   ];
-  console.log(fitLines.map((l) => `  ${l}`).join("\n"));
   fs.mkdirSync(outDir, { recursive: true });
   const file = (s: string) => path.join(outDir, `${id}${s}`);
-  const renders = { approach: file("-approach.site.png"), far: file("-far.site.png"), plan: file("-plan.site.png") };
-  const frames = { approach: file("-approach.png"), far: file("-far.png") };
+  const manifestFile = file(".site.json");
+  const renders: Record<string, string> = { plan: file("-plan.site.png") }, frames: Record<string, string> = {};
+  for (const v of allViews) { renders[v.name] = file(`-${v.name}.site.png`); frames[v.name] = file(`-${v.name}.png`); }
+  // EXTENT (step 2 of the near round): the painted town's ground outline (<id>.concept-marks.json `extent`, the
+  // place-scale schema), back-projected through its view's camera to metres and kept in the manifest
+  const marksFile = file(".concept-marks.json");
+  const prior = tryJson(manifestFile);
+  const extent = exists(marksFile) && prior ? paintedExtent(readJson(marksFile), prior, plan, field) : null;
+  if (extent?.vsStakes) fitLines.push(`painted extent (${extent.view}): ${extent.vsStakes.painted} px wide vs the staked wall ${extent.vsStakes.staked} px -> x${extent.vsStakes.ratio}: build the wall ring to r ~${extent.vsStakes.radius} m${extent.vsStakes.gatehouse ? `; gatehouse x${extent.vsStakes.gatehouse}` : ""}${extent.metric ? "" : " (eye at ground level: metres not readable)"}`);
+  else if (extent) fitLines.push(`painted extent (${extent.view}): ${extent.area} m2, ${extent.width} m wide x ${extent.depth} m deep, ${extent.reach} m from the centre at most${extent.missed ? `; ${extent.missed} outline point(s) miss the ground` : ""}${extent.metric ? "" : " (eye at ground level: metres NOT reliable)"}`);
+  console.log(fitLines.map((l) => `  ${l}`).join("\n"));
+  const sheet = file("-sheet.png");
+  if (ctx.flag("measure")) {
+    // read-only on the renders: write the extent into the manifest and redraw the sheet
+    if (!prior) { console.error(`zonegen concept --measure: no ${rel(manifestFile)} (render first)`); return 2; }
+    if (!extent) { console.error(`zonegen concept --measure: no extent in ${rel(marksFile)} ({ image, vfov, extent: { view, outline, masses } } — docs/place-builder.md scale)`); return 2; }
+    writeJson(manifestFile, { ...prior, extent });
+    writeSheet(sheet, encodePng(...conceptSheet(allViews.map((v) => v.name), renders, frames, fitLines, { extent, prior })));
+    console.log(`  extent -> ${rel(manifestFile)}\n  sheet  ${rel(sheet)}`);
+    return 0;
+  }
   const briefText = conceptBrief(text, fit, height);
-  // the two cameras as light-shots spots: a pre-freeze look at the bare site renders them with tools/light-shots.mts --spots
-  if (ctx.flag("dry-run")) console.log(`cameras: ${JSON.stringify([approach, far].map((v, i) => ({ name: `${id}-${i ? "far" : "approach"}`, x: Math.round(v.eye[0]), z: Math.round(v.eye[2]), camera: v.eye, target: v.target, note: v.note })))}`);
+  // the cameras as light-shots spots: a pre-freeze look at the bare site renders them with tools/light-shots.mts --spots
+  if (ctx.flag("dry-run")) console.log(`cameras: ${JSON.stringify(allViews.map((v) => ({ name: `${id}-${v.name}`, x: Math.round(v.eye[0]), z: Math.round(v.eye[2]), camera: v.eye, target: v.target, note: v.note })))}`);
   if (ctx.flag("dry-run")) { console.log(`\n--- repaint brief ---\n${briefText}\n--- (dry run: nothing rendered) ---`); return 0; }
 
   // ---- render the bare site ------------------------------------------------------------------------------------------
   const fpRes = { center, radius, terrainRadius };
   const fingerprint = groundFingerprint(raw, { center, radius: terrainRadius }, own);
-  const manifestFile = file(".site.json");
+  const fitRec = (v: View) => ({ from: v.from, px: v.px, note: v.note });
   if (!ctx.flag("paint-only")) {
-    fs.writeFileSync(renders.plan, encodePng(...planCrop(field, raw, center, radius, terrainRadius, approachPts, roads, [approach, far])));
-    const shot = await renderBare(ctx, id, own, [approach, far], terrainRadius);
+    fs.writeFileSync(renders.plan!, encodePng(...planCrop(field, raw, center, radius, terrainRadius, approachPts, roads, allViews, plan)));
+    const shot = await renderBare(ctx, id, own, views, terrainRadius);
     if (!shot.ok) { console.error(`zonegen concept: the bare render failed — ${shot.why}`); return 1; }
-    fs.copyFileSync(shot.files.approach!, renders.approach);
-    fs.copyFileSync(shot.files.far!, renders.far);
+    for (const v of views) {
+      if (plan && (NEAR_VIEWS as readonly string[]).includes(v.name)) fs.writeFileSync(renders[v.name]!, encodePng(...staked(decodePng(fs.readFileSync(shot.files[v.name]!)) as Img, field, plan, v)));
+      else fs.copyFileSync(shot.files[v.name]!, renders[v.name]!);
+    }
+    // a partial run (--views) keeps the other views' records when the ground has not moved
+    const keep = want && prior && prior.fingerprint === fingerprint.hash ? (prior.renders ?? {}) : {};
+    if (want && prior && prior.fingerprint !== fingerprint.hash) console.warn(`WARN: the ground under ${id} changed since ${prior.renderedAt}: the views not re-rendered now are dropped from the manifest`);
+    const rec = (v: View) => ({ file: path.basename(renders[v.name]!), sha256: fileSha(renders[v.name]!), ...cam(v), ...(plan && (NEAR_VIEWS as readonly string[]).includes(v.name) ? { staked: true } : {}) });
     writeJson(manifestFile, {
       tool: CONCEPT_TOOL, version: 1, poi: id, project: ctx.project, world: ctx.world, zone: ctx.zone || null, town: townName,
       reservation: fpRes, worldFile: rel(P.recipe), ownership: own, fingerprint: fingerprint.hash, featuresUnder: fingerprint.features,
       renderedAt: new Date().toISOString(), bare: shot.bare,
-      renders: Object.fromEntries(Object.entries(renders).map(([k, f]) => [k, { file: path.basename(f), sha256: fileSha(f), ...(k === "approach" ? cam(approach) : k === "far" ? cam(far) : {}) }])),
-      fit: { ...fit, read, height, approach: { from: approach.from, px: approach.px, note: approach.note }, far: { from: far.from, px: far.px, note: far.note }, wall },
+      renders: { ...keep, ...Object.fromEntries(views.map((v) => [v.name, rec(v)])), plan: { file: path.basename(renders.plan!), sha256: fileSha(renders.plan!) } },
+      fit: { ...fit, read, height, ...Object.fromEntries(allViews.map((v) => [v.name, fitRec(v)])), wall },
+      ...(plan ? { stakes: stakeRecord(plan) } : {}),
+      ...(extent ? { extent } : {}),
     });
-  } else if (!exists(manifestFile) || !exists(renders.approach) || !exists(renders.far)) { console.error(`zonegen concept: --paint-only needs the renders + ${rel(manifestFile)} (run without it first)`); return 2; }
-  else {
-    const m = readJson(manifestFile) as J;
-    if (m.fingerprint !== fingerprint.hash) console.warn(`WARN: the ground under ${id} changed since ${m.renderedAt}: repainting stale renders (gate 16 will refuse them; re-render)`);
-  }
+  } else if (!prior || views.some((v) => !exists(renders[v.name]!))) { console.error(`zonegen concept: --paint-only needs the renders + ${rel(manifestFile)} (run without it first)`); return 2; }
+  else if (prior.fingerprint !== fingerprint.hash) console.warn(`WARN: the ground under ${id} changed since ${prior.renderedAt}: repainting stale renders (gate 16 will refuse them; re-render)`);
 
   // ---- repaint -------------------------------------------------------------------------------------------------------
   if (!rendersOnly) {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "concept-set-"));
     try {
+      // a town's frames are the SAME place: its current approach painting rides along as the identity reference (copied
+      // out first: a repainted approach overwrites it); one Codex session, refs attached once each in first-seen order
+      const identity = plan && exists(frames.approach!) ? path.join(tmp, "identity-approach.png") : null;
+      if (identity) fs.copyFileSync(frames.approach!, identity);
+      const refOrder: string[] = [], at = (f: string) => { if (!refOrder.includes(f)) refOrder.push(f); return refOrder.indexOf(f) + 1; };
       const set = {
         brief: briefText,
-        images: (["approach", "far"] as const).map((v, i) => ({
-          id: `concept-${ctx.world}-${id}-${v}`, target: frames[v], size: `${W}x${H}`, paint: true, ref: [renders[v]], purpose: `concept on site: ${id} ${v} view (gate 16)`,
-          prompt: `This frame repaints the ${i === 0 ? "FIRST" : "SECOND"} attached image only: the ${v === "approach" ? `APPROACH view, at player height on the road ${approach.from} m out, where the place first comes into sight` : `FAR view from ${far.from} m: the place's silhouette over its land`}. Same camera, same horizon, same ground.`,
-        })),
+        images: views.map((v) => {
+          const near = (NEAR_VIEWS as readonly string[]).includes(v.name), ref = [...(identity ? [identity] : []), renders[v.name]!];
+          const idN = identity ? at(identity) : 0, n = at(renders[v.name]!);
+          return {
+            id: `concept-${ctx.world}-${id}-${v.name}`, target: frames[v.name]!, size: `${W}x${H}`, paint: true, ref, purpose: `concept on site: ${id} ${v.name} view (gate 16)`,
+            prompt: [
+              `This frame repaints attached image ${n} only (its COMPOSITION: keep its camera, horizon and ground): ${viewText(v)}. Same camera, same horizon, same ground.`,
+              near ? `The coloured lines in image ${n} are survey STAKES of the town's plan, standing on the real ground at true scale: RED = the town wall line with its ${WALL_M} m top line and posts; ORANGE = the gatehouse footprint and its ${GATEHOUSE_M} m top; YELLOW = the main street's edges (6 m wide); CYAN = the market square; MAGENTA = the chapel lot and its tower (${plan!.chapel.tower} m top); WHITE = building lots (8 m frontage, 11 m deep, 3 m posts). Build the town ON them: walls on the red line at that height, the gatehouse on the orange box, houses filling the white lots fronting the street, the square open, the chapel on the magenta lot with its tower where the small box is. Then REMOVE every stake line: none may show in the painting.` : "",
+              identity ? `Attached image ${idN} is the current APPROACH painting of this same town (from ${approach.from} m): it is the town's identity. Match it exactly — the same red rubble wall and stone, the same roofs, the same gatehouse and chapel tower, the same light and air — so this frame reads as that town seen up close. Do not repaint image ${idN}.` : "",
+            ].filter(Boolean).join("\n"),
+          };
+        }),
       };
       const mf = path.join(tmp, "set.json");
       writeJson(mf, set);
@@ -220,15 +280,108 @@ export async function run(ctx: Ctx): Promise<number> {
       process.stdout.write(r.stdout ?? ""); if (r.status !== 0) { process.stderr.write((r.stderr ?? "").slice(-2000)); console.error("zonegen concept: the repaint failed (renders and manifest kept; --paint-only retries)"); return 1; }
     } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
   }
-  const sheet = file("-sheet.png");
-  fs.writeFileSync(sheet, encodePng(...conceptSheet(renders, frames, fitLines)));
+  writeSheet(sheet, encodePng(...conceptSheet(allViews.map((v) => v.name), renders, frames, fitLines, extent ? { extent, prior: tryJson(manifestFile) ?? prior! } : null)));
   console.log(`\nconcept on site: ${id}`);
-  for (const v of ["approach", "far"] as const) console.log(`  ${v.padEnd(8)} bare ${rel(renders[v])}${exists(frames[v]) ? `  ->  painted ${rel(frames[v])}` : ""}`);
-  console.log(`  plan     ${rel(renders.plan)}\n  sheet    ${rel(sheet)}   (open it: judge the painting against the numbers)\n  manifest ${rel(manifestFile)}`);
-  if (exists(frames.approach)) console.log(`  design.json: "concept": [${[frames.approach, frames.far].filter(exists).map((f) => `"${rel(f)}"`).join(", ")}]`);
+  for (const v of allViews) console.log(`  ${v.name.padEnd(8)} bare ${rel(renders[v.name]!)}${exists(frames[v.name]!) ? `  ->  painted ${rel(frames[v.name]!)}` : ""}`);
+  console.log(`  plan     ${rel(renders.plan!)}\n  sheet    ${rel(sheet)}   (open it: judge the painting against the numbers)\n  manifest ${rel(manifestFile)}`);
+  const painted = allViews.map((v) => frames[v.name]!).filter(exists);
+  if (painted.length) console.log(`  design.json: "concept": [${painted.map((f) => `"${rel(f)}"`).join(", ")}]`);
   if (!ctx.flag("paint-only")) { const r = order.recordPlaceStage(P.projectDir, orderKey, "bare-renders", { by: "zonegen concept", evidenceFile: manifestFile }, ctx.world); if (r) console.log(`  ${r}`); }
   if (!rendersOnly) { const r = order.recordPlaceStage(P.projectDir, orderKey, "concept-painted", { by: "zonegen concept", evidenceFile: sheet }, ctx.world); if (r) console.log(`  ${r}`); }
   return 0;
+}
+
+function viewText(v: View): string {
+  switch (v.name) {
+    case "approach": return `the APPROACH view, at player height on the road ${v.from} m out, where the place first comes into sight`;
+    case "far": return `the FAR view from ${v.from} m: the place's silhouette over its land`;
+    case "gate": return `the GATE view, at player height on the main road ${v.from} m out from the gatehouse: the wall and the gatehouse close up, the road running into the gate passage`;
+    case "street": return "the STREET view, at player height just inside the gate, looking down the main street: house fronts on both sides, the market square ahead and the chapel tower beyond";
+    case "square": return "the SQUARE view, at player height on the near corner of the market square, looking across it at the chapel and its tower, houses round the square";
+  }
+}
+
+/** The plan summary kept in the manifest (the town planner reads it as the concept's assumed layout). */
+function stakeRecord(p: TownPlan): J {
+  const r = (q: V2) => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10];
+  return {
+    note: p.note, gate: r(p.gate), axis: r(p.axis), wallM: WALL_M, gatehouseM: GATEHOUSE_M,
+    square: { at: r(p.square.at), halfDepth: p.square.halfDepth, halfWidth: p.square.halfWidth }, chapel: { at: r(p.chapel.at), tower: p.chapel.tower },
+    lots: p.stakes.filter((s) => s.kind === "lot").map((s) => s.points.map(r)),
+  };
+}
+
+const STAKE_RGB: Record<string, [number, number, number]> = { wall: [255, 50, 40], gatehouse: [255, 150, 20], street: [255, 235, 60], square: [40, 230, 255], chapel: [255, 60, 230], lot: [255, 255, 255] };
+/** The staked plan drawn over a bare near render: each stake line projected through the view's camera (vfov 60, the play
+ *  camera), drawn where the ground does not hide it, 3 px within 25 m, 2 px beyond. */
+function staked(img: Img, g: { height(x: number, z: number): number }, plan: TownPlan, v: View): [number, number, Uint8Array] {
+  const camera: ScaleCamera = { eye: v.eye, target: v.target, vfov: 60, width: img.width, height: img.height }, proj = projector(camera);
+  const out = new Uint8Array(img.data.length === img.width * img.height * 4 ? img.data : toRgba(img));
+  const put = (x: number, y: number, c: number[], r: number) => {
+    for (let a = -r; a <= r; a++) for (let b = -r; b <= r; b++) { const X = Math.round(x + a), Y = Math.round(y + b); if (X < 0 || Y < 0 || X >= img.width || Y >= img.height) continue; const k = (Y * img.width + X) * 4; out[k] = c[0]!; out[k + 1] = c[1]!; out[k + 2] = c[2]!; out[k + 3] = 255; }
+  };
+  // lots first: the street, square and chapel edges they front stay readable on top
+  const layer = ["lot", "wall", "square", "street", "chapel", "gatehouse"];
+  for (const line of stakeLines(g, plan).sort((a, b) => layer.indexOf(a.kind) - layer.indexOf(b.kind))) {
+    const col = STAKE_RGB[line.kind]!;
+    // a vertical post is two points: densify it so the occlusion test runs along it
+    const pts = line.pts.length === 2 ? Array.from({ length: 9 }, (_, i) => [line.pts[0]![0], line.pts[0]![1] + ((line.pts[1]![1] - line.pts[0]![1]) * i) / 8, line.pts[0]![2]] as [number, number, number]) : line.pts;
+    let prev: [number, number, number] | null = null;
+    for (const p of pts) {
+      const s = proj(p), seen = s && seenOverGround(g, v.eye, p) ? s : null;
+      if (seen && prev) { const L = Math.hypot(seen[0] - prev[0], seen[1] - prev[1]); if (L < 400) for (let t = 0; t <= L; t += 0.7) put(prev[0] + ((seen[0] - prev[0]) * t) / (L || 1), prev[1] + ((seen[1] - prev[1]) * t) / (L || 1), col, seen[2] < 25 ? 1 : 0.5); }
+      else if (seen) put(seen[0], seen[1], col, 1);
+      prev = seen;
+    }
+  }
+  return [img.width, img.height, out];
+}
+function toRgba(img: Img): Uint8Array {
+  const ch = img.data.length / (img.width * img.height), out = new Uint8Array(img.width * img.height * 4);
+  for (let i = 0; i < img.width * img.height; i++) { out[i * 4] = img.data[i * ch]!; out[i * 4 + 1] = img.data[i * ch + 1]!; out[i * 4 + 2] = img.data[i * ch + 2]!; out[i * 4 + 3] = 255; }
+  return out;
+}
+
+/** A town's concept-marks file: no hero pieces to mark before anything is built, only the painted extent. */
+const townMarksSchema = z.object({
+  image: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }).strict().default({ width: 1280, height: 720 }),
+  vfov: z.number().min(10).max(120).default(60),
+  extent: extentSchema,
+}).passthrough();
+/** An eye less than this far (m) above the ground its outline lands on reads no metres: at player height a pixel row near
+ *  the horizon spans tens of metres (redstrand town-1 2026-10-30: the gate painting's wall foot back-projected 20 m short). */
+const METRIC_EYE_M = 10;
+/**
+ * The painted outline back-projected through its view's camera onto the bare ground (no zoom: the painting is made over
+ * the true render; an `anchor` needs built pieces and is ignored here). On a STAKED near view the outline is also judged
+ * in the frame's own pixels against the staked wall ring (+ a `gatehouse` mass against the staked gatehouse): the ratio
+ * is the painting's scale on the plan, readable at player height where metres are not.
+ */
+function paintedExtent(rawMarks: unknown, manifest: J, plan: TownPlan | null, g: { height(x: number, z: number): number }): J | null {
+  const m = townMarksSchema.safeParse(rawMarks); if (!m.success) { console.warn(`WARN: concept-marks: ${m.error.message.slice(0, 300)}`); return null; }
+  const ext = m.data.extent, r = manifest.renders?.[ext.view];
+  if (!r?.camera || !r?.target) { console.warn(`WARN: concept-marks extent.view ${ext.view} has no camera in the manifest`); return null; }
+  const camera: ScaleCamera = { eye: r.camera, target: r.target, vfov: m.data.vfov, width: m.data.image.width, height: m.data.image.height };
+  const ray = pixelRay(camera), h = ext.planeY != null ? () => ext.planeY! : (x: number, z: number) => g.height(x, z);
+  const hits = ext.outline.map((p) => groundHit(camera.eye as V3, ray(p[0], p[1]), h));
+  const poly = hits.filter(Boolean).map((p) => [p![0], p![2]] as V2);
+  const ax = groundAxes(camera), span = (a: [number, number]) => { const v = poly.map((p) => p[0] * a[0] + p[1] * a[1]); return v.length ? Math.max(...v) - Math.min(...v) : 0; };
+  const c = manifest.reservation.center as V2, r1 = (v: number) => Math.round(v * 10) / 10, r2 = (v: number) => Math.round(v * 100) / 100;
+  const metric = camera.eye[1] - h(c[0], c[1]) >= METRIC_EYE_M;
+  let vsStakes: J | null = null;
+  if (plan && r.staked) {
+    const proj = projector(camera), xs = (pts: V3[]) => pts.filter((p) => seenOverGround(g, camera.eye as V3, p)).map((p) => proj(p)).filter((s): s is [number, number, number] => !!s && s[0] >= 0 && s[0] <= camera.width).map((s) => s[0]);
+    const lines = stakeLines(g, plan), wide = (k: string) => { const v = lines.filter((l) => l.kind === k).flatMap((l) => xs(l.pts)); return v.length ? Math.max(...v) - Math.min(...v) : 0; };
+    const ox = ext.outline.map((p) => p[0]), painted = Math.max(...ox) - Math.min(...ox), staked = wide("wall");
+    const gm = ext.masses.find((q) => q.id === "gatehouse"), gw = gm ? Math.max(...gm.points.map((p) => p[0])) - Math.min(...gm.points.map((p) => p[0])) : 0, sg = wide("gatehouse");
+    if (staked > 0) vsStakes = { painted: Math.round(painted), staked: Math.round(staked), ratio: r2(painted / staked), radius: Math.round((manifest.reservation.radius * painted) / staked), ...(gw && sg ? { gatehouse: r2(gw / sg) } : {}) };
+  }
+  return {
+    view: ext.view, metric, ...(vsStakes ? { vsStakes } : {}), outline: ext.outline, world: hits.map((p) => (p ? [r1(p[0]), r1(p[1]), r1(p[2])] : null)), missed: hits.filter((p) => !p).length,
+    area: Math.round(polyArea(poly)), width: r1(span(ax.right)), depth: r1(span(ax.fwd)), reach: r1(Math.max(0, ...poly.map((p) => Math.hypot(p[0] - c[0], p[1] - c[1])))),
+    masses: ext.masses.map((q) => { const w = q.points.map((p) => groundHit(camera.eye as V3, ray(p[0], p[1]), h)).filter(Boolean).map((p) => [p![0], p![2]] as V2); return { id: q.id, note: q.note, area: Math.round(polyArea(w)) }; }),
+    at: new Date().toISOString(),
+  };
 }
 
 /** Is a PNG one flat colour (every sampled pixel within 6 of the first)? */
@@ -314,7 +467,8 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
     const r = await runCapped([...TSX, "tools/light-shots.mts", "--scene", sceneId, "--spots", spotsFile, "--times", "12", "--no-refs", "--weather-settle", "4", "--out", tmp, "--port", port, "--scope", String(scope), "--spot-timeout", ctx.opt("spot-timeout", "240")], 20 * 60_000, path.join(tmp, "shots.log"));
     const dir = path.join(tmp, sceneId), files: Record<string, string> = {};
     for (const v of views) { const f = exists(dir) ? fs.readdirSync(dir).find((n) => n.startsWith(`${v.name}-`) && n.endsWith(".png")) : undefined; if (f) files[v.name] = path.join(dir, f); }
-    if (!files.approach || !files.far) return { ok: false, why: `light-shots exit ${r.status}${r.timedOut ? " (TIMEOUT)" : ""}: ${r.out.split("\n").filter((l) => /STOP|Error|TIMEOUT|fail/i.test(l)).slice(-4).join(" | ") || r.out.slice(-400)}` };
+    const lost = views.filter((v) => !files[v.name]).map((v) => v.name);
+    if (lost.length) return { ok: false, why: `light-shots exit ${r.status}${r.timedOut ? " (TIMEOUT)" : ""}, no ${lost.join("/")} frame: ${r.out.split("\n").filter((l) => /STOP|Error|TIMEOUT|fail/i.test(l)).slice(-4).join(" | ") || r.out.slice(-400)}` };
     // a frame of one flat colour is a render that never drew (2026-10-29 w5-ground: two black 4 KB frames were kept as the
     // bare site on a busy machine); refuse it rather than overwrite the last good render
     for (const [k, f] of Object.entries(files)) if (blankFrame(f)) return { ok: false, why: `the ${k} frame is blank (one flat colour): the scene never drew — retry on a quieter machine or raise --spot-timeout` };
@@ -330,9 +484,14 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
   }
 }
 
+
+const VIEW_MARK: Record<ViewName, { letter: string; col: number[] }> = {
+  approach: { letter: "A", col: [255, 230, 60] }, far: { letter: "F", col: [90, 220, 255] },
+  gate: { letter: "G", col: [255, 150, 20] }, street: { letter: "S", col: [255, 255, 255] }, square: { letter: "Q", col: [40, 230, 255] },
+};
 /** The plan-map crop: hillshaded bare ground, water, roads, the reservation (radius solid, terrain radius dashed), the
- *  approach points and both cameras with their view lines. North up. */
-function planCrop(g: { height(x: number, z: number): number; waterY(x: number, z: number): number | null }, raw: J, c: V2, radius: number, terrainRadius: number, approachPts: V2[], roads: V2[][], views: View[]): [number, number, Uint8Array] {
+ *  approach points, a town's stakes, and every camera with its view line. North up. */
+function planCrop(g: { height(x: number, z: number): number; waterY(x: number, z: number): number | null }, raw: J, c: V2, radius: number, terrainRadius: number, approachPts: V2[], roads: V2[][], views: View[], plan: TownPlan | null): [number, number, Uint8Array] {
   const N = 640, pts: V2[] = [[c[0] - terrainRadius, c[1] - terrainRadius], [c[0] + terrainRadius, c[1] + terrainRadius], ...views.map((v) => [v.eye[0], v.eye[2]] as V2)];
   const x0 = Math.min(...pts.map((p) => p[0])), x1 = Math.max(...pts.map((p) => p[0])), z0 = Math.min(...pts.map((p) => p[1])), z1 = Math.max(...pts.map((p) => p[1]));
   const span = Math.max(x1 - x0, z1 - z0) * 1.15, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, m = span / N, ox = cx - span / 2, oz = cz - span / 2;
@@ -358,35 +517,55 @@ function planCrop(g: { height(x: number, z: number): number; waterY(x: number, z
   const ring = (rr: number, col: number[], dash: number) => { const pc = px(c); for (let a = 0; a < 720; a++) { const t = (a / 720) * Math.PI * 2; if (dash && Math.floor(a / dash) % 2) continue; dot(pc[0] + (Math.cos(t) * rr) / m, pc[1] + (Math.sin(t) * rr) / m, col, 1); } };
   ring(terrainRadius, [255, 160, 60], 12); ring(radius, [235, 60, 60], 0);
   for (let k = 0; k + 1 < approachPts.length; k++) line(px(approachPts[k]!), px(approachPts[k + 1]!), [255, 255, 255], 1, 4);
+  if (plan) for (const s of plan.stakes) { const p = (s.closed ? [...s.points, s.points[0]!] : s.points).map(px); for (let k = 0; k + 1 < p.length; k++) line(p[k]!, p[k + 1]!, STAKE_RGB[s.kind]!, 0); }
   const label = (s: string, x: number, y: number, col: number[]) => drawText(s, Math.round(x), Math.round(y), 2, (X: number, Y: number) => dot(X, Y, col, 0));
   for (const v of views) {
-    const e = px([v.eye[0], v.eye[2]]), t = px([v.target[0], v.target[2]]), col = v.name === "approach" ? [255, 230, 60] : [90, 220, 255];
-    line(e, t, col, 0, 6); dot(e[0], e[1], col, 4); label(v.name === "approach" ? "A" : "F", e[0] + 7, e[1] - 7, col);
+    const e = px([v.eye[0], v.eye[2]]), t = px([v.target[0], v.target[2]]), { letter, col } = VIEW_MARK[v.name];
+    line(e, t, col, 0, 6); dot(e[0], e[1], col, 3); label(letter, e[0] + 7, e[1] - 7, col);
   }
   const bar = 100 / m; line([16, N - 20], [16 + bar, N - 20], [255, 255, 255], 1); label("100 M", 20 + bar, N - 27, [255, 255, 255]); label("N", N - 24, 10, [255, 255, 255]);
   return [N, N, rgba];
 }
 
-/** bare | painted per view (640 x 360 each) over a band of the fit numbers, the plan crop at the right. */
-function conceptSheet(renders: Record<string, string>, frames: Record<string, string>, lines: string[]): [number, number, Uint8Array] {
-  const TW = 640, TH = 360, BAND = 12 + lines.length * 18, PW = 2 * TH, SW = 2 * TW + PW, SH = 2 * TH + BAND;
+/** bare | painted per view (640 x 360 each, one row per view) over a band of the fit numbers, the plan crop at the right;
+ *  a measured extent is outlined on its painted frame. */
+function conceptSheet(names: string[], renders: Record<string, string>, frames: Record<string, string>, lines: string[], measured: { extent: J; prior: J } | null): [number, number, Uint8Array] {
+  const TW = 640, TH = 360, rows = names.length, BAND = 12 + lines.length * 18, PW = 2 * TH, SW = 2 * TW + PW, SH = rows * TH + BAND;
   const out = new Uint8Array(SW * SH * 4).fill(24);
   for (let k = 3; k < out.length; k += 4) out[k] = 255;
   const blit = (file: string, ox: number, oy: number, w: number, h: number) => {
     if (!exists(file)) return;
-    const img = decodePng(fs.readFileSync(file)) as Img;
+    const img = decodePng(fs.readFileSync(file)) as Img, ch = img.data.length / (img.width * img.height);
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const sx = Math.floor((x * img.width) / w), sy = Math.floor((y * img.height) / h), s = (sy * img.width + sx) * 4, d = ((oy + y) * SW + ox + x) * 4;
+      const sx = Math.floor((x * img.width) / w), sy = Math.floor((y * img.height) / h), s = (sy * img.width + sx) * ch, d = ((oy + y) * SW + ox + x) * 4;
       out[d] = img.data[s]!; out[d + 1] = img.data[s + 1]!; out[d + 2] = img.data[s + 2]!;
     }
   };
   const plot = (col: number[]) => (x: number, y: number) => { if (x < 0 || y < 0 || x >= SW || y >= SH) return; const d = (y * SW + x) * 4; out[d] = col[0]!; out[d + 1] = col[1]!; out[d + 2] = col[2]!; };
-  (["approach", "far"] as const).forEach((v, row) => {
+  names.forEach((v, row) => {
     blit(renders[v]!, 0, row * TH, TW, TH); blit(frames[v]!, TW, row * TH, TW, TH);
-    drawText(`${v} - bare site`, 8, row * TH + 8, 2, plot([255, 255, 255]));
+    drawText(`${v} - bare site${(NEAR_VIEWS as readonly string[]).includes(v) ? " (staked)" : ""}`, 8, row * TH + 8, 2, plot([255, 255, 255]));
     drawText(exists(frames[v]!) ? `${v} - concept` : `${v} - not painted`, TW + 8, row * TH + 8, 2, plot([255, 255, 255]));
   });
-  blit(renders.plan!, 2 * TW, 0, PW, PW > 2 * TH ? 2 * TH : PW);
-  lines.forEach((l, i) => drawText(l.replace(/[^\x20-\x7e]/g, "-").slice(0, 200), 8, 2 * TH + 8 + i * 18, 2, plot(i === 0 ? [255, 220, 120] : [220, 220, 220])));
+  if (measured) {
+    const row = names.indexOf(measured.extent.view), o = measured.extent.outline as V2[];
+    if (row >= 0) for (let k = 0; k < o.length; k++) {
+      const a = o[k]!, b = o[(k + 1) % o.length]!, L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+      for (let t = 0; t <= L; t += 1) for (const [dx, dy] of [[0, 0], [1, 0], [0, 1]]) plot([255, 40, 200])(Math.round(TW + ((a[0] + ((b[0] - a[0]) * t) / L) * TW) / 1280) + dx!, Math.round(row * TH + ((a[1] + ((b[1] - a[1]) * t) / L) * TH) / 720) + dy!);
+    }
+  }
+  blit(renders.plan!, 2 * TW, 0, PW, PW);
+  lines.forEach((l, i) => drawText(l.replace(/[^\x20-\x7e]/g, "-").slice(0, 200), 8, rows * TH + 8 + i * 18, 2, plot(i === 0 ? [255, 220, 120] : [220, 220, 220])));
   return [SW, SH, out];
+}
+
+/** The sheet, retried: a viewer holding the PNG open (Windows EBUSY / UNKNOWN on open) failed the 2026-10-30 town-1
+ *  repaint AFTER Codex had painted, losing the concept-painted record. A last failure warns instead of throwing. */
+function writeSheet(file: string, png: Uint8Array): void {
+  for (let i = 0; i < 4; i++) {
+    try { fs.writeFileSync(file, png); return; } catch (err) {
+      if (i === 3) { console.warn(`WARN: could not write ${rel(file)} (${(err as Error).message.slice(0, 120)}): close the viewer and rerun with --measure or --paint-only`); return; }
+      const until = Date.now() + 1500; while (Date.now() < until) { /* wait for the holder */ }
+    }
+  }
 }

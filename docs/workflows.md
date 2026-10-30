@@ -78,7 +78,10 @@ before repeating a style or major asset group.
   role must have, measured: `apps/playground/tools/site-needs.mts`). Towns: `worldgen towns --propose` -> a fresh siting
   agent (`zonegen brief-for site-towns`) -> `worldgen towns --pick`. Places: `zonegen sites --role <r> --for <place>
   --propose` -> `brief-for site-places` -> `zonegen reserve --pick`. Ground no candidate has: recipe `needs` +
-  `worldgen needs` (cliff-face, walled-neck). The `site-finder` skill has the commands and failures.
+  `worldgen needs` (cliff-face, walled-neck). The `site-finder` skill has the commands and failures. A cliff-face
+  block is BROKEN ROCK (lifts with ledges, set-back bays, a ragged crest, gullies, terraced ends and back;
+  `cliffFaceRelief` in `tools/site-needs.mts` measures ledges / plane RMS / crest spread); re-shape a solved face in place with
+  `worldgen needs --only <id> --keep-foot`.
 - **Small/medium outdoor places** (camp, croft row, shrine, graveyard, landing, work yard, den, watch ruin, halt
   yard, cuttings): `tools/place-build.mts all` from a place archetype; read `docs/place-builder.md`. Hero places below.
 - **Complete POI creation/revision:** use `tools/poi-review/creator/SKILL.md` for
@@ -132,6 +135,11 @@ before repeating a style or major asset group.
   `node node_modules/tsx/dist/cli.mjs tools/zonegen.mts concept <world> --project <p> --zone <z> --poi <id>` (apps/playground; `--town <name>` for a town) renders the site,
   repaints it through `image-request.mjs gen-set --paint` and prints the fit numbers beside the frames
   (`concept/<id>-sheet.png`). Rule and check: `tools/poi-review/concept-site.mjs`.
+  A town also gets the NEAR set (gate 40-70 m out on the main road, street just inside the gate, square), at player
+  height on a plan staked from the site (wall ring + gatehouse where the road crosses it, street, square, chapel lot,
+  street lots, drawn over the bare render for scale; `stakes` in `<id>.site.json`). `--views gate,street,square`
+  renders/paints a subset; `--measure` back-projects the painted town's outline in `<id>.concept-marks.json`
+  (`{ extent: { view, outline, masses } }`, the place-scale schema) to metres and keeps it as `extent` in the manifest.
 - **Texturing a mob or a weapon:** read `docs/mob-atlas.md` for a creature
   (the unwrap-to-atlas process, what each recipe setting is for, and the prompt
   rules that make artwork land) and `docs/weapon-atlas.md` for a modular

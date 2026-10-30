@@ -150,7 +150,10 @@ export function nearClutter(eye: V3, target: V3, clutter?: (x: number, z: number
   return n;
 }
 
-export interface View { name: "approach" | "far"; eye: V3; target: V3; from: number; px: number; visible: number; note: string }
+/** The concept cameras: approach + far for every painted place; a town adds the NEAR set (gate, street, square). */
+export type ViewName = "approach" | "far" | "gate" | "street" | "square";
+export const NEAR_VIEWS = ["gate", "street", "square"] as const;
+export interface View { name: ViewName; eye: V3; target: V3; from: number; px: number; visible: number; note: string }
 
 /**
  * The approach view: walking IN along the road(s) the reservation is reached from (each road walked both ways from
@@ -234,4 +237,130 @@ export function conceptBrief(t: PromptText, fit: SiteFit, height: number): strin
     t.style ?? "Style: dark high fantasy concept painting for a classic-MMO world built of very simple geometry with texture-led PSX-era surfaces: big readable silhouettes, painted stone, timber and rock textures carrying the detail, no fine modelled ornament; foreboding, colour by tone not by darkness, readable.",
     "No text, no letters, no labels, no UI, no border, no watermark. No people or creatures in the foreground.",
   ].filter(Boolean).join("\n\n");
+}
+
+// ---- TOWN NEAR VIEWS (Derek 2026-10-30, redstrand town-1: "you only have far away views; you're going to need some
+// closer views for the concepting") ------------------------------------------------------------------------------------
+// A town has no buildings to render before its concept, so the near cameras stand on a STAKED plan generated from the
+// site: the wall ring at the town radius with a gatehouse where the main road crosses it, the main street from the gate
+// to a square at the centre, the chapel lot beyond the square, and street-front lots. The stakes are drawn over the
+// bare render (stakeLines + seenOverGround; zonegen concept rasterises them) so the painter has the scale; the
+// painting replaces them.
+
+export interface TownStake { kind: "wall" | "gatehouse" | "street" | "square" | "chapel" | "lot"; points: V2[]; closed: boolean; height: number }
+export interface TownPlan {
+  gate: V2; /** unit vector, outward along the road at the gate */ out: V2; /** unit street axis, gate -> square -> chapel */ axis: V2;
+  square: { at: V2; halfDepth: number; halfWidth: number }; chapel: { at: V2; tower: number };
+  roadOut: V2[]; stakes: TownStake[]; note: string;
+}
+/** Stake heights and sizes (m): a walled town's curtain, its gatehouse, a lot corner post; the street half-width; a lot's
+ *  frontage and depth. */
+export const WALL_M = 6, GATEHOUSE_M = 11, LOT_POST_M = 3, STREET_HALF_M = 3, LOT_FRONT_M = 8, LOT_DEEP_M = 11;
+const unit = (a: V2): V2 => { const l = Math.hypot(a[0], a[1]) || 1; return [a[0] / l, a[1] / l]; };
+const addv = (a: V2, b: V2, k = 1): V2 => [a[0] + b[0] * k, a[1] + b[1] * k];
+const rect = (at: V2, ax: V2, halfAlong: number, halfAcross: number): V2[] => {
+  const pp: V2 = [-ax[1], ax[0]];
+  return [addv(addv(at, ax, -halfAlong), pp, -halfAcross), addv(addv(at, ax, halfAlong), pp, -halfAcross), addv(addv(at, ax, halfAlong), pp, halfAcross), addv(addv(at, ax, -halfAlong), pp, halfAcross)];
+};
+
+/**
+ * The staked town plan. `road` = the main road's points (any order); the gate is where it crosses the ring, walking out
+ * from its end nearest the centre. No road: the gate faces away from the nearest water (`awayFrom`).
+ */
+export function townStakePlan(g: Ground, c: V2, radius: number, road: V2[] | null, awayFrom: V2 | null = null): TownPlan {
+  let gate: V2, out: V2, roadOut: V2[], note: string;
+  const pts = road && road.length >= 2 ? (dist(road[0]!, c) <= dist(road[road.length - 1]!, c) ? road : [...road].reverse()) : null;
+  const walk = pts ? along(pts, 1) : [];
+  const k = walk.findIndex((w) => dist(w.p, c) >= radius);
+  if (pts && k > 0) {
+    const a = walk[Math.max(0, k - 4)]!.p, b = walk[Math.min(walk.length - 1, k + 4)]!.p;
+    gate = walk[k]!.p; out = unit([b[0] - a[0], b[1] - a[1]]);
+    roadOut = walk.slice(k).map((w) => w.p); note = "gate where the main road crosses the wall ring";
+  } else {
+    out = awayFrom ? unit([c[0] - awayFrom[0], c[1] - awayFrom[1]]) : [0, 1];
+    gate = addv(c, out, radius); roadOut = [gate, addv(gate, out, 80)]; note = "no road crosses the ring: gate on the side away from the water";
+  }
+  const axis = unit([c[0] - gate[0], c[1] - gate[1]]), perp: V2 = [-axis[1], axis[0]];
+  const hd = Math.max(8, Math.min(16, radius * 0.3)), hw = Math.max(8, Math.min(14, radius * 0.27));
+  const sq: V2 = [c[0], c[1]], chapel = addv(sq, axis, hd + LOT_DEEP_M), tower = Math.max(14, Math.min(22, radius * 0.4));
+  const inside = (p: V2, m = 3) => dist(p, c) <= radius - m && !wet(g, p[0], p[1]);
+  const stakes: TownStake[] = [];
+  // the wall ring, open at the gatehouse
+  const N = Math.max(24, Math.round((2 * Math.PI * radius) / 5)), ga = Math.atan2(gate[1] - c[1], gate[0] - c[0]), gap = 6 / radius;
+  const ring: V2[] = [];
+  for (let i = 0; i <= N; i++) { const a = ga + gap + ((2 * Math.PI - 2 * gap) * i) / N; ring.push([c[0] + Math.cos(a) * radius, c[1] + Math.sin(a) * radius]); }
+  stakes.push({ kind: "wall", points: ring, closed: false, height: WALL_M });
+  stakes.push({ kind: "gatehouse", points: rect(gate, axis, 5, 6), closed: true, height: GATEHOUSE_M });
+  // the main street, gate to square, and the square
+  const sqNear = addv(sq, axis, -hd);
+  for (const s of [-1, 1]) stakes.push({ kind: "street", points: [addv(addv(gate, axis, 5), perp, s * STREET_HALF_M), addv(sqNear, perp, s * STREET_HALF_M)], closed: false, height: 0 });
+  stakes.push({ kind: "square", points: rect(sq, axis, hd, hw), closed: true, height: 0 });
+  // the chapel lot beyond the square, its tower at the square end
+  stakes.push({ kind: "chapel", points: rect(chapel, axis, LOT_DEEP_M - 1, 6), closed: true, height: 0 });
+  stakes.push({ kind: "chapel", points: rect(addv(chapel, axis, -(LOT_DEEP_M - 1) + 3), axis, 3, 3), closed: true, height: tower });
+  // lots: both sides of the street (fronting it), then both flanks of the square
+  const lots: V2[][] = [];
+  const streetLen = dist(addv(gate, axis, 6), sqNear);
+  for (let s = 0; s + LOT_FRONT_M <= streetLen; s += LOT_FRONT_M) for (const side of [-1, 1])
+    lots.push(rect(addv(addv(gate, axis, 6 + s + LOT_FRONT_M / 2), perp, side * (STREET_HALF_M + LOT_DEEP_M / 2)), axis, LOT_FRONT_M / 2 - 0.5, LOT_DEEP_M / 2));
+  for (let s = -hd + LOT_FRONT_M / 2; s + LOT_FRONT_M / 2 <= hd; s += LOT_FRONT_M) for (const side of [-1, 1])
+    lots.push(rect(addv(addv(sq, axis, s), perp, side * (hw + LOT_DEEP_M / 2)), axis, LOT_FRONT_M / 2 - 0.5, LOT_DEEP_M / 2));
+  for (const l of lots) if (l.every((p) => inside(p))) stakes.push({ kind: "lot", points: l, closed: true, height: LOT_POST_M });
+  return { gate, out, axis, square: { at: sq, halfDepth: hd, halfWidth: hw }, chapel: { at: chapel, tower }, roadOut, stakes, note };
+}
+
+/** Gate view distances (m out from the gate along the road): the 40-70 m band, nearest the middle first. */
+export const GATE_VIEW_M = [55, 50, 60, 45, 65, 40, 70];
+/**
+ * The NEAR cameras of a staked town, all at player height: GATE = on the road 40-70 m out from the gate, looking at the
+ * gatehouse (the first distance whose eye sees most of it over the ground); STREET = just inside the gate, down the main
+ * street to the chapel; SQUARE = the near corner of the square, across it to the chapel.
+ */
+export function townNearViews(g: Ground, plan: TownPlan): View[] {
+  const eyeAt = (p: V2): V3 => [p[0], g.height(p[0], p[1]) + EYE_M, p[1]];
+  const gy = g.height(plan.gate[0], plan.gate[1]);
+  const gateTarget: V3 = [plan.gate[0], gy + 4.5, plan.gate[1]];
+  // arc length along the road out (its points are already dense)
+  const outWalk: { p: V2; s: number }[] = [];
+  plan.roadOut.forEach((p, i) => outWalk.push({ p, s: i ? outWalk[i - 1]!.s + dist(plan.roadOut[i - 1]!, p) : 0 }));
+  let gate: View | null = null;
+  for (const m of GATE_VIEW_M) {
+    const p = outWalk.find((x) => x.s >= m)?.p ?? addv(plan.gate, plan.out, m);
+    if (wet(g, p[0], p[1])) continue;
+    const eye = eyeAt(p), r = readPixels(g, eye, { at: plan.gate, foot: gy, top: gy + GATEHOUSE_M }), from = Math.round(dist(p, plan.gate));
+    const v: View = { name: "gate", eye, target: gateTarget, from, px: r.px, visible: r.visible, note: `on the main road ${from} m out from the gate, at player height` };
+    if (r.visible >= GATEHOUSE_M * 0.8) { gate = v; break; }
+    if (!gate || v.visible > gate.visible) gate = { ...v, note: `${v.note}; the gatehouse foot is hidden (${v.visible} of ${GATEHOUSE_M} m shows)` };
+  }
+  if (!gate) { const p = addv(plan.gate, plan.out, 55); gate = { name: "gate", eye: eyeAt(p), target: gateTarget, from: 55, px: 0, visible: 0, note: "every gate eye stands in water: a stand-in 55 m out" }; }
+  const inGate = addv(plan.gate, plan.axis, 8), cy = g.height(plan.chapel.at[0], plan.chapel.at[1]);
+  const street: View = { name: "street", eye: eyeAt(inGate), target: [plan.chapel.at[0], cy + 5, plan.chapel.at[1]], from: Math.round(dist(inGate, plan.chapel.at)), px: 0, visible: 0, note: "just inside the gate, down the main street to the square and the chapel" };
+  const pp: V2 = [-plan.axis[1], plan.axis[0]], sq = plan.square;
+  const corner = addv(addv(sq.at, plan.axis, -sq.halfDepth + 2), pp, sq.halfWidth - 3);
+  const square: View = { name: "square", eye: eyeAt(corner), target: [plan.chapel.at[0], cy + 6, plan.chapel.at[1]], from: Math.round(dist(corner, plan.chapel.at)), px: 0, visible: 0, note: "the near corner of the square, across it to the chapel" };
+  return [gate, street, square];
+}
+
+/** The stakes as 3D polylines over the ground: every outline on the ground; walls, gatehouse and tower also their top
+ *  line and posts (every 6 m on a wall, at the corners elsewhere); lots a short post at each corner. */
+export function stakeLines(g: Ground, plan: TownPlan): { kind: TownStake["kind"]; pts: V3[] }[] {
+  const out: { kind: TownStake["kind"]; pts: V3[] }[] = [];
+  const at = (p: V2, up = 0.15): V3 => [p[0], g.height(p[0], p[1]) + up, p[1]];
+  for (const s of plan.stakes) {
+    const loop = s.closed ? [...s.points, s.points[0]!] : s.points, dense = along(loop, 1).map((w) => w.p);
+    out.push({ kind: s.kind, pts: dense.map((p) => at(p)) });
+    if (!s.height) continue;
+    if (s.kind === "lot") { for (const p of s.points) out.push({ kind: s.kind, pts: [at(p, 0), at(p, s.height)] }); continue; }
+    out.push({ kind: s.kind, pts: dense.map((p) => at(p, s.height)) });
+    const posts = s.kind === "wall" ? along(loop, 6).map((w) => w.p) : s.points;
+    for (const p of posts) out.push({ kind: s.kind, pts: [at(p, 0), at(p, s.height)] });
+  }
+  return out;
+}
+
+/** Is a world point seen from the eye over the ground (terrain only: trees do not occlude a stake)? */
+export function seenOverGround(g: Ground, eye: V3, p: V3, step = 1.5): boolean {
+  const d = Math.hypot(p[0] - eye[0], p[2] - eye[2]);
+  for (let s = step; s < d - 1.5; s += step) { const t = s / d, y = eye[1] + (p[1] - eye[1]) * t; if (y < g.height(eye[0] + (p[0] - eye[0]) * t, eye[2] + (p[2] - eye[2]) * t) - 0.3) return false; }
+  return true;
 }

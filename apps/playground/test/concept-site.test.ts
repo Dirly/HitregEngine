@@ -43,3 +43,36 @@ test("the repaint brief fixes the ground and carries the measured face", () => {
   assert.match(b, /Do not raise, deepen, widen or add cliffs/);
   assert.ok(b.includes(`${fit.face!.height} m`), b);
 });
+
+test("a town's NEAR set: gate on the road outside the wall, street and square inside, stakes on the plan", async () => {
+  const { townStakePlan, townNearViews, stakeLines, seenOverGround, GATE_VIEW_M } = await import("../tools/_concept-site.mts");
+  const flat = { height: () => 10, waterY: () => null };
+  // the road comes in from the east and ends at the centre
+  const plan = townStakePlan(flat, [0, 0], 45, [[0, 0], [200, 0]]);
+  assert.ok(Math.abs(Math.hypot(...plan.gate) - 45) < 1.5 && plan.gate[0] > 0, `gate on the ring where the road crosses it: ${plan.gate}`);
+  assert.ok(plan.out[0] > 0.99, "outward along the road");
+  assert.ok(plan.stakes.some((s) => s.kind === "wall") && plan.stakes.some((s) => s.kind === "gatehouse"));
+  const lots = plan.stakes.filter((s) => s.kind === "lot");
+  assert.ok(lots.length >= 6, `lots ${lots.length}`);
+  assert.ok(lots.every((l) => l.points.every((p) => Math.hypot(...p) <= 42)), "every lot inside the wall");
+  const [gate, street, square] = townNearViews(flat, plan);
+  const d = (v: { eye: number[] }) => Math.hypot(v.eye[0]!, v.eye[2]!);
+  assert.equal(gate!.name, "gate");
+  assert.ok(d(gate!) > 45 + 35 && d(gate!) < 45 + 75, `gate eye 40-70 m out from the gate: ${d(gate!)}`);
+  assert.ok(GATE_VIEW_M.includes(gate!.from), `from ${gate!.from}`);
+  assert.ok(d(street!) < 45 && d(square!) < 45, "street and square eyes inside the wall");
+  for (const v of [gate!, street!, square!]) assert.ok(Math.abs(v.eye[1] - 11.7) < 1e-6, `${v.name} at player height`);
+  assert.ok(street!.target[0] < street!.eye[0], "the street looks in, toward the square");
+  const lines = stakeLines(flat, plan);
+  assert.ok(lines.some((l) => l.kind === "wall" && l.pts.every((p) => Math.abs(p[1] - 16) < 1e-6)), "a wall top line 6 m up");
+  // a ridge between the eye and a stake hides it
+  const ridge = { height: (x: number) => (x > 40 && x < 44 ? 30 : 0) };
+  assert.equal(seenOverGround(ridge, [60, 1.7, 0], [0, 0.1, 0]), false);
+  assert.equal(seenOverGround(flat, [60, 11.7, 0], [0, 10.1, 0]), true);
+});
+
+test("no road: the gate faces away from the water", async () => {
+  const { townStakePlan } = await import("../tools/_concept-site.mts");
+  const plan = townStakePlan({ height: () => 0 }, [0, 0], 40, null, [0, -80]);
+  assert.ok(plan.gate[1] > 39, `gate south, the lake north: ${plan.gate}`);
+});
