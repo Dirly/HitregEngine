@@ -25,7 +25,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import {
-  MANUAL_STAGES, REVIEW_STAGES, artOf, catalogueDesignFaults, currentSite, groundRecord, currentWorldHash, evaluate, fileSha, isDatedRuling, loadStages, nextOf, reviewVerdict, saveStages, short, stagesFile,
+  MANUAL_STAGES, REVIEW_STAGES, artOf, catalogueDesignFaults, currentSite, groundRecord, currentWorldHash, evaluate, evidenceSha, fileSha, isDatedRuling, loadStages, nextOf, reviewVerdict, saveStages, short, stagesFile,
   stagesOf, worldStagesSchema, type StageState, type WorldStages,
 } from "../../world-order.mts";
 
@@ -174,6 +174,13 @@ export async function run(ctx: Ctx): Promise<number> {
     if (stage === "design" && artOf(p) === "catalogue") {
       const faults = catalogueDesignFaults(fs.readFileSync(file, "utf8"));
       if (faults.length) { console.error(`design refused for ${p.id}: a catalogue place (no artwork, Derek 2026-10-29) asks for new art — use catalogue props only:\n${faults.slice(0, 12).map((x) => `  ${x}`).join("\n")}`); return 1; }
+    }
+    // L (Red Dial 2026-10-30: re-recording an unchanged design.json STALEd its design-review): the same evidence recorded
+    // again (same bytes, or the same design with only ruling fields changed) is a no-op: the record and its time stay
+    const prior = p.stages[stage];
+    if (prior?.evidenceSha && (prior.evidenceSha === fileSha(file) || prior.evidenceSha === evidenceSha(file))) {
+      console.log(`${p.id} ${stage}: evidence unchanged since ${prior.at} — no-op (the stages after it stay as they are)`);
+      return 0;
     }
     const ground = groundRecord(projectDir, doc, p);
     p.stages[stage] = { at: now(), worldHash: hash!, by, ...(ground ? { ground } : {}), evidence: path.relative(projectDir, file).split(path.sep).join("/"), evidenceSha: fileSha(file) ?? undefined, ...(ctx.opt("note") ? { note: ctx.opt("note") } : {}) };

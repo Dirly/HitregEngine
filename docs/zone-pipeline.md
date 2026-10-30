@@ -316,7 +316,7 @@ Three small rules that large sites (an estate, a cave system, a shore camp, an i
 **Creatures at a site the plan never reserved.** `zonegen populate` fills the wilderness and the places the quest plan
 reserved. A site added afterwards hands over its clearings (8 m, dry, standable) and the coordinator lists who stands
 there in `zones/<zone>/site-packs.json`: per pack the site, the spot (`at`, plus `y` when it is underground), faction,
-level, members (`creature`, `theme`, `role`, `count`) and an optional `named` creature that leads it. Populate places
+level, members (`creature`, `theme`, `role`, `count`) and an optional `named` creature that leads it (with `chance` and `lockout` [min, max] s the leader is a placeholder rare on the members' slots, never always up; a pack `temperament` makes a roadside camp territorial). Populate places
 them as written (step 3b), before wildlife, so wildlife keeps its distance. An area whose `y` is well under the open
 ground is a cave area: the server spawns it on the cave floor (`terrain.groundNear`), not on the mountain above. A
 large site is not finished until it is populated, and it carries named creatures to farm: one near its edge, more

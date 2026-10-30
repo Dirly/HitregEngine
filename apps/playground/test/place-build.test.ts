@@ -8,7 +8,7 @@ import {
   ribbonApproachOps, approachForBuilt, trackId, trimTrack, trackBand, TRACK_WIDTH_M, TRACK_JOIN_M,
   applySets, silhouetteHeight, forTier, approachLines, approachRead, approachReadAny, readHeightNeeded, readTargets, installGuard, RESEAT_MAX_M, SMOKE_READ_M, shoreRise, waterLevelNear, SHORE_RISE_M, routeOnRibbon, briefCount, expandRows, CAMP_ONLY_RE, ROOM_FILL, cutRing, wallGates, towerSides, withoutDenied, MIN_GATE_M, siteSearch, slopeMap, uniqueItemIds, DENIED_PROPS, fillOk, routeGrid, usableArea, approachSpots, readBand, firstPlanItems, arrangeFirstPlan, fitPocket, pickArchetype, placeArchetypeSchema, planPlace, primitiveMeshes, staleEntities, unclearedStructures, type PlaceGround,
 } from "../tools/_place-archetype.mts";
-import { placeLayoutSchema, withLayout, layoutCoverage, toWorld } from "../tools/_place-archetype.mts";
+import { placeLayoutSchema, withLayout, layoutCoverage, toWorld, discStats, waterAtMarker, sinkToBase, seatPad, mergeSeatPads, SEAT_PAD_MAX_M, PATH_GRADE_BAND_M, siteScale } from "../tools/_place-archetype.mts";
 import { patchReaches } from "../tools/worldgen-scatter-float.mts";
 
 const DIR = "projects/world-kit/authoring/place-archetypes";
@@ -664,7 +664,7 @@ test("every route lane also clears the grass cover over the cut shoulder, narrow
 
 // ---------------------------------------------------------------------------------------------------------------------
 // POI quality (Hagsheer 2026-10-21): size floors, density floors, built stone, the 300 m read in pixels, seated structures
-import { baseOutline, seatStructure, seatGap, SEAT_GAP_M, densityNeed, heightForPx, READ_PX_MIN, readPixels, wearsCliffTile, POCKET_FLOOR_M } from "../tools/_place-quality.mts";
+import { baseOutline, seatStructure, seatGap, SEAT_GAP_M, RAISE_PAST_M, densityNeed, heightForPx, READ_PX_MIN, readPixels, wearsCliffTile, POCKET_FLOOR_M } from "../tools/_place-quality.mts";
 const boxTris = (mn: number[], mx: number[]) => { const c = (i: number) => [i & 1 ? mx[0]! : mn[0]!, i & 2 ? mx[1]! : mn[1]!, i & 4 ? mx[2]! : mn[2]!];
   const f = [[0, 1, 5], [0, 5, 4], [2, 3, 7], [2, 7, 6], [0, 2, 6], [0, 6, 4], [1, 3, 7], [1, 7, 5], [0, 1, 3], [0, 3, 2], [4, 5, 7], [4, 7, 6]];
   return f.map(([a, b, d]) => ({ a: c(a!), b: c(b!), c: c(d!), material: "old-watch/ashlar" })); };
@@ -685,6 +685,22 @@ test("seated: a ruin on a slope sits on its highest ground with a skirt round it
   assert.equal(seatStructure(base, [0, 0], 0, () => 50).skirt, null);
   const rock = seatStructure(base, [0, 0], 0.7, (x) => slope(x), { rock: true });
   assert.ok(rock.sunk && rock.skirt === null && seatGap(base, [0, 0], rock.y, 0.7, (x) => slope(x)).gap <= 0);
+});
+
+test("seated: an open-court ruin on a big fall stands at the middle of it on LEVELLED ground (cut + fill), never sunk to its lowest (Red Dial)", () => {
+  const legs = baseOutline([...boxTris([-6, 0, -2], [-5, 3, 2]), ...boxTris([5, 0, -2], [6, 3, 2])])!, slope = (x: number) => 100 + 0.3 * x; // 3.6 m of fall
+  assert.ok(legs.fill < 0.3 && Math.max(...legs.extent) >= 6, `open base (fill ${legs.fill})`);
+  const seat = seatStructure(legs, [0, 0], 0, (x) => slope(x), { sinkMax: 0.6 });
+  assert.ok(seat.level && seat.raise && !seat.sunk, JSON.stringify(seat));
+  assert.ok(Math.abs(seat.y - 100) < 0.2, `at the middle of the fall (${seat.y})`);
+  assert.ok(seatGap(legs, [0, 0], seat.y, 0, () => seat.raise!.y).gap <= SEAT_GAP_M && seat.rect && seat.rect.half[0] >= 6, "no daylight on the levelled ground, over its own rectangle");
+  // the levelled plateau runs RAISE_PAST_M past the base (o-small2 dropped-hour 2026-10-30: at +0.5 m the 2 m patch lattice sagged under the outline, a lodge 0.062 m clear)
+  const xs = legs.cells.map((c) => c[0]), zs = legs.cells.map((c) => c[1]), far = Math.max(...legs.cells.map(([x, z]) => Math.hypot(x, z)));
+  assert.ok(Math.abs(seat.rect!.half[0] - ((Math.max(...xs) - Math.min(...xs)) / 2 + RAISE_PAST_M)) < 0.02 && Math.abs(seat.rect!.half[1] - ((Math.max(...zs) - Math.min(...zs)) / 2 + RAISE_PAST_M)) < 0.02, JSON.stringify(seat.rect));
+  assert.ok(Math.abs(seat.raise!.radius - (far + RAISE_PAST_M)) < 0.02, String(seat.raise!.radius));
+  // a small legged piece (a table) is still sunk, with no terrain edit
+  const table = baseOutline([...boxTris([-2, 0, -1], [-1.5, 1, 1]), ...boxTris([1.5, 0, -1], [2, 1, 1])])!;
+  assert.ok(seatStructure(table, [0, 0], 0, (x) => slope(x), { sinkMax: 0.6 }).sunk);
 });
 
 test("the planner seats structures on their outline and skirts them on a slope (no structure floats on its low side)", () => {
@@ -1373,3 +1389,109 @@ test("TOOLS-LAYOUT 10: wet ground refuses a piece unless it says `wet: true` (dr
   assert.ok(spot, "no spot of the test frame lands in the stub's sea");
   assert.equal(inWater(plan(reeds(spot!, true))).length, 0, "wet: true lets the piece stand in water");
 });
+
+test("discStats: a piece under 2 m radius is sampled at its rim too, so a rock face under it reads steep (o-small 2026-10-29)", () => {
+  // a 5 m step 1 m north of the centre: flat at z > -1, a face from z -1 to -2, the top behind
+  const ground = { height: (_x: number, z: number) => (z > -1 ? 0 : z < -2 ? 5 : 5 * (-1 - z)), wet: () => false };
+  assert.ok(discStats(ground, [0, 0], 1.65).steep > 0.6, "the trough's rim reaches the face: steep");
+  assert.equal(discStats(ground, [0, 3], 1.65).steep, 0, "the same piece 3 m out on the flat is not");
+  assert.ok(discStats(ground, [0, 0], 4).steep > 0.6, "the 2 m rings still see it for a big piece");
+});
+
+// L (Red Dial 2026-10-29): a layout piece may stand ON an earlier piece, and a layout `waters` entry fills a built
+// basin at its marker (one still level) instead of the basin standing dry.
+test("layout: `on` passes through to the core structure; `waters` parse, count for coverage, and land at the marker", () => {
+  const l = layoutOf([{ id: "plinth", element: "p", kind: "structure", prefab: "x/plinth", at: [0, 0] }, { id: "ring", element: "p", kind: "structure", prefab: "x/ring", at: [0, -1], on: "plinth", over: ["plinth"] }, { id: "block", element: "w", kind: "structure", prefab: "x/basin", at: [20, 0] }],
+    { waters: [{ id: "basin", element: "w", on: "block", material: "terrain/x-water" }] });
+  assert.equal(l.waters[0]!.marker, "basin-water");
+  assert.equal(l.waters[0]!.swim, false);
+  assert.deepEqual(layoutCoverage({ elements: [{ id: "p", madeOf: ["x/plinth"] }, { id: "w", madeOf: ["water: the basin"] }] }, l), []);
+  // unturned: the marker offset adds straight on; turned a quarter (+Z onto +X): local +Z lands on world +X
+  assert.deepEqual(waterAtMarker({ w: [10, 5], ang: 0, y: 2, k: 1 }, { position: [1, -0.9, -1] }), { w: [11, 4], y: 1.1, ang: 0 });
+  const q = waterAtMarker({ w: [0, 0], ang: Math.PI / 2, y: 0, k: 2 }, { position: [0, 0, 1] });
+  assert.deepEqual(q.w, [2, 0]);
+  assert.throws(() => layoutOf([{ id: "a", element: "p", kind: "structure", prefab: "x/a", at: [0, 0] }], { waters: [{ id: "w", on: "a" }] }));
+});
+
+test("layout sink: a decal piece may stand below its centre ground (a niche set into a face toe); other pieces default to 0", () => {
+  const base = { version: 1, frame: "place", pieces: [{ id: "niche", element: "e", kind: "decal", prefab: "x/y", at: [0, 0], sink: 2.75 }, { id: "jar", element: "e", kind: "prop", prefab: "x/z", at: [3, 0] }] };
+  const l = placeLayoutSchema.parse(base);
+  assert.equal(l.pieces[0]!.sink, 2.75);
+  assert.equal(l.pieces[1]!.sink, 0);
+  assert.throws(() => placeLayoutSchema.parse({ ...base, pieces: [{ ...base.pieces[0], sink: 5 }] }), /sink|4/);
+});
+
+// L (Red Dial 2026-10-29): a large place needs a water/cave/interior feature; a layout `waters` sheet in a built basin
+// (and a layout pool) is that water for the size gate
+test("layout waters: the still sheet stands at the host's marker and counts as the size gate's water feature", () => {
+  const l = layoutOf([FIRE, { id: "slab", element: "slab", kind: "structure", prefab: "x/slab", at: [14, 0] }], { waters: [{ id: "basin", element: "slab", on: "slab", material: "terrain/x-water" }] });
+  const p = layoutPlan(l, undefined, { markerOf: (prefab: string, id: string) => (prefab === "x/slab" && id === "basin-water" ? { position: [0, 0.5, 0], size: [6, 0, 4] } : null), materialExists: () => true });
+  assert.deepEqual(p.faults.filter((f: string) => /water/.test(f)), []);
+  const w = p.ops.find((o: any) => o.id === "test-place-core-basin-water");
+  assert.ok(w, "the water entity is written");
+  assert.deepEqual(w.entity.components.mesh.source.positions.slice(0, 3), [-3, 0, -2]);
+  assert.ok(p.handoff.measurements.features.some((f: any) => f.kind === "water" && f.id === "water-basin"), JSON.stringify(p.handoff.measurements.features));
+  const none = layoutPlan(l, undefined, { markerOf: () => null, materialExists: () => true });
+  assert.ok(none.faults.some((f: string) => /no marker basin-water/.test(f)));
+});
+
+// L (Red Dial 2026-10-30): the built re-seat sinks a piece to the lowest ground under its WHOLE footprint, capped by footing
+test("sinkToBase: lowest ground under the turned footprint, never deeper than the cap below the highest; lowers, or raises one buried past the cap", () => {
+  const slope = (x: number) => 10 - 0.2 * x; // falls 0.2 m per m toward +x
+  // a 2 x 2 m pillar standing at its centre's ground (10): its +x edge is at 9.8 -> sinks to 9.77 (cap 0.6 allows it)
+  assert.equal(sinkToBase({ x: 0, y: 10, z: 0, yaw: 0 }, [1, 1], 0.6, (x) => slope(x)), 9.77);
+  // a 10 m wall: lowest 8.97, but at most 0.6 m below the highest (11): 10.4
+  assert.equal(sinkToBase({ x: 0, y: 11, z: 0, yaw: 0 }, [5, 1], 0.6, (x) => slope(x)), 10.4);
+  // turned 90 deg the long side runs along z (level): its x edges are +-1 m -> 9.77
+  assert.equal(sinkToBase({ x: 0, y: 11, z: 0, yaw: Math.PI / 2 }, [5, 1], 0.6, (x) => slope(x)), 9.77);
+  assert.equal(sinkToBase({ x: 0, y: 9.7, z: 0, yaw: 0 }, [1, 1], 0.6, (x) => slope(x)), null, "within the cap: never raised");
+  assert.equal(sinkToBase({ x: 0, y: 9, z: 0, yaw: 0 }, [1, 1], 0.6, (x) => slope(x)), 9.6, "buried past the cap (a path filled over it): up to the cap");
+});
+
+// L (Red Dial 2026-10-30): after the footpaths, a piece still showing daylight gets a level seat pad at its foot
+test("seatPad: a pad when the base shows daylight, none when seated or past the cap", () => {
+  const slope = (x: number) => 10 - 0.4 * x;
+  const p = seatPad({ x: 0, y: 10, z: 0, yaw: 0 }, [1.25, 1.25], (x) => slope(x));
+  assert.ok(p && Math.abs(p.gap - 0.5) < 1e-6 && p.y === 10 && p.radius > 1.25 * Math.SQRT2, JSON.stringify(p));
+  assert.equal(seatPad({ x: 0, y: 9.5, z: 0, yaw: 0 }, [1.25, 1.25], (x) => slope(x)), null, "sunk to its low edge: nothing shows");
+  assert.equal(seatPad({ x: 0, y: 10, z: 0, yaw: 0 }, [5, 1], (x) => slope(x)), null, `a 2 m fall is past the ${SEAT_PAD_MAX_M} m cap`);
+  assert.equal(PATH_GRADE_BAND_M, 3.5);
+});
+
+test("seat pads: overlapping pieces (a spit over its pyre) share ONE pad at the lowest base; apart ones keep their own (dropped-hour)", () => {
+  const out = mergeSeatPads([
+    { id: "pyre", at: [0, 0], radius: 1.5, y: 10.0, gap: 0.13 },
+    { id: "spit", at: [0.4, 0], radius: 1.2, y: 10.2, gap: 0.15 },
+    { id: "post", at: [20, 0], radius: 1, y: 12, gap: 0.3 },
+    { id: "next", at: [21.5, 0], radius: 1, y: 12.5, gap: 0.2 }, // its pad touches the post's: a neighbour, not one spot
+  ]);
+  assert.equal(out.length, 3);
+  const m = out.find((p) => p.id === "pyre--spit")!;
+  assert.ok(m && m.y === 10 && m.gap === 0.15 && m.radius >= 1.5 && Math.hypot(m.at[0] - 0.2, m.at[1]) < 0.01, JSON.stringify(m));
+  assert.ok(out.some((p) => p.id === "post" && p.y === 12));
+});
+
+test("site plans take their scale from the culture: an ogre camp is dressed at giant scale (o-small2 2026-10-30)", () => {
+  assert.equal(siteScale(["ogre", "giant"]), "giant");
+  assert.equal(siteScale(["giant"]), "giant");
+  assert.equal(siteScale(["rural"]), "human");
+  assert.equal(siteScale(["bandit", "any"]), "human");
+});
+
+test("a layout piece's prefab overrides reach its placed instance (a camp fire lit at night only, o-small2 2026-10-30)", () => {
+  const ov = [{ path: "glow/components/light/when", value: "night" }];
+  const p = layoutPlan(layoutOf([{ ...FIRE, overrides: ov }, { id: "tent-n", element: "tents", kind: "structure", prefab: "camp-props/tent", at: [6, 1] }]));
+  assert.deepEqual(p.ops.find((o: any) => o.id === "test-place-core-fire")!.entity.components.prefab.overrides, ov);
+  assert.equal(p.ops.find((o: any) => o.id === "test-place-core-tent-n")!.entity.components.prefab.overrides, undefined, "no overrides: none written");
+});
+
+test("layout areas join the handoff's dressing areas in world coordinates; one repeating a pocket's is a refusal (o-small2 2026-10-30)", () => {
+  const p = layoutPlan(layoutOf([FIRE], { areas: [{ id: "midden", role: "yard", at: [0, -20], radius: 7, note: "bones", reach: [3, -14] }] }));
+  const m = p.handoff.siteDressing.areas.find((x: any) => x.id === "midden")!, w = toWorld(p.centre, p.front, [0, -20]);
+  assert.ok(m && m.role === "yard" && m.radius === 7 && Math.hypot(m.centre[0] - w[0], m.centre[1] - w[1]) < 0.01, JSON.stringify(m));
+  const r = toWorld(p.centre, p.front, [3, -14]);
+  assert.ok(Math.hypot(m.reach[0] - r[0], m.reach[2] - r[1]) < 0.01, `reach ${m.reach}`);
+  const bad = layoutPlan(layoutOf([FIRE], { areas: [{ id: "core", role: "yard", at: [0, -20], radius: 7 }] }));
+  assert.ok(bad.faults.some((f: string) => /area core repeats/.test(f)), bad.faults.join(" | "));
+});
+

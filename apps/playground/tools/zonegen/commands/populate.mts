@@ -109,6 +109,8 @@ export interface Area {
   /** A starter zone's wildlife: its disposition as a mob-brain temperament (and wary metres). */
   temperament?: "hostile" | "territorial" | "passive";
   territory?: number;
+  /** spawnArea.rares rows: a site pack's named leader behind its members' slots (placeholder rare). */
+  rares?: Record<string, unknown>[];
 }
 export interface Template {
   /** combat-actor loot spec ('item:qty:chance,...'): the plan's items whose source is this creature. */
@@ -178,7 +180,12 @@ interface SitePack {
   faction: string;
   level: number;
   members: { creature: string; theme?: string; role: Role; count: number; scale?: number }[];
-  named?: { id: string; name: string; base: string; theme?: string; level: number; scale?: number; title?: string };
+  /** The pack's mob-brain temperament (default hostile): a camp by a road that only fights who comes in is territorial. */
+  temperament?: "hostile" | "territorial" | "passive";
+  /** The leader. With `chance` it is a placeholder RARE (spawnArea.rares on the members' slots, `lockout` [min, max] s),
+   *  never always up (RARE_RULES); without it the leader stands with the pack. L (o-small2 dropped-hour 2026-10-30: a site
+   *  pack could only name an always-up leader). */
+  named?: { id: string; name: string; base: string; theme?: string; level: number; scale?: number; title?: string; chance?: number; lockout?: [number, number] };
 }
 
 /** The files whose content decides the population: the status row re-digests them. */
@@ -1091,17 +1098,19 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
         roam = Math.max(roam, sp.y !== undefined ? Math.min(pk.roam, 4) : pk.roam);
       }
       const row = (siteRows[sp.site] ??= { areas: 0, creatures: 0, named: [] });
+      const rares: Record<string, unknown>[] = [];
       if (sp.named) {
         const base = creatures.get(sp.named.base);
         const t = base ? templateFor(sp.named.base, sp.named.theme ?? "", "elite", sp.named.level, sp.faction, { id: sp.named.id, name: sp.named.name, level: sp.named.level, title: sp.named.title }, sp.named.scale) : null;
         if (t) {
           named.push({ template: t.id, name: sp.named.name, kind: "named" });
-          spawns.push({ template: t.id, count: 1, spread: 2 });
+          if (sp.named.chance !== undefined) rares.push({ template: t.id, chance: sp.named.chance, lockout: sp.named.lockout ?? [0, 0], id: sp.named.id, placeholders: spawns.map((x) => x.template) });
+          else spawns.push({ template: t.id, count: 1, spread: 2 });
           row.named.push(sp.named.name);
         } else f.push({ level: "warn", code: "site-pack-named", message: `site pack ${sp.id}: named base ${sp.named.base} not in the catalogue` });
       }
       if (!spawns.length) continue;
-      const a = addArea({ id: `pop-${zone}-site-${sp.id}`, kind: sp.members.length ? "group" : "rare", x: sp.at[0], z: sp.at[1], yAt: sp.y, level: sp.level, creature: sp.members[0]?.creature ?? sp.named!.id, location: sp.site, habitats: i >= 0 ? habitatsOf(i) : [], leash: leash || PACK.elite.leash, roam, spawns });
+      const a = addArea({ id: `pop-${zone}-site-${sp.id}`, kind: sp.members.length ? "group" : "rare", x: sp.at[0], z: sp.at[1], yAt: sp.y, level: sp.level, creature: sp.members[0]?.creature ?? sp.named!.id, location: sp.site, habitats: i >= 0 ? habitatsOf(i) : [], leash: leash || PACK.elite.leash, roam, spawns, ...(sp.temperament ? { temperament: sp.temperament } : {}), ...(rares.length ? { rares } : {}) });
       row.areas += 1;
       row.creatures += a.spawns.reduce((n, x) => n + x.count, 0);
     }
@@ -1877,7 +1886,7 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
     if (t.scale) sizeOps(t.id, ops.slice(capsuleStart) as never, t.scale);
   }
   for (const a of areas) {
-    const spawnArea = { radius: a.radius, sleepRadius: a.sleepRadius, idleSeconds: a.idleSeconds, spawns: a.spawns, leash: a.leash, roam: a.roam, ...(a.temperament ? { temperament: a.temperament } : {}), ...(a.territory ? { territory: a.territory } : {}), ...(a.life ?? {}) };
+    const spawnArea = { radius: a.radius, sleepRadius: a.sleepRadius, idleSeconds: a.idleSeconds, spawns: a.spawns, leash: a.leash, roam: a.roam, ...(a.temperament ? { temperament: a.temperament } : {}), ...(a.territory ? { territory: a.territory } : {}), ...(a.rares?.length ? { rares: a.rares } : {}), ...(a.life ?? {}) };
     const tags = ["populate", `zone:${zone}`, `pop:${a.kind}`, `creature:${a.creature}`, ...(a.group ? [`group:${a.group}`] : []), ...(a.location ? [`location:${a.location}`] : []), `level:${a.level}`];
     if (a.camp) {
       const prev = doc.entities[a.camp]?.tags ?? ["camp", `zone:${zone}`];

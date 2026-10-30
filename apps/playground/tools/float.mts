@@ -359,6 +359,9 @@ export function floatScene(assets: string, doc: SceneDoc, field: WorldField | nu
     checked++;
     if (r.status === "ok") {
       if (contact !== "base" && contact !== "legs") return;
+      // L (o-small 2026-10-29): a piece placed INTO a face on purpose (layout `sink`, tag `set-in`: an opened niche whose back
+      // is in the rock) has its front seated on the flat; the rock through its back is the point, not a burial
+      if (((doc.entities as Record<string, any>)[g.id]?.tags ?? []).includes("set-in")) return;
       const why = buriedReason(built, fieldProbe, { ...fp, y: r.y ?? fp.y });
       if (!why) return;
       rows.push({ kind: "scene", id: g.id, what: g.prefabId, contact, x: r3(fp.x), y: r3(fp.y), z: r3(fp.z), status: "off", gap: Infinity, support: null as never, reason: `${why}: move it in its plan (never re-seat)`, fix: { y: null } });

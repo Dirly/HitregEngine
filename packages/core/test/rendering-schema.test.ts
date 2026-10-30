@@ -254,3 +254,15 @@ describe("lightSchema — shadow quality", () => {
     expect(() => lightSchema.parse({ kind: "directional", shadow: { normalBias: -1 } })).toThrow(/normalBias/);
   });
 });
+
+describe("water material color", () => {
+  it("a water material's plain color fills the absent shallow/mid/deep stops; set stops and other shaders are untouched", () => {
+    const m = materialSchema.parse({ shader: "water", color: "#6a2a1e", water: { deepColor: "#200805" } });
+    expect(m.water?.shallowColor).toBe("#6a2a1e");
+    expect(m.water?.midColor).toBe("#6a2a1e");
+    expect(m.water?.deepColor).toBe("#200805");
+    expect(materialSchema.parse({ shader: "water", color: "#6a2a1e" }).water?.midColor).toBe("#6a2a1e");
+    expect(materialSchema.parse({ shader: "water" }).water).toBeUndefined();
+    expect(materialSchema.parse({ color: "#6a2a1e" }).water).toBeUndefined();
+  });
+});

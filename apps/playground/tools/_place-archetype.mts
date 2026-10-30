@@ -11,7 +11,7 @@
 import { z } from "zod";
 import { facesDir } from "./_compass.mts";
 import { fitRibbon, pathParamsSchema, regionVegetationSchema } from "@hitreg/core";
-import { densityNeed, heightForPx, leanQuat, orientBase, POCKET_FLOOR_M, READ_PX_MIN, readPixels, SEAT_GAP_M, scaleBase, seatStructure, SINK_MAX_M, SKIRT_BURY_M, wearsCliffTile, type BaseOutline } from "./_place-quality.mts";
+import { densityNeed, heightForPx, leanQuat, orientBase, POCKET_FLOOR_M, READ_PX_MIN, readPixels, SEAT_GAP_M, scaleBase, seatStructure, SINK_MAX_M, SKIRT_BURY_M, toWorldYaw, wearsCliffTile, type BaseOutline } from "./_place-quality.mts";
 /** Skirt wall thickness (m): its outer face stands ~0.15 m past the structure's base edge (a plinth). */
 export const SKIRT_THICK_M = 0.8;
 
@@ -70,6 +70,7 @@ export const placeStructureSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/).describe("Slot id, unique in the pocket (`--set <pocket>.<slot>=<prefab>` swaps the prefab)."),
   role: z.enum(["landmark", "dwelling", "work", "fire", "set-piece", "boat"]).describe("What it is for. `fire` must be a catalogued vfx fire (FIRE_PREFABS); `boat` lies on the ground as a boat (never a wall); `dwelling` gets its ground cover cleared."),
   prefab: z.string().describe("Catalogued prefab id (world-kit / foundation / the world's project). Never a primitive: the tool refuses an id it cannot find."),
+  overrides: z.array(z.object({ path: z.string().min(1), value: z.unknown() }).strict()).max(8).default([]).describe("Prefab-instance overrides on the placed piece (the engine prefab `overrides`: `<local entity>/components/<component>/<field>`; a nested instance is reached through its `<entity>/components/prefab/overrides` array). For a per-place tweak of a catalogued piece that is not a new prop: a camp fire whose light burns at night only. L (o-small2 dropped-hour 2026-10-30)."),
   choices: z.array(z.string()).default([]).describe("Other catalogued prefabs this slot accepts (`--set` may pick one of them, or any catalogued id)."),
   at: xz.default([0, 0]).describe("Metres from the pocket centre in the place frame (+z = toward the approach, +x = its right)."),
   yaw: z.number().default(0).describe("Degrees about +Y in the place frame (0: the prefab's +Z front faces the approach)."),
@@ -201,7 +202,7 @@ export const placePocketSchema = z.object({
       .describe("A FIRST dressing plan, by name only (dress check resolves every place; a Sonnet dresser may refine it). Counts are EXACT: the density top-up never repeats a listed prop (L TOOLS-PB 2026-10-23: 1 figurehead became 3)."),
     filler: z.array(z.string()).optional().describe("Catalogued small props the density top-up draws from for this pocket (stones, hay, rope coils, firewood); omitted = the archetype's `filler`, then the role's fill (ROOM_FILL). Never a `props` entry."),
   }).strict().nullable().default(null),
-  encounter: z.object({ radius: z.number().min(6).max(16).default(8), for: z.string() }).strict().nullable().default(null)
+  encounter: z.object({ radius: z.number().min(6).max(16).default(8), for: z.string(), at: z.tuple([z.number(), z.number()]).optional().describe("Pocket-local centre (the place frame for the core under a layout): the fight's ground, e.g. the foot of a stair the boss guards. Omitted: the first spot of a ring round the pocket clear of its pieces. L (Red Dial 2026-10-29: the ring spot fell behind a plinth, unreachable).") }).strict().nullable().default(null)
     .describe("A creature clearing (populate packs) in this pocket."),
   floor: z.object({
     surface: z.string().min(1).describe("Palette surface name (recipe.surfaces[].name): the zone's paving for a flagged floor."),
@@ -307,10 +308,17 @@ const layoutPieceSchema = z.object({
   landmark: landmarkSchema.optional().describe("The ONE piece the approach read and the silhouette rule judge (at most one per layout)."),
   over: z.array(z.string()).default([]).describe("Piece ids this piece is MEANT to overlap (a hoist gantry straddling the bell, a tarp standing over a crate): those footprint pairs are exempt from the overlap refusal, both directions. L (Exiles' Bell 2026-10-24)."),
   quest: z.string().regex(/^[a-z0-9-]+$/).optional().describe("A quest slot (the quest plan's object id, `--set quest.<slot>=<prop>`): the slot's prop (the set's prop; this piece's `prefab` when the set names none) is placed HERE as the quest entity (a fixed floor item of the core plan at this `at`/`yaw`), never at the dressing plan's auto spot; the piece is not also built as a structure."),
+  sink: z.number().min(0).max(4).default(0).describe("Decal pieces only: metres the piece stands BELOW the ground at its centre. A piece set INTO a rock face (an opened niche whose back is in the face) has its centre over the face, where the ground is the face itself; `sink` lowers it to the foot so its front stands flush on the flat. L (o-small 2026-10-29)."),
   lift: z.number().min(0).max(2).default(0).describe("Metres the piece stands above its seat (raised foundations: a kit building whose floor slab is at y=0 stands 0.6 m up, like town buildings, so the slab never shares the pad surface — Ashen Vow 2026-10-24: a 410 m2 z-fight)."),
-  lean: leanSchema.optional().describe("Tilt the WHOLE piece from its foot (leanSchema): yaw turns it, lean tips it. L (KNUCKLECROWN 2026-10-29)."),
+  on: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of an EARLIER piece of the layout: this piece stands on that piece's own mesh top at its `at` (a ring on its plinth, a fire bowl on a pillar cap or a tower top), never on the ground; list it with `over` when the footprints overlap. L (Red Dial 2026-10-29: the ring stands on a 2.4 m plinth, lift caps at 2 m)."),
+  lean: leanSchema.optional().describe("Tilt the WHOLE piece from its foot (leanSchema): yaw turns it, lean tips it (also on top of an `on` piece). L (KNUCKLECROWN 2026-10-29)."),
+  overrides: z.array(z.object({ path: z.string().min(1), value: z.unknown() }).strict()).max(8).default([]).describe("Prefab-instance overrides on the placed piece (the engine prefab `overrides`: `<local entity>/components/<component>/<field>`; a nested instance is reached through its `<entity>/components/prefab/overrides` array). For a per-place tweak of a catalogued piece that is not a new prop: a camp fire whose light burns at night only. L (o-small2 dropped-hour 2026-10-30)."),
   wet: z.boolean().default(false).describe("The piece may stand at or in water (drowned steps, a pier, a reed clump): wet ground under its footprint is not a refusal. Default: wet ground refuses the piece (Drowning Pools 2026-10-24: the ordeal sanctuary whose steps run into the loch)."),
 }).strict();
+/** The scale class a site's dressing plans are made for, from its cultures: an ogre or giant camp is dressed at giant
+ *  scale (props menu --scale giant), everyone else at human. L (o-small2 dropped-hour 2026-10-30): every site plan was
+ *  written 'human', so a desert-ogre camp's dressers could not take the ogre-giant-craft props without editing the plan. */
+export const siteScale = (culture: string[]): "giant" | "human" => (culture.some((c) => c === "ogre" || c === "giant") ? "giant" : "human");
 export const placeLayoutSchema = z.object({
   version: z.literal(1),
   frame: z.literal("place").describe("Every x,z is in the place frame: origin the plan centre, +z toward the approach, +x its right, y over padY."),
@@ -339,6 +347,15 @@ export const placeLayoutSchema = z.object({
     bank: z.number().min(6).max(30).default(8).describe("Metres the shore eases from the waterline back to the pad (>= 6: the 6 m rule; no lip)."),
     material: z.string().optional().describe("Water material for this pool (recipe lake `material`): a still black pool, a murky tarn."),
   }).strict()).max(4).default([]).describe("STILL WATER as data: a hand-placed recipe lake (carve: true) of ONE level sunk below the pad in its own hollow. L (KNUCKLECROWN 2026-10-28): a landmark ringing a pool had no way to say the pool; a basin kerb is a square tank."),
+  waters: z.array(z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    element: z.string().optional().describe("The design element the water belongs to (checked like a piece's)."),
+    on: z.string().regex(/^[a-z0-9-]+$/).describe("The layout piece (a built basin, a tank, a well) whose marker holds the level."),
+    marker: z.string().default("basin-water").describe("Marker id in that piece's <model>.markers.json: its position is the water level and centre, its size [x, 0, z] the sheet."),
+    material: z.string().describe("Water material (a still pool's, e.g. terrain/<world>-water-lake)."),
+    depth: z.number().min(0.2).max(8).default(1.4).describe("Water depth for bodies in it, metres."),
+    swim: z.boolean().default(false).describe("false: visual-only water a body wades through (a basin), true: swimmable."),
+  }).strict()).max(4).default([]).describe("STILL WATER IN A BUILT PIECE: one level sheet at a structure's marker (a kit basin's `basin-water`), nothing moving. Pools carve terrain; this fills a mesh basin. L (Red Dial 2026-10-29)."),
   clearings: z.array(z.object({
     id: z.string().regex(/^[a-z0-9-]+$/),
     element: z.string().optional().describe("The design element the clearing serves (checked like a piece's)."),
@@ -347,6 +364,14 @@ export const placeLayoutSchema = z.object({
     keep: z.number().min(0).max(1).default(0.15).describe("Share of trees and scatter kept inside (0.15: a heath with a few stripped trees)."),
     feather: z.number().min(0).max(60).default(20).describe("Metres outside the edge over which the woods return."),
   }).strict()).max(6).default([]).describe("HEATH / SIGHTLINE clearings as data (recipe vegetation clearings, scatter only, ground cover kept): a landmark in woodland is hidden from its own roads by the trees, not the terrain. L (KNUCKLECROWN 2026-10-28: 25 m pillars on a forested crown were invisible from all three roads at 300 m)."),
+  areas: z.array(z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/).describe("Area id (the room of its socket map; its plan is dressing/<poi>-<id>.json, written by its dresser and KEPT by plan)."),
+    role: z.enum(["camp", "yard", "path", "shore", "ruin", "cave-mouth"]).describe("Site-dressing role (density floor, vignette kinds)."),
+    at: xz.describe("Place frame centre."),
+    radius: z.number().min(3).max(20).describe("Metres."),
+    note: z.string().default("").describe("What the area is for, printed in the dresser brief."),
+    reach: xz.optional().describe("Place frame point poi-walk walks to for this area: open ground at its edge, on the walk side (default the centre, where the dresser's props and the area's own pieces stand; a reach there walked into a basin and through a sack)."),
+  }).strict()).max(4).default([]).describe("Extra DRESSING AREAS beyond the pockets' (handoff siteDressing.areas): a midden, an opened tomb at the rib foot, each dressed by its own fresh dresser. Plan never wipes their plan files. L (o-small2 dropped-hour 2026-10-30)."),
   vegetation: regionVegetationSchema.optional().describe("The place's OWN region vegetation (recipe regions[id = the poi].vegetation, a place region): species swaps, thinning and cover filters over the whole place, applied by build/install (removed by --uninstall). Clearings only thin; this says WHAT grows (broadleaf -> dead pines on a heath crown). L (KNUCKLECROWN 2026-10-29: a heath crown stood in lush broadleaf with no data path to say otherwise)."),
 }).strict().superRefine((l, ctx) => {
   const ids = l.pieces.map((p) => p.id);
@@ -392,7 +417,9 @@ export function layoutSizeWarn(q: { kind: string; prefab: string; scale: number 
 export const CODEX_SCALE_MAX = 1.2;
 /** Two yawed rectangles (place-frame centre, half extents, degrees) overlap (separating axis); `tol` metres of touch allowed. */
 export function boxesOverlap(a: { at: [number, number]; half: [number, number]; yaw: number }, b: { at: [number, number]; half: [number, number]; yaw: number }, tol = 0.05): boolean {
-  const axes = (y: number): [number, number][] => { const r = (y * Math.PI) / 180; return [[Math.cos(r), -Math.sin(r)], [Math.sin(r), Math.cos(r)]]; };
+  // the piece's own axes in the place frame, as planPlace turns it (+Z front onto (-sin, cos): yaw +90 faces -x). L (Red Dial
+  // 2026-10-29: these were mirrored — harmless at 0/90/180, wrong overlaps at 35 deg)
+  const axes = (y: number): [number, number][] => { const r = (y * Math.PI) / 180; return [[Math.cos(r), Math.sin(r)], [-Math.sin(r), Math.cos(r)]]; };
   const corners = (q: typeof a) => { const [u, v] = axes(q.yaw); return [[1, 1], [1, -1], [-1, 1], [-1, -1]].map(([i, j]) => [q.at[0] + u![0] * q.half[0] * i! + v![0] * q.half[1] * j!, q.at[1] + u![1] * q.half[0] * i! + v![1] * q.half[1] * j!] as [number, number]); };
   const ca = corners(a), cb = corners(b);
   for (const ax of [...axes(a.yaw), ...axes(b.yaw)]) {
@@ -410,7 +437,7 @@ export function boxesOverlap(a: { at: [number, number]; half: [number, number]; 
 export function withLayout(a: PlaceArchetype, l: PlaceLayout, info?: (prefab: string) => { size?: number[] } | null): PlaceArchetype {
   const pieces = l.pieces.filter((p) => p.kind !== "decal" && !p.quest).map((p) => {
     const half = pieceHalf(p, info?.(p.prefab)?.size);
-    return { id: p.id, role: pieceRole(p), prefab: p.prefab, choices: [], at: p.at, yaw: p.yaw, footprint: Math.min(20, Math.max(0.5, half ? Math.round(Math.hypot(half[0], half[1]) * 100) / 100 : 1)), scale: p.scale, lift: p.lift ?? 0, landmark: p.landmark ?? null, ...(p.lean && p.lean.deg > 0 ? { lean: p.lean } : {}) } as PlaceArchetype["pockets"][number]["structures"][number];
+    return { id: p.id, role: pieceRole(p), prefab: p.prefab, choices: [], at: p.at, yaw: p.yaw, footprint: Math.min(20, Math.max(0.5, half ? Math.round(Math.hypot(half[0], half[1]) * 100) / 100 : 1)), scale: p.scale, lift: p.lift ?? 0, landmark: p.landmark ?? null, ...(p.on ? { on: p.on } : {}), ...(p.lean && p.lean.deg > 0 ? { lean: p.lean } : {}), overrides: p.overrides ?? [] } as PlaceArchetype["pockets"][number]["structures"][number];
   });
   // L (Exiles' Bell 2026-10-24): spreadToFloor had multiplied the core walls' `at` by floor / fit (x1.8), so a chapel the
   // owner drew at [28,-4] stood 51 m out while the pieces beside it stood exactly: under a layout the walls stand where
@@ -439,7 +466,7 @@ export function layoutCoverage(design: { elements?: { id: string; madeOf?: strin
   for (const e of els) {
     const props = (e.madeOf ?? []).filter((m) => !exempt.test(m) && m.includes("/") && (o.catalogued?.(m) ?? true));
     if (!props.length || props.every((m) => (o.questProps ?? []).includes(m))) continue;
-    if (!l.pieces.some((p) => p.element === e.id) && !l.ground.some((q) => q.element === e.id) && !(l.pools ?? []).some((q) => q.element === e.id) && !(l.clearings ?? []).some((q) => q.element === e.id)) out.push(`element ${e.id} has no layout piece`);
+    if (!l.pieces.some((p) => p.element === e.id) && !l.ground.some((q) => q.element === e.id) && !(l.pools ?? []).some((q) => q.element === e.id) && !(l.waters ?? []).some((q) => q.element === e.id) && !(l.clearings ?? []).some((q) => q.element === e.id)) out.push(`element ${e.id} has no layout piece`);
   }
   return out;
 }
@@ -628,6 +655,8 @@ export interface PlaceInput {
   texelsOf?: (prefab: string) => number | null;
   /** Highest mesh surface (m, prefab frame, unscaled) of a catalogued piece over a local point; null off its mesh. */
   topOf?: (prefab: string, x: number, z: number) => number | null;
+  /** A catalogued piece's marker (prefab frame, unscaled: position [x, y, z], size [x, y, z]) from its <model>.markers.json; null when none. */
+  markerOf?: (prefab: string, id: string) => { position: [number, number, number]; size: [number, number, number] } | null;
   /** Quest objects the zone's quest plan declares at this place (kind object/readable); each needs `a.quest[id]`. */
   questObjects?: { id: string; kind: string; what?: string }[];
   /** Pocket centres chosen by `siteSearch` (level, dry, connected ground): each pocket's fit only refines within 4 m. */
@@ -673,6 +702,11 @@ export function placeFacing(at: V2, faces: string | undefined, approaches: V2[][
   const l = Math.hypot(best[0] - at[0], best[1] - at[1]); return [(best[0] - at[0]) / l, (best[1] - at[1]) / l];
 }
 /** Place frame -> world: local (x right, z front). */
+/** A placed piece's marker in the world: rotY(ang) of its scaled local point (+Z onto (sin, cos)) over its foot. Pure. */
+export function waterAtMarker(host: { w: V2; ang: number; y: number; k: number }, mk: { position: [number, number, number] }): { w: V2; y: number; ang: number } {
+  const [x, y, z] = mk.position.map((v) => v * host.k) as [number, number, number], c = Math.cos(host.ang), s = Math.sin(host.ang);
+  return { w: [r2(host.w[0] + x * c + z * s), r2(host.w[1] - x * s + z * c)], y: r2(host.y + y), ang: host.ang };
+}
 export function toWorld(origin: V2, front: V2, local: V2): V2 {
   const right: V2 = [-front[1], front[0]];
   return [origin[0] + local[0] * right[0] + local[1] * front[0], origin[1] + local[0] * right[1] + local[1] * front[1]];
@@ -682,11 +716,15 @@ const yawOf = (front: V2) => Math.atan2(front[0], front[1]); // rotY(a) maps +Z 
 /** Relief, wetness and the steepest step over a disc (rings of samples, 2 m apart). */
 export function discStats(g: PlaceGround, c: V2, r: number) {
   const hs: number[] = []; let wet = 0, steep = 0;
-  for (let rr = 0; rr <= r + 1e-6; rr += 2) {
-    const n = rr === 0 ? 1 : Math.max(6, Math.round((2 * Math.PI * rr) / 2.5));
+  // rings every 2 m plus the rim itself when it falls between rings: a piece under 2 m radius was sampled at its centre
+  // alone, so the steep check never fired for it (L o-small 2026-10-29: a trough drawn on a rock face toe passed)
+  const rings: number[] = []; for (let rr = 0; rr <= r + 1e-6; rr += 2) rings.push(rr);
+  if (r - rings[rings.length - 1]! > 0.25) rings.push(r);
+  rings.forEach((rr, k) => {
+    const n = rr === 0 ? 1 : Math.max(6, Math.round((2 * Math.PI * rr) / 2.5)), prev = k ? rings[k - 1]! : 0;
     for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2, x = c[0] + rr * Math.cos(a), z = c[1] + rr * Math.sin(a); const h = g.height(x, z); hs.push(h); if (g.wet(x, z)) wet++;
-      if (rr > 0) steep = Math.max(steep, Math.abs(h - g.height(c[0] + (rr - 2) * Math.cos(a), c[1] + (rr - 2) * Math.sin(a))) / 2); }
-  }
+      if (rr > 0) steep = Math.max(steep, Math.abs(h - g.height(c[0] + prev * Math.cos(a), c[1] + prev * Math.sin(a))) / (rr - prev)); }
+  });
   hs.sort((a, b) => a - b);
   return { median: hs[hs.length >> 1]!, relief: hs[hs.length - 1]! - hs[0]!, wet, steep };
 }
@@ -751,6 +789,20 @@ export function padPatch(id: string, c: V2, r: number, y: number, feather: numbe
   return { edit: "add-feature", kind: "heightPatches", feature: { id, origin: [r2(c[0] - R), r2(c[1] - R)], size: [2 * R, 2 * R], columns: cols, rows: cols, heights, weights, blend: 2, edgeSlope: 0.6, filter: 2, calm: true, ...(raiseOnly ? { raiseOnly: true } : {}) } };
 }
 
+/** L (Red Dial 2026-10-30): a LEVEL pad (cut + fill) over a turned rectangle (`half` in the piece's frame, turned `yaw` like a
+ *  structure, three.js about +Y), feathered `feather` m past its edge with padPatch's smoothstep and rim fade. */
+export function rectPadPatch(id: string, c: V2, half: [number, number], yaw: number, y: number, feather: number, g?: PlaceGround) {
+  const R = Math.hypot(half[0], half[1]) + feather, step = 2, cols = Math.round((2 * R) / step) + 1, cs = Math.cos(yaw), sn = Math.sin(yaw);
+  const heights: number[] = [], weights: number[] = [];
+  for (let j = 0; j < cols; j++) for (let i = 0; i < cols; i++) {
+    const dx = -R + i * step, dz = -R + j * step, lx = dx * cs - dz * sn, lz = dx * sn + dz * cs; // world offset -> the piece's frame (inverse of toWorldYaw)
+    const ox = Math.max(0, Math.abs(lx) - half[0]), oz = Math.max(0, Math.abs(lz) - half[1]), d = Math.hypot(ox, oz), t = Math.min(1, d / feather);
+    const x = c[0] + dx, z = c[1] + dz, gap = g && d > 0 ? Math.abs(g.height(x, z) - y) : 0, keep = Math.min(1, Math.max(0, 1 - (gap - 1.5) / 2.5));
+    heights.push(r2(y)); weights.push(r2((1 - t * t * (3 - 2 * t)) * keep));
+  }
+  return { edit: "add-feature", kind: "heightPatches", feature: { id, origin: [r2(c[0] - R), r2(c[1] - R)], size: [2 * R, 2 * R], columns: cols, rows: cols, heights, weights, blend: 2, edgeSlope: 0.6, filter: 2, calm: true } };
+}
+
 /** L (walk, fowlers-drop 2026-10-21): a tower's door spans ONE face: a 2.4 m door on a 12-sided 4.5 m tower (2.33 m faces)
  *  crossed two corners and a corner's mitre stood in the passage (10 STUCK). Fewer sides (multiples of 4, at least 8)
  *  until the face holds the door + 0.4 m each side. */
@@ -782,6 +834,11 @@ const encloses = (w: z.infer<typeof placeWallSchema>, r: number) => w.shape !== 
 export function standPoint(p: z.infer<typeof placePocketSchema>, at: V2, front: V2): V2 {
   const clearOf = pocketClearance(p);
   for (const c of [[0, 0], [0, 3], [3, 3], [-3, 3], [0, 6], [4, 6], [-4, 6], [0, 9]] as V2[]) if (clearOf(c) >= 2) return toWorld(at, front, c).map(r2) as V2;
+  // L (Red Dial 2026-10-29: a 24 x 18 m plinth over the core centre put every stand inside it; all routes "no walkable
+  // way"): further out toward the approach, nearest first, inside the pocket
+  const far: V2[] = [];
+  for (let d = 12; d <= p.radius - 1; d += 3) for (const x of [0, 4, -4, 8, -8, 12, -12]) far.push([x, d]);
+  for (const c of far) if (clearOf(c) >= 2) return toWorld(at, front, c).map(r2) as V2;
   return toWorld(at, front, [0, Math.min(p.radius - 1, 9)]).map(r2) as V2;
 }
 /** Clearance of a pocket-local point from the pocket's structure footprints and wall lines (their half-width + 0.6 m). */
@@ -1117,7 +1174,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       const r = half ? Math.max(half[0], half[1]) : 1, st = discStats(g, w, Math.max(0.5, r));
       if (dist(w, keepIn.center) > keepIn.radius) why(q.id, `at ${q.at.join(",")} lies outside the usable area (${Math.round(dist(w, keepIn.center))} m from the reservation centre, ${Math.round(keepIn.radius)} m allowed)`);
       else if (!q.wet && (st.wet > 0 || g.wet(w[0], w[1]))) why(q.id, `at ${q.at.join(",")} stands in water (wet ground under its ${r2(r)} m footprint; wet: true on the piece if it is meant to)`);
-      else if (q.kind !== "decal" && st.steep > USABLE_SLOPE) why(q.id, `at ${q.at.join(",")} stands on ground steeper than the usable slope (${r2(st.steep)} > ${USABLE_SLOPE} rise/run under its footprint)`);
+      else if (q.kind !== "decal" && !q.on && st.steep > USABLE_SLOPE) why(q.id, `at ${q.at.join(",")} stands on ground steeper than the usable slope (${r2(st.steep)} > ${USABLE_SLOPE} rise/run under its footprint)`);
       // the hero-prop size band: WARN, never a refusal (TOOLS-LAYOUT 5: a 4.8 m "bonfire" in a human camp)
       const sw = layoutSizeWarn(q, size); if (sw) notes.push(`WARN: piece ${q.id}: ${sw}`);
     }
@@ -1132,8 +1189,9 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   const ops: any[] = [{ op: "add-entity", id: `poi-${poi}`, entity: { name: place.name, parent: null, tags, components: { transform: { position: [core.at[0], padY, core.at[1]] } } } }];
   const features: any[] = [], keepClear: any[] = [];
   let landmark: { at: V2; foot: number; top: number; fogReach: number } | null = null;
-  const smokes: { at: V2; top: number; fogReach: number }[] = [], solids: { at: V2; r: number }[] = [];
+  const smokes: { at: V2; top: number; fogReach: number }[] = [], solids: { at: V2; r: number; band?: number; soft?: boolean }[] = [];
   const stands: V2[] = [];
+  const placedAll = new Map<string, { w: V2; ang: number; y: number; prefab: string; k: number }>(); // every pocket's pieces (layout `waters` find their host here)
   // `walk: false`: a structure's own cover clearing is ground cleared under a solid, not a spot a body walks to (poi-walk skips it;
   // L walk, peat-banks 2026-10-21: a marker spread past a bank line became an unreachable walk target, 3 STUCK)
   const clear = (id: string, c: V2, r: number, walk = true) => clearings.push({ id: `${poi}-${id}`, center: [r2(c[0]), r2(c[1])], radius: r2(r), feather: 2, keep: 0, scatter: true, cover: true, owner: poi, ...(walk ? {} : { walk: false }) });
@@ -1186,29 +1244,36 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       if (under) { const dx = w[0] - under.w[0], dz = w[1] - under.w[1], c = Math.cos(under.ang), sn = Math.sin(under.ang), lx = (dx * c - dz * sn) / under.k, lz = (dx * sn + dz * c) / under.k, t = inp.topOf?.(under.prefab, lx, lz);
         if (t == null) faults.push(`structure ${p.id}.${s.id}: no top of ${s.on} under it`); else onY = under.y + t * under.k - 0.1; }
       // LEAN: the whole piece tipped toward a place-frame point or direction; its base outline turned with it, sunk (rooted)
-      const lean = s.lean && s.lean.deg > 0 && !host && !under ? s.lean : null;
+      const lean = s.lean && s.lean.deg > 0 && !host ? s.lean : null; // on a piece (`on`): tipped from its foot on that top
       const leanDir = lean ? (lean.toward ? (() => { const t = toWorld(pk.at, front, lean.toward!); return Math.atan2(t[0] - w[0], t[1] - w[1]); })() : yaw + ((lean.dir ?? 0) * Math.PI) / 180) : 0;
       const q = leanQuat(ang, lean?.deg ?? 0, leanDir);
       const b0 = host || under || s.role === "fire" || s.role === "boat" ? null : inp.structureBase?.(s.prefab) ?? null, bs = b0 && s.scale !== 1 ? scaleBase(b0, s.scale) : b0, base = bs && lean ? orientBase(bs, q) : bs;
       if (lean && s.role === "dwelling") faults.push(`structure ${p.id}.${s.id}: a dwelling never leans (lean is for menhirs, pillars, posts)`);
       const seat = base ? seatStructure(base, w, lean ? 0 : ang, planned, { rock: /^rock-kit\//.test(s.prefab) || !!lean, sinkMax: s.role === "dwelling" ? 0 : SINK_MAX_M }) : null, sy0 = r2(kerbTop != null ? kerbTop : host ? y + host.height + 0.3 : onY != null ? onY : seat ? seat.y : planned(w[0], w[1]));
       const sy = r2(sy0 + (s.lift ?? 0)); // raised foundations for a piece that asks for it (`lift`)
-      placed.set(s.id, { w, ang, y: sy, prefab: s.prefab, k: s.scale });
+      placed.set(s.id, { w, ang, y: sy, prefab: s.prefab, k: s.scale }); placedAll.set(s.id, placed.get(s.id)!);
       // raised foundations: the ground under the base is lifted to it (level, raise-only, feathered with the fall)
-      if (seat?.raise) worldOps.push(padPatch(`pb-${poi}-seat-${p.id}-${s.id}`, w, seat.raise.radius, seat.raise.y, Math.max(4, 3 * seat.relief), true, g));
+      if (seat?.level && seat.rect) worldOps.push(rectPadPatch(`pb-${poi}-seat-${p.id}-${s.id}`, toWorldYaw(w, ang, seat.rect.centre[0], seat.rect.centre[1]), seat.rect.half, ang, seat.raise!.y, Math.max(3, Math.min(8, 2 * seat.relief)), g));
+      else if (seat?.raise) worldOps.push(padPatch(`pb-${poi}-seat-${p.id}-${s.id}`, w, seat.raise.radius, seat.raise.y, Math.max(4, 3 * seat.relief), true, g));
       if (seat?.skirt) {
         const own = base!.material && inp.materialExists?.(base!.material) ? base!.material : null, mats: Record<string, string> = own ? { face: own, cap: own, footing: own } : { ...(inp.builtStone ?? {}) };
         if (wearsCliffTile(mats)) faults.push(`skirt ${p.id}.${s.id}: no stone for it (its own base material is not a material asset and the zone has no builtStone)`);
         operators.push({ id: `pb-${poi}-skirt-${p.id}-${s.id}`, op: "wall", variant: "free", scale: "human", points: seat.skirt, smooth: false, height: 0.5, heightMode: "level", topY: r2(sy + Math.min(...base!.perimeter.map((q) => q[2])) - 0.15), thickness: SKIRT_THICK_M, batter: 0, cap: null,
           footing: { depth: SKIRT_BURY_M, projection: 0.1, plinth: 0.05 }, irregularity: { thickness: 0, height: 0, lean: 0 }, materials: mats, seed: 1 });
         notes.push(`structure ${p.id}.${s.id}: ${seat.relief} m of ground fall under its base: seated on the highest ground, a skirt (${own ?? "zone built stone"}) runs round it ${SKIRT_BURY_M} m into the ground`);
-      } else if (seat?.raise) notes.push(`structure ${p.id}.${s.id}: ${seat.relief} m of ground fall under its base: seated on the highest ground, the ground raised to its base (r ${seat.raise.radius} m)`);
+      } else if (seat?.level) notes.push(`structure ${p.id}.${s.id}: ${seat.relief} m of ground fall under its open base: seated at the middle of the fall, the ground levelled under it (r ${seat.raise!.radius} m, cut + fill)`);
+      else if (seat?.raise) notes.push(`structure ${p.id}.${s.id}: ${seat.relief} m of ground fall under its base: seated on the highest ground, the ground raised to its base (r ${seat.raise.radius} m)`);
       else if (seat?.sunk && seat.relief > SEAT_GAP_M) notes.push(`structure ${p.id}.${s.id}: sunk to its lowest ground (${seat.relief} m of fall under it: its uphill side rooted, no terrain edit)`);
-      const comps: any = { transform: { position: [r2(w[0] - core.at[0]), r2(sy - padY), r2(w[1] - core.at[1])], rotation: q.map((c) => r2(c * 1e4) / 1e4), ...(s.scale !== 1 ? { scale: [s.scale, s.scale, s.scale] } : {}) }, prefab: { prefabId: s.prefab, props: {} } };
+      const comps: any = { transform: { position: [r2(w[0] - core.at[0]), r2(sy - padY), r2(w[1] - core.at[1])], rotation: q.map((c) => r2(c * 1e4) / 1e4), ...(s.scale !== 1 ? { scale: [s.scale, s.scale, s.scale] } : {}) }, prefab: { prefabId: s.prefab, props: {}, ...(s.overrides?.length ? { overrides: s.overrides } : {}) } };
       if (lean) notes.push(`structure ${p.id}.${s.id}: leans ${lean.deg} deg toward ${Math.round(((leanDir * 180) / Math.PI + 360) % 360)} deg (world, 0 = +z), sunk ${seat ? r2(Math.max(0, ...base!.cells.map((c) => planned(w[0] + c[0], w[1] + c[1]) - (seat.y + c[2])))) : 0} m at its downhill foot`);
       if (s.scale !== 1) { const tx = inp.texelsOf?.(s.prefab); if (tx != null && tx / s.scale < MIN_SCALED_TEXELS) faults.push(`structure ${p.id}.${s.id}: ${s.prefab} at scale ${s.scale} is ${r2(tx / s.scale)} tx/m, under the ${MIN_SCALED_TEXELS} tx/m floor: a taller piece is a prop request (Codex), never a stretched one`); }
       if (s.landmark) { comps.landmark = { fogReach: s.landmark.fogReach, silhouette: s.landmark.silhouette }; landmark = { at: w, foot: sy, top: sy + s.landmark.height, fogReach: s.landmark.fogReach }; }
-      if (!host) solids.push({ at: w, r: s.footprint });
+      // L (Red Dial 2026-10-30: a footpath's grade band cut under a kit wall's end, 0.7 m of daylight): a kit structure with a
+      // declared footing keeps the routes a grade band further off, so no path cut reaches under it
+      // ...and so does every other ground piece (Red Dial 2026-10-30: the paths re-baked over the seat pads cut 0.7-0.9 m under
+      // the avenue's pillars); a piece `on` another rides its host's band
+      // (soft: dropped for a leg that finds no way with it)
+      if (!host && !under) solids.push({ at: w, r: s.footprint, band: PATH_GRADE_BAND_M, ...((inp.propInfo?.(s.prefab) as { footing?: number } | null)?.footing ? {} : { soft: true }) });
       if (SMOKE_READ_M[s.prefab]) smokes.push({ at: [r2(w[0]), r2(w[1])], top: r2(sy + SMOKE_READ_M[s.prefab]!), fogReach: s.landmark?.fogReach ?? 600 });
       ops.push({ op: "add-entity", id: `${poi}-${p.id}-${s.id}`, entity: { name: `${s.id} (${s.prefab})`, parent: `poi-${poi}`, tags: [...tags.slice(1), `slot:${s.role}`, ...(s.on ? [`on:${s.on}`] : s.onWall ? [`on:${s.onWall}`] : []), ...(s.stone ? [`stone:${stoneOf(s.stone)}`] : []), ...(s.lift ? [`lift:${s.lift}`] : []), ...(lean ? [`lean:${lean.deg}`] : [])], components: comps } });
       if (host || under) continue; // up on the wall: no ground cleared, nothing kept clear on the ground
@@ -1304,7 +1369,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       { const nf = laid.items.filter((it) => /^fill-/.test(it.id)).length, nl = laid.items.length - nf; if (L && nf > Math.max(4, nl)) notes.push(`WARN: ${p.id} dressing: ${nf} top-up filler vs ${nl} listed props: the area (r ${dr + DRESS_RIM_M} m) spans open composition ground; set ${p.id}.dressing.radius to the ground the props belong to`); }
       requested[id] = (asked.get(p.id) ?? []).map((q) => { const d = dropped.find((x) => x.prop === q.prop); return { prop: q.prop, count: q.count, ...(d ? { why: d.why } : {}) }; });
       for (const d of dropped) notes.push(`${p.id} dressing: ${d.prop} x${d.count ?? 1} not placed (${d.why})`);
-      if (laid.items.length) plans.push({ id, map: id, lights: a.lights, rooms: { [p.id]: { role: p.dressing.role, also: ROOM_ALSO[p.dressing.role] ?? [p.dressing.role] } }, space: { kind: "site", scale: "human", cultures: a.culture }, items: laid.items, ...(laid.arrangements.length ? { arrangements: laid.arrangements } : {}) });
+      if (laid.items.length) plans.push({ id, map: id, lights: a.lights, rooms: { [p.id]: { role: p.dressing.role, also: ROOM_ALSO[p.dressing.role] ?? [p.dressing.role] } }, space: { kind: "site", scale: siteScale(a.culture), cultures: a.culture }, items: laid.items, ...(laid.arrangements.length ? { arrangements: laid.arrangements } : {}) });
     }
     if (p.encounter) {
       // L (walk): the creature clearing's centre keeps 1.5 m past every structure footprint (wolfhollow: a boulder on the
@@ -1312,7 +1377,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       // L (walk, shielings 2026-10-20): and 1.5 m past every wall line (a croft's corner left the clearing unreachable);
       // when the half-radius ring has no free spot, a ring at 0.85 x the radius
       const h = p.radius * 0.5, f = p.radius * 0.85, clearOf = pocketClearance(p), spots: V2[] = [[h, -h], [-h, -h], [h, h], [-h, h], [0, -h], [0, h], [f, 0], [-f, 0], [0, -f], [0, f], [f * 0.7, -f * 0.7], [-f * 0.7, -f * 0.7], [f * 0.7, f * 0.7], [-f * 0.7, f * 0.7]];
-      const c = toWorld(pk.at, front, spots.find((q) => clearOf(q) >= 1.5) ?? spots[0]!);
+      const c = toWorld(pk.at, front, (p.encounter.at as V2 | undefined) ?? spots.find((q) => clearOf(q) >= 1.5) ?? spots[0]!);
       clear(`enc-${p.id}`, c, p.encounter.radius);
       encounters.push({ id: `${poi}-enc-${p.id}`, job: poi, center: [r2(c[0]), r2(c[1])], radius: p.encounter.radius, for: p.encounter.for });
       keepClear.push({ id: `enc-${p.id}`, why: "creature clearing", at: [r2(c[0]), r2(c[1])], radius: p.encounter.radius });
@@ -1324,8 +1389,8 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   if (L) {
     const corePadded = worldOps.some((w: any) => w.feature?.id === `pb-${poi}-core-pad`), fitC = a.pockets[0]!.fit ?? a.pockets[0]!.radius;
     for (const q of L.pieces.filter((x) => x.kind === "decal" && !refused.has(x.id))) {
-      const { w } = layoutWorld.get(q.id)!, y = corePadded && dist(w, core.at) <= fitC - 0.5 ? padY : g.height(w[0], w[1]), ang = yaw + (q.yaw * Math.PI) / 180;
-      ops.push({ op: "add-entity", id: `${poi}-core-${q.id}`, entity: { name: `${q.id} (${q.prefab})`, parent: `poi-${poi}`, tags: [...tags.slice(1), "slot:decal", "layout"], components: { transform: { position: [r2(w[0] - core.at[0]), r2(y - padY), r2(w[1] - core.at[1])], rotation: [0, r2(Math.sin(ang / 2) * 1e4) / 1e4, 0, r2(Math.cos(ang / 2) * 1e4) / 1e4], ...(q.scale !== 1 ? { scale: [q.scale, q.scale, q.scale] } : {}) }, prefab: { prefabId: q.prefab, props: {} } } } });
+      const { w } = layoutWorld.get(q.id)!, y = (corePadded && dist(w, core.at) <= fitC - 0.5 ? padY : g.height(w[0], w[1])) - (q.sink ?? 0), ang = yaw + (q.yaw * Math.PI) / 180;
+      ops.push({ op: "add-entity", id: `${poi}-core-${q.id}`, entity: { name: `${q.id} (${q.prefab})`, parent: `poi-${poi}`, tags: [...tags.slice(1), "slot:decal", "layout", ...((q.sink ?? 0) > 0 ? ["set-in"] : [])], components: { transform: { position: [r2(w[0] - core.at[0]), r2(y - padY), r2(w[1] - core.at[1])], rotation: [0, r2(Math.sin(ang / 2) * 1e4) / 1e4, 0, r2(Math.cos(ang / 2) * 1e4) / 1e4], ...(q.scale !== 1 ? { scale: [q.scale, q.scale, q.scale] } : {}) }, prefab: { prefabId: q.prefab, props: {} } } } });
     }
     for (const q of L.ground) {
       const c = toWorld(core.at, front, q.at), radius = Math.max(GROUND_MIN_RADIUS_M, q.radius);
@@ -1365,7 +1430,25 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
         P.heights[k] = r2(Math.min(P.heights[k], h)); if (P.weights) P.weights[k] = 1;
       }
     } else notes.push(`LAYOUT: pool ${q.id}: no core pad patch to cut the hollow into (the lake carves the natural ground)`);
+    features.push({ id: `pool-${q.id}`, kind: "water", linkedTo: ["core"] });
     notes.push(`LAYOUT: pool ${q.id}: still water r ${q.radius} m at y ${r2(padY - q.sink)} (pad ${r2(padY)} - ${q.sink}), bank ${q.bank} m`);
+  }
+  // the layout's WATERS: one still sheet at a placed structure's marker (a kit basin's `basin-water`), level and unmoving.
+  // L (Red Dial 2026-10-29: sun-ruins/basin-block carries the water level as a marker; a pool carves terrain, so the basin was dry)
+  if (L) for (const q of L.waters ?? []) {
+    const host = placedAll.get(q.on), mk = host ? inp.markerOf?.(host.prefab, q.marker) ?? null : null;
+    if (!host) { faults.push(`LAYOUT: water ${q.id}: on ${q.on} is no placed structure of the layout`); continue; }
+    if (!mk) { faults.push(`LAYOUT: water ${q.id}: ${host.prefab} has no marker ${q.marker} (its <model>.markers.json)`); continue; }
+    if (inp.materialExists && !inp.materialExists(q.material)) { faults.push(`LAYOUT: water ${q.id}: water material ${q.material} is no material asset of the closure`); continue; }
+    const at = waterAtMarker(host, mk), W = r2((mk.size[0] * host.k) / 2), D = r2((mk.size[2] * host.k) / 2);
+    if (!(W > 0 && D > 0)) { faults.push(`LAYOUT: water ${q.id}: marker ${q.marker} of ${host.prefab} has no size (x, z)`); continue; }
+    ops.push({ op: "add-entity", id: `${poi}-core-${q.id}-water`, entity: { name: `${q.id} water (${q.material})`, parent: `poi-${poi}`, tags: ["water", ...tags.slice(1), "slot:basin", "layout"],
+      components: { transform: { position: [r2(at.w[0] - core.at[0]), r2(at.y - padY), r2(at.w[1] - core.at[1])], rotation: [0, r2(Math.sin(at.ang / 2) * 1e4) / 1e4, 0, r2(Math.cos(at.ang / 2) * 1e4) / 1e4] },
+        mesh: { source: { kind: "surface", positions: [-W, 0, -D, W, 0, -D, W, 0, D, -W, 0, D], indices: [0, 2, 1, 0, 3, 2], uvs: [-W, -D, W, -D, W, D, -W, D] }, material: q.material, static: false, castShadow: false, receiveShadow: false },
+        water: { depth: q.depth, swim: q.swim } } } });
+    // the size gate's water feature (a large place needs water/cave/interior): the basin's still water counts. L (Red Dial 2026-10-29)
+    features.push({ id: `water-${q.id}`, kind: "water", linkedTo: ["core"] });
+    notes.push(`LAYOUT: water ${q.id}: still sheet ${r2(2 * W)} x ${r2(2 * D)} m at y ${at.y} (${q.on}'s marker ${q.marker})`);
   }
   if (L) for (const q of L.clearings ?? []) { const c = toWorld(core.at, front, q.at); clearings.push({ id: `${poi}-heath-${q.id}`, center: [r2(c[0]), r2(c[1])], radius: q.radius, feather: q.feather, keep: q.keep, scatter: true, cover: false, owner: poi, walk: false }); }
   // THE RING (archetype `ring`): a ground band round an anchor, as data: a groundPaints feature and catalogued ground
@@ -1439,7 +1522,12 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   // (route.maxGrade), then + 0.1, and only when the ground holds neither may it cross up to 35 deg. Ground steeper than
   // the ribbon's grade gets a riser: a 29 deg slope on the in-field leg (fell 3 m) and a 0.45 stretch on the approach
   // (a 2 m riser, fell 2.2 m) were the short ways the router took (2 FALL, 8 STUCK, 8-10 MISS at one spot).
-  const leg = (from: V2, to: V2, what: string): V2[] => routeGrid(g, from, to, obs, { prefer: a.route.maxGrade, maxSlope: a.route.maxGrade }) ?? routeGrid(g, from, to, obs, { prefer: a.route.maxGrade, maxSlope: a.route.maxGrade + 0.1 }) ?? routeGrid(g, from, to, obs, { prefer: a.route.maxGrade }) ?? (() => { faults.push(`route ${what}: no walkable way over the ground (water, walls or slopes > 35 deg)`); const l: V2[] = [from, to]; failed.add(l); return l; })();
+  // a kit structure with a declared footing keeps a leg a grade band further off (its path cut never reaches under it),
+  // except the structure the leg starts or ends at (a stand beside the plinth)
+  const legObs = (from: V2, to: V2, soft = true): RouteObstacles => ({ ...obs, discs: obs.discs.map((d: any) => (d.band && (soft || !d.soft) && dist(from, d.at) > d.r + d.band + 1 && dist(to, d.at) > d.r + d.band + 1 ? { at: d.at, r: d.r + d.band } : d)) });
+  const tryLeg = (from: V2, to: V2, obs: RouteObstacles): V2[] | null => routeGrid(g, from, to, obs, { prefer: a.route.maxGrade, maxSlope: a.route.maxGrade }) ?? routeGrid(g, from, to, obs, { prefer: a.route.maxGrade, maxSlope: a.route.maxGrade + 0.1 }) ?? routeGrid(g, from, to, obs, { prefer: a.route.maxGrade });
+  // every piece's grade band first; a leg with no way through them keeps only the footing structures' bands (the old rule)
+  const leg = (from: V2, to: V2, what: string): V2[] => tryLeg(from, to, legObs(from, to)) ?? tryLeg(from, to, legObs(from, to, false)) ?? (() => { faults.push(`route ${what}: no walkable way over the ground (water, walls or slopes > 35 deg)`); const l: V2[] = [from, to]; failed.add(l); return l; })();
   /** The longest run of a planned line outside the given pockets (their radius - 1): the stretch the ribbon paves. */
   const outside = (poly: V2[], discs: { at: V2; radius: number }[]): V2[] => {
     const out = (q: V2) => discs.every((d) => dist(q, d.at) > d.radius - 1), sm: { q: V2; v: boolean }[] = [];
@@ -1604,6 +1692,13 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   const reads = judged ?? [...new Set(spots.map((s) => s.line))].map((l) => spots.filter((s) => s.line === l).reduce((m, s) => (s.d > m.d ? s : m)));
   reads.forEach((s, i) => look(`read-${i + 1}-${Math.round(s.d)}m`, s.p, lm?.at ?? core.at, 1));
   for (const v of a.read.views) look(`far-${v.name}-${Math.round(dist(v.at, lm?.at ?? core.at))}m`, v.at, lm?.at ?? core.at);
+  // the layout's extra dressing AREAS (one fresh dresser each, plan <poi>-<id> in the job's dressing/, which plan keeps):
+  // L (o-small2 dropped-hour 2026-10-30): a pinpoint has one pocket, so a camp's midden and an opened tomb had no area of their own
+  if (L) for (const q of L.areas ?? []) {
+    if (areas.some((x) => x.id === q.id)) { faults.push(`LAYOUT: area ${q.id} repeats a pocket's dressing area`); continue; }
+    const c = toWorld(core.at, front, q.at), rc = q.reach ? toWorld(core.at, front, q.reach) : c;
+    areas.push({ id: q.id, role: q.role, centre: [r2(c[0]), r2(c[1])], radius: q.radius, note: q.note, reach: [r2(rc[0]), r2(g.height(rc[0], rc[1])), r2(rc[1])] });
+  }
   const handoff = {
     version: 1, poiId: poi, ownerAgentId: "place-build", builder: { tool: "place-build", archetype: a.id },
     // L (KNUCKLECROWN 2026-10-29): the dress-site brief prints handoff `idea`; a place-build handoff had none ("undefined")
@@ -2162,6 +2257,8 @@ export function uniqueItemIds<T extends { id: string }>(items: T[]): T[] {
  *  place installs and its pieces are re-seated on the live solid (float's seat rule) with the float gate run on the live
  *  scene; above it the place is re-planned. 0.05 m and under is the same ground. */
 export const RESEAT_MAX_M = 0.5;
+/** Half-width a footpath operator grades either side of its centre line (its ribbon samples carry 3.5 m). */
+export const PATH_GRADE_BAND_M = 3.5;
 export function installGuard(maxDiffM: number): "same" | "reseat" | "refuse" {
   return maxDiffM <= 0.05 ? "same" : maxDiffM <= RESEAT_MAX_M ? "reseat" : "refuse";
 }
@@ -2192,4 +2289,59 @@ export function routeOnRibbon(points: number[][], samples: number[][], hw: numbe
     k = e + 1;
   }
   return out;
+}
+
+/** L (Red Dial 2026-10-30: footpath grades cut under avenue pillars AFTER the plan seated them; the built re-seat fixed the
+ *  centre and the seated gate still read 0.2-3.6 m of daylight at their edges): the y a piece's foot should take on the
+ *  ground AS BUILT — the lowest ground sampled over its whole turned footprint (dressing size x scale), but never more than
+ *  its declared `footing` below the highest ground there (deeper is buried: the float gate). Only ever lowers: null when
+ *  the piece already stands no higher than that. Pure. */
+export function sinkToBase(at: { x: number; y: number; z: number; yaw: number }, half: [number, number], footing: number, height: (x: number, z: number) => number, step = 1): number | null {
+  const c = Math.cos(at.yaw), s = Math.sin(at.yaw), nx = Math.max(1, Math.ceil((2 * half[0]) / step)), nz = Math.max(1, Math.ceil((2 * half[1]) / step));
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i <= nx; i++) for (let j = 0; j <= nz; j++) {
+    const lx = -half[0] + (2 * half[0] * i) / nx, lz = -half[1] + (2 * half[1] * j) / nz, h = height(at.x + lx * c + lz * s, at.z - lx * s + lz * c);
+    lo = Math.min(lo, h); hi = Math.max(hi, h);
+  }
+  const want = Math.max(lo - 0.03, hi - Math.max(0, footing));
+  // L (Red Dial 2026-10-30: a fire post the footpath grade FILLED over stood 0.7 m in the ground, float: buried): a piece
+  // buried past the cap below its highest ground comes up to the cap; one within it is only ever lowered
+  const raiseTo = hi - Math.max(0, footing);
+  if (raiseTo > at.y + 0.01) return Math.round(raiseTo * 1000) / 1000;
+  return want < at.y - 0.01 ? Math.round(want * 1000) / 1000 : null;
+}
+
+/** A piece's seat pad before merging (place-build's SEAT PADS pass). */
+export interface SeatPadRaw { id: string; at: V2; radius: number; y: number; gap: number }
+/** L (dropped-hour 2026-10-30: a spit over its pyre each got a pad at its own height: the pyre floated 0.13 m, the spit
+ *  0.15 m): seat pads of pieces SHARING a spot (centres within half the smaller pad's radius: one over the other) merge into ONE pad covering them all at the LOWEST base of the group (ids joined
+ *  with "--", the largest gap kept). Neighbours whose pads only touch keep their own (a merged pad at the lower pillar's
+ *  seat cut 0.8 m from under the next pillar up the avenue, Red Dial). Pure. */
+export function mergeSeatPads(pads: SeatPadRaw[]): SeatPadRaw[] {
+  const groups: SeatPadRaw[][] = [];
+  for (const p of pads) {
+    const hit = groups.filter((g) => g.some((q) => Math.hypot(q.at[0] - p.at[0], q.at[1] - p.at[1]) < 0.5 * Math.min(q.radius, p.radius)));
+    const merged = [p, ...hit.flat()]; for (const h of hit) groups.splice(groups.indexOf(h), 1); groups.push(merged);
+  }
+  return groups.map((g) => {
+    if (g.length === 1) return g[0]!;
+    const c: V2 = [g.reduce((s, q) => s + q.at[0], 0) / g.length, g.reduce((s, q) => s + q.at[1], 0) / g.length];
+    return { id: g.map((q) => q.id).sort().join("--"), at: [r2(c[0]), r2(c[1])], radius: r2(Math.max(...g.map((q) => Math.hypot(q.at[0] - c[0], q.at[1] - c[1]) + q.radius))), y: Math.min(...g.map((q) => q.y)), gap: Math.max(...g.map((q) => q.gap)) };
+  });
+}
+/** The most ground a seat pad may lift under a piece (more is a re-plan, not a pad). */
+export const SEAT_PAD_MAX_M = 1.5;
+/** L (Red Dial 2026-10-30: pillars on 0.8-1.5 m of fall kept daylight under their low edge after the sink cap): the
+ *  seat pad a piece's base needs on the ground AS BUILT (after the footpath grades): a level disc at its foot over its
+ *  turned footprint, or null when nothing shows (gap <= 0.05 m) or the fall is past SEAT_PAD_MAX_M. Pure. */
+export function seatPad(at: { x: number; y: number; z: number; yaw: number }, half: [number, number], height: (x: number, z: number) => number, step = 0.5): { radius: number; y: number; gap: number } | null {
+  const c = Math.cos(at.yaw), s = Math.sin(at.yaw), nx = Math.max(1, Math.ceil((2 * half[0]) / step)), nz = Math.max(1, Math.ceil((2 * half[1]) / step));
+  let lo = Infinity;
+  for (let i = 0; i <= nx; i++) for (let j = 0; j <= nz; j++) {
+    const lx = -half[0] + (2 * half[0] * i) / nx, lz = -half[1] + (2 * half[1] * j) / nz;
+    lo = Math.min(lo, height(at.x + lx * c + lz * s, at.z - lx * s + lz * c));
+  }
+  const gap = Math.round((at.y - lo) * 1000) / 1000;
+  if (gap <= 0.05 || gap > SEAT_PAD_MAX_M) return null;
+  return { radius: Math.round((Math.hypot(half[0], half[1]) + 1.2) * 100) / 100, y: at.y, gap }; // 1.2 m of plateau past the base: the filtered 2 m lattice sagged a 0.3 m margin 0.28 m (red-pillar)
 }

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { artBlock, deliversArt, finalReviewBlock, footprintPoints, jobHandoff, jobParent, measureSize, ownerApproval, readReview, rubricCodes, sizeBlock, deliversMaterialModels, deliversStructures, flatArtBlock, installBlock, terrainFineBlock, fineExceptionsFile, isMonumentSite, monumentApproachBlock, ownerOverrideScenes, opsHash, recordFix, recordReview, requireFinalReview, seeThroughBlock, setStage, stageBlock, catalogueIds, designBlock, designCodes, designFaults, designHash, recordDesignReview } from "./job.mjs";
+import { artBlock, deliversArt, finalReviewBlock, footprintPoints, jobHandoff, jobParent, measureSize, ownerApproval, readReview, rubricCodes, sizeBlock, deliversMaterialModels, deliversStructures, flatArtBlock, installBlock, terrainFineBlock, fineExceptionsFile, isMonumentSite, monumentApproachBlock, ownerOverrideScenes, opsHash, recordFix, recordReview, requireFinalReview, seeThroughBlock, setStage, stageBlock, catalogueIds, designBlock, designCodes, designFaults, designHash, recordDesignReview, jobArt } from "./job.mjs";
 import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership } from "./concept-site.mjs";
 
 // image-request records live in a scratch folder for the whole file (concept-site.mjs reads HITREG_IMAGE_REQUESTS)
@@ -635,6 +635,43 @@ test("gate 16: a story element's props must exist in the project closure's catal
   }
 });
 
+test("gate 16 art mode: a catalogue place (world order) asks for no concept frame and no sample; a painted place still does", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "poi-art-"));
+  const pd = path.join(root, "projects", "w");
+  const dir = path.join(pd, "authoring", "zonegen", "w", "zones", "z", "pois", "t");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(pd, "project.json"), JSON.stringify({ name: "w", dependsOn: [] }));
+  fs.writeFileSync(path.join(dir, "progress.json"), JSON.stringify({ version: 1, poiId: "t", ownerAgentId: "POI-T", stage: "blockout" }));
+  fs.writeFileSync(path.join(dir, "brief.json"), JSON.stringify({ id: "t", adventureSize: "pinpoint" }));
+  const stages = (place) => { fs.mkdirSync(path.join(pd, "authoring", "stages"), { recursive: true }); fs.writeFileSync(path.join(pd, "authoring", "stages", "w.json"), JSON.stringify({ version: 1, world: "w", places: [place] })); };
+  try {
+    designJson(dir, { concept: [], sample: undefined });
+    const wants = (re) => designFaults(dir).some((f) => re.test(f));
+    assert.equal(jobArt(dir), null, "no staged world: the art mode is unknown");
+    assert.ok(wants(/^concept:/) && wants(/^sample:/), "unknown art mode: the painted rules hold");
+    stages({ id: "t", kind: "poi", role: "small-place" });
+    assert.equal(jobArt(dir), "catalogue", "a small POI role is catalogue by default");
+    assert.ok(!wants(/^concept:/) && !wants(/^sample:/), designFaults(dir).join(" | "));
+    stages({ id: "t", kind: "poi", role: "small-place", art: "painted" });
+    assert.ok(wants(/^concept:/), "an explicit painted art mode asks for the concept frame again");
+    stages({ id: "t", kind: "poi", role: "large-place" });
+    assert.equal(jobArt(dir), "painted");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("gate 16: a ruling recorded in design.json (size, *Ruling) never changes the design hash; a design edit does, and an old raw-bytes review hash still matches", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "poi-ruling-"));
+  try {
+    designJson(dir);
+    const before = designHash(dir), legacy = designHash(dir, undefined, { legacy: true });
+    designJson(dir, { size: "pinpoint", sizeRuling: "coordinator 2026-10-29: camp scale", approachRuling: "one road" });
+    assert.equal(designHash(dir), before, "ruling fields are bookkeeping");
+    assert.notEqual(designHash(dir, undefined, { legacy: true }), legacy, "the raw bytes did change");
+    designJson(dir, { premise: "A roadside shrine where carters leave a stone, and something takes it back each night." });
+    assert.notEqual(designHash(dir), before, "a premise edit is a design edit");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("gate 12: a clearing outside the reservation never stretches the footprint; a recorded coordinator size ruling excepts only the usable-area shortfall", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "poi-ruling-"));
   try {
@@ -724,5 +761,27 @@ test("gate 16 concept on site: a moved reservation stales the frame; a job whose
     p.designReview = { verdict: "PASS", file: "design-review.md", designHash: designHash(dir), reviewer: "REV-D1" };
     fs.writeFileSync(path.join(dir, "progress.json"), JSON.stringify(p));
     assert.deepEqual(designFaults(dir, undefined, { sample: false }).filter((f) => /concept/.test(f)), []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("gate 16 concept on site: once the world-order ledger records the concept approved and the design reviewed, a whole-world change no longer stales the frames", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "poi-ledger-"));
+  const dir = path.join(root, "projects", "p", "authoring", "zonegen", "w", "zones", "zone-1", "pois", "t");
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  fs.renameSync(job({ designed: false }), dir);
+  try {
+    designJson(dir);
+    const { worldFile } = siteConcept(dir);
+    const faults = () => designFaults(dir, undefined, { sample: false }).filter((f) => /concept/.test(f));
+    const world = JSON.parse(fs.readFileSync(worldFile, "utf8"));
+    fs.writeFileSync(worldFile, JSON.stringify({ ...world, terrain: { amp: 41 } }));
+    assert.ok(faults().some((f) => /world changed under the reservation/.test(f)), "no ledger: the fingerprint still judges");
+    const ledger = path.join(root, "projects", "p", "authoring", "stages", "w.json");
+    fs.mkdirSync(path.dirname(ledger), { recursive: true });
+    const stages = { "concept-approved": { at: "x", by: "derek" } };
+    fs.writeFileSync(ledger, JSON.stringify({ version: 1, places: [{ id: "t", stages }] }));
+    assert.ok(faults().length > 0, "approved but not design-reviewed: still judged");
+    fs.writeFileSync(ledger, JSON.stringify({ version: 1, places: [{ id: "t", stages: { ...stages, "design-review": { at: "y", by: "reviewer" } } }] }));
+    assert.deepEqual(faults(), []);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

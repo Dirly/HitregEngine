@@ -1117,8 +1117,20 @@ export const seaWaterSchema = z.object({
   glintSize: z.number().min(0.001).max(0.5).default(0.03).describe("How wide the glint cone around the sun's mirror angle is (bigger = a wider glitter path)."),
 });
 
+/**
+ * L (redstrand 2026-10-30: a water material's plain `color` was ignored, the shader drew its cyan defaults): on a
+ * `shader: "water"` material, `color` fills `water.shallowColor` / `midColor` / `deepColor` wherever those are absent.
+ */
+function waterColorFromColor(v: unknown): unknown {
+  if (!v || typeof v !== "object") return v;
+  const m = v as Record<string, unknown>;
+  if (m.shader !== "water" || typeof m.color !== "string") return v;
+  const w = (m.water && typeof m.water === "object" ? m.water : {}) as Record<string, unknown>;
+  return { ...m, water: { shallowColor: m.color, midColor: m.color, deepColor: m.color, ...w } };
+}
+
 /** PBR material — a data asset referenced by mesh.material GUID. */
-export const materialSchema = z.object({
+export const materialSchema = z.preprocess(waterColorFromColor, z.object({
   shader: z
     .enum(["standard", "unlit", "toon", "wireframe", "terrain-splat", "water", "portal", "rock-cap"])
     .default("standard")
@@ -1126,7 +1138,7 @@ export const materialSchema = z.object({
       "Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR; " +
         "terrain-splat = blends `splat.layers` by height/slope (seamless heightmap terrain, no per-tile hard edges); " +
         "rock-cap = faceted rock with a zone-chosen top cap (see `rockCap`); " +
-        "portal = persistent unlit FX Lab procedural gate using color/opacity and optional map luminance as rotating paint detail on local 0..1 UVs; visual only, no zone transfer. water = animated fresnel/ripple shader driven by `water` (bounded brightness — safe under bloom).",
+        "portal = persistent unlit FX Lab procedural gate using color/opacity and optional map luminance as rotating paint detail on local 0..1 UVs; visual only, no zone transfer. water = animated fresnel/ripple shader driven by `water` (bounded brightness — safe under bloom); its `color` fills water.shallowColor/midColor/deepColor where those are absent.",
     ),
   color: hexColor.default("#9aa0a8"),
   map: z.string().optional().describe("Texture asset id (assets/textures/) used as the color map."),
@@ -1854,7 +1866,7 @@ export const materialSchema = z.object({
         "baked crevice mask. Two fetches and one hash a fragment: far below the terrain's twelve. Per-instance values " +
         "come from `mesh.source.rockCap`; a non-instanced mesh draws the bare first base.",
     ),
-});
+}));
 
 /** Attach behavior: a registered script by name + its tuning params. */
 export const scriptSchema = z.object({

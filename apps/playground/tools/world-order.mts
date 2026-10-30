@@ -564,6 +564,10 @@ export function recordPlaceStage(projectDir: string, key: string, stage: string,
     if (!doc || !p) continue;
     const hash = currentWorldHash(projectDir, doc)!;
     const { evidenceFile, ...rest } = fields;
+    // L (Red Dial 2026-10-30: re-recording an unchanged design.json STALEd its design-review): the same evidence (same
+    // sha) recorded again is a no-op — the old record and its time stay, so the stages after it stay current
+    const prior = p.stages[stage], sameSha = evidenceFile ? evidenceSha(path.resolve(evidenceFile)) : null;
+    if (prior && sameSha && prior.evidenceSha === sameSha) return `${p.id} ${stage}: evidence unchanged since ${prior.at} (no-op: the stages after it stay as they are)`;
     const ground = groundRecord(projectDir, doc, p);
     p.stages[stage] = {
       at: new Date().toISOString(), worldHash: hash, ...(ground ? { ground } : {}), ...rest,

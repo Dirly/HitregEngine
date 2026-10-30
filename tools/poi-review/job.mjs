@@ -271,11 +271,19 @@ export function readDesign(dir) {
 }
 
 /** One hash over design.json and every sample frame it names: editing either re-opens the design review. */
-export function designHash(dir, design = readDesign(dir)) {
+/** Top-level design.json fields that record a coordinator ruling or bookkeeping, not the design: editing them never stales a
+ *  review (L o-small 2026-10-29: recording a size ruling in design.json re-opened a design review twice). */
+export const DESIGN_RULING_KEY = (k) => k === "size" || /Ruling$/.test(k);
+/** design.json without its ruling fields, canonical: what a design review judges. */
+export function designBody(design) {
+  return JSON.stringify(Object.fromEntries(Object.entries(design).filter(([k]) => !DESIGN_RULING_KEY(k))));
+}
+export function designHash(dir, design = readDesign(dir), { legacy = false } = {}) {
   const f = path.join(dir, DESIGN_FILE);
   if (!design || design.__error || !fs.existsSync(f)) return null;
   const shots = Array.isArray(design.sample?.shots) ? design.sample.shots.filter((s) => typeof s === "string") : [];
-  const parts = [`${DESIGN_FILE}\0${sha(fs.readFileSync(f))}`];
+  // legacy: the raw file bytes (reviews recorded before the ruling fields were left out still match their design)
+  const parts = [`${DESIGN_FILE}\0${legacy ? sha(fs.readFileSync(f)) : sha(designBody(design))}`];
   for (const s of shots) { const p = path.resolve(dir, s); parts.push(`${s}\0${fs.existsSync(p) ? sha(fs.readFileSync(p)) : "missing"}`); }
   return sha(parts.join("\n"));
 }
@@ -335,10 +343,40 @@ function resolveRef(dir, r) {
   return null;
 }
 
+/**
+ * The job's art mode from its project's world order (`authoring/stages/<world>.json`, apps/playground/tools/world-order.mts
+ * `artOf`): the place's `art`, else a small / roadside / camp POI is "catalogue" and everything else "painted" (Derek
+ * 2026-10-29: small places get no concept art and no new props). Null when no staged world knows the place. Read from
+ * the world order, never from design.json: a design cannot excuse itself from its concept frame.
+ */
+export function jobArt(dir) {
+  const { playground, project } = projectOf(dir);
+  if (!playground) return null;
+  const poi = tryJson(progressFile(dir))?.poiId ?? tryJson(path.join(dir, "brief.json"))?.id ?? path.basename(dir);
+  const stages = path.join(playground, "projects", project, "authoring", "stages");
+  if (!fs.existsSync(stages)) return null;
+  for (const f of fs.readdirSync(stages).filter((x) => x.endsWith(".json"))) {
+    const p = (tryJson(path.join(stages, f))?.places ?? []).find((x) => x?.id === poi || x?.name === poi);
+    if (p) return p.art ?? (p.kind === "poi" && /small|roadside|camp/.test(String(p.role ?? "")) ? "catalogue" : "painted");
+  }
+  return null;
+}
+
 /** A design review PASS is on record for the job (its concept frames were judged before the concept-on-site rule or on it). */
 function designReviewed(dir) {
   const p = tryJson(progressFile(dir));
   return !!p?.designReview && String(p.designReview.verdict).toUpperCase() === "PASS";
+}
+/** The world-order ledger (<project>/authoring/stages/<world>.json, zonegen stages) records this place's concept as
+ *  approved and its design as reviewed: the stage machine owns ground freshness from then on (it marks the place STALE
+ *  and refuses place-build when the LOCAL ground moves), so gate 16 stops re-judging the frames against a whole-world
+ *  fingerprint. L (Red Dial 2026-10-29: a woodland pass elsewhere in the world blocked a reviewed place's build). */
+function stageReviewed(dir) {
+  const { playground, project } = projectOf(dir), parts = path.resolve(dir).split(path.sep), zi = parts.lastIndexOf("zonegen");
+  if (!playground || !project || zi < 0 || !parts[zi + 1]) return false;
+  const ledger = tryJson(path.join(playground, "projects", project, "authoring", "stages", `${parts[zi + 1]}.json`));
+  const place = (ledger?.places ?? []).find((q) => q?.id === jobSite(dir).poi);
+  return !!place?.stages?.["concept-approved"] && !!place?.stages?.["design-review"];
 }
 
 /**
@@ -385,8 +423,12 @@ export function designFaults(dir, design = readDesign(dir), { sample = true } = 
   if (areas.length < minAreas) out.push(`areas: ${areas.length} of at least ${minAreas} for a ${tier} place — the functional layout (where people enter, work, gather, leave)`);
   const placed = new Set(areas.flatMap((a) => (Array.isArray(a?.elements) ? a.elements : [])));
   for (const id of ids) if (!placed.has(id)) out.push(`element "${id}" stands in no area`);
+  // a catalogue place (world order art mode) has no concept painting and no sample-before-repeat stage: it is built
+  // from catalogue props in one go and the grey-box / final review judge the built frames (L o-small 2026-10-29: the
+  // design gate demanded a concept frame the world order had ruled out)
+  const catalogue = jobArt(dir) === "catalogue";
   const s = design.sample;
-  if (!sample) { /* before the build: the sample frames do not exist yet */ }
+  if (!sample || (catalogue && !s)) { /* before the build, or a catalogue place: no sample frames asked for */ }
   else if (!s || typeof s !== "object" || !str(s.area, 2)) out.push("sample: { area, shots[] } — the ONE area finished to the bar before anything repeats, with its player-height frames");
   else {
     if (!areaIds.has(s.area)) out.push(`sample.area "${s.area}" is not in areas[]`);
@@ -401,13 +443,13 @@ export function designFaults(dir, design = readDesign(dir), { sample = true } = 
   // premise BEFORE the build (image-request.mjs gen, the zone's concept frames as --ref); the build composes to it, the reviewer
   // holds the sample frames beside it (P5)
   const concepts = Array.isArray(design.concept) ? design.concept.filter((x) => typeof x === "string") : [];
-  if (!concepts.length) out.push(`concept: at least one concept frame drawn from the premise before the build, painted on a render of the bare site (${CONCEPT_COMMAND}; it writes <zone>/concept/<id>-approach.png and -far.png)`);
+  if (!concepts.length && !catalogue) out.push(`concept: at least one concept frame drawn from the premise before the build, painted on a render of the bare site (${CONCEPT_COMMAND}; it writes <zone>/concept/<id>-approach.png and -far.png)`);
   for (const c of concepts) if (!resolveRef(dir, c)) out.push(`concept frame ${c} does not exist`);
   // L (Wristgate 2026-10-29: every firstshore concept was drawn from TEXT; Codex invented a cliff tall enough for a 50 m
   // gate on a 40 m gorge and the owner built to it): a NEW job's concept frames (no design review PASS recorded yet) count
   // only as repaints of a render of the bare site made by `zonegen concept` for the same reservation, on the ground as it
   // is now (concept-site.mjs). A job whose design was already reviewed keeps its frames until the design re-opens.
-  if (concepts.length && !designReviewed(dir)) {
+  if (concepts.length && !designReviewed(dir) && !stageReviewed(dir)) {
     const site = jobSite(dir), { playground } = projectOf(dir);
     for (const f of concepts.map((c) => resolveRef(dir, c)).filter(Boolean)) { const why = conceptSiteFault(f, site, playground ?? undefined); if (why) out.push(why); }
   }
@@ -438,7 +480,7 @@ export function designBlock(dir, p) {
   const said = readReview(file);
   if (said.verdict !== "PASS") return `${r.file} does not say Verdict: PASS (it says ${said.verdict || "nothing"}) (gate 16)`;
   if (said.designHash !== r.designHash) return `${r.file} names design hash ${said.designHash ?? "(none)"}, progress.json ${r.designHash} (gate 16)`;
-  if (r.designHash !== now) return `the design or its sample frames changed after the design review (reviewed ${String(r.designHash).slice(0, 12)}, now ${String(now).slice(0, 12)}): review again (gate 16)`;
+  if (r.designHash !== now && r.designHash !== designHash(dir, design, { legacy: true })) return `the design or its sample frames changed after the design review (reviewed ${String(r.designHash).slice(0, 12)}, now ${String(now).slice(0, 12)}): review again (gate 16)`;
   return reviewIdentityBlock(dir, said, r.file, { codes: designCodes(), gate: 16, sections: "Place" });
 }
 
@@ -450,7 +492,7 @@ export function recordDesignReview(dir, file) {
   const said = readReview(path.resolve(file));
   const now = designHash(dir);
   if (!said.designHash) throw new Error(`${rel} names no design hash: the reviewer writes "Design hash: ${now}" (job.mjs design) in it`);
-  if (said.designHash !== now) throw new Error(`${rel} reviewed design ${said.designHash.slice(0, 12)}, the job's design is ${String(now).slice(0, 12)} now`);
+  if (said.designHash !== now && said.designHash !== designHash(dir, undefined, { legacy: true })) throw new Error(`${rel} reviewed design ${said.designHash.slice(0, 12)}, the job's design is ${String(now).slice(0, 12)} now`);
   const who = reviewIdentityBlock(dir, said, rel, { codes: designCodes(), gate: 16, sections: "Place" });
   if (who) throw new Error(who);
   const p = loadProgress(dir);
@@ -1127,7 +1169,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     else if (cmd === "review") console.log(JSON.stringify(recordReview(dir, opt("file"))));
     else if (cmd === "design") {
       const faults = designFaults(dir);
-      if (faults.length) { console.error(`design (gate 16) FAIL:\n  ${faults.join("\n  ")}`); process.exitCode = 1; }
+      if (faults.length) { console.error(`design (gate 16) FAIL:\n  ${faults.join("\n  ")}\nDesign hash: ${designHash(dir)} (art ${jobArt(dir) ?? "unknown"})`); process.exitCode = 1; }
       else { console.log(`design ok (gate 16)\nDesign hash: ${designHash(dir)}`); const d = designBlock(dir); if (d) { console.log(`review: ${d}`); process.exitCode = 1; } else console.log("review: PASS recorded for this design"); }
     }
     else if (cmd === "design-review") console.log(JSON.stringify(recordDesignReview(dir, opt("file"))));

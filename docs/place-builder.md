@@ -65,11 +65,20 @@ builder decided where things went (TOOLS-LAYOUT 2026-10-24). The owner writes `<
 
 ```
 { "version": 1, "frame": "place", "origin": [x, z],
-  "pieces": [{ "id", "element", "kind": "structure"|"prop"|"fire"|"decal", "prefab", "at": [x, z], "yaw"?, "scale"?, "pocket"?, "role"?, "landmark"?, "over"?: [ids], "quest"?: "<slot>" }],
+  "pieces": [{ "id", "element", "kind": "structure"|"prop"|"fire"|"decal", "prefab", "at": [x, z], "yaw"?, "scale"?, "pocket"?, "role"?, "landmark"?, "over"?: [ids], "on"?: "<earlier piece id>", "quest"?: "<slot>" }],
   "views":  [{ "name", "camera": [x, y, z], "target": [x, y, z] }],
-  "ground": [{ "id", "element"?, "kind": "wear"|"mud"|"ash"|"paving"|"rubble", "at": [x, z], "radius"?, "texture"? }] }
+  "ground": [{ "id", "element"?, "kind": "wear"|"mud"|"ash"|"paving"|"rubble", "at": [x, z], "radius"?, "texture"? }],
+  "waters": [{ "id", "element"?, "on": "<piece id>", "marker"?: "basin-water", "material", "depth"?, "swim"? }],
+  "areas":  [{ "id", "role", "at": [x, z], "radius", "note"?, "reach"?: [x, z] }] }
 ```
 
+- **Extra dressing areas** (`areas`): a midden, an opened tomb, beyond the pockets' own areas (a pinpoint has one pocket). Each joins
+  handoff siteDressing.areas, gets its own fresh dresser and plan `dressing/<poi>-<id>.json`, which `plan` keeps; `reach` is the
+  walk gate's point at the area's edge (default the centre, where its props stand).
+- **Per-place tweaks of a catalogued piece** (piece `overrides`): prefab-instance overrides, e.g. a pyre whose light burns at night
+  only: `[{ "path": "bonfire/components/prefab/overrides", "value": [{ "path": "glow/components/light/when", "value": "night" }] }]`.
+- **Water in a built basin** (`waters`): one still, level sheet at a placed piece's marker (a kit basin's `basin-water` in its
+  `<model>.markers.json`: centre, level and size), nothing moving; `pools` carve terrain and cannot fill a mesh basin.
 - **Frame**: the place frame `views` use: origin the plan centre (`reports/plan.json` `centre`), +z toward the approach,
   +x its right, y over padY. `origin` pins the core there, so no later site search moves the composition.
 - **Exact or refused**: `plan` places every piece at its `at`/`yaw`, settled to the ground there (structures and props

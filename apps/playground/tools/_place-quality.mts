@@ -170,12 +170,18 @@ export const toWorldYaw = (at: V2, yaw: number, x: number, z: number): V2 => [at
 export const SKIRT_RELIEF_M = 1;
 /** Ground fall (m) under which a piece that is not a dwelling is sunk to its lowest ground instead of raised. */
 export const SINK_MAX_M = 0.6;
+/** The longest side (m) from which an open or legged piece on a fall is seated on levelled ground (smaller ones: a table, a cart, are sunk). */
+export const LEVEL_MIN_EXTENT_M = 6;
 /** Raised foundations: metres the raised ground stands over the base's top cell, and its level plateau past the base. */
 export const RAISE_OVER_M = 0.1, RAISE_PAST_M = 1.5;
 export interface Seat { y: number; relief: number; lowest: number; skirt: V2[] | null; sunk: boolean;
   /** The ground raised under the base (raised foundations): a level, raise-only patch at `y` (the base's top cell level
    *  - 0.02) over `radius` round the structure. Null when the ground already holds it within SEAT_GAP_M. */
-  raise: { y: number; radius: number } | null }
+  raise: { y: number; radius: number } | null;
+  /** The ground under the base is LEVELLED to `raise.y` (cut and fill, not raise-only): an open-court ruin on a fall. */
+  level?: boolean;
+  /** The levelled ground's rectangle in the piece's own frame (centre, half sizes; turned with it): `level` only. */
+  rect?: { centre: [number, number]; half: [number, number] } }
 /** Where a structure's root goes (y) on `ground`, and whether it needs a skirt: a built piece sits on the HIGHEST ground
  *  under its base (nothing buries its floor) and, when its outline then stands more than SEAT_GAP_M clear anywhere, a
  *  the ground under it is raised to its base (`raise`) and, past SKIRT_RELIEF_M of fall, a skirt also runs round its outline (the convex hull of the perimeter cells, world XZ, closed) down into the ground. A rock or
@@ -185,6 +191,19 @@ export function seatStructure(base: BaseOutline, at: V2, yaw: number, ground: (x
   const per = base.perimeter.map(([x, z, yb]) => { const w = toWorldYaw(at, yaw, x, z); return { w, need: ground(w[0], w[1]) - yb }; });
   const all = base.cells.map(([x, z, yb]) => { const w = toWorldYaw(at, yaw, x, z); return ground(w[0], w[1]) - yb; });
   const hi = Math.max(...all), lo = Math.min(...per.map((p) => p.need)), relief = r2_(hi - lo);
+  // L (Red Dial 2026-10-30: open-court ruins (fill < SKIRT_MIN_FILL) on 1.5-4.4 m of fall were sunk to their lowest ground,
+  // their uphill walls buried to the coping, then raised by the build's backfill and standing 0.4-3.5 m clear): a wide piece
+  // on legs or an open court past `sinkMax` of fall stands at the middle of its fall on LEVELLED ground (cut + fill, `level`)
+  if (!opts.rock && Math.max(...base.extent) >= LEVEL_MIN_EXTENT_M && Math.min(...base.extent) >= SKIRT_MIN_EXTENT_M && base.fill < SKIRT_MIN_FILL && relief > (opts.sinkMax ?? 0)) {
+    const y = r2_((hi + lo) / 2);
+    // the levelled ground stands 3 cm under the base's highest OUTLINE cell (the seated gate's measure; a declared footing
+    // below it goes into the ground; a floor slab on ground at its top cell z-fought it, arcade-court)
+    // over the base's own turned rectangle (a disc round a 24 m wall cut under the plinth beside it), RAISE_PAST_M past it:
+    // L (o-small2 dropped-hour 2026-10-30: at +0.5 m the filtered 2 m patch lattice sagged, the hide lodge stood 0.062 m clear)
+    const xs = base.cells.map((c) => c[0]), zs = base.cells.map((c) => c[1]);
+    return { y, relief, lowest: r2_(lo), skirt: null, sunk: false, level: true, raise: { y: r2_(y + Math.max(...base.perimeter.map((c) => c[2])) - 0.03), radius: r2_(Math.max(...base.cells.map(([x, z]) => Math.hypot(x, z))) + RAISE_PAST_M) },
+      rect: { centre: [r2_((Math.max(...xs) + Math.min(...xs)) / 2), r2_((Math.max(...zs) + Math.min(...zs)) / 2)], half: [r2_((Math.max(...xs) - Math.min(...xs)) / 2 + RAISE_PAST_M), r2_((Math.max(...zs) - Math.min(...zs)) / 2 + RAISE_PAST_M)] } };
+  }
   if (opts.rock || Math.min(...base.extent) < SKIRT_MIN_EXTENT_M || base.fill < SKIRT_MIN_FILL) return { y: r2_(lo - (opts.rock ? 0.2 : 0)), relief, lowest: r2_(lo), skirt: null, sunk: true, raise: null };
   if (relief <= SEAT_GAP_M) return { y: r2_(hi), relief, lowest: r2_(lo), skirt: null, sunk: false, raise: null };
   // L (art, signal-tower 2026-10-21: the raised patch round a ruin took the cliff paint and failed the ground texel rule):

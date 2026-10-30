@@ -57,7 +57,7 @@ import { skinPlacedOps } from "./rock-skins.mts";
 import { applyOps, applyRecipeEdits, ComponentRegistry, createWorldField, registerChunkComponents, registerCoreComponents, worldRecipeSchema } from "@hitreg/core";
 import { assetIds, findAsset, PROJECTS } from "./_closure.mjs";
 import {
-  applySets, silhouetteHeight, SILHOUETTE_RATIO, arrangeFirstPlan, DENIED_PROPS, approachLines, burnsAtDusk, forTier, newZfightClusters, approachReadAny, fillOk, installGuard, RESEAT_MAX_M, routeOnRibbon, hull, readBand, pickArchetype, roomFill, placeArchetypeSchema, planPlace, primitiveMeshes, siteSearch, staleEntities, unclearedStructures, uniqueItemIds, usableArea, type PlaceArchetype, type PlaceGround, type PlaceTier, type SiteBlockers, type SiteChoice,
+  sinkToBase, seatPad, mergeSeatPads, type SeatPadRaw, padPatch, applySets, silhouetteHeight, SILHOUETTE_RATIO, arrangeFirstPlan, DENIED_PROPS, approachLines, burnsAtDusk, forTier, newZfightClusters, approachReadAny, fillOk, installGuard, RESEAT_MAX_M, routeOnRibbon, hull, readBand, pickArchetype, roomFill, placeArchetypeSchema, planPlace, primitiveMeshes, siteSearch, staleEntities, unclearedStructures, uniqueItemIds, usableArea, type PlaceArchetype, type PlaceGround, type PlaceTier, type SiteBlockers, type SiteChoice,
   ribbonApproachOps, approachForBuilt, trackId, trimTrack, TRACK_CUT_M, TRACK_FILL_M, type ApproachTrack, type PlacePlan,
   fillerFor, requestedShortfall, type PlanDrop, placeLayoutSchema, withLayout, layoutCoverage, layoutSizeWarn, type PlaceLayout,
 } from "./_place-archetype.mts";
@@ -135,13 +135,13 @@ function gradeTrack(recipe: any, t: ApproachTrack | null): any[] {
 }
 function withoutPlace(w: any) { const features: any = {}; for (const [k, v] of Object.entries(w.features ?? {})) features[k] = Array.isArray(v) ? v.filter((f) => !ownsFeature(f)) : v; return { ...w, features }; }
 /** A prop's catalogue dressing declaration (the prefab root's `dressing` component), for the plan's culture checks. */
-const propInfoCache = new Map<string, { cultures?: string[]; height?: number; size?: number[] } | null>();
+const propInfoCache = new Map<string, { cultures?: string[]; height?: number; size?: number[]; footing?: number } | null>();
 let placementPolicy:ReturnType<typeof propPolicy>|undefined;
-function propInfo(prefab: string): { cultures?: string[]; height?: number; size?: number[] } | null {
+function propInfo(prefab: string): { cultures?: string[]; height?: number; size?: number[]; footing?: number } | null {
   (placementPolicy??=propPolicy(PROJECTS,project)).assertAllowed(prefab);
   if (!propInfoCache.has(prefab)) { const f = findAsset(project, `prefabs/${prefab}.json`); let d: any = null;
     try { const j = f ? read(f) : null; d = Object.values(j?.entities ?? {}).map((e: any) => e?.components?.dressing).find(Boolean) ?? null; } catch {}
-    propInfoCache.set(prefab, d ? { cultures: d.cultures, height: Array.isArray(d.size) ? d.size[1] : undefined, size: Array.isArray(d.size) ? d.size : undefined } : null); }
+    propInfoCache.set(prefab, d ? { cultures: d.cultures, height: Array.isArray(d.size) ? d.size[1] : undefined, size: Array.isArray(d.size) ? d.size : undefined, ...(Number(d.footing) > 0 ? { footing: Number(d.footing) } : {}) } : null); }
   return propInfoCache.get(prefab)!;
 }
 /** A catalogued piece's texel density (median tx/m), for the scale floor (cached). */
@@ -158,6 +158,21 @@ function topOf(prefab: string, x: number, z: number): number | null {
     const l1 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d, l2 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d, l3 = 1 - l1 - l2;
     if (l1 < 0 || l2 < 0 || l3 < 0) continue; const y = l1 * a[1] + l2 * b[1] + l3 * c[1]; if (best === null || y > best) best = y; }
   return best;
+}
+/** A catalogued piece's marker (prefab frame) from the <model>.markers.json beside its mesh (layout `waters`: a kit basin's level). */
+// L (o-small 2026-10-29): a .gltf model's markers were never found (only .glb was stripped)
+function markerOf(prefab: string, id: string): { position: [number, number, number]; size: [number, number, number] } | null {
+  try {
+    const pf = findAsset(project, `prefabs/${prefab}.json`); if (!pf) return null;
+    for (const e of Object.values(read(pf).entities ?? {}) as any[]) {
+      const asset = e?.components?.mesh?.source?.assetId; if (typeof asset !== "string") continue;
+      const mf = findAsset(project, `models/${asset.replace(/.(glb|gltf)$/i, "")}.markers.json`); if (!mf) continue;
+      const m = (read(mf).markers ?? []).find((x: any) => x.id === id); if (!m) continue;
+      const t = e.components.transform?.position ?? [0, 0, 0];
+      return { position: [m.position[0] + t[0], m.position[1] + t[1], m.position[2] + t[2]], size: m.size ?? [0, 0, 0] };
+    }
+  } catch {}
+  return null;
 }
 /** A catalogued piece's height (its declared dressing size), for the silhouette rule (withBeacon). */
 const heightOf = (prefab: string): number | null => (propInfo(prefab) as any)?.height ?? null;
@@ -185,6 +200,8 @@ function noFloor(p: string, id: string): string | null {
   const f = path.join(PROJECTS, p, "authoring", "dressing", "sockets", `${id}.json`); if (!fs.existsSync(f)) return null;
   try { const rooms = (read(f).levels ?? []).flatMap((l: any) => l.rooms ?? []); return rooms.length && rooms.every((r: any) => !(r.area > 0)) ? "0 m2 open of the area" : null; } catch { return null; }
 }
+/** A prefab's declared dressing footing (m below its base plane; 0 when none). */
+function footingOf(prefab: unknown): number { if (typeof prefab !== "string") return 0; try { const pf = findAsset(project, `prefabs/${prefab}.json`); return Number((Object.values(read(pf!).entities ?? {}).map((x: any) => x?.components?.dressing).find(Boolean) as any)?.footing) || 0; } catch { return 0; } }
 /** A structure prefab's base outline from its triangles (cached): the planner seats on it, the seated gate measures it. */
 const baseCache = new Map<string, BaseOutline | null>();
 function structureBase(prefab: string): BaseOutline | null {
@@ -345,7 +362,7 @@ function plan() {
   const roam = +(opt("roam") ?? 1.5), sites: Record<string, SiteChoice | null> = {};
   const planAt = (size: PlaceTier) => {
     const at0 = forTier(a, size, heightOf), at_ = layout ? withLayout(at0, layout, propInfo) : at0; // L (weepmouth 2026-10-21): a pinpoint is the core pocket only
-    const base = { world, zone, project, place: { id: poi, name: place.name, size, at, faces, text: briefText, ...(culture ? { culture } : {}) }, reservation: { center: res.center, radius: res.radius, approaches }, propInfo, texelsOf, topOf, questObjects, waters, builtStone, builtKinds, structureBase, materialExists: (m: string) => !!findAsset(project, `materials/${m}.json`), ...(layout ? { layout, catalogued: (id: string) => !!findAsset(project, `prefabs/${id}.json`), surfaces: ((recipe.surfaces ?? []) as any[]).map((x) => x.name as string), surfaceColors: Object.fromEntries(((recipe.surfaces ?? []) as any[]).filter((x) => typeof x.color === "string").map((x) => [x.name as string, x.color as string])) } : {}), scatterRules: ((recipe.scatter ?? []) as any[]).map((s) => s.id as string), roads: existingRoads(recipe), kitBuildings: assetIds(project, "prefabs/wfc-ruins").size > 0 };
+    const base = { world, zone, project, place: { id: poi, name: place.name, size, at, faces, text: briefText, ...(culture ? { culture } : {}) }, reservation: { center: res.center, radius: res.radius, approaches }, propInfo, texelsOf, topOf, markerOf, questObjects, waters, builtStone, builtKinds, structureBase, materialExists: (m: string) => !!findAsset(project, `materials/${m}.json`), ...(layout ? { layout, catalogued: (id: string) => !!findAsset(project, `prefabs/${id}.json`), surfaces: ((recipe.surfaces ?? []) as any[]).map((x) => x.name as string), surfaceColors: Object.fromEntries(((recipe.surfaces ?? []) as any[]).filter((x) => typeof x.color === "string").map((x) => [x.name as string, x.color as string])) } : {}), scatterRules: ((recipe.scatter ?? []) as any[]).map((s) => s.id as string), roads: existingRoads(recipe), kitBuildings: assetIds(project, "prefabs/wfc-ruins").size > 0 };
     const site = sites[size] = siteSearch(at_, base, g, { needM2: tierFor(size).minUsableAreaM2, roam, pinned, blockers, read: { band: readBand(size, a.read.band) } });
     const p = planPlace(at_, site ? { ...base, place: { ...base.place, at: site.at }, pocketAt: site.pockets } : base, g);
     const bcn = [...at_.pockets[0]!.structures, ...at_.pockets[0]!.walls].find((x) => x.id === "beacon");
@@ -385,8 +402,10 @@ function plan() {
   fs.mkdirSync(path.join(JOB, "reports"), { recursive: true });
   if (zoneMaster) write(path.join(JOB, "reports", "zone-master.json"), zoneMaster); else fs.rmSync(path.join(JOB, "reports", "zone-master.json"), { force: true });
   fs.mkdirSync(JOB, { recursive: true });
-  for (const f of fs.existsSync(path.join(JOB, "dressing")) ? fs.readdirSync(path.join(JOB, "dressing")) : []) fs.unlinkSync(path.join(JOB, "dressing", f)); // overwrite in place
-  write(path.join(JOB, "brief.json"), { id: poi, name: place.name, adventureSize: size, ...(downgrade ? { tierDowngrade: downgrade } : {}), archetype: a.id, sets: setList, ...(pinned ? { at: pinned } : {}), ...(faces && faces !== place.site?.faces ? { faces } : {}), site: siteRecord(sites[size] ?? null), place });
+  // overwrite in place; a layout area's plan is its dresser's, never the plan's (L o-small2 dropped-hour 2026-10-30)
+  const keepPlans = new Set((layout?.areas ?? []).map((q) => `${poi}-${q.id}.json`));
+  for (const f of fs.existsSync(path.join(JOB, "dressing")) ? fs.readdirSync(path.join(JOB, "dressing")) : []) if (!keepPlans.has(f)) fs.unlinkSync(path.join(JOB, "dressing", f));
+  write(path.join(JOB, "brief.json"), { id: poi, name: place.name, adventureSize: size, ...(downgrade ? { tierDowngrade: downgrade } : {}), archetype: a.id, sets: setList, ...(pinned ? { at: pinned } : {}), ...(faces ? { faces } : {}) /* L (o-small 2026-10-29): a --faces equal to the zone brief site.faces was dropped here, and the pinned re-plan of `all` then ignored site.faces and turned the frame to the nearest approach point */, site: siteRecord(sites[size] ?? null), place });
   write(path.join(JOB, "handoff.json"), p.handoff);
   write(path.join(JOB, "ops.json"), p.ops);
   write(path.join(JOB, "world-ops.json"), [...p.worldOps, ...gradeTrack(recipe, p.track)]);
@@ -540,13 +559,82 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
       if (r.status !== "off" || Number.isFinite(r.gap) || r.kind !== "scene" || st.ops.some((o: any) => o.id === r.id)) continue;
       const hs = [0, 1, 2, 3, 4, 5, 6, 7].map((k) => fb.height(r.x + 1.4 * Math.cos(k * Math.PI / 4), r.z + 1.4 * Math.sin(k * Math.PI / 4))), g = Math.min(...hs, fb.height(r.x, r.z)) - 0.03;
       const e = d0.entities[r.id], t = e?.components?.transform; if (!t || !(g > r.y + 0.01)) continue;
+      // L (Red Dial 2026-10-30): a kit structure with a declared footing keeps the plan's seat (its footing is MEANT to be in
+      // the levelled ground; lifted to a 1.4 m ring round its centre it stood 0.2-1.7 m clear on its outline)
+      if (footingOf(e?.components?.prefab?.prefabId) > 0) continue;
       const q = t.position ?? [0, 0, 0]; st.ops.push({ op: "set-component", id: r.id, component: "transform", data: { ...t, position: [q[0], Math.round((q[1] + g - r.y) * 1000) / 1000, q[2]] } });
+    }
+    // L (Red Dial 2026-10-30): a piece the footpath grades cut under still shows daylight at its edges after the centre
+    // re-seat: sink it to the lowest built ground under its WHOLE turned footprint, capped by its declared footing (sinkToBase)
+    // every piece (seatPlaced reports only the faulty ones), its world foot = the place root's position + its own (no root turn)
+    for (const id of ids) {
+      const e = d0.entities[id], t0 = e?.components?.transform, prefab = e?.components?.prefab?.prefabId; if (!t0 || typeof prefab !== "string") continue;
+      if ((e.tags ?? []).some((g: string) => /^(on|lift):/.test(g))) continue; // up on another piece or lifted on purpose: not the ground's
+      const root = e.parent ? d0.entities[e.parent]?.components?.transform?.position ?? [0, 0, 0] : [0, 0, 0];
+      const prior = st.ops.find((o: any) => o.op === "set-component" && o.id === id) as any, t = prior?.data ?? t0, q = t.position ?? [0, 0, 0];
+      const r = { id, x: root[0] + q[0], z: root[2] + q[2] };
+      const y = root[1] + q[1], size = propInfo(prefab)?.size, k = Array.isArray(t.scale) ? t.scale[0] : 1, rot = t.rotation ?? [0, 0, 0, 1];
+      if (!size) continue;
+      const footing = footingOf(prefab);
+      // a kit structure with a declared footing is sized by its catalogue box (rubble spread and all): sunk to the lowest
+      // ground under that box it came out BURIED (float, 2026-10-30) — it keeps the plan's seat; props and posts only
+      if (footing > 0) continue;
+      const ny = sinkToBase({ x: r.x, y, z: r.z, yaw: 2 * Math.atan2(rot[1], rot[3]) }, [(size[0] * k) / 2, (size[2] * k) / 2], Math.max(footing * k, 0.6 /* the plan's own SINK_MAX_M */), (x, z) => fb.height(x, z));
+      if (ny === null) continue;
+      const data = { ...t, position: [q[0], Math.round((q[1] + ny - y) * 1000) / 1000, q[2]] };
+      if (prior) prior.data = data; else st.ops.push({ op: "set-component", id: r.id, component: "transform", data });
+    }
+    // L (Red Dial 2026-10-30: a fire bowl `on` a pillar floated after the pillar was re-seated): a piece `on` a moved
+    // piece moves with it (same dy), down a chain of `on` pieces
+    for (let moved = true, guard = 0; moved && guard < 4; guard++) {
+      moved = false;
+      for (const o of [...st.ops] as any[]) {
+        if (o.op !== "set-component") continue;
+        const dy = o.data.position[1] - (d0.entities[o.id]?.components?.transform?.position?.[1] ?? o.data.position[1]); if (Math.abs(dy) < 1e-4) continue;
+        const short = o.id.replace(`${poi}-`, "").replace(/^[^-]+-/, ""); // red-dial-core-pillar-w3 -> pillar-w3 (layout id)
+        for (const id of ids) {
+          const c = d0.entities[id]; if (!(c?.tags ?? []).includes(`on:${short}`) || st.ops.some((x: any) => x.op === "set-component" && x.id === id)) continue;
+          const tc = c.components.transform, pc = tc.position ?? [0, 0, 0];
+          st.ops.push({ op: "set-component", id, component: "transform", data: { ...tc, position: [pc[0], Math.round((pc[1] + dy) * 1000) / 1000, pc[2]] } }); moved = true;
+        }
+      }
     }
     if (st.ops.length) {
       write(SF, applyOps(d0, st.ops as never, reg).doc);
       const byId = new Map(st.ops.filter((o: any) => o.op === "set-component").map((o: any) => [o.id, o.data])), jops = read(path.join(JOB, "ops.json")) as any[];
       for (const o of jops) if (o.op === "add-entity" && byId.has(o.id)) o.entity.components.transform = byId.get(o.id);
       write(path.join(JOB, "ops.json"), jops); console.log(`  re-seated ${st.ops.length} piece(s) on the ground as built (operator backfill); ops.json updated`);
+    }
+  }
+  // L (Red Dial 2026-10-30): SEAT PADS after the footpaths — a piece whose base still shows daylight on the ground as built
+  // (a 2.5 m pillar on 0.8-1.5 m of fall, past the sink cap) gets a small feathered level pad at its foot (seatPad, capped
+  // SEAT_PAD_MAX_M; never under a kit structure with a declared footing). Measured on the lab, kept in seat-pads.json so the
+  // live install appends the same patches AFTER its own op-apply (later height patches win)
+  if (!remove) {
+    const spf = path.join(JOB, "seat-pads.json");
+    let pads: any[] = [];
+    if (p === lab) {
+      const d1 = read(SF), fb2 = createWorldField(worldRecipeSchema.parse(read(WF)));
+      const raw: SeatPadRaw[] = [];
+      for (const [id, e] of Object.entries(d1.entities) as [string, any][]) {
+        const tags: string[] = e.tags ?? [], prefab = e.components?.prefab?.prefabId, t = e.components?.transform;
+        if (!tags.includes(`poi:${poi}`) || tags.some((g) => /^(on|lift|lean):/.test(g)) || typeof prefab !== "string" || !t) continue;
+        const info = propInfo(prefab); if (!info?.size || info.footing) continue;
+        const root = e.parent ? d1.entities[e.parent]?.components?.transform?.position ?? [0, 0, 0] : [0, 0, 0], q = t.position ?? [0, 0, 0], rot = t.rotation ?? [0, 0, 0, 1], k = Array.isArray(t.scale) ? t.scale[0] : 1;
+        const x = root[0] + q[0], z = root[2] + q[2], pad = seatPad({ x, y: root[1] + q[1], z, yaw: 2 * Math.atan2(rot[1], rot[3]) }, [(info.size[0] * k) / 2, (info.size[2] * k) / 2], (a, b) => fb2.height(a, b));
+        if (pad) raw.push({ id: id.replace(`${poi}-`, ""), at: [x, z], radius: pad.radius, y: pad.y, gap: pad.gap });
+      }
+      // overlapping pieces (a spit over its pyre) share ONE pad at the lowest base, never two at different heights (dropped-hour)
+      for (const m of mergeSeatPads(raw)) pads.push({ ...padPatch(`${PREFIX}seatpad-${m.id}`, m.at, m.radius, m.y - 0.02, 2, true /* raise-only: a pad never cuts from under the next piece up the slope */), gap: m.gap });
+      write(spf, pads);
+    } else if (fs.existsSync(spf)) pads = read(spf);
+    if (pads.length) {
+      const w3 = read(WF), ids3 = new Set(pads.map((q) => q.feature.id));
+      w3.features.heightPatches = [...((w3.features.heightPatches ?? []) as any[]).filter((f) => !ids3.has(f.id)), ...pads.map((q) => q.feature)];
+      worldRecipeSchema.parse(w3); write(WF, w3);
+      console.log(`  seat pads: ${pads.length} piece(s) on a level pad at their foot after the paths (${pads.map((q) => `${q.feature.id.slice(PREFIX.length + 8)} ${q.gap} m`).join(", ")})`);
+      // the footpaths are baked again on the padded ground (op-check: STALE "the ground under it moved" otherwise)
+      if (operators.length) wg("op-apply", ["op", w, "--project", p, "--apply", path.join(JOB, "operators.json")]);
     }
   }
   if (!remove && p === lab) { // L: routes on the walk surface as BUILT (pads, raiseOnly, the footpaths' grade patches): re-measured on the lab ground AFTER the operators

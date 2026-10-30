@@ -110,6 +110,9 @@ describe("world order", () => {
     fs.writeFileSync(design, '{"size":"pinpoint","sizeRuling":"2026-10-29 coordinator: camp scale"}');
     assert.equal(state("dial", "design").state, "ok");
     assert.equal(state("dial", "design-review").state, "ok");
+    // L (Red Dial 2026-10-30): `--done design` again on the UNCHANGED design is a no-op: the review still stands
+    assert.equal(await quiet(() => stagesRun(ctx({ done: "design", place: "dial", evidence: design, by: "owner" }))), 0);
+    assert.equal(state("dial", "design-review").state, "ok", "re-recording the same design must not stale its review");
     // the design edited after its review: the review no longer stands
     fs.writeFileSync(design, '{"changed":true}');
     assert.equal(state("dial", "design").state, "STALE");
