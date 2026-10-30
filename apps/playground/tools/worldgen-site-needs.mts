@@ -32,7 +32,7 @@ import { decodePng, encodePng } from "./_png.mjs";
 import { drawText as drawGlyphs } from "./_map-text.mts";
 import { coastalFaults, findCoastalSites, measureCoastalSite } from "./worldgen-coastal-towns.mts";
 import {
-  compassWord, measureNeeds, needArea, needGroundOf, needRulingSchema, needsLine, needStillMet, solveCliffFace, solveWalledNeck, unexcepted,
+  compassWord, measureNeeds, needArea, needGroundOf, needRulingSchema, needsLine, needStillMet, solveCliffFace, solveRoadsideRib, solveWalledNeck, unexcepted,
   parsePlaceNeeds, type NeedGround, type NeedsReport, type SitedPlace, type SiteNeedOverrides, type SiteRole, type V2,
 } from "./site-needs.mts";
 
@@ -487,7 +487,7 @@ export function commandNeeds(host: SiteNeedsHost): void {
   }
   const only = arg(argv, "only", "");
   const needs = (recipe.needs ?? []).filter((n) => !only || n.id === only);
-  if (!needs.length) host.fail(only ? `no need ${only} in the recipe` : "the recipe has no `needs` (add one: { id, kind: cliff-face | walled-neck, near: [x, z] | \"<zone> <side>\", minHeight / radius, neck })");
+  if (!needs.length) host.fail(only ? `no need ${only} in the recipe` : "the recipe has no `needs` (add one: { id, kind: cliff-face | walled-neck | roadside-rib, near: [x, z] | \"<zone> <side>\", minHeight / radius, neck })");
   const ids = new Set(needs.map((n) => `need-${n.id}`));
   // solve on the ground WITHOUT this run's own patches (re-running replaces them) and without town pads
   const base: WorldRecipe = { ...recipe, features: { ...recipe.features, towns: [], heightPatches: recipe.features.heightPatches.filter((p) => !ids.has(p.id)) } };
@@ -496,7 +496,7 @@ export function commandNeeds(host: SiteNeedsHost): void {
   for (const need of needs) {
     let area;
     try { area = needArea(need.near, need.within, recipe.regions as never); } catch (e) { console.error(`  ${need.id}: ${(e as Error).message}`); failed++; continue; }
-    const s = need.kind === "cliff-face" ? solveCliffFace(g, need, area) : solveWalledNeck(g, need, area);
+    const s = need.kind === "cliff-face" ? solveCliffFace(g, need, area) : need.kind === "roadside-rib" ? solveRoadsideRib(g, need, area) : solveWalledNeck(g, need, area);
     if (!s.ok) { console.error(`  ${need.id} (${need.kind}): NOT SOLVED: ${s.message}`); failed++; continue; }
     recipe.features.heightPatches = recipe.features.heightPatches.filter((p) => p.id !== `need-${need.id}`);
     if (s.patch) {

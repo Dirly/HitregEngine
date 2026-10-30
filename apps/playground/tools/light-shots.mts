@@ -239,6 +239,27 @@ if (field) {
   const under = spots.filter((sp) => sp.camera && sp.y === undefined && sp.camera[1] < groundAt(sp.camera[0], sp.camera[2]) + 0.3);
   if (under.length) { console.error(`STOP: fixed camera(s) under the ground: ${under.map((sp) => `${sp.name} y ${sp.camera![1]} over ground ${groundAt(sp.camera![0], sp.camera![2]).toFixed(1)}`).join(", ")}`); process.exit(2); }
 }
+// CUT-OUTS NEAR THE CAMERA (2026-10-29 redstrand w9: a black maple blob and paper pines in the "far" frames). The
+// world streams full meshes only inside the full-render ring round the BODY (the spot's x/z); past it a cell draws its
+// HLOD proxy — impostor cut-outs. A fixed camera 225-258 m from its spot (concept's eye/target midpoint) stood in the
+// HLOD ring, so the trees beside it were cut-outs. A player stands at the eye, so a fixed camera streams from the eye
+// whenever the spot would leave its near ground out of the ring, and every frame records how far the full meshes
+// reach past the camera; one that reaches less than --cutout-free m (default 60) fails the run.
+const CUTOUT_FREE_M = Number(arg("cutout-free", "60"));
+const fullRenderM: number = (() => {
+  const vw = Object.values(sceneDoc.entities).map((e) => e.components["voxelWorld"] as { rings?: { fullRender?: number } } | undefined).find(Boolean);
+  const cell = recipe?.cellSize ?? 48;
+  const m = (vw?.rings?.fullRender ?? 3) * cell;
+  return SCOPE !== null ? Math.min(m, Math.max(1, Math.ceil(SCOPE / cell)) * cell) : m;
+})();
+const cutoutFree = (sp: Spot): number => (sp.camera ? fullRenderM - Math.hypot(sp.camera[0] - sp.x, sp.camera[2] - sp.z) : fullRenderM);
+spots = spots.map((sp) => {
+  if (!sp.camera || sp.y !== undefined || cutoutFree(sp) >= CUTOUT_FREE_M) return sp;
+  console.log(`  ${sp.name}: streams from the camera (the spot stood ${Math.round(Math.hypot(sp.camera[0] - sp.x, sp.camera[2] - sp.z))} m off it; full meshes reach ${fullRenderM} m)`);
+  return { ...sp, x: Math.round(sp.camera[0]), z: Math.round(sp.camera[2]) };
+});
+const cutoutFaults = spots.filter((sp) => cutoutFree(sp) < CUTOUT_FREE_M);
+if (cutoutFaults.length) { console.error(`FAIL cut-outs: impostor cut-outs would draw within ${CUTOUT_FREE_M} m of the camera at ${cutoutFaults.map((sp) => `${sp.name} (full meshes end ${Math.round(cutoutFree(sp))} m out)`).join(", ")}`); process.exitCode = 1; }
 // under the heavy-lock wrapper (it exports HEAVY_LOCK): the slot's label carries the spot count, so `heavy status` shows the size of the run
 if (process.env.HEAVY_LOCK) {
   try {
@@ -682,7 +703,7 @@ async function shootSpot(spot: Spot): Promise<void> {
   await sleep(1500);
   await settle(field ? 8000 : 2000); // zone mood eases in over ~6 s after arrival
   const region = regionOf(placed.pivot[0], placed.pivot[2]);
-  spotInfo.push({ ...spot, facing, region, pivot: placed.pivot, camera: placed.cam, cameraDistance: placed.dist });
+  spotInfo.push({ ...spot, facing, region, pivot: placed.pivot, camera: placed.cam, cameraDistance: placed.dist, fullMeshesPastCameraM: Math.round(cutoutFree(spot)) });
   for (const weatherName of WEATHERS) {
   let weatherLine = "";
   if (MULTI_WEATHER) {

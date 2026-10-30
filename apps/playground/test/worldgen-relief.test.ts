@@ -98,6 +98,11 @@ test("tree rules are the tall plants; the sampler finds woodland in a forest zon
   const wood = woodlandShare(recipe, field, [[-600, -600], [600, -600], [600, 600], [-600, 600]], sampler, 400);
   assert.ok(wood.share > 0.5, `woodland share ${wood.share}`);
   assert.deepEqual(interiorLakes(recipe, field, [[-600, -600], [600, -600], [600, 600], [-600, 600]]), []);
+  // a shore-placed rule counts only within its reach of water (2026-10-29 redstrand: willows counted on every dry table)
+  const shore = { ...recipe.scatter.find((s) => treeRules(recipe).some((t) => t.rule.id === s.id))!, id: "shore-willow", density: 0.5, water: { mode: "shore" as const, reach: 14 } };
+  const withShore = worldRecipeSchema.parse({ ...recipe, scatter: [...recipe.scatter, shore] });
+  const shoreField = createWorldField(withShore);
+  assert.ok(Math.abs(treeSampler(withShore, shoreField).density(0, 0) - inland) < 1e-9, "a shore rule adds nothing far inland");
 });
 
 test("autoRelief measures the largest landmass and derives the bands, the mask and the amplitude; a second run is a no-op", () => {

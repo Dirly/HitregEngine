@@ -890,7 +890,7 @@ export function needArea(near: GroundNeedDoc["near"], within: number, regions: r
 const smooth = (t: number) => { const c = Math.max(0, Math.min(1, t)); return c * c * (3 - 2 * c); };
 
 /** A masked, raise-only height patch over a box, from a function giving the wanted height (null = leave the ground). */
-function patchOver(id: string, box: [number, number, number, number], cell: number, natural: (x: number, z: number) => number, wantY: (x: number, z: number) => number | null): { patch: HeightPatchDoc; raised: number } {
+function patchOver(id: string, box: [number, number, number, number], cell: number, natural: (x: number, z: number) => number, wantY: (x: number, z: number) => number | null, blendM?: number): { patch: HeightPatchDoc; raised: number } {
   const columns = Math.min(1025, Math.max(2, Math.round((box[2] - box[0]) / cell) + 1));
   const rows = Math.min(1025, Math.max(2, Math.round((box[3] - box[1]) / cell) + 1));
   const sx = (box[2] - box[0]) / (columns - 1), sz = (box[3] - box[1]) / (rows - 1);
@@ -906,7 +906,9 @@ function patchOver(id: string, box: [number, number, number, number], cell: numb
       weights.push(1);
       raised = Math.max(raised, w - nat);
     }
-  const blend = Math.max(4, Math.min(12, Math.min(box[2] - box[0], box[3] - box[1]) / 2 - 1));
+  // a small feature passes its own blend (with a box margin wider than it): the default 12 m feather inside a 30 m box
+  // smoothed the whole dropped-hour rib into a dome (2026-10-29 w9)
+  const blend = blendM ?? Math.max(4, Math.min(12, Math.min(box[2] - box[0], box[3] - box[1]) / 2 - 1));
   return {
     patch: { id, origin: [box[0], box[1]], size: [box[2] - box[0], box[3] - box[1]], columns, rows, heights, weights, blend, raiseOnly: true, edgeSlope: 1.5 } as HeightPatchDoc,
     raised,
@@ -1072,10 +1074,134 @@ export function solveWalledNeck(g: NeedGround, need: GroundNeedDoc, area: NeedAr
   return { ok: true, existing: false, at: [Math.round(cx), Math.round(cz)], faces: Math.round(best.neck), height: R1(top), raised: R1(raised), patch, message: `a promontory pad r${r} at [${Math.round(cx)}, ${Math.round(cz)}] top ${R1(top)} m, neck ${need.neck} m wide facing ${compassWord(best.neck)} (lifted at most ${R1(raised)} m)` };
 }
 
+/**
+ * roadside-rib (2026-10-29 redstrand w9: dropped-hour, a small roadside place, sat on a flat road): a rock rib or
+ * outcrop `minHeight` m tall and `width` m long rising beside the travel road nearest `near`, its foot `apron` m off
+ * the road's centre line. The side is `faces` (the bearing the rib's face looks toward, i.e. toward the road) or, by
+ * default, the side whose ground already rises (the rib reads as the bank breaking into rock). Profile across: a steep
+ * road face (rise/run 2.2, so the slope paints rock), a narrow crest, a back slope of 1; along: the ends taper over one
+ * height and the crest line steps a little (a rib, not a berm). Raise-only: the road itself is never touched.
+ */
+/** roadside-rib profile: face rise/run (2.4 = 67 deg), back slope, metres over which each end drops. */
+export const RIB_FACE = 3, RIB_BACK = 0.6, RIB_END = 4;
+export function solveRoadsideRib(g: NeedGround, need: GroundNeedDoc, area: NeedArea): NeedSolve {
+  const H = need.minHeight, L = need.width;
+  const fail = (message: string): NeedSolve => ({ ok: false, existing: false, at: area.near, faces: 0, height: 0, raised: 0, patch: null, message });
+  // the road point nearest `near` (within the area), and the road's direction there
+  let best: { x: number; z: number; tx: number; tz: number; d: number } | null = null;
+  for (const r of g.roads ?? []) {
+    const pts = r.points;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const [ax, az] = [pts[i]![0]!, pts[i]![pts[i]!.length - 1]!];
+      const [bx, bz] = [pts[i + 1]![0]!, pts[i + 1]![pts[i + 1]!.length - 1]!];
+      const sx = bx - ax, sz = bz - az, len2 = sx * sx + sz * sz;
+      if (len2 < 1e-6) continue;
+      const t = Math.max(0, Math.min(1, ((area.near[0] - ax) * sx + (area.near[1] - az) * sz) / len2));
+      const x = ax + sx * t, z = az + sz * t;
+      if (!area.inside(x, z)) continue;
+      const d = Math.hypot(x - area.near[0], z - area.near[1]);
+      const l = Math.sqrt(len2);
+      if (!best || d < best.d) best = { x, z, tx: sx / l, tz: sz / l, d };
+    }
+  }
+  if (!best) return fail(`no travel road within ${need.within} m of [${area.near.map(Math.round).join(", ")}]`);
+  const roadY = g.height(best.x, best.z);
+  // the side: `faces` (toward the road) or the side that already rises; never a wet side
+  const nx = -best.tz, nz = best.tx;
+  const side = (s: number) => {
+    let rise = 0, wet = 0;
+    for (const off of [need.apron, need.apron + H / 2, need.apron + H]) {
+      const x = best!.x + nx * s * off, z = best!.z + nz * s * off;
+      rise += g.height(x, z) - roadY;
+      if (g.wet(x, z)) wet++;
+    }
+    return { rise, wet };
+  };
+  let s: 1 | -1;
+  if (need.faces !== undefined) {
+    const [fx, fz] = dirOf(need.faces);
+    s = fx * nx + fz * nz > 0 ? -1 : 1; // the face looks toward the road: the rib stands opposite the bearing
+  } else {
+    const a = side(1), b = side(-1);
+    s = a.wet !== b.wet ? (a.wet < b.wet ? 1 : -1) : a.rise >= b.rise ? 1 : -1;
+  }
+  if (side(s).wet) return fail("the only side of the road there is wet");
+  const ox = nx * s, oz = nz * s; // across, away from the road
+  // PROFILE (2026-10-29 w9: the first cut, a 2.2 face + 45 deg back under a 12 m feather, rendered as a smooth dome):
+  // a broken rock FACE toward the road at rise/run RIB_FACE (>= 60 deg: the slope paints the cliff tile, not turf) in
+  // two lifts with a narrow ledge between, a crest that steps along the rib, a gentle back (RIB_BACK) and ends that
+  // stay steep (they drop over RIB_END m). The patch feathers over 3 m inside a 10 m margin, so the shape is what draws.
+  const foot = need.apron, run = H / RIB_FACE, ledge = 1.6, crest = 3;
+  const half = L / 2;
+  const fx0 = best.x + ox * foot, fz0 = best.z + oz * foot;
+  const footY = Math.max(roadY, g.height(fx0, fz0));
+  const wantY = (x: number, z: number): number | null => {
+    const u = (x - best!.x) * best!.tx + (z - best!.z) * best!.tz, v = (x - best!.x) * ox + (z - best!.z) * oz;
+    const au = Math.abs(u);
+    if (au > half || v < foot) return null;
+    // the crest steps along the rib (three blocks of different height), never a uniform berm
+    const block = Math.floor(((u + half) / L) * 3);
+    const top = H * [0.86, 1, 0.78][Math.min(2, block)]!;
+    const w = v - foot;
+    const lift1 = top * 0.55, r1 = lift1 / RIB_FACE, r2 = (top - lift1) / RIB_FACE;
+    let y: number;
+    if (w <= r1) y = (w / r1) * lift1;
+    else if (w <= r1 + ledge) y = lift1;
+    else if (w <= r1 + ledge + r2) y = lift1 + ((w - r1 - ledge) / r2) * (top - lift1);
+    else if (w <= r1 + ledge + r2 + crest) y = top;
+    else y = top - (w - r1 - ledge - r2 - crest) * RIB_BACK;
+    // steep ends: the rib drops over RIB_END m at each end instead of tapering into a mound
+    if (au > half - RIB_END) y = Math.min(y, ((half - au) / RIB_END) * top);
+    return y > 0.05 ? footY + y : null;
+  };
+  const span = foot + run + ledge + crest + H / RIB_BACK + 10;
+  const corners = [[-half - 10, foot - 10], [-half - 10, span], [half + 10, foot - 10], [half + 10, span]].map(([u, v]) => [best!.x + best!.tx * u! + ox * v!, best!.z + best!.tz * u! + oz * v!]);
+  const box: [number, number, number, number] = [
+    Math.floor(Math.min(...corners.map((c) => c[0]!))), Math.floor(Math.min(...corners.map((c) => c[1]!))),
+    Math.ceil(Math.max(...corners.map((c) => c[0]!))), Math.ceil(Math.max(...corners.map((c) => c[1]!))),
+  ];
+  const { patch, raised } = patchOver(`need-${need.id}`, box, 1, (x, z) => g.height(x, z), wantY, 3);
+  // a light prefilter only: the default (one voxel step) rounded the 60+ deg face to 59 and filled the ledge
+  (patch as { filter?: number }).filter = 0.4;
+  const faces = Math.round(bearingOf(-ox, -oz));
+  return { ok: true, existing: false, at: [Math.round(fx0), Math.round(fz0)], faces, height: H, raised: R1(raised), patch, message: `a ${H} m rock rib ${L} m long beside the road at [${Math.round(best.x)}, ${Math.round(best.z)}], its foot ${foot} m off the centre line, face toward ${compassWord(faces)} (lifted at most ${R1(raised)} m)` };
+}
+
+/** rise/run of a rock face (60 deg): the rib measure counts only rise climbed at least this steep. */
+const RIB_STEEP = 1.73;
+/** roadside-rib re-measured: the crest stands at least 0.85 x minHeight over the road beside it, and at least
+ * 0.6 x minHeight of the road face is climbed at >= 60 deg (a dome climbs none of it steep). */
+export function measureRib(g: NeedGround, need: GroundNeedDoc): NeedResult {
+  const [x, z] = need.solved!.at;
+  const [fx, fz] = dirOf(need.solved!.faces);
+  const run = need.minHeight / RIB_FACE + 3.6;
+  const roadY = g.height(x + fx * need.apron, z + fz * need.apron);
+  let top = -Infinity;
+  for (let u = -need.width / 4; u <= need.width / 4; u += 2) for (let w = run - 2; w <= run + 4; w += 1) top = Math.max(top, g.height(x - fx * w - fz * u, z - fz * w + fx * u));
+  const h = top - roadY;
+  // the median, over the middle half of the rib, of the rise climbed at >= 60 deg walking from the foot to the crest
+  const steepRise: number[] = [];
+  for (let u = -need.width / 4; u <= need.width / 4; u += 2) {
+    let rise = 0;
+    for (let w = -1; w < run + 2; w += 0.5) {
+      const a = g.height(x - fx * w - fz * u, z - fz * w + fx * u), b = g.height(x - fx * (w + 0.5) - fz * u, z - fz * (w + 0.5) + fx * u);
+      if ((b - a) / 0.5 >= RIB_STEEP) rise += b - a;
+    }
+    steepRise.push(rise);
+  }
+  steepRise.sort((p, q) => p - q);
+  const face = steepRise[Math.floor(steepRise.length / 2)] ?? 0;
+  const faults: string[] = [];
+  if (h < need.minHeight * 0.85) faults.push(`the rib stands ${R1(h)} m over the road, under ${R1(need.minHeight * 0.85)}`);
+  if (face < need.minHeight * 0.6) faults.push(`only ${R1(face)} m of the road face is >= 60 deg (needs ${R1(need.minHeight * 0.6)}): a mound, not a rock face`);
+  return { need: "rock-face", met: faults.length === 0, numbers: { ribHeight: R1(h), steepFace: R1(face) }, faults, message: `the rib stands ${R1(h)} m over the road, ${R1(face)} m of its face at >= 60 deg` };
+}
+
 /** How a solved need is re-measured on the ground as it now stands (the `needs` status row). */
 export function needStillMet(g: NeedGround, need: GroundNeedDoc): NeedResult | null {
   if (!need.solved) return null;
   const [x, z] = need.solved.at;
+  if (need.kind === "roadside-rib") return measureRib(g, need);
   if (need.kind === "cliff-face") {
     // measured from the apron centre in front of the foot
     const [fx, fz] = dirOf(need.solved.faces);

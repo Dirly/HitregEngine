@@ -1177,7 +1177,7 @@ export function scatterCell(
         let emitIndex = ruleIndex;
         let plan: VegetationPlan | null = null;
         if (vegOn) {
-          const clear = veg.clearingKeep(wx, wz, 0, clearPad);
+          const clear = veg.clearingKeep(wx, wz, 0, clearPad, rule.id);
           if (clear <= 0 || (clear < 1 && hashUnit(gx, gz, 13, ruleSeed) >= clear)) continue;
           plan = veg.planAt(wx, wz);
           if (plan) {
@@ -1219,7 +1219,7 @@ export function scatterCell(
             const across = (w.wade[0] + (w.wade[1] - w.wade[0]) * hashUnit(gx, gz, 17, ruleSeed)) * baseFootprint(rule) * (rule.scale[0] + rule.scale[1]) * 0.5;
             wx = shorePt.x + shorePt.inX * across;
             wz = shorePt.z + shorePt.inZ * across;
-            if (vegOn && veg.clearingKeep(wx, wz, 0, clearPad) <= 0) continue;
+            if (vegOn && veg.clearingKeep(wx, wz, 0, clearPad, rule.id) <= 0) continue;
           } else if (shoreLevel(field, wx, wz, w.reach, shoreProbe()) === null) continue;
         }
         // in/river/marsh rules: no water here, no candidate (before the four-height slope)
@@ -1260,7 +1260,7 @@ export function scatterCell(
             let w = first;
             for (let r = first; r < out.length; r++) {
               const inst = out[r]!;
-              const keep = veg.clearingKeep(inst.position[0] + x0, inst.position[2] + z0, 0, clearPad);
+              const keep = veg.clearingKeep(inst.position[0] + x0, inst.position[2] + z0, 0, clearPad, rule.id);
               if (keep <= 0 || (keep < 1 && hashUnit(gx, gz, 14 + r - first, ruleSeed) >= keep)) continue;
               out[w++] = inst;
             }

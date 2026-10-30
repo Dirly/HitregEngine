@@ -106,6 +106,10 @@ describe("world order", () => {
     fs.writeFileSync(review, "# Design review 3\n\nVerdict: PASS\n");
     assert.equal(await quiet(() => stagesRun(ctx({ done: "design-review", place: "dial", evidence: review, by: "rev" }))), 0);
     assert.equal(requirePlaceStage(projectDir, "dial", "design-review", "place-build plan", W), null);
+    // a coordinator ruling recorded in design.json (size, *Ruling) is bookkeeping: the review still stands (o-small 2026-10-29)
+    fs.writeFileSync(design, '{"size":"pinpoint","sizeRuling":"2026-10-29 coordinator: camp scale"}');
+    assert.equal(state("dial", "design").state, "ok");
+    assert.equal(state("dial", "design-review").state, "ok");
     // the design edited after its review: the review no longer stands
     fs.writeFileSync(design, '{"changed":true}');
     assert.equal(state("dial", "design").state, "STALE");

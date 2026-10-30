@@ -192,6 +192,15 @@ describe("clearings", () => {
     expect(vegetationIndex(recipe).clearingKeep(100, 100, 0)).toBe(1);
   });
 
+  it("a clearing naming its rules clears only those rules, and never the cover", () => {
+    const field = world({ clearings: [{ id: "woodland-keep-site", center: [0, 0], radius: 40, feather: 0, rules: ["woodland-canopy"] }] });
+    const veg = vegetationIndex(field.recipe);
+    expect(veg.clearingKeep(0, 0, 0, 0, "woodland-canopy")).toBe(0);
+    expect(veg.clearingKeep(0, 0, 0, 0, "rock-small")).toBe(1);
+    expect(veg.clearingKeep(0, 0, 0)).toBe(1);
+    expect(veg.clearingKeep(0, 0, 1)).toBe(1);
+  });
+
   it("schema: polygon OR circle", () => {
     expect(clearingSchema.safeParse({ id: "a", center: [0, 0], radius: 3 }).success).toBe(true);
     expect(clearingSchema.safeParse({ id: "a", polygon: square(0, 0, 1, 1), center: [0, 0], radius: 3 }).success).toBe(false);

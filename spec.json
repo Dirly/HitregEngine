@@ -8253,56 +8253,56 @@
             "camps": {
               "default": [],
               "description": "Enemy camps — where monsters live. Written by `worldgen spawn`, which also patches the matching spawnArea entities into the scene (ids `camp-*`, rewritten on every run); hand-written camps are kept.",
-              "$ref": "#/$defs/__schema1288"
+              "$ref": "#/$defs/__schema1290"
             }
           }
         },
         "verticalRange": {
           "description": "The vertical band actually meshed per cell. A voxel world is not infinite in Y for free.",
           "default": {},
-          "$ref": "#/$defs/__schema1344"
+          "$ref": "#/$defs/__schema1346"
         },
         "textureFilter": {
           "default": "linear",
           "description": "Magnification filter for every terrain surface texture. Set 'nearest' for PIXEL ART so it stays chunky instead of being smeared smooth up close. Emitted onto the terrain material by `worldgen material`.",
-          "$ref": "#/$defs/__schema1347"
+          "$ref": "#/$defs/__schema1349"
         },
         "macroNoise": {
           "description": "Noise multiplied over the whole blended terrain to break up texture repetition, emitted onto the terrain material by `worldgen material`. It lives HERE and not only in the material because the material is derived data — anything written straight into it is lost the next time the palette changes and it gets re-emitted.",
-          "$ref": "#/$defs/__schema1348"
+          "$ref": "#/$defs/__schema1350"
         },
         "material": {
           "type": "string"
         },
         "waterMaterial": {
           "description": "Material asset id for the water emitted into streamed cells (lakes, and rivers without a `riverMaterial`), clipped from each cell's terrain. Without it rivers are carved but dry. `worldgen init` writes one beside the terrain material.",
-          "$ref": "#/$defs/__schema1356"
+          "$ref": "#/$defs/__schema1358"
         },
         "riverMaterial": {
           "description": "Material asset id for river water specifically — a water material with `flowMode: \"field\"`, so the water visibly runs downstream along the current each vertex carries. Falls back to `waterMaterial` (standing water). `worldgen rivers` writes `<waterMaterial>-river` and sets this.",
-          "$ref": "#/$defs/__schema1357"
+          "$ref": "#/$defs/__schema1359"
         },
         "marshMaterial": {
           "description": "Material asset id for the marsh sheet (zone anchors with a `waterTable`): still, murky standing water. Falls back to `waterMaterial`.",
-          "$ref": "#/$defs/__schema1358"
+          "$ref": "#/$defs/__schema1360"
         },
         "bridgeMaterial": {
           "description": "Material asset id for the placeholder decks emitted for `features.bridges`. `worldgen roads` writes a plain timber-coloured one when the recipe has none.",
-          "$ref": "#/$defs/__schema1359"
+          "$ref": "#/$defs/__schema1361"
         },
         "splat": {
           "default": "dense",
           "description": "How the terrain mesh carries its surface weights. `dense`: every vertex carries a weight per palette surface (ceil(N/4) vec4 attributes) and the shader blends every layer — fine to 16 surfaces. `indexed`: every vertex carries the ids and weights of the FOUR layers it blends (two 4-byte attributes), the shader samples those four from one texture array, and the palette can be 64 deep (zone ground textures). A palette past 16 is meshed indexed regardless. `worldgen material` must be re-run after changing it.",
-          "$ref": "#/$defs/__schema1360"
+          "$ref": "#/$defs/__schema1362"
         },
         "zoneGround": {
           "description": "How zone ground overrides (`regions[].ground`) blend across zone borders.",
           "default": {},
-          "$ref": "#/$defs/__schema1361"
+          "$ref": "#/$defs/__schema1363"
         },
         "rockSkins": {
           "description": "ROCK SKINS — the world's stone follows the place. Cliff surface NAME -> body slice (`rockCap.bases` index) of the world's rock-cap material. Every scatter rock, boulder and cliff mass (rules with `cap`, `rockBase` or `rockBaseByCliff`) samples the cliff the terrain draws where it stands (zone `ground.cliff` overrides included, so it is its zone's stone, or the sea cliff / butte it leans on) and wears that slice; this table wins over a rule's `rockBase` / `rockBaseByCliff`. Key \"*\" is the fallback. The slice should be the cliff's own tile (the zone's rock texture or its cliff tile at the 40 texels/m standard): `worldgen rock-skins` measures the tone of each. Same meshes, one material, one batch per model. Omit for the legacy per-rule bases. Written by `worldgen init` / `zone-textures`.",
-          "$ref": "#/$defs/__schema1364"
+          "$ref": "#/$defs/__schema1366"
         }
       },
       "required": [
@@ -14366,9 +14366,10 @@
                 "type": "string",
                 "enum": [
                   "cliff-face",
-                  "walled-neck"
+                  "walled-neck",
+                  "roadside-rib"
                 ],
-                "description": "cliff-face: a rock face at least `minHeight` m from foot to top, `width` m long, with a flat apron `apron` m deep at its foot (a grand dungeon entrance carved into it). walled-neck: a town pad of `radius` m whose flanks fall at least `flankDrop` m within 30 m of the pad edge on every side except one neck `neck` m wide (the one short wall), with no ground within 60 m higher than the wall top."
+                "description": "cliff-face: a rock face at least `minHeight` m from foot to top, `width` m long, with a flat apron `apron` m deep at its foot (a grand dungeon entrance carved into it). walled-neck: a town pad of `radius` m whose flanks fall at least `flankDrop` m within 30 m of the pad edge on every side except one neck `neck` m wide (the one short wall), with no ground within 60 m higher than the wall top. roadside-rib: a rock rib or outcrop `minHeight` m tall (8-15 for a small roadside place) and `width` m long beside the travel road nearest `near`, its foot `apron` m off the road centre line, on the side that already rises (or `faces`: the bearing its face looks toward, the road side); a steep road face, a narrow stepped crest, raise-only (the road is untouched)."
               },
               "for": {
                 "default": "",
@@ -20366,6 +20367,9 @@
               },
               "owner": {
                 "$ref": "#/$defs/__schema1286"
+              },
+              "rules": {
+                "$ref": "#/$defs/__schema1288"
               }
             },
             "required": [
@@ -20468,6 +20472,17 @@
           "type": "string"
         },
         "__schema1288": {
+          "description": "Only these scatter rule ids are cleared (omitted = every rule; ground cover is never cleared by a rule-limited clearing). A generated species keeps out of the places' footprints this way without clearing the rocks the ground already carries (`worldgen flora` writes the woodland's keep-outs so).",
+          "$ref": "#/$defs/__schema1289"
+        },
+        "__schema1289": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "__schema1290": {
           "type": "array",
           "items": {
             "type": "object",
@@ -20480,10 +20495,10 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema1289"
+                    "$ref": "#/$defs/__schema1291"
                   },
                   {
-                    "$ref": "#/$defs/__schema1290"
+                    "$ref": "#/$defs/__schema1292"
                   }
                 ],
                 "description": "World-space XZ. Ground height is sampled from the field, so no Y is stored — the camp follows the terrain when it changes."
@@ -20491,70 +20506,70 @@
               "zone": {
                 "default": "",
                 "description": "Region id this camp sits in (recipe `regions`), or empty in an unzoned world. What a difficulty tier, a faction or a story hook keys on.",
-                "$ref": "#/$defs/__schema1291"
+                "$ref": "#/$defs/__schema1293"
               },
               "area": {
                 "type": "object",
                 "properties": {
                   "radius": {
-                    "$ref": "#/$defs/__schema1292"
-                  },
-                  "showRadius": {
                     "$ref": "#/$defs/__schema1294"
                   },
-                  "sleepRadius": {
+                  "showRadius": {
                     "$ref": "#/$defs/__schema1296"
                   },
-                  "idleSeconds": {
+                  "sleepRadius": {
                     "$ref": "#/$defs/__schema1298"
                   },
-                  "spawns": {
+                  "idleSeconds": {
                     "$ref": "#/$defs/__schema1300"
                   },
-                  "leash": {
+                  "spawns": {
                     "$ref": "#/$defs/__schema1302"
                   },
-                  "roam": {
+                  "leash": {
                     "$ref": "#/$defs/__schema1304"
                   },
-                  "patrol": {
+                  "roam": {
                     "$ref": "#/$defs/__schema1306"
                   },
-                  "loop": {
+                  "patrol": {
                     "$ref": "#/$defs/__schema1308"
                   },
-                  "hours": {
+                  "loop": {
                     "$ref": "#/$defs/__schema1310"
                   },
-                  "placement": {
+                  "hours": {
                     "$ref": "#/$defs/__schema1312"
                   },
-                  "mix": {
+                  "placement": {
                     "$ref": "#/$defs/__schema1314"
                   },
-                  "population": {
-                    "$ref": "#/$defs/__schema1321"
+                  "mix": {
+                    "$ref": "#/$defs/__schema1316"
                   },
-                  "respawn": {
+                  "population": {
                     "$ref": "#/$defs/__schema1323"
                   },
-                  "hiddenFrom": {
+                  "respawn": {
                     "$ref": "#/$defs/__schema1325"
                   },
-                  "roamRange": {
+                  "hiddenFrom": {
                     "$ref": "#/$defs/__schema1327"
                   },
-                  "unique": {
+                  "roamRange": {
                     "$ref": "#/$defs/__schema1329"
                   },
-                  "temperament": {
+                  "unique": {
                     "$ref": "#/$defs/__schema1331"
                   },
-                  "territory": {
+                  "temperament": {
                     "$ref": "#/$defs/__schema1333"
                   },
-                  "rares": {
+                  "territory": {
                     "$ref": "#/$defs/__schema1335"
+                  },
+                  "rares": {
+                    "$ref": "#/$defs/__schema1337"
                   }
                 },
                 "description": "The spawnArea component emitted onto the scene entity, verbatim."
@@ -20562,7 +20577,7 @@
               "tags": {
                 "default": [],
                 "description": "Free-form. `worldgen spawn` writes a distance tier (\"near\", \"far\") off the zone hub.",
-                "$ref": "#/$defs/__schema1343"
+                "$ref": "#/$defs/__schema1345"
               }
             },
             "required": [
@@ -20571,26 +20586,18 @@
             ]
           }
         },
-        "__schema1289": {
-          "type": "number"
-        },
-        "__schema1290": {
-          "type": "number"
-        },
         "__schema1291": {
-          "type": "string"
+          "type": "number"
         },
         "__schema1292": {
-          "default": 80,
-          "description": "Metres from the area's origin within which a player wakes it: the packs simulate (spawning first if they have not been placed yet).",
-          "$ref": "#/$defs/__schema1293"
+          "type": "number"
         },
         "__schema1293": {
-          "type": "number",
-          "exclusiveMinimum": 0
+          "type": "string"
         },
         "__schema1294": {
-          "description": "Metres within which the packs are PLACED: spawned out of sight, settled on the ground, then paused standing in their idle until a player comes within `radius`. Default: the server's interest radius + 30, so a creature is already standing there when it first comes into view instead of appearing (and dropping) in front of the player.",
+          "default": 80,
+          "description": "Metres from the area's origin within which a player wakes it: the packs simulate (spawning first if they have not been placed yet).",
           "$ref": "#/$defs/__schema1295"
         },
         "__schema1295": {
@@ -20598,8 +20605,7 @@
           "exclusiveMinimum": 0
         },
         "__schema1296": {
-          "default": 120,
-          "description": "Once awake, the area sleeps only when no player is within this (hysteresis — keep it larger than radius).",
+          "description": "Metres within which the packs are PLACED: spawned out of sight, settled on the ground, then paused standing in their idle until a player comes within `radius`. Default: the server's interest radius + 30, so a creature is already standing there when it first comes into view instead of appearing (and dropping) in front of the player.",
           "$ref": "#/$defs/__schema1297"
         },
         "__schema1297": {
@@ -20607,15 +20613,24 @@
           "exclusiveMinimum": 0
         },
         "__schema1298": {
-          "default": 10,
-          "description": "Seconds with no player inside sleepRadius before the pack is paused in place. It does not despawn: a returning player finds it where it was.",
+          "default": 120,
+          "description": "Once awake, the area sleeps only when no player is within this (hysteresis — keep it larger than radius).",
           "$ref": "#/$defs/__schema1299"
         },
         "__schema1299": {
           "type": "number",
-          "minimum": 0
+          "exclusiveMinimum": 0
         },
         "__schema1300": {
+          "default": 10,
+          "description": "Seconds with no player inside sleepRadius before the pack is paused in place. It does not despawn: a returning player finds it where it was.",
+          "$ref": "#/$defs/__schema1301"
+        },
+        "__schema1301": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema1302": {
           "default": [],
           "type": "array",
           "items": {
@@ -20635,7 +20650,7 @@
               "spread": {
                 "default": 6,
                 "description": "Metres around the origin the pack is scattered in (uniform disc).",
-                "$ref": "#/$defs/__schema1301"
+                "$ref": "#/$defs/__schema1303"
               }
             },
             "required": [
@@ -20643,34 +20658,34 @@
             ]
           }
         },
-        "__schema1301": {
+        "__schema1303": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1302": {
+        "__schema1304": {
           "default": 25,
           "description": "Metres from home an enemy may chase before it must turn back. Handed to each NPC's root script as the `leash` param (with `home`, `roam`, `spawnArea`); the server also fences at 1.5× as a backstop.",
-          "$ref": "#/$defs/__schema1303"
-        },
-        "__schema1303": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema1304": {
-          "default": 10,
-          "description": "Idle wander radius around home, passed as the `roam` param.",
           "$ref": "#/$defs/__schema1305"
         },
         "__schema1305": {
           "type": "number",
-          "minimum": 0
+          "exclusiveMinimum": 0
         },
         "__schema1306": {
-          "default": [],
-          "description": "Patrol route: points in metres relative to the area's origin, walked in order and back (ping-pong) while the pack is idle, instead of wandering inside `roam`. Handed to each NPC as the `patrol` param in world coordinates; the leash and the server's fence are then measured from the nearest point of the route, so the route itself may be longer than the leash. Empty = no patrol.",
+          "default": 10,
+          "description": "Idle wander radius around home, passed as the `roam` param.",
           "$ref": "#/$defs/__schema1307"
         },
         "__schema1307": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema1308": {
+          "default": [],
+          "description": "Patrol route: points in metres relative to the area's origin, walked in order and back (ping-pong) while the pack is idle, instead of wandering inside `roam`. Handed to each NPC as the `patrol` param in world coordinates; the leash and the server's fence are then measured from the nearest point of the route, so the route itself may be longer than the leash. Empty = no patrol.",
+          "$ref": "#/$defs/__schema1309"
+        },
+        "__schema1309": {
           "type": "array",
           "items": {
             "type": "array",
@@ -20687,19 +20702,19 @@
             ]
           }
         },
-        "__schema1308": {
+        "__schema1310": {
           "default": false,
           "description": "`patrol` is a closed LOOP, walked round and round (the last point leads back to the first) instead of out and back: a roaming pack ranging a moor or a gorge rim. A road corridor stays out and back (false).",
-          "$ref": "#/$defs/__schema1309"
-        },
-        "__schema1309": {
-          "type": "boolean"
-        },
-        "__schema1310": {
-          "description": "World-clock window [from, to) in hours (netState world/hour; wraps past midnight, [19, 5] = dusk to dawn) when the area is OUT. Outside it nothing spawns and every member no player is within `hiddenFrom` of is cleared (bats at dusk and night). `anywhere` / `route` only. Unset = always; no clock running = always.",
           "$ref": "#/$defs/__schema1311"
         },
         "__schema1311": {
+          "type": "boolean"
+        },
+        "__schema1312": {
+          "description": "World-clock window [from, to) in hours (netState world/hour; wraps past midnight, [19, 5] = dusk to dawn) when the area is OUT. Outside it nothing spawns and every member no player is within `hiddenFrom` of is cleared (bats at dusk and night). `anywhere` / `route` only. Unset = always; no clock running = always.",
+          "$ref": "#/$defs/__schema1313"
+        },
+        "__schema1313": {
           "type": "array",
           "prefixItems": [
             {
@@ -20714,12 +20729,12 @@
             }
           ]
         },
-        "__schema1312": {
+        "__schema1314": {
           "default": "pack",
           "description": "How the population is laid out. `pack` (the old behaviour): every spawn scattered within its `spread` of the origin, respawned in place by the server's NPC manager. `anywhere`: AMBIENT LIFE — each creature (or pair) spawns, and respawns after `respawn` seconds, at a random walkable open-air point anywhere inside `radius`, never within `hiddenFrom` metres of a player, so no spot can be camped; each one's `home` is its own spawn point and it roams `roamRange` metres round it. Use it for starter wildlife with a `mix` of singles and pairs. `route`: a WANDERING RARE — spawns at a random point along `patrol` (never its start), walks it in a random direction, and respawns after `respawn` seconds out of sight; `unique` keeps one alive per area. Caves: `pack` or `route` (`anywhere` samples the open-air surface).",
-          "$ref": "#/$defs/__schema1313"
+          "$ref": "#/$defs/__schema1315"
         },
-        "__schema1313": {
+        "__schema1315": {
           "type": "string",
           "enum": [
             "pack",
@@ -20727,12 +20742,12 @@
             "route"
           ]
         },
-        "__schema1314": {
+        "__schema1316": {
           "default": [],
           "description": "Weighted table of what spawns: each roll picks one row by `weight` and spawns `count` of it together, until `population` are alive. Singles and pairs ([1,1], [1,2]) read as roaming life; [3,5] reads as a camp. Works in every placement (in `pack` the rolls are scattered within 6 m of the origin, on top of `spawns`). Empty = `spawns` only (in `anywhere` / `route` the `spawns` entries are then the table, weighted by their counts, one creature per roll).",
-          "$ref": "#/$defs/__schema1315"
+          "$ref": "#/$defs/__schema1317"
         },
-        "__schema1315": {
+        "__schema1317": {
           "type": "array",
           "items": {
             "type": "object",
@@ -20745,7 +20760,7 @@
               "weight": {
                 "default": 1,
                 "description": "Relative chance this row is the one rolled.",
-                "$ref": "#/$defs/__schema1316"
+                "$ref": "#/$defs/__schema1318"
               },
               "count": {
                 "default": [
@@ -20753,21 +20768,21 @@
                   1
                 ],
                 "description": "[min, max] creatures spawned together by one roll: [1,1] a single, [1,2] a single or a pair. More than 2 reads as a pack, not ambient life.",
-                "$ref": "#/$defs/__schema1317"
+                "$ref": "#/$defs/__schema1319"
               },
               "temperament": {
                 "description": "This row's temperament (overrides the area's `temperament`).",
-                "$ref": "#/$defs/__schema1318"
+                "$ref": "#/$defs/__schema1320"
               },
               "near": {
                 "default": 4,
                 "description": "Metres the members of one roll stand from the first of them (a pair grazing together).",
-                "$ref": "#/$defs/__schema1319"
+                "$ref": "#/$defs/__schema1321"
               },
               "with": {
                 "default": [],
                 "description": "Companion templates spawned in the same roll, beside the row's own `count` (a band: a Bandit Footpad with a Cutpurse and a Lookout). On a `route` every member of one roll sets off the same way, so the band walks together. Each companion takes a population slot.",
-                "$ref": "#/$defs/__schema1320"
+                "$ref": "#/$defs/__schema1322"
               }
             },
             "required": [
@@ -20775,11 +20790,11 @@
             ]
           }
         },
-        "__schema1316": {
+        "__schema1318": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1317": {
+        "__schema1319": {
           "type": "array",
           "prefixItems": [
             {
@@ -20794,7 +20809,7 @@
             }
           ]
         },
-        "__schema1318": {
+        "__schema1320": {
           "type": "string",
           "enum": [
             "hostile",
@@ -20802,35 +20817,35 @@
             "passive"
           ]
         },
-        "__schema1319": {
+        "__schema1321": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1320": {
+        "__schema1322": {
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1
           }
         },
-        "__schema1321": {
+        "__schema1323": {
           "description": "Creatures alive at once across the area, rolled from `mix`. Default: the sum of the `spawns` counts in `anywhere` (6 with only a `mix`), 1 in `route`, and in `pack` 0 extra (a `pack` with a `mix` rolls this many on top of `spawns`; default the mix's row count). Ignored when `unique` is on.",
-          "$ref": "#/$defs/__schema1322"
+          "$ref": "#/$defs/__schema1324"
         },
-        "__schema1322": {
+        "__schema1324": {
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
         },
-        "__schema1323": {
+        "__schema1325": {
           "default": [
             60,
             150
           ],
           "description": "[min, max] seconds, jittered per death, before a dead creature's corpse is cleared and a replacement spawns somewhere out of sight. `anywhere` and `route` only — `pack` keeps the server's fixed respawn at the spawn point.",
-          "$ref": "#/$defs/__schema1324"
+          "$ref": "#/$defs/__schema1326"
         },
-        "__schema1324": {
+        "__schema1326": {
           "type": "array",
           "prefixItems": [
             {
@@ -20843,24 +20858,24 @@
             }
           ]
         },
-        "__schema1325": {
+        "__schema1327": {
           "default": 60,
           "description": "`anywhere` / `route`: no spawn or respawn lands within this many metres of any player, so no spot can be camped.",
-          "$ref": "#/$defs/__schema1326"
+          "$ref": "#/$defs/__schema1328"
         },
-        "__schema1326": {
+        "__schema1328": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1327": {
+        "__schema1329": {
           "default": [
             40,
             80
           ],
           "description": "`anywhere` only: [min, max] metres each creature roams round its own spawn point (rolled per creature, replacing `roam`). Its leash is then at least that roam + 20 m, so a long wander is never mistaken for a chase gone too far.",
-          "$ref": "#/$defs/__schema1328"
+          "$ref": "#/$defs/__schema1330"
         },
-        "__schema1328": {
+        "__schema1330": {
           "type": "array",
           "prefixItems": [
             {
@@ -20873,19 +20888,19 @@
             }
           ]
         },
-        "__schema1329": {
+        "__schema1331": {
           "default": false,
           "description": "`route`: exactly one alive per area (a rare); its replacement waits `respawn` seconds and appears out of sight.",
-          "$ref": "#/$defs/__schema1330"
-        },
-        "__schema1330": {
-          "type": "boolean"
-        },
-        "__schema1331": {
-          "description": "Default temperament for every creature of the area (a `mix` row's own wins), handed to mob-brain as the `temperament` param: hostile (attacks on sight, today's mobs), territorial (attacks only who comes within `territory` metres of it or its home), passive (never starts a fight; hit it and it fights back, then wanders off; never shouts — the server hands passive creatures `alertRadius` 0). Unset = whatever the template's brain says (hostile).",
           "$ref": "#/$defs/__schema1332"
         },
         "__schema1332": {
+          "type": "boolean"
+        },
+        "__schema1333": {
+          "description": "Default temperament for every creature of the area (a `mix` row's own wins), handed to mob-brain as the `temperament` param: hostile (attacks on sight, today's mobs), territorial (attacks only who comes within `territory` metres of it or its home), passive (never starts a fight; hit it and it fights back, then wanders off; never shouts — the server hands passive creatures `alertRadius` 0). Unset = whatever the template's brain says (hostile).",
+          "$ref": "#/$defs/__schema1334"
+        },
+        "__schema1334": {
           "type": "string",
           "enum": [
             "hostile",
@@ -20893,20 +20908,20 @@
             "passive"
           ]
         },
-        "__schema1333": {
-          "description": "Metres a `territorial` creature defends round itself and its home, handed to mob-brain as `territory`. Unset = the brain's default (7).",
-          "$ref": "#/$defs/__schema1334"
-        },
-        "__schema1334": {
-          "type": "number",
-          "minimum": 0
-        },
         "__schema1335": {
-          "default": [],
-          "description": "PLACEHOLDER RARES: whenever one of this area's slots spawns or respawns (a camp member in `pack`, a roamer in `anywhere`, a walker in `route`) and a rare is neither alive nor locked out, the slot rolls its `chance`; on a hit the rare spawns in that slot instead, with the slot's spot, home, roam, patrol and temperament (or its own). When it dies the slot goes back to placeholder respawns. Listed on the area, not on a row: one rare may sit behind several rows, and one-alive is per area (or per `id`). The old `route` + `unique` wandering rare still works.",
+          "description": "Metres a `territorial` creature defends round itself and its home, handed to mob-brain as `territory`. Unset = the brain's default (7).",
           "$ref": "#/$defs/__schema1336"
         },
         "__schema1336": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema1337": {
+          "default": [],
+          "description": "PLACEHOLDER RARES: whenever one of this area's slots spawns or respawns (a camp member in `pack`, a roamer in `anywhere`, a walker in `route`) and a rare is neither alive nor locked out, the slot rolls its `chance`; on a hit the rare spawns in that slot instead, with the slot's spot, home, roam, patrol and temperament (or its own). When it dies the slot goes back to placeholder respawns. Listed on the area, not on a row: one rare may sit behind several rows, and one-alive is per area (or per `id`). The old `route` + `unique` wandering rare still works.",
+          "$ref": "#/$defs/__schema1338"
+        },
+        "__schema1338": {
           "type": "array",
           "items": {
             "type": "object",
@@ -20925,7 +20940,7 @@
               "placeholders": {
                 "default": [],
                 "description": "Templates (of this area's `spawns` / `mix` rows) whose slots may roll the rare. Empty = any slot of the area.",
-                "$ref": "#/$defs/__schema1337"
+                "$ref": "#/$defs/__schema1339"
               },
               "lockout": {
                 "default": [
@@ -20933,23 +20948,23 @@
                   0
                 ],
                 "description": "[min, max] seconds after the rare dies (jittered per death) before any slot may roll it again. [0,0] = none.",
-                "$ref": "#/$defs/__schema1338"
+                "$ref": "#/$defs/__schema1340"
               },
               "id": {
                 "description": "Shared key: rares with the same id are one creature — at most one alive across every area naming it (and one lockout). Default: one per area and template.",
-                "$ref": "#/$defs/__schema1339"
+                "$ref": "#/$defs/__schema1341"
               },
               "temperament": {
                 "description": "The rare's own temperament (a rare is usually hostile or territorial). Unset = its placeholder slot's.",
-                "$ref": "#/$defs/__schema1340"
+                "$ref": "#/$defs/__schema1342"
               },
               "territory": {
                 "description": "The rare's own `territory` metres (territorial). Unset = the area's.",
-                "$ref": "#/$defs/__schema1341"
+                "$ref": "#/$defs/__schema1343"
               },
               "props": {
                 "description": "`prefab:` templates only: prefab props set on the rare (e.g. `level`, `maxHp`, `xpValue`, `aggroRange`), so a stock body can be the rare without a scene template.",
-                "$ref": "#/$defs/__schema1342"
+                "$ref": "#/$defs/__schema1344"
               }
             },
             "required": [
@@ -20958,14 +20973,14 @@
             ]
           }
         },
-        "__schema1337": {
+        "__schema1339": {
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1
           }
         },
-        "__schema1338": {
+        "__schema1340": {
           "type": "array",
           "prefixItems": [
             {
@@ -20978,11 +20993,11 @@
             }
           ]
         },
-        "__schema1339": {
+        "__schema1341": {
           "type": "string",
           "minLength": 1
         },
-        "__schema1340": {
+        "__schema1342": {
           "type": "string",
           "enum": [
             "hostile",
@@ -20990,65 +21005,65 @@
             "passive"
           ]
         },
-        "__schema1341": {
+        "__schema1343": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1342": {
+        "__schema1344": {
           "type": "object",
           "propertyNames": {
             "type": "string"
           },
           "additionalProperties": {}
         },
-        "__schema1343": {
+        "__schema1345": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "__schema1344": {
+        "__schema1346": {
           "type": "object",
           "properties": {
             "above": {
               "default": 14,
               "description": "World units of air polygonized above the highest ground in a cell — headroom for overhangs and arches.",
-              "$ref": "#/$defs/__schema1345"
+              "$ref": "#/$defs/__schema1347"
             },
             "below": {
               "default": 28,
               "description": "World units of rock polygonized below the lowest ground in a cell. This is what makes surface caves enterable, and it is THE vertical cost knob: it multiplies both the sampled volume AND the cave surface the mesher has to triangulate, so it hits twice. Deeper cave networks want vertical chunk sections, not a bigger band here.",
-              "$ref": "#/$defs/__schema1346"
+              "$ref": "#/$defs/__schema1348"
             }
           }
         },
-        "__schema1345": {
-          "type": "number",
-          "minimum": 0
-        },
-        "__schema1346": {
-          "type": "number",
-          "minimum": 0
-        },
         "__schema1347": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema1348": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema1349": {
           "type": "string",
           "enum": [
             "linear",
             "nearest"
           ]
         },
-        "__schema1348": {
+        "__schema1350": {
           "type": "object",
           "properties": {
             "scale": {
               "default": 90,
               "description": "World units per cycle of the broad band.",
-              "$ref": "#/$defs/__schema1349"
+              "$ref": "#/$defs/__schema1351"
             },
             "strength": {
               "default": 0.22,
               "description": "Brightness swing, plus and minus. 0 disables the whole overlay.",
-              "$ref": "#/$defs/__schema1350"
+              "$ref": "#/$defs/__schema1352"
             },
             "octaves": {
               "default": 3,
@@ -21058,7 +21073,7 @@
             },
             "detailScale": {
               "description": "Second band, near tile size (10-20). This is the one that hides the grid up close.",
-              "$ref": "#/$defs/__schema1351"
+              "$ref": "#/$defs/__schema1353"
             },
             "detailStrength": {
               "default": 0.1,
@@ -21075,11 +21090,11 @@
             "colorStrength": {
               "default": 0,
               "description": "How far the overlay shifts COLOUR, per channel, on top of the brightness swing. Brightness alone makes a large area read as one material under uneven light; letting the channels drift apart slightly — warmer here, greyer there — is what reads as the ground actually being different from place to place. 0.06-0.15 is a natural mottle; past ~0.25 the terrain goes tie-dye.",
-              "$ref": "#/$defs/__schema1352"
+              "$ref": "#/$defs/__schema1354"
             },
             "colorScale": {
               "description": "World units per cycle of the colour band. Defaults to `scale`. Set it larger for broad regional colour shifts that survive being seen from a distance.",
-              "$ref": "#/$defs/__schema1353"
+              "$ref": "#/$defs/__schema1355"
             },
             "colorOctaves": {
               "default": 3,
@@ -21090,23 +21105,14 @@
             "warp": {
               "default": 0,
               "description": "How far the texture PROJECTION is pushed around by noise before it is sampled, as a fraction of each layer's OWN tile, so one setting means the same thing to a 3.5m grass tile and a 9m cliff tile. This is the one that actually kills tiling: brightness noise can only shade OVER a grid, and the grid is still underneath it — on a big flat-lit face seen from a distance the eye finds it anyway. Warping the projection means neighbouring tiles no longer line up, so there is no grid left to find. 0.25-0.5 is usually enough; past about 0.6 the texture visibly smears.",
-              "$ref": "#/$defs/__schema1354"
+              "$ref": "#/$defs/__schema1356"
             },
             "warpScale": {
               "default": 18,
               "description": "World units per cycle of the warp. Measured: keep it near TWICE the tile size, not far above it. A warp much coarser than the tile slides whole tiles around and leaves the motif inside each one perfectly intact, so a strongly patterned texture still reads as a pattern; a warp at roughly tile scale distorts the motif itself, which is what stops a big rock face looking stamped.",
-              "$ref": "#/$defs/__schema1355"
+              "$ref": "#/$defs/__schema1357"
             }
           }
-        },
-        "__schema1349": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema1350": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
         },
         "__schema1351": {
           "type": "number",
@@ -21123,17 +21129,20 @@
         },
         "__schema1354": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 1
         },
         "__schema1355": {
           "type": "number",
           "exclusiveMinimum": 0
         },
         "__schema1356": {
-          "type": "string"
+          "type": "number",
+          "minimum": 0
         },
         "__schema1357": {
-          "type": "string"
+          "type": "number",
+          "exclusiveMinimum": 0
         },
         "__schema1358": {
           "type": "string"
@@ -21142,36 +21151,42 @@
           "type": "string"
         },
         "__schema1360": {
+          "type": "string"
+        },
+        "__schema1361": {
+          "type": "string"
+        },
+        "__schema1362": {
           "type": "string",
           "enum": [
             "dense",
             "indexed"
           ]
         },
-        "__schema1361": {
+        "__schema1363": {
           "type": "object",
           "properties": {
             "band": {
               "default": 150,
               "description": "Width in metres of the blend across a zone border where a zone restyles its ground (`regions[].ground`): half outside the polygon, half inside, so two zones meet at 50/50 on the line and nothing is a seam.",
-              "$ref": "#/$defs/__schema1362"
+              "$ref": "#/$defs/__schema1364"
             },
             "jitter": {
               "default": 0.35,
               "description": "Noise on the border, as a fraction of `band`, so the blend does not follow a clean offset of the polygon.",
-              "$ref": "#/$defs/__schema1363"
+              "$ref": "#/$defs/__schema1365"
             }
           }
         },
-        "__schema1362": {
+        "__schema1364": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema1363": {
+        "__schema1365": {
           "type": "number",
           "minimum": 0
         },
-        "__schema1364": {
+        "__schema1366": {
           "type": "object",
           "propertyNames": {
             "type": "string",

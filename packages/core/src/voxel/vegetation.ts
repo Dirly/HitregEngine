@@ -144,6 +144,14 @@ export const clearingSchema = z
       .describe("Clear scatter props. A prop's canopy footprint counts, so a big tree keeps its whole crown off the clearing."),
     cover: z.boolean().default(true).describe("Clear ground cover."),
     owner: z.string().optional().describe("Who wrote it (a POI or town id) — installers remove their own by owner."),
+    rules: z
+      .array(z.string().min(1))
+      .optional()
+      .describe(
+        "Only these scatter rule ids are cleared (omitted = every rule; ground cover is never cleared by a rule-limited " +
+          "clearing). A generated species keeps out of the places' footprints this way without clearing the rocks the " +
+          "ground already carries (`worldgen flora` writes the woodland's keep-outs so).",
+      ),
   })
   .refine((c) => (c.polygon !== undefined) !== (c.center !== undefined && c.radius !== undefined), {
     message: "a clearing needs a polygon OR center + radius (not both, not neither)",
@@ -436,7 +444,7 @@ export class VegetationIndex {
    * (1): 1 outside every clearing, the clearing's `keep` inside, rising to 1
    * across its feather. `pad` widens every clearing by a prop's footprint.
    */
-  clearingKeep(x: number, z: number, kind: 0 | 1, pad = 0): number {
+  clearingKeep(x: number, z: number, kind: 0 | 1, pad = 0, rule?: string): number {
     if (!this.hasClearings) return 1;
     const list = this.clearingBuckets.at(x, z);
     if (!list) return 1;
@@ -445,6 +453,8 @@ export class VegetationIndex {
     for (let k = 0; k < list.length; k++) {
       const c = this.clearings[list[k]!]!;
       if (kind === 0 ? !c.scatter : !c.cover) continue;
+      // a clearing naming its rules clears only those (scatter only)
+      if (c.rules && (kind === 1 || rule === undefined || !c.rules.includes(rule))) continue;
       const sd = this.clearingIndex!.signedDistance(list[k]!, x, z);
       if (sd >= 1e5) continue; // far outside
       const d = sd <= FAR_INSIDE ? -1 : sd - pad;

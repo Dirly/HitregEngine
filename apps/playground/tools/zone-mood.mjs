@@ -22,6 +22,13 @@ export const MOOD_BAND = {
   contrast: [0.97, 1.03],
   saturation: [0.95, 1.1],
   effective: [0.92, 1.08],
+  // the AIR: the mood's haze (the fog colour) and sky are judged against the scene's authored fog colour by luminance —
+  // a bright haze is a colour wash over every distant ridge (2026-10-29 redstrand w9: haze #d8a07c = 3.6x and sky
+  // #f4c8a2 = 5.6x the house fog washed the whole world one flat orange and the far ridges vanished). Calibrated on
+  // proving's 14 moods: haze 1.1-2.7x (Hrimgard's snow air the top), sky 0.4-0.85x.
+  hazeLuma: [0.8, 2.8],
+  skyLuma: [0.3, 1.2],
+  temperature: [-0.35, 0.2],
   calibration: "2026-10-09 lighting pass: proving's 14 moods cut the effective sun 22-40% and the fill ~45% while passing the old multiplier-only check (minLuma light 0.66 / shade 0.53); fog 1.25 + mist 1.5 + saturation 0.68 read as washed out. House grade saturation is 0.9, so the floor here keeps the effective saturation >= ~0.85.",
 };
 const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
@@ -34,6 +41,18 @@ export const effective = (tint, base = "#ffffff") => { const b = rgb(base), t = 
 /** `lights` = the world scene's authored { sun, ambient } colours (white when unknown). */
 export function lintMood(mood, lights = { sun: "#ffffff", ambient: "#ffffff" }) {
   const out = [];
+  if (lights.fog) {
+    const base = luma(lights.fog) || 1e-3;
+    for (const [k, band] of [["haze", MOOD_BAND.hazeLuma], ["sky", MOOD_BAND.skyLuma]]) {
+      if (!mood[k]) continue;
+      const r = +(luma(mood[k]) / base).toFixed(2);
+      if (r < band[0] || r > band[1]) out.push(`${k} ${mood[k]} is ${r}x the scene fog ${lights.fog} by luminance, outside [${band[0]}, ${band[1]}] (${r > band[1] ? "a colour wash over every distant ridge" : "crushes the distance"}): tint the hue at the house luminance`);
+    }
+  }
+  {
+    const t = mood.temperature ?? 0, [lo, hi] = MOOD_BAND.temperature;
+    if (t < lo || t > hi) out.push(`temperature ${t} outside [${lo}, ${hi}] (grades the whole frame one colour)`);
+  }
   for (const k of ["lightScale", "fogDensity", "mist", "contrast", "saturation"]) {
     const v = mood[k] ?? 1, [lo, hi] = MOOD_BAND[k];
     if (v < lo || v > hi) out.push(`${k} ${v} outside [${lo}, ${hi}] (${k === "saturation" ? "washes the zone out" : k === "lightScale" ? "more than a tint needs to keep its luminance" : "a brightness change, not a tone"})`);
@@ -60,7 +79,8 @@ export function worldLights(world) {
       if (!ents.some((e) => e.components?.voxelWorld?.world === world)) continue;
       const sun = ents.find((e) => e.components?.light?.kind === "directional")?.components.light.color ?? "#ffffff";
       const ambient = ents.find((e) => e.components?.light?.kind === "ambient")?.components.light.color ?? "#ffffff";
-      return { sun, ambient, scene: f };
+      const fog = ents.find((e) => e.components?.sky?.fog?.color)?.components.sky.fog.color ?? null;
+      return { sun, ambient, fog, scene: f };
     }
   }
   return { sun: "#ffffff", ambient: "#ffffff", scene: null };
@@ -84,7 +104,7 @@ if (args[0] === "lint") {
   const world = opt("world", "proving");
   const w = JSON.parse(fs.readFileSync(worldFile(world), "utf8"));
   const lights = worldLights(world);
-  console.log(`judged against ${lights.scene ?? "no scene (white lights)"}: sun ${lights.sun}, ambient ${lights.ambient}`);
+  console.log(`judged against ${lights.scene ?? "no scene (white lights)"}: sun ${lights.sun}, ambient ${lights.ambient}, fog ${lights.fog ?? "-"}`);
   let bad = 0;
   for (const r of w.regions ?? []) {
     if (!r.mood) continue;

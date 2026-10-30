@@ -110,9 +110,10 @@ import { commandFloat } from "./float.mts";
 import { commandRockSkins, writeRockSkinTemplate } from "./rock-skins.mts";
 import { commandPalette, commandRockAudit } from "./worldgen-rock-audit.mts";
 import { commandWaterEdges } from "./water-edges.mts";
+import { acceptWater, baselineFile, describeMoves, recordWaterRun, waterLevelsCheck } from "./worldgen-water-levels.mts";
 import { commandWaterLogic, lakeSettleLevels } from "./worldgen-water-logic.mts";
 import { describeFillPlates, describeFillWalls, fillPlates, fillWalls } from "./worldgen-fill-walls.mts";
-import { applyFlora, describeFlora, floraClimate, floraFindings } from "./worldgen-flora.mts";
+import { applyCoverFlora, applyFlora, applyWoodland, coverFloraFindings, describeFlora, floraClimate, floraFindings, woodlandContext, woodlandFindings } from "./worldgen-flora.mts";
 import { COAST_COLOURS, coastStageCheck, commandCoast, commandCoastTop } from "./worldgen-coast.mts";
 import { riverWaterDoc } from "./_river-water.mts";
 import { measureTownRisers, riserRule } from "./worldgen-riser-rule.mts";
@@ -1402,6 +1403,14 @@ const RUN_GRADE_FALL_WINDOW = 60;
 
 function commandRivers(): void {
   const { recipe, file } = loadRecipe();
+  // --accept-water "<dated ruling>": the last re-solve's moves near places were checked; clears the water-baseline row
+  const accept = stringOption("accept-water", "");
+  if (accept) {
+    if (!/^d{4}-d{2}-d{2} /.test(accept)) fail('--accept-water "YYYY-MM-DD who: why"');
+    const b = acceptWater(baselineFile(file, worldName), accept);
+    console.log(b ? `  water baseline accepted: ${accept}` : "  no water baseline to accept (run worldgen rivers first)");
+    return;
+  }
   // LAKE LEVELS SETTLED AFTER THE RIVERS (2026-10-29 w3-hydro, redstrand dogfood): a lake takes its level from the
   // hydrology grid BEFORE any river is carved, and the rivers then cut its rim — a fall's gorge 15 m off the shore
   // lowered the rim of seed 2130 lake-5 from 68.2 to 62.1 and its sheet stood 6 m over the cut; a shallow shelf the
@@ -1435,6 +1444,12 @@ function commandRivers(): void {
       for (const n of notes) console.log(n);
       if (fresh.length > 0) console.log(`  ! lake settle: ${fresh.length} lake(s) still leak after ${pass} pass(es): ${fresh.map((k) => k.lake.id).join(", ")}`);
       writeRecipe(r, file);
+      // the water baseline: what this re-solve moved against the last run (a scratch --recipe run records nothing)
+      if (!stringOption("recipe", "")) {
+        const places = woodlandContext(r, file, worldName).places ?? [];
+        const run = recordWaterRun(baselineFile(file, worldName), r, places);
+        console.log(run.first ? `  water baseline written (${path.relative(process.cwd(), baselineFile(file, worldName))})` : run.moves.length ? `  WATER MOVED since the last rivers run: ${describeMoves(run.moves)}` : "  water unchanged since the last rivers run");
+      }
       const audit = auditWorld(r, createWorldField(r));
       console.log(`  ${audit.summary}`);
       if (audit.counts.townsUnderWater > 0) console.log("  lakes moved: re-run towns, paths, pois and trails (worldgen audit for the list)");
@@ -5063,6 +5078,57 @@ function commandSpawnPaint(): void {
  * the polygon (simplified), its seed town the hub, the towns inside the
  * landmarks. Names are placeholders: "Zone N" — naming is the skill's job.
  */
+/**
+ * SEAWARD ZONE EDGES (2026-10-29 redstrand w9: rock-skins fault lake-rocks_-183_-50_f1 at [-1673,-454]). A zone's
+ * polygon is traced on the 48 m grid, so along the coast it is a staircase that cuts back inside the land; zone
+ * membership fades over the ground band (zoneGround.band, +-jitter) across the polygon edge, so land a cell inside the
+ * coast read 0.27 of its zone and took the base palette's cliff. Every top-level zone vertex whose outside is SEA (open
+ * water below sea level, inside no other zone) is carried out over the sea by the band's full reach (half band + jitter
+ * amplitude + one lattice), so membership is whole all the way to the waterline. A coast that faces another zone keeps
+ * its edge. Sited places keep their zone ground: no vertex within SEAWARD_KEEP_M (or radius + band) of a town or a
+ * reservation moves, so a painted concept never changes under it.
+ */
+const SEAWARD_KEEP_M = 600;
+function zonesSeaward(recipe: WorldRecipe, file: string): string[] {
+  const field = createWorldField(recipe);
+  const band = recipe.zoneGround?.band ?? 150, jitter = recipe.zoneGround?.jitter ?? 0.35;
+  const top = recipe.regions.filter((r) => r.within === undefined);
+  const places = woodlandContext(recipe, file, worldName).places ?? [];
+  const kept = (x: number, z: number) => places.some((p) => Math.hypot(p.center[0] - x, p.center[1] - z) < Math.max(SEAWARD_KEEP_M, p.radius + band));
+  const sea = (x: number, z: number) => field.height(x, z) < recipe.seaLevel - 0.5;
+  const notes: string[] = [];
+  for (const region of top) {
+    const half = ((region as { groundBand?: number }).groundBand ?? band) / 2;
+    const push = Math.round(half + ((region as { groundBand?: number }).groundBand ?? band) * jitter + 16);
+    const poly = region.polygon as [number, number][];
+    const n = poly.length;
+    let moved = 0, held = 0;
+    const out = poly.map(([x, z], i) => {
+      const [ax, az] = poly[(i - 1 + n) % n]!, [bx, bz] = poly[(i + 1) % n]!;
+      let nx = bz - az, nz = -(bx - ax);
+      const l = Math.hypot(nx, nz) || 1;
+      nx /= l; nz /= l;
+      if (pointInPolygon(poly, x + nx * 4, z + nz * 4)) { nx = -nx; nz = -nz; }
+      // the waterline within two grid cells outward (the staircase leaves up to a cell of land outside the polygon);
+      // from there the push runs over sea and ends in no other zone
+      let first = -1;
+      for (let s = 0; s <= 96; s += 8) if (sea(x + nx * s, z + nz * s)) { first = s; break; }
+      if (first < 0) return [x, z] as [number, number];
+      const reach = first + push;
+      for (let s = first; s <= reach; s += 16) {
+        const px = x + nx * s, pz = z + nz * s;
+        if (!sea(px, pz) || top.some((o) => o !== region && pointInPolygon(o.polygon as [number, number][], px, pz))) return [x, z] as [number, number];
+      }
+      if (kept(x, z)) { held++; return [x, z] as [number, number]; }
+      moved++;
+      return [Math.round(x + nx * reach), Math.round(z + nz * reach)] as [number, number];
+    });
+    region.polygon = out as never;
+    notes.push(`  ${region.id}: ${moved} coast vertex(es) carried ${push} m out over the sea${held ? `; ${held} held at sited places (within ${SEAWARD_KEEP_M} m)` : ""}`);
+  }
+  return notes;
+}
+
 function commandZones(): void {
   const { recipe, file } = loadRecipe();
   if (recipe.regions.length > 0 && !flag("force")) {
@@ -5071,7 +5137,11 @@ function commandZones(): void {
     // terrace re-run (writeRecipe), so `status` stops calling them STALE; an unclaimed town keeps the row STALE
     const unclaimed = recipe.features.towns.filter((t) => !recipe.regions.some((r) => r.within === undefined && pointInPolygon(r.polygon, t.center[0], t.center[1])));
     if (unclaimed.length > 0) console.log(`  ${unclaimed.length} town(s) in no zone (${unclaimed.map((t) => t.id).join(", ")}): fix the borders (zone-setup) or redraft`);
-    else writeRecipe(recipe, file);
+    else {
+      // --seaward: carry the drawn zones' coast edges out over the sea (no redraft; see zonesSeaward)
+      if (flag("seaward")) for (const n of zonesSeaward(recipe, file)) console.log(n);
+      writeRecipe(recipe, file);
+    }
     return;
   }
   // the zones being replaced, so their names can outlive them
@@ -5424,6 +5494,7 @@ function commandZones(): void {
   });
 
   recipe.regions = [...regions, ...townZones(regions, towns, option("town-cap", 120), townZonesBefore)];
+  for (const n of zonesSeaward(recipe, file)) console.log(n);
   stampPoiZones(recipe);
   writeRecipe(recipe, file);
   console.log(`drafted ${regions.length} zones from ${seeds.length} seed towns over ${landKm2.toFixed(1)} km² of land (step ${grid.step} m), plus ${recipe.regions.length - regions.length} town zones`);
@@ -7592,6 +7663,14 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
       check: (r) => (r.cover.length > 0 ? null : "no ground-cover layers: only scatter props grow"),
     },
     {
+      // 2026-10-29 w9 (coordinator): a rivers re-solve that moved water at a sited place went unseen
+      name: "water-baseline",
+      after: ["rivers"],
+      by: "procedural",
+      how: 'worldgen rivers <world> (writes authoring/worldgen/<world>-water-levels.json and diffs it); moves near places: --accept-water "<dated ruling>"',
+      check: (r) => { const f = findRecipeFile(worldName); return f ? waterLevelsCheck(r, baselineFile(f, worldName)) : null; },
+    },
+    {
       // the tree SPECIES follow the climate (2026-10-29 redstrand: proving's palms grew on a dry red-sandstone coast)
       name: "flora",
       after: ["init"],
@@ -7599,7 +7678,14 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
       how: "worldgen flora <world>   (worldgen climate runs it too; tools/worldgen-flora.mts)",
       check: (r) => {
         const f = floraFindings(r);
-        return f.length > 0 ? `${f.length} tree species/biome pair(s) the ${floraClimate(r)} climate does not grow: ${describeFlora(f)}` : null;
+        if (f.length > 0) return `${f.length} tree species/biome pair(s) the ${floraClimate(r)} climate does not grow: ${describeFlora(f)}`;
+        // ground cover follows it too (papyrus at a dry world's lake), and the woodland keeps the owner's curation and
+        // the places' footprints (2026-10-29 w9)
+        const c = coverFloraFindings(r);
+        if (c.length) return `${c.length} cover layer/biome pair(s) the ${floraClimate(r)} climate does not grow: ${[...new Set(c.map((x) => x.layer))].join(", ")}`;
+        const file = findRecipeFile(worldName);
+        const w = file ? woodlandFindings(r, woodlandContext(r, file, worldName)) : [];
+        return w.length ? `woodland: ${w.map((x) => `${x.rule} ${x.why}`).join("; ")}` : null;
       },
     },
     {
@@ -8219,11 +8305,18 @@ function commandFlora(): void {
   const { recipe, file } = loadRecipe();
   const before = floraFindings(recipe);
   console.log(`  climate ${floraClimate(recipe)}: ${before.length ? describeFlora(before) : "every tree species fits"}`);
+  const ctx = woodlandContext(recipe, file, worldName);
   if (flag("check")) {
-    if (before.length) process.exitCode = 1;
+    const cover = coverFloraFindings(recipe), wood = woodlandFindings(recipe, ctx);
+    for (const c of cover) console.log(`  cover ${c.layer} in ${c.biome}: ${c.why}`);
+    for (const w of wood) console.log(`  woodland ${w.rule}: ${w.why}`);
+    if (before.length || cover.length || wood.length) process.exitCode = 1;
     return;
   }
   for (const n of applyFlora(recipe)) console.log(`  ${n}`);
+  for (const n of applyCoverFlora(recipe)) console.log(`  ${n}`);
+  // the woodland (woodland-botany species by role): --no-woodland leaves the generated rules as they are
+  if (!flag("no-woodland")) for (const n of applyWoodland(recipe, ctx)) console.log(`  ${n}`);
   writeRecipe(recipe, file);
 }
 

@@ -579,12 +579,14 @@ export const TOWN_SITE_ROLES = ["town", "capital", "walled-town", "harbour-town"
 export const groundNeedSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "lower-case letters, digits and dashes").describe("Need id; the generated height patch is `need-<id>`."),
   kind: z
-    .enum(["cliff-face", "walled-neck"])
+    .enum(["cliff-face", "walled-neck", "roadside-rib"])
     .describe(
       "cliff-face: a rock face at least `minHeight` m from foot to top, `width` m long, with a flat apron `apron` m deep at its foot " +
         "(a grand dungeon entrance carved into it). walled-neck: a town pad of `radius` m whose flanks fall at least `flankDrop` m " +
         "within 30 m of the pad edge on every side except one neck `neck` m wide (the one short wall), with no ground within 60 m " +
-        "higher than the wall top.",
+        "higher than the wall top. roadside-rib: a rock rib or outcrop `minHeight` m tall (8-15 for a small roadside place) and `width` m long " +
+        "beside the travel road nearest `near`, its foot `apron` m off the road centre line, on the side that already rises (or `faces`: " +
+        "the bearing its face looks toward, the road side); a steep road face, a narrow stepped crest, raise-only (the road is untouched).",
     ),
   for: z.string().default("").describe("The place, location, town or role it is asked for (`wristgate`, `town-2`, `walled-town`)."),
   near: z

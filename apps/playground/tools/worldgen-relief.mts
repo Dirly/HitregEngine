@@ -223,6 +223,19 @@ export function treeSampler(recipe: WorldRecipe, field: WorldField, veg: Vegetat
         const { rule, index } = trees[k]!;
         if (slope > rule.slopeMax || slope < rule.slopeMin) continue;
         if (rule.height && (ground < rule.height[0] || ground > rule.height[1])) continue;
+        // water-placed rules stand only where the scatter puts them (core scatter.ts): a shore rule within its reach of a
+        // shore; the other modes stand in water, which never counts here (2026-10-29 redstrand: the willow shore rule counted 0.03/m2 on every dry table,
+        // and the concept cameras read the whole zone as a wood)
+        if (rule.water) {
+          if (rule.water.mode !== "shore") continue;
+          const r = rule.water.reach;
+          const nearWater = Math.abs(field.shoreDistance(x, z)) <= r
+            || [[r, 0], [-r, 0], [0, r], [0, -r], [r * 0.7, r * 0.7], [-r * 0.7, r * 0.7], [r * 0.7, -r * 0.7], [-r * 0.7, -r * 0.7]].some(([dx, dz]) => {
+              const wy = field.waterY(x + dx!, z + dz!);
+              return wy !== null && wy > field.height(x + dx!, z + dz!);
+            });
+          if (!nearWater) continue;
+        }
         const mult = plan ? plan.ruleKeep[index]! : 1;
         if (mult <= 0) continue;
         let membership = 0;
