@@ -101,3 +101,12 @@ test("--role sets the painted class of the tread", () => {
   assert.equal(r.features.roads[0]!.role, "paving");
   assert.throws(() => run(withRoads([]), ["--id", "road-x", "--points", "0,0;0,40", "--role", "planks"]), /--role/);
 });
+
+test("the tread is capped to the grading caps by default (an uncapped band on a side slope draws walls)", () => {
+  const r = run(withRoads([]), ["--id", "road-x", "--points", "0,0;0,40"])!;
+  assert.equal(r.features.roads[0]!.maxCut, 3);
+  assert.equal(r.features.roads[0]!.maxFill, 0.8);
+  const t = run(withRoads([]), ["--id", "road-x", "--points", "0,0;0,40", "--max-cut", "2", "--tread-fill", "1.5"])!;
+  assert.equal(t.features.roads[0]!.maxCut, 2);
+  assert.equal(t.features.roads[0]!.maxFill, 1.5);
+});

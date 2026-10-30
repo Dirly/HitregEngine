@@ -130,3 +130,34 @@ test("reserve --pick file: a ruling must carry its date", () => {
   assert.equal(placePickSchema.safeParse({ places: [{ ...row, rulings: [{ need: "rock-face", ruling: "coordinator says so" }] }] }).success, false);
   assert.equal(placePickSchema.safeParse({ places: [{ ...row, rulings: [{ need: "rock-face", ruling: "2026-10-29 the stair stands in for the apron" }] }] }).success, true);
 });
+
+// 2026-10-29 redstrand w10-moon: a face on a narrow arm (lake in front, sea behind) and a face that holds a lake's rim
+test("cliff-face: a narrow arm between a lake and the sea still takes a set-bearing face that falls to the sea", () => {
+  // land 100 m wide (z 0..100) rising 0.4 into the face side, lake (wet) north of z 0, sea south of z 100
+  const h = (_x: number, z: number) => (z < 0 ? -5 : z > 100 ? -20 : 20 + z * 0.4);
+  const g: NeedGround = { height: h, wet: (x, z) => h(x, z) < 0.3, sea: 0 };
+  const need = { id: "moon-face", kind: "cliff-face", for: "moon", near: [0, 40], within: 40, minHeight: 50, width: 60, apron: 30, radius: 45, neck: 60, flankDrop: 12, faces: 0 } as GroundNeedDoc;
+  const s = solveCliffFace(g, need, needArea(need.near, need.within, []));
+  assert.equal(s.ok, true, s.message);
+  const p = s.patch!;
+  const at = (x: number, z: number) => { const i = Math.round((x - p.origin[0]) / (p.size[0] / (p.columns - 1))), j = Math.round((z - p.origin[1]) / (p.size[1] / (p.rows - 1))); return p.weights![j * p.columns + i] ? p.heights[j * p.columns + i]! : h(x, z); };
+  // never raises standing water (lake in front, sea behind)
+  assert.ok(at(0, -10) <= h(0, -10) + 0.05 && at(0, 110) <= h(0, 110) + 0.05, "water untouched");
+  // the block falls to the sea: within 12 m of the shore it stands at most SHORE_FALL x (distance - 12) over the ground
+  assert.ok(at(0, 96) <= h(0, 96) + 1, `near the sea ${at(0, 96)}`);
+});
+
+test("cliff-face holds: a held lake keeps a rim over its water level where the ground beside it was low", () => {
+  const h = (x: number, _z: number) => (x > 150 ? 0 : 30); // the ground east of x 150 is lower than the lake
+  const g: NeedGround = { height: h, wet: () => false, sea: -100 };
+  const lake = { id: "lake-x", waterY: 10, center: [140, 0] as [number, number], radius: 30, polygon: [[120, -20], [145, -20], [145, 20], [120, 20]] as [number, number][] };
+  const need = { id: "sun-face", kind: "cliff-face", for: "sun", near: [0, 0], within: 30, minHeight: 30, width: 40, apron: 20, radius: 45, neck: 60, flankDrop: 12, faces: 180, holds: ["lake-x"] } as GroundNeedDoc;
+  const s = solveCliffFace(g, need, needArea(need.near, need.within, []), { lakes: [lake] });
+  assert.equal(s.ok, true, s.message);
+  const p = s.patch!;
+  const i = Math.round((155 - p.origin[0]) / (p.size[0] / (p.columns - 1))), j = Math.round((0 - p.origin[1]) / (p.size[1] / (p.rows - 1)));
+  assert.equal(p.weights![j * p.columns + i], 1, "the rim beside the lake is raised");
+  assert.ok(p.heights[j * p.columns + i]! >= 11, `rim ${p.heights[j * p.columns + i]}`);
+  const missing = solveCliffFace(g, { ...need, holds: ["nope"] }, needArea(need.near, need.within, []), { lakes: [lake] });
+  assert.equal(missing.ok, false);
+});

@@ -600,6 +600,14 @@ export const groundNeedSchema = z.object({
   neck: z.number().positive().default(60).describe("walled-neck: metres of wall across the one way in."),
   flankDrop: z.number().positive().default(12).describe("walled-neck: metres the ground falls away on every other side."),
   faces: z.number().optional().describe("Compass bearing (0 = north/-Z, 90 = east/+X) the face's front or the neck looks toward; omitted = the open/downhill side."),
+  holds: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "cliff-face: lake ids (features.lakes) whose rim this patch also holds: dry ground within 36 m outside the outline that " +
+        "stands under the water + 1.5 m is raised to it (20 m thick, easing out to 36 m). For a need that replaces the ground a lake was " +
+        "solved against (a re-sited face whose old patch was the lake's dam), so the lake keeps its level instead of draining.",
+    ),
   solved: z
     .object({
       at: z.tuple([z.number(), z.number()]).describe("cliff-face: the foot's centre; walled-neck: the pad centre."),

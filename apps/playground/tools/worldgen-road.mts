@@ -5,7 +5,7 @@
  * that no town or peak names) and for replacing a hand-laid route with a real road.
  *
  *   worldgen road <world> --id road-<name> --points "x,z;x,z;..." [--width 6] [--max-grade 0.18] [--max-cut 3]
- *        [--max-fill 0.8] [--tread-cut <m>] [--tread-fill <m>] [--pin-start y] [--pin-end y] [--step 2]
+ *        [--max-fill 0.8] [--tread-cut <m>] [--tread-fill <m>]   (tread caps default to --max-cut / --max-fill) [--pin-start y] [--pin-end y] [--step 2]
  *        [--surface dirt] [--keep-landforms] [--dry-run [--out built.json]] [--inverse f.json]
  *   --keep-landforms: the road is no obstacle to buttes/sea cliffs (RoadDoc.keepLandforms) - an approach onto a
  *   monument; without it a road into a butte field drops the monument it reaches.
@@ -256,8 +256,11 @@ export function commandRoad(host: RoadHost): void {
   for (const r of built.roads) {
     if (keepLandforms) r.keepLandforms = true;
     if (role) r.role = role as RoadDoc["role"];
-    if (treadCut !== undefined) r.maxCut = treadCut;
-    if (treadFill !== undefined) r.maxFill = treadFill;
+    // the tread rides the ground within the grading caps unless told otherwise (as `paths` / `trails` do): an uncapped band
+    // graded along a 1:1 side slope or up an apron fill drew 12 m cut/fill walls and sawtooth (2026-10-29 redstrand w11:
+    // road-moon / road-weeping-sun, ~500 lips cells at the Sun and Moon aprons and the lake shore)
+    r.maxCut = treadCut ?? options.maxCut;
+    r.maxFill = treadFill ?? options.maxFill;
   }
   // what the grading did, against the ground it was graded on
   let len = 0, climb = 0, steepest = 0, cut = 0, fill = 0;

@@ -496,7 +496,7 @@ export function commandNeeds(host: SiteNeedsHost): void {
   for (const need of needs) {
     let area;
     try { area = needArea(need.near, need.within, recipe.regions as never); } catch (e) { console.error(`  ${need.id}: ${(e as Error).message}`); failed++; continue; }
-    const s = need.kind === "cliff-face" ? solveCliffFace(g, need, area) : need.kind === "roadside-rib" ? solveRoadsideRib(g, need, area) : solveWalledNeck(g, need, area);
+    const s = need.kind === "cliff-face" ? solveCliffFace(g, need, area, { lakes: recipe.features.lakes.map((l) => ({ id: l.id, waterY: l.waterY, center: [l.center[0], l.center[1]] as [number, number], radius: l.radius, polygon: l.polygon as [number, number][] | undefined })) }) : need.kind === "roadside-rib" ? solveRoadsideRib(g, need, area) : solveWalledNeck(g, need, area);
     if (!s.ok) { console.error(`  ${need.id} (${need.kind}): NOT SOLVED: ${s.message}`); failed++; continue; }
     recipe.features.heightPatches = recipe.features.heightPatches.filter((p) => p.id !== `need-${need.id}`);
     if (s.patch) {
