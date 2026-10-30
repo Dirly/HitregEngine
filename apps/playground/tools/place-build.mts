@@ -68,7 +68,7 @@ import os from "node:os";
 import { baseGap, lowerPatch, planBridge } from "./_place-bridge.mts";
 import { baseOutline, coverClearedShare, isLeaned, orientBase, scaleBase, seatGap, SEAT_GAP_M, type BaseOutline } from "./_place-quality.mts";
 import { prefabGeometry, projectedTexels, sceneGeometry, texelDensity } from "./_prop-geometry.mts";
-import { compareMark, conceptMarksSchema, paintedViews, screenBox, type ScaleRow } from "./_place-scale.mts";
+import { compareExtent, compareMark, conceptMarksSchema, paintedViews, screenBox, type ConceptMarks, type ExtentReport, type ScaleRow } from "./_place-scale.mts";
 import { CLASS_FOOTPRINT_M, gradeScore, heightForPx, POCKET_FLOOR_M, READ_PX_MIN, readPixels, spanOf, wearsCliffTile, type QualityRow, type Tier } from "./_place-quality.mts";
 // @ts-ignore untyped engine tool module
 import { designFaults, requireFinalReview, setStage } from "../../../tools/poi-review/job.mjs";
@@ -888,9 +888,36 @@ function scaleCheck(): { ok: boolean; detail: string } {
     return compareMark(m, screenBox(xyz, cam), marks.tolerance);
   });
   const bad = rows.filter((x) => !x.ok);
-  write(out, { ok: !bad.length, painted: true, view: marks.view, camera: { eye: cam.eye, target: cam.target, vfov: cam.vfov }, tolerance: marks.tolerance, lab, at: new Date().toISOString(), rows });
+  const extent = scaleExtent(marks, site, want), extentOk = !!extent?.ok;
+  write(out, { ok: !bad.length && extentOk, painted: true, view: marks.view, camera: { eye: cam.eye, target: cam.target, vfov: cam.vfov }, tolerance: marks.tolerance, lab, at: new Date().toISOString(), rows, extent: extent ?? { ok: false, why: "no extent in concept-marks.json" } });
   for (const x of rows) console.log(`  ${x.ok ? "ok  " : "FAIL"} ${x.id.padEnd(16)} painted ${x.painted.w} x ${x.painted.h} px, built ${x.built ? `${x.built.w} x ${x.built.h} px at ${x.built.depth} m` : "-"}  ratio w ${x.ratio.w ?? "-"} h ${x.ratio.h ?? "-"}${x.ok ? "" : `: ${x.why}`}`);
-  return { ok: !bad.length, detail: bad.length ? bad.slice(0, 4).map((x) => `${x.id}: ${x.why}`).join("; ").slice(0, 400) : `${rows.length} marks within ${Math.round(marks.tolerance * 100)} % of the painting (${marks.view})` };
+  console.log(`  ${extentOk ? "ok  " : "FAIL"} extent           ${extent ? `${extent.why} (${extent.view}, zoom ${extent.zoom}, reach ${extent.reach} m)` : "no extent: mark the painted city's ground outline (concept-marks.json extent)"}`);
+  for (const m of extent?.masses ?? []) console.log(`       mass ${m.id.padEnd(20)} ${m.area} m2, built covers ${Math.round(m.covered * 100)} %`);
+  const faults = [...bad.slice(0, 4).map((x) => `${x.id}: ${x.why}`), ...(extentOk ? [] : [`extent: ${extent?.why ?? "no extent in concept-marks.json: mark the painted city's ground outline (docs/place-builder.md scale)"}`])];
+  return { ok: !faults.length, detail: faults.length ? faults.join("; ").slice(0, 400) : `${rows.length} marks within ${Math.round(marks.tolerance * 100)} % of the painting (${marks.view}); ${extent!.why}` };
+}
+/** EXTENT (Red Dial 2026-10-30, owner: "the concept art is correct, it should be that grand ... looks like the ruins of an
+ *  old city"): the painted city's ground outline (concept-marks.json `extent`) back-projected through the painting's camera
+ *  (zoomed by its anchor: the hero's painted width / its built width) onto the lab ground, against the BUILT DISTRICT (every
+ *  layout structure's vertices grown by `reach`). Built area or width more than the tolerance short fails. */
+function scaleExtent(marks: ConceptMarks, site: any, want: Set<string>): ExtentReport | null {
+  const ext = marks.extent; if (!ext) return null;
+  const r = site.renders[ext.view]; if (!r?.camera || !r?.target) fail(`concept-marks.json extent.view ${ext.view} is not a render of the site record (${paintedViews(site).join(", ")})`);
+  const cam = { eye: r.camera, target: r.target, vfov: marks.vfov, width: marks.image.width, height: marks.image.height };
+  const lf = path.join(JOB, "layout.json"), layout = fs.existsSync(lf) ? read(lf) : null;
+  const structs = new Set<string>(layout ? (layout.pieces as any[]).filter((p) => p.kind === "structure").map((p) => `${poi}-core-${p.id}`)
+    : (read(path.join(JOB, "ops.json")) as any[]).filter((o) => o.entity?.components?.prefab && (o.entity.tags ?? []).some((t: string) => t.startsWith("slot:") && t !== "slot:fire")).map((o) => o.id));
+  const anchorIds = new Set((ext.anchor?.pieces ?? []).map((p) => `${poi}-core-${p}`));
+  const geo = sceneGeometry(path.join(PROJECTS, lab, "assets"), read(sceneFile(lab, labWorld)), (id) => !structs.has(id) && !anchorIds.has(id) && !want.has(id));
+  let zoom = 1;
+  if (ext.anchor) {
+    const xyz: number[] = []; for (const g of geo.filter((g) => anchorIds.has(g.id))) for (let i = 0; i < g.world.length; i += 3) xyz.push(g.world[i]!, Math.max(g.world[i + 1]!, g.m[13]!), g.world[i + 2]!);
+    const sb = xyz.length ? screenBox(xyz, cam) : null, bw = sb ? sb.box[2] - sb.box[0] : 0;
+    if (!(bw > 0)) return { ok: false, why: `anchor ${ext.anchor.pieces.join("+")} is not in the built scene`, view: ext.view, zoom: 0, reach: ext.reach, painted: { outline: [], area: 0, width: 0, depth: 0 }, built: { area: 0, width: 0, depth: 0, cells: 0 }, ratio: { area: 0, width: 0, depth: 0 }, masses: [] };
+    zoom = (ext.anchor.box[2] - ext.anchor.box[0]) / bw;
+  }
+  const xz: number[] = []; for (const g of geo.filter((g) => structs.has(g.id))) for (let i = 0; i < g.world.length; i += 3) xz.push(g.world[i]!, g.world[i + 2]!);
+  return compareExtent(ext, cam, zoom, ground(read(worldFile(lab, labWorld))).height, xz, marks.tolerance);
 }
 /** ROADS (owner ruling 2026-10-20: "no ribbon roads: buried by terrain, never approved"): the job carries no ribbon /
  *  path-operator approach (ribbonApproachOps; zonegen status `poi <id>` fails on the same rule), and the approach track

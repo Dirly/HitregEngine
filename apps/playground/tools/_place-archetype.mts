@@ -324,7 +324,7 @@ export const placeLayoutSchema = z.object({
   version: z.literal(1),
   frame: z.literal("place").describe("Every x,z is in the place frame: origin the plan centre, +z toward the approach, +x its right, y over padY."),
   origin: xz.optional().describe("World x,z of the frame's origin (the plan centre the layout was drawn on, reports/plan.json `centre`). Given: the core is PINNED there (the site search never moves the composition between plans). Omitted: the site search's core, re-fitted every plan."),
-  pieces: z.array(layoutPieceSchema).min(1).max(60).describe("The composition: every structure, hero prop, fire and decal of the place, each at its exact spot."),
+  pieces: z.array(layoutPieceSchema).min(1).max(160).describe("The composition: every structure, hero prop, fire and decal of the place, each at its exact spot. Cap 160 (was 60; Derek 2026-10-30: grand places at the painted extent, Red Dial a ruined city): repeated ruin shells share atlas pages and instance (draw calls first; over ~300 far-frame draws, merge distant districts into an HLOD proxy)."),
   views: z.array(z.object({ name: z.string().regex(/^[a-z0-9-]+$/), camera: z.tuple([z.number(), z.number(), z.number()]), target: z.tuple([z.number(), z.number(), z.number()]) }).strict()).max(12).default([])
     .describe("Fixed evidence cameras in the place frame (y over padY). They REPLACE the archetype's / `--set views` set; contract.json views still win on a name."),
   ground: z.array(z.object({

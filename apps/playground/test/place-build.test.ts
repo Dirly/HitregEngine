@@ -1532,7 +1532,7 @@ test("layout areas join the handoff's dressing areas in world coordinates; one r
 
 
 // SCALE (Red Dial 2026-10-30): the built place in the painting's own pixels
-import { compareMark, conceptMarksSchema, projector, screenBox, paintedViews, SCALE_TOL } from "../tools/_place-scale.mts";
+import { builtDistrict, compareExtent, compareMark, conceptMarksSchema, groundHit, pixelRay, polyArea, projector, screenBox, paintedViews, SCALE_TOL } from "../tools/_place-scale.mts";
 test("scale: a piece through the painting's camera is measured in its pixels, and 15 % off fails naming the factor", () => {
   // the play camera (vfov 60, 1280 x 720) looking level down -z from 1.7 m; a 10 m tall, 4 m wide box 50 m away
   const cam = { eye: [0, 1.7, 0] as [number, number, number], target: [0, 1.7, -50] as [number, number, number], vfov: 60, width: 1280, height: 720 };
@@ -1552,6 +1552,35 @@ test("scale: a piece through the painting's camera is measured in its pixels, an
   assert.equal(compareMark(marks.marks[0]!, null).ok, false);
   assert.deepEqual(paintedViews({ renders: { approach: { camera: [0, 0, 0], target: [1, 0, 0] }, plan: { file: "x" } } }), ["approach"]);
   assert.deepEqual(paintedViews(null), []);
+});
+
+// L (Red Dial 2026-10-30, owner: "the concept art is correct, it should be that grand"): the painted CITY's extent,
+// back-projected through the painting's camera (zoomed by its anchor), against the built district; a short city fails
+test("scale extent: a painted outline back-projects to metres and a built district more than 15 % short fails", () => {
+  const cam = { eye: [0, 60, 160] as [number, number, number], target: [0, 0, 0] as [number, number, number], vfov: 60, width: 1280, height: 720 };
+  const flat = () => 0, sq = (h: number): [number, number, number][] => [[-h, 0, -h], [h, 0, -h], [h, 0, h], [-h, 0, h]];
+  // pixel -> ray -> ground round-trips a projected ground point
+  const p = projector(cam)([30, 0, -20])!, hit = groundHit(cam.eye, pixelRay(cam)(p[0], p[1]), flat)!;
+  assert.ok(Math.abs(hit[0] - 30) < 0.05 && Math.abs(hit[2] + 20) < 0.05, JSON.stringify(hit));
+  // a painting ZOOMED x2 about the frame centre: its pixels back-project through the anchor's zoom to the true ground
+  const zoomed = (q: [number, number, number]): [number, number] => { const s = projector(cam)(q)!; return [640 + (s[0] - 640) * 2, 360 + (s[1] - 360) * 2]; };
+  const ext = conceptMarksSchema.parse({ view: "far", marks: [{ id: "x", pieces: ["x"], box: [0, 0, 1, 1] }], extent: { view: "far", outline: sq(50).map(zoomed) } }).extent!;
+  const grid = (h: number, step = 10) => { const out: number[] = []; for (let x = -h; x <= h; x += step) for (let z = -h; z <= h; z += step) out.push(x, z); return out; };
+  const wide = compareExtent(ext, cam, 2, flat, grid(50));
+  assert.ok(Math.abs(wide.painted.area - 10000) < 150, `painted area ${wide.painted.area}`);
+  assert.ok(Math.abs(wide.painted.width - 100) < 1, `painted width ${wide.painted.width}`);
+  assert.ok(wide.ok, wide.why); assert.ok(wide.built.area > 10000);
+  // the same painting read at zoom 1 is twice the size: the 100 m city is now short
+  assert.ok(compareExtent(ext, cam, 1, flat, grid(50)).painted.width > 190);
+  // a city of islands: four 4 m ruins at the corners (reach 12) cover a fraction of the painted extent and fail on area
+  const islands = compareExtent(ext, cam, 2, flat, [-50, -50, 50, -50, 50, 50, -50, 50]);
+  assert.equal(islands.ok, false); assert.match(islands.why, /built area .* grow the city/);
+  // a narrow city fails on width; masses report the share the district covers
+  const narrow = compareExtent({ ...ext, masses: [{ id: "west", points: [[-50, 0, -50], [-20, 0, -50], [-20, 0, 50], [-50, 0, 50]].map((q) => zoomed(q as [number, number, number])), note: "" }] }, cam, 2, flat, grid(20, 4));
+  assert.equal(narrow.ok, false); assert.match(narrow.why, /built width/);
+  assert.equal(narrow.masses[0]!.covered < 0.5, true);
+  assert.equal(builtDistrict([0, 0], 12).length * 4 > 400, true);
+  assert.ok(Math.abs(polyArea([[0, 0], [10, 0], [10, 10], [0, 10]]) - 100) < 1e-9);
 });
 
 // L (Red Dial 2026-10-30): a layout road (an avenue) parses with its tread and grade defaults; never past 10 m wide
