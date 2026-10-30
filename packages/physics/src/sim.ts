@@ -238,6 +238,20 @@ export class PhysicsSim {
   private charCollision: RAPIER.CharacterCollision | null = null;
   /** Colliders have changed since the last step — see {@link syncQueries}. */
   private queriesDirty = true;
+  /**
+   * Entities whose colliders went in (+id) or out (-id) since the last Rapier step (capped): named in the error when a
+   * step fails inside Rapier, so a wasm panic points at the content that changed instead of an anonymous `unreachable`.
+   */
+  private readonly changedSinceStep: string[] = [];
+  /**
+   * Bodies taken out of the game but not yet out of Rapier: at most ONE collider leaves Rapier per update
+   * (see {@link retireBody}); the rest wait here, inert (collision groups 0, fixed), and drain one per step.
+   */
+  private readonly retiring: RAPIER.RigidBody[] = [];
+  /** Colliders of {@link retiring} bodies still in Rapier (subtracted from stats). */
+  private retiringColliders = 0;
+  /** Collider removals Rapier has not yet seen an update for (0 or 1). */
+  private removalsPending = 0;
   // ---- streamed statics (options.streamStatics) -----------------------------
   /** Every streamable static by id, built or not. */
   private readonly statics = new Map<string, StreamedStatic>();
@@ -257,7 +271,7 @@ export class PhysicsSim {
     }
     this.options = options;
     this.world = new RAPIER.World({ x: gravity[0], y: gravity[1], z: gravity[2] });
-    this.ragdolls = new RagdollSet(this.world);
+    this.ragdolls = new RagdollSet(this.world, (body) => this.retireBody(body));
     this.addEntities(doc);
   }
 
@@ -450,7 +464,8 @@ export class PhysicsSim {
       for (let i = 0; i < body.numColliders(); i++) {
         this.colliderToEntity.delete(body.collider(i).handle);
       }
-      this.world.removeRigidBody(body); // attached colliders/joints go with it
+      this.noteChanged(`-${id}`);
+      this.retireBody(body); // attached colliders/joints go with it
       this.bodies.delete(id);
       this.moving.delete(id);
       this.sensors.delete(id);
@@ -524,7 +539,7 @@ export class PhysicsSim {
   stats(): PhysicsStats {
     return {
       bodies: this.bodies.size,
-      colliders: this.world.colliders.len(),
+      colliders: this.world.colliders.len() - this.retiringColliders,
       statics: this.statics.size,
       staticsBuilt: this.staticsBuilt,
       staticsBuiltTotal: this.staticsBuiltTotal,
@@ -850,7 +865,8 @@ export class PhysicsSim {
     const body = this.bodies.get(entry.id);
     if (body) {
       for (let i = 0; i < body.numColliders(); i++) this.colliderToEntity.delete(body.collider(i).handle);
-      this.world.removeRigidBody(body);
+      this.noteChanged(`-${entry.id}`);
+      this.retireBody(body);
       this.bodies.delete(entry.id);
       this.sensors.delete(entry.id);
       this.queriesDirty = true;
@@ -890,7 +906,13 @@ export class PhysicsSim {
         col.layers?.collidesWith ?? Layers.ALL,
       ),
     );
+    const fault = colliderFault(shape, body, scaledOffset);
+    if (fault) {
+      this.warnOnce(id, `collider refused: ${fault}`);
+      return;
+    }
     const created = this.world.createCollider(shape, body);
+    this.noteChanged(`+${id}`);
     // The JS Collider keeps the desc's Shape: for a trimesh, its vertex and
     // index arrays, which the wasm side has already copied. Nothing here reads
     // `collider.shape` (it re-derives from wasm if anyone does), so let go.
@@ -1043,7 +1065,7 @@ export class PhysicsSim {
     this.ragdolls.tick(dt);
     if (this.carriers.size > 0) this.carryRiders(dt);
     this.world.timestep = dt;
-    this.world.step(this.events);
+    this.rapierStep();
     this.drainEvents();
     this.queriesDirty = false;
     // hand the carrier's velocity back: what a script reads stays relative to the deck it stands on
@@ -1164,6 +1186,64 @@ export class PhysicsSim {
    * them the world is clean, so a later lazy sync can never fire while a
    * kinematic target is outstanding.
    */
+  /**
+   * Take a body out of the world. Rapier 0.19.3's broad-phase BVH (parry `Bvh::optimize_incremental`) is corrupted
+   * when two or more colliders are removed within one update, and a later step panics (`unreachable` / "Maximum call
+   * stack size exceeded" in stepWithEvents) — 2026-10-29 redstrand dropped-hour: a cold start released every streamed
+   * static, then an inline cell load stepped. So a removal that would make it two parks the body instead: collision
+   * groups 0 (no contacts, no query hits: every query here filters by groups), fixed, events off; {@link rapierStep}
+   * drains it one collider per update. Fixed upstream (rapier3d-compat 0.21), not taken: 0.21 changes how bodies walk.
+   */
+  private retireBody(body: RAPIER.RigidBody): void {
+    const n = body.numColliders();
+    if (this.retiring.length === 0 && this.removalsPending + n <= 1) {
+      this.removalsPending += n;
+      this.world.removeRigidBody(body);
+      return;
+    }
+    for (let i = 0; i < n; i++) {
+      const c = body.collider(i);
+      c.setCollisionGroups(0);
+      c.setActiveEvents(RAPIER.ActiveEvents.NONE);
+    }
+    if (!body.isFixed()) body.setBodyType(RAPIER.RigidBodyType.Fixed, false);
+    this.retiring.push(body);
+    this.retiringColliders += n;
+  }
+
+  /** Before a step: hand Rapier the next retiring collider (one per update), and any emptied body. */
+  private drainRetiring(): void {
+    while (this.retiring.length > 0) {
+      const body = this.retiring[0]!;
+      if (body.numColliders() > 0) {
+        if (this.removalsPending >= 1) return;
+        this.world.removeCollider(body.collider(0), false);
+        this.removalsPending++;
+        this.retiringColliders--;
+        continue;
+      }
+      this.world.removeRigidBody(body);
+      this.retiring.shift();
+    }
+  }
+
+  private rapierStep(): void {
+    this.drainRetiring();
+    try {
+      this.world.step(this.events);
+    } catch (error) {
+      // a panic inside Rapier's wasm leaves the world unusable: say what changed, never just `unreachable`
+      const changed = this.changedSinceStep.length ? this.changedSinceStep.join(", ") : "none";
+      throw new Error(`[physics] Rapier step failed (${String(error)}); colliders changed since the last step: ${changed}`, { cause: error });
+    }
+    this.changedSinceStep.length = 0;
+    this.removalsPending = 0;
+  }
+
+  private noteChanged(entry: string): void {
+    if (this.changedSinceStep.length < 64) this.changedSinceStep.push(entry);
+  }
+
   private syncQueries(): void {
     if (!this.queriesDirty) return;
     this.queriesDirty = false;
@@ -1183,7 +1263,7 @@ export class PhysicsSim {
     }
     const dt = this.world.timestep;
     this.world.timestep = 0;
-    this.world.step(this.events);
+    this.rapierStep();
     this.world.timestep = dt;
     for (const [body, tx, ty, tz, nx, ny, nz] of held) {
       body.setTranslation({ x: tx, y: ty, z: tz }, false);
@@ -2106,4 +2186,40 @@ function boxMeshGeometry(size: Vec3, scale: Vec3): MeshGeometryData {
     0, 1, 5,  0, 5, 4, // -y
   ]);
   return { positions, indices };
+}
+
+/**
+ * Why Rapier must not be handed this collider (null = fine): non-finite body pose or offset, a cuboid/ball/capsule/
+ * cylinder with a non-finite or negative size, a trimesh with non-finite vertices, no triangles, or indices past its
+ * vertices. Rapier panics (wasm `unreachable`) mid-step on such input, taking a server down with it; refusing here
+ * names the entity instead. A collapsed scale axis is not a fault: it cooks a flat shape, which Rapier handles.
+ */
+export function colliderFault(desc: RAPIER.ColliderDesc, body: RAPIER.RigidBody, offset: Vec3): string | null {
+  const t = body.translation();
+  const r = body.rotation();
+  if (![t.x, t.y, t.z, r.x, r.y, r.z, r.w].every(Number.isFinite)) return "the body's position or rotation is not finite";
+  if (!offset.every(Number.isFinite)) return "its offset is not finite";
+  const shape = desc.shape as unknown as {
+    halfExtents?: { x: number; y: number; z: number };
+    radius?: number;
+    halfHeight?: number;
+    vertices?: Float32Array;
+    indices?: Uint32Array;
+  };
+  const sizes = [
+    ...(shape.halfExtents ? [shape.halfExtents.x, shape.halfExtents.y, shape.halfExtents.z] : []),
+    ...(shape.radius !== undefined ? [shape.radius] : []),
+    ...(shape.halfHeight !== undefined ? [shape.halfHeight] : []),
+  ];
+  if (sizes.some((v) => !Number.isFinite(v) || v < 0)) return `its size is not finite or negative (${sizes.join(", ")})`;
+  const { vertices, indices } = shape;
+  if (vertices) {
+    for (let i = 0; i < vertices.length; i++) if (!Number.isFinite(vertices[i]!)) return `vertex ${Math.floor(i / 3)} is not finite`;
+  }
+  if (vertices && indices) {
+    if (indices.length < 3 || indices.length % 3 !== 0) return `its ${indices.length} indices are not whole triangles`;
+    const count = vertices.length / 3;
+    for (let i = 0; i < indices.length; i++) if (indices[i]! >= count) return `index ${indices[i]} is past its ${count} vertices`;
+  }
+  return null;
 }

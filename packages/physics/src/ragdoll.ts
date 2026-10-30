@@ -161,7 +161,11 @@ export class RagdollSet {
   private created = 0;
   private removed = 0;
 
-  constructor(private readonly world: RAPIER.World) {}
+  constructor(
+    private readonly world: RAPIER.World,
+    /** Takes a body out of the world (PhysicsSim paces removals: see PhysicsSim.retireBody). */
+    private readonly removeBody: (body: RAPIER.RigidBody) => void = (body) => world.removeRigidBody(body),
+  ) {}
 
   add(spec: RagdollSpec): number {
     const groups = interactionGroups(
@@ -399,7 +403,7 @@ export class RagdollSet {
     if (!r) return;
     this.live.delete(handle);
     // removing a body takes its colliders and joints with it
-    for (const b of r.bodies) this.world.removeRigidBody(b);
+    for (const b of r.bodies) this.removeBody(b);
     this.removed++;
   }
 
