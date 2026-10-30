@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { defaultWorldRecipe, worldRecipeSchema } from "@hitreg/core";
 import {
-  evaluate, guardWorldWrite, loadStages, nextOf, recordPlaceStage, requirePlaceStage, reviewVerdict, saveStages, worldHash, worldStagesSchema, type WorldStages,
+  artOf, catalogueDesignFaults, evaluate, groundRecord, guardWorldWrite, stagesOf, loadStages, nextOf, recordPlaceStage, requirePlaceStage, reviewVerdict, saveStages, worldHash, worldStagesSchema, type WorldStages,
 } from "../tools/world-order.mts";
 import { run as stagesRun } from "../tools/zonegen/commands/stages.mts";
 import { run as approveRun } from "../tools/zonegen/commands/approve.mts";
@@ -47,8 +47,8 @@ function frozenWorld(): void {
   const hash = worldHash(JSON.parse(fs.readFileSync(recipeFile(), "utf8")), ["dial", "town-1"]);
   const at = new Date(Date.now() - 60_000).toISOString();
   doc.stages["status-clean"] = { at, worldHash: hash };
-  doc.places[0]!.stages["sited"] = { at, worldHash: hash, site: { center: [300, 0], radius: 60 } };
-  doc.places[1]!.stages["sited"] = { at, worldHash: hash, site: { center: [0, 0], radius: 40 } };
+  doc.places[0]!.stages["sited"] = { at, worldHash: hash, site: { center: [300, 0], radius: 60 }, ground: groundRecord(projectDir, doc, doc.places[0]!) };
+  doc.places[1]!.stages["sited"] = { at, worldHash: hash, site: { center: [0, 0], radius: 40 }, ground: groundRecord(projectDir, doc, doc.places[1]!) };
   doc.stages["world-frozen"] = { at, worldHash: hash, by: "test" };
   saveStages(projectDir, doc);
 }
@@ -70,16 +70,15 @@ describe("world order", () => {
     assert.equal(requirePlaceStage(projectDir, "dial", "design-review", "place-build plan"), null);
   });
 
-  it("concept is refused before the world is frozen, and says what to run", () => {
+  it("a place needs no world freeze: on an unfrozen world its bare renders are the next step; unsited it is refused", () => {
     frozenWorld();
     const doc = loadStages(projectDir, W)!;
     delete doc.stages["world-frozen"];
     saveStages(projectDir, doc);
-    const why = requirePlaceStage(projectDir, "dial", "world-frozen", "zonegen concept", W);
-    assert.match(why ?? "", /refused/);
-    assert.match(why ?? "", /--freeze/);
-    assert.equal(state("dial", "bare-renders").state, "BLOCKED");
-    assert.equal(state("dial", "bare-renders").blockedBy, "world-frozen");
+    assert.equal(requirePlaceStage(projectDir, "dial", "sited", "zonegen concept", W), null);
+    assert.equal(state("dial", "bare-renders").state, "MISSING");
+    fs.writeFileSync(path.join(zoneDir(), "reservations.json"), JSON.stringify({ reservations: [] }));
+    assert.match(requirePlaceStage(projectDir, "dial", "sited", "zonegen concept", W) ?? "", /refused/);
   });
 
   it("out-of-order place commands are refused: grey box before design review, install before final review", () => {
@@ -134,7 +133,7 @@ describe("world order", () => {
     next.features.towns[0].radius = 70;
     assert.deepEqual(guardWorldWrite(recipeFile(), next, "", "worldgen road"), { ok: true, message: "" });
     // a world road is
-    next.features.roads.push({ id: "path-b", points: [[0, 50], [100, 50]] });
+    next.features.roads.push({ id: "path-b", points: [[250, 50], [350, 50]] }); // through the dial's ground
     const refused = guardWorldWrite(recipeFile(), next, "", "worldgen paths");
     assert.equal(refused.ok, false);
     assert.match(refused.message, /FROZEN/);
@@ -165,6 +164,71 @@ describe("world order", () => {
     fs.writeFileSync(path.join(zoneDir(), "reservations.json"), JSON.stringify({ reservations: [{ location: "dial", center: [340, 0], radius: 60 }] }));
     assert.equal(nextOf(rowsOf("dial"))!.stage, "sited");
     assert.match(state("dial", "sited").why, /site moved/);
+  });
+
+  it("local ground: a far write leaves a place ok, a write inside its footprint stales it and names the part", () => {
+    frozenWorld();
+    const doc = loadStages(projectDir, W)!;
+    delete doc.stages["world-frozen"]; // places need no world freeze any more
+    saveStages(projectDir, doc);
+    painted();
+    assert.equal(state("dial", "concept-painted").state, "ok", "painted on an unfrozen world");
+    assert.ok(loadStages(projectDir, W)!.places[0]!.stages["concept-painted"]!.ground, "the record carries its local ground");
+    const r = JSON.parse(fs.readFileSync(recipeFile(), "utf8"));
+    // a far road (2 km off): the world changed, the dial did not
+    r.features.roads.push({ id: "path-far", points: [[2000, 2000], [2100, 2000]] });
+    assert.deepEqual(guardWorldWrite(recipeFile(), r, "", "worldgen paths"), { ok: true, message: "" });
+    fs.writeFileSync(recipeFile(), JSON.stringify(worldRecipeSchema.parse(r)));
+    assert.equal(state("dial", "concept-painted").state, "ok", "a far write leaves the place ok");
+    // a road through the reservation
+    r.features.roads.push({ id: "path-near", points: [[250, -50], [350, 50]] });
+    const g = guardWorldWrite(recipeFile(), r, "", "worldgen paths");
+    assert.equal(g.ok, true);
+    assert.match(g.message, /dial \(.*roads\/path-near new/);
+    fs.writeFileSync(recipeFile(), JSON.stringify(worldRecipeSchema.parse(r)));
+    const s = state("dial", "concept-painted");
+    assert.equal(s.state, "STALE");
+    assert.match(s.why, /roads\/path-near new/);
+    assert.equal(state("town-1", "sited").state, "ok", "the town 300 m away is untouched");
+  });
+
+  it("local ground: mood, scatter, cover and surfaces never stale a place", () => {
+    frozenWorld();
+    painted();
+    const r = JSON.parse(fs.readFileSync(recipeFile(), "utf8"));
+    r.scatter = [...(r.scatter ?? []).slice(1)];
+    r.cover = [];
+    r.regions = [{ id: "zone-1", name: "Zone", polygon: [[0, 0], [500, 0], [500, 500]], mood: { haze: "#806040", amount: 0.4 } }];
+    r.features.clearings = [{ id: "clear-dial", center: [300, 0], radius: 40 }];
+    fs.writeFileSync(recipeFile(), JSON.stringify(worldRecipeSchema.parse(r)));
+    for (const st of ["sited", "bare-renders", "concept-painted"]) assert.equal(state("dial", st).state, "ok", st);
+  });
+
+  it("a catalogue place skips the painting: sited -> bare-renders -> design, and its design may not ask for new art", async () => {
+    frozenWorld();
+    const doc = loadStages(projectDir, W)!;
+    doc.roles.push("small-place");
+    doc.places.push({ id: "camp", kind: "poi", role: "small-place", zone: "zone-1", stages: {} });
+    saveStages(projectDir, doc);
+    fs.writeFileSync(path.join(zoneDir(), "reservations.json"), JSON.stringify({ reservations: [{ location: "dial", center: [300, 0], radius: 60 }, { location: "camp", center: [-300, 0], radius: 30 }] }));
+    const p = loadStages(projectDir, W)!.places.find((x) => x.id === "camp")!;
+    assert.equal(artOf(p), "catalogue", "small places default to catalogue");
+    assert.equal(artOf(loadStages(projectDir, W)!.places[0]!), "painted");
+    assert.ok(!stagesOf(p).includes("concept-painted") && !stagesOf(p).includes("concept-approved"));
+    assert.equal(await quiet(() => stagesRun(ctx({ site: "camp", kind: "poi", role: "small-place", zone: "zone-1", by: "test" }))), 0);
+    fs.mkdirSync(path.join(zoneDir(), "concept"), { recursive: true });
+    fs.writeFileSync(path.join(zoneDir(), "concept", "camp.site.json"), "{}");
+    recordPlaceStage(projectDir, "camp", "bare-renders", { by: "test", evidenceFile: path.join(zoneDir(), "concept", "camp.site.json") }, W);
+    assert.equal(nextOf(rowsOf("camp"))!.stage, "design");
+    const design = path.join(dir, "camp-design.json");
+    fs.writeFileSync(design, JSON.stringify({ elements: [{ id: "totem", madeOf: ["structure: one Codex landmark piece (prop request camp/totem)"] }] }));
+    assert.equal(await quiet(() => stagesRun(ctx({ done: "design", place: "camp", evidence: design, by: "owner" }))), 1, "a Codex request is refused");
+    assert.ok(catalogueDesignFaults(JSON.stringify({ propRequests: ["x"] })).length);
+    fs.writeFileSync(design, JSON.stringify({ elements: [{ id: "fire", madeOf: ["codex-craft/sun-fire-basin", "foundation/tent-a"] }] }));
+    assert.equal(await quiet(() => stagesRun(ctx({ done: "design", place: "camp", evidence: design, by: "owner" }))), 0);
+    assert.equal(await quiet(() => approveRun(ctx({ place: "camp", stage: "concept", by: "derek" }))), 2, "nothing to approve");
+    assert.equal(await quiet(() => stagesRun(ctx({ art: "painted", place: "camp" }))), 0);
+    assert.equal(nextOf(rowsOf("camp"))!.stage, "concept-painted", "switched to painted, the painting is owed");
   });
 
   it("the town order has town-design and plan-approved before grey-box", () => {

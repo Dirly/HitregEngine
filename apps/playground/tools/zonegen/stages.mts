@@ -28,6 +28,7 @@ import { readableReportFile } from "../_dress-report.mts";
 import { portalDigest, walkThroughPortals } from "../_portal-veil-ops.mts";
 import { ribbonApproachOps } from "../_place-archetype.mts";
 import { smokeReport } from "../_smoke-check.mts";
+import { lintMood, worldLights } from "../zone-mood.mjs";
 import { designBlock } from "../../../../tools/poi-review/job.mjs";
 import type { SceneDoc } from "@hitreg/core";
 
@@ -839,7 +840,11 @@ function moodRow(ctx: Ctx, zone: string, moodyPlaces: string[]): Row {
   const scene = path.join(p.projectDir, "assets", "scenes", `${ctx.world}.scene.json`);
   if (!exists(scene)) missing.push(`no scene ${ctx.world}`);
   else if (!fs.readFileSync(scene, "utf8").includes('"zone-mood"')) missing.push("the scene runs no zone-mood script");
-  return { stage: "mood", who: "opus", state: missing.length ? "MISSING" : "ok", why: missing.join("; "), how };
+  if (missing.length) return { stage: "mood", who: "opus", state: "MISSING", why: missing.join("; "), how };
+  // inside the house band (tools/zone-mood.mjs: tone, never brightness; the haze and sky against the scene fog)
+  const lights = worldLights(ctx.world);
+  const out = regions.filter((r) => r.mood && (r.id === zone || r.within === zone)).flatMap((r) => lintMood(r.mood as Record<string, unknown>, lights).map((f: string) => `${r.id}: ${f}`));
+  return { stage: "mood", who: "opus", state: out.length ? "FAILED" : "ok", why: out.join("; "), how: out.length ? `node tools/zone-mood.mjs lint --world ${ctx.world}; fix with zone-mood.mjs install <proposal.json> --apply` : how };
 }
 
 /** The zones a world view summarises: from adjacency.json when it exists. */

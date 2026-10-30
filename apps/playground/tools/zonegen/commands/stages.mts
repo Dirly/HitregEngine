@@ -5,8 +5,10 @@
  *
  *   stages <world> --project <p> [--next] [--json]          the table; --next = the one next allowed action per place
  *   stages <world> --project <p> --roles a,b,c              start the file / set the siting roles the world must fill
- *   stages <world> --project <p> --site <id> --kind poi|entrance|town --role <r> [--zone z] [--name stem] --by <who> [--evidence f] [--note ..]
- *                                                           record a place sited (on the reservation / town centre it has now)
+ *   stages <world> --project <p> --site <id> --kind poi|entrance|town --role <r> [--zone z] [--name stem] [--art painted|catalogue] --by <who> [--evidence f] [--note ..]
+ *                                                           record a place sited (on the reservation / town centre it has now,
+ *                                                           and the LOCAL ground hash of its footprint: no world freeze needed)
+ *   stages <world> --project <p> --art painted|catalogue --place <id>   set a place's art mode (catalogue: no painting / approval)
  *   stages <world> --project <p> --done status-clean [--allow row,row --ruling "YYYY-MM-DD ..."]
  *                                                           runs `worldgen status`; records it only when every non-optional row is ok
  *   stages <world> --project <p> --freeze --by <who>        world-frozen (needs status-clean + siting ok). From here every worldgen
@@ -23,7 +25,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import {
-  MANUAL_STAGES, REVIEW_STAGES, currentSite, currentWorldHash, evaluate, fileSha, isDatedRuling, loadStages, nextOf, reviewVerdict, saveStages, short, stagesFile,
+  MANUAL_STAGES, REVIEW_STAGES, artOf, catalogueDesignFaults, currentSite, groundRecord, currentWorldHash, evaluate, fileSha, isDatedRuling, loadStages, nextOf, reviewVerdict, saveStages, short, stagesFile,
   stagesOf, worldStagesSchema, type StageState, type WorldStages,
 } from "../../world-order.mts";
 
@@ -37,7 +39,7 @@ export function table(projectDir: string, doc: WorldStages): string {
   out.push("world");
   for (const s of ev.world) out.push(`  ${cell(s).padEnd(26)} ${s.stage.padEnd(17)} ${s.why}`);
   for (const { place, rows } of ev.places) {
-    out.push(`${place.id} (${place.kind}, ${place.role}${place.zone ? `, ${place.zone}` : ""})`);
+    out.push(`${place.id} (${place.kind}, ${place.role}${place.zone ? `, ${place.zone}` : ""}, art ${artOf(place)})`);
     for (const s of rows) out.push(`  ${cell(s).padEnd(26)} ${s.stage.padEnd(17)} ${s.why}`);
   }
   if (doc.unfreezes.length) {
@@ -55,11 +57,8 @@ export function nextLines(projectDir: string, doc: WorldStages): string[] {
   for (const { place, rows } of ev.places) {
     const n = nextOf(rows);
     if (!n) { lines.push(`${place.id}: done (walked)`); continue; }
-    // BLOCKED points at its blocker: a world stage when the place waits on the world
-    // past `sited` every place stage stands on the frozen world: while it is not frozen, the place waits on the world
-    const frozen = ev.world.find((x) => x.stage === "world-frozen")!.state === "ok";
-    if (w && n.stage !== "sited" && !frozen) lines.push(`${place.id}: ${n.stage} [${cell(n)}] waits on the world (${w.stage} first; nothing past sited runs on an unfrozen world)`);
-    else lines.push(`${place.id}: ${n.stage} [${cell(n)}${n.why ? `: ${n.why}` : ""}] -> ${n.how}`);
+    // a place stands on its LOCAL ground (tools/world-order.mts localGround): it never waits on the world freeze
+    lines.push(`${place.id}: ${n.stage} [${cell(n)}${n.why ? `: ${n.why}` : ""}] -> ${n.how}`);
   }
   return lines;
 }
@@ -93,6 +92,17 @@ export async function run(ctx: Ctx): Promise<number> {
   if (!doc) { console.error(`zonegen stages: no ${path.relative(process.cwd(), stagesFile(projectDir, ctx.world))} — start it: zonegen stages ${ctx.world} --project ${ctx.project} --roles <role,role,...>`); return 2; }
   const hash = currentWorldHash(projectDir, doc);
 
+  const art = ctx.opt("art");
+  if (art && !["painted", "catalogue"].includes(art)) { console.error("zonegen stages: --art painted|catalogue"); return 2; }
+  // ---- art mode ----
+  if (art && !ctx.opt("site")) {
+    const p = doc.places.find((x) => x.id === ctx.opt("place") || x.name === ctx.opt("place"));
+    if (!p) { console.error(`zonegen stages --art ${art} --place <id> (sited: ${doc.places.map((x) => x.id).join(", ") || "none"})`); return 2; }
+    p.art = art as "painted";
+    saveStages(projectDir, doc);
+    console.log(`${p.id}: art ${art} (stages: ${stagesOf(p).join(" -> ")})`);
+    return 0;
+  }
   // ---- sited ----
   if (ctx.opt("site")) {
     const id = ctx.opt("site"), kind = ctx.opt("kind"), role = ctx.opt("role");
@@ -104,12 +114,14 @@ export async function run(ctx: Ctx): Promise<number> {
     p.kind = kind as "poi"; p.role = role;
     if (ctx.zone) p.zone = ctx.zone;
     if (ctx.opt("name")) p.name = ctx.opt("name");
+    if (art) p.art = art as "painted";
     const site = currentSite(projectDir, doc, p);
     if (!site) { console.error(`zonegen stages: ${id} has no ${kind === "town" ? "town in the recipe" : `reservation in zone ${p.zone ?? "(give --zone)"}`}: reserve / pick it first`); return 2; }
     const ev = ctx.opt("evidence");
-    p.stages["sited"] = { at: now(), worldHash: hash, by, site, ...(ctx.opt("note") ? { note: ctx.opt("note") } : {}), ...(ev ? { evidence: path.relative(projectDir, path.resolve(ev)).split(path.sep).join("/"), evidenceSha: fileSha(path.resolve(ev)) ?? undefined } : {}) };
+    const ground = groundRecord(projectDir, doc, p);
+    p.stages["sited"] = { at: now(), worldHash: hash, by, site, ...(ground ? { ground } : {}), ...(ctx.opt("note") ? { note: ctx.opt("note") } : {}), ...(ev ? { evidence: path.relative(projectDir, path.resolve(ev)).split(path.sep).join("/"), evidenceSha: fileSha(path.resolve(ev)) ?? undefined } : {}) };
     saveStages(projectDir, doc);
-    console.log(`sited ${id} (${kind}, ${role}) at [${site.center}] r ${site.radius} on world ${short(hash)}`);
+    console.log(`sited ${id} (${kind}, ${role}, art ${artOf(p)}) at [${site.center}] r ${site.radius} on world ${short(hash)}${ground ? `, local ground ${short(ground.hash)} (${Object.keys(ground.parts).length} parts)` : ""}`);
     return 0;
   }
 
@@ -159,7 +171,12 @@ export async function run(ctx: Ctx): Promise<number> {
       const v = reviewVerdict(file);
       if (v !== "PASS") { console.error(`${stage} refused: the review ${ev} says ${v ?? "no verdict (PASS / RETURN / FAIL)"} — a RETURN is fixed and reviewed again by a FRESH reviewer`); return 1; }
     }
-    p.stages[stage] = { at: now(), worldHash: hash!, by, evidence: path.relative(projectDir, file).split(path.sep).join("/"), evidenceSha: fileSha(file) ?? undefined, ...(ctx.opt("note") ? { note: ctx.opt("note") } : {}) };
+    if (stage === "design" && artOf(p) === "catalogue") {
+      const faults = catalogueDesignFaults(fs.readFileSync(file, "utf8"));
+      if (faults.length) { console.error(`design refused for ${p.id}: a catalogue place (no artwork, Derek 2026-10-29) asks for new art — use catalogue props only:\n${faults.slice(0, 12).map((x) => `  ${x}`).join("\n")}`); return 1; }
+    }
+    const ground = groundRecord(projectDir, doc, p);
+    p.stages[stage] = { at: now(), worldHash: hash!, by, ...(ground ? { ground } : {}), evidence: path.relative(projectDir, file).split(path.sep).join("/"), evidenceSha: fileSha(file) ?? undefined, ...(ctx.opt("note") ? { note: ctx.opt("note") } : {}) };
     saveStages(projectDir, doc);
     console.log(`recorded ${p.id} ${stage} on world ${short(hash!)}`);
     const n = nextOf(evaluate(projectDir, doc).places.find((e) => e.place.id === p.id)!.rows);

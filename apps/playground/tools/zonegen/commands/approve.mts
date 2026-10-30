@@ -9,7 +9,7 @@
  * (`--poi <id>` is accepted for --place.)
  */
 import path from "node:path";
-import { conceptSheet, currentWorldHash, evaluate, fileSha, isDatedRuling, loadStages, nextOf, planPicture, saveStages, short, stagesOf } from "../../world-order.mts";
+import { conceptSheet, currentWorldHash, groundRecord, evaluate, fileSha, isDatedRuling, loadStages, nextOf, planPicture, saveStages, short, stagesOf } from "../../world-order.mts";
 
 interface Ctx { project: string; world: string; opt(name: string, fallback?: string): string; flag(name: string): boolean; paths: { projectDir: string } }
 
@@ -26,7 +26,7 @@ export async function run(ctx: Ctx): Promise<number> {
   const p = doc.places.find((x) => x.id === key || x.name === key);
   if (!p) { console.error(`zonegen approve: no place ${key}`); return 2; }
   const stage = kind === "concept" ? "concept-approved" : "plan-approved";
-  if (!stagesOf(p).includes(stage)) { console.error(`zonegen approve: a ${p.kind} has no plan approval (towns only)`); return 2; }
+  if (!stagesOf(p).includes(stage)) { console.error(stage === "plan-approved" ? `zonegen approve: a ${p.kind} has no plan approval (towns only)` : `zonegen approve: ${p.id} is a catalogue place (no painting, no concept approval)`); return 2; }
   const rows = evaluate(projectDir, doc).places.find((e) => e.place === p)!.rows;
   const before = rows[stagesOf(p).indexOf(stage) - 1]!;
   if (before.state !== "ok") {
@@ -42,7 +42,8 @@ export async function run(ctx: Ctx): Promise<number> {
   // the approval pins (a redesigned plan changes it)
   if (kind === "concept" && of.evidenceSha && of.evidenceSha !== sha) { console.error(`zonegen approve: ${path.relative(process.cwd(), file)} changed since ${before.stage} was recorded — re-record it first`); return 1; }
   const hash = currentWorldHash(projectDir, doc)!;
-  p.stages[stage] = { at: new Date().toISOString(), worldHash: hash, by, approves: of.evidenceSha ?? sha, evidence: path.relative(projectDir, file).split(path.sep).join("/"), evidenceSha: sha, ...(ruling ? { ruling } : {}) };
+  const ground = groundRecord(projectDir, doc, p);
+  p.stages[stage] = { at: new Date().toISOString(), worldHash: hash, by, ...(ground ? { ground } : {}), approves: of.evidenceSha ?? sha, evidence: path.relative(projectDir, file).split(path.sep).join("/"), evidenceSha: sha, ...(ruling ? { ruling } : {}) };
   saveStages(projectDir, doc);
   console.log(`${stage}: ${p.id} by ${by}${ruling ? ` (${ruling})` : ""}, ${path.basename(file)} ${short(sha)} on world ${short(hash)}`);
   return 0;

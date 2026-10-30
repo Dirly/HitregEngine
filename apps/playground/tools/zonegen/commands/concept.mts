@@ -72,11 +72,14 @@ export async function run(ctx: Ctx): Promise<number> {
   if (!poiArg === !townArg) { console.error("zonegen concept: give --poi <reservation location> (with --zone) or --town <name>"); return 2; }
   if (poiArg && !ctx.zone) { console.error("zonegen concept: --poi needs --zone <id>"); return 2; }
   if (!exists(P.recipe)) { console.error(`zonegen concept: no world ${P.recipe}`); return 2; }
-  // WORLD ORDER (tools/world-order.mts): paint only on a frozen world, on a sited place; a repaint needs current renders
+  // WORLD ORDER (tools/world-order.mts): render on a place sited on its current LOCAL ground (no world freeze needed);
+  // a repaint needs current renders; a catalogue place (art: "catalogue") gets bare renders only, never a painting
   const orderKey = (poiArg || townArg)!;
+  const catalogue = order.artFor(P.projectDir, orderKey, ctx.world) === "catalogue";
+  if (catalogue && ctx.flag("paint-only")) { console.error(`zonegen concept: ${orderKey} is a catalogue place (art: "catalogue", Derek 2026-10-29: no artwork) — it gets bare renders only; its design names catalogue props`); return 3; }
+  const rendersOnly = ctx.flag("renders-only") || catalogue;
   if (!ctx.flag("dry-run")) {
-    const refused = order.requirePlaceStage(P.projectDir, orderKey, "world-frozen", "zonegen concept", ctx.world)
-      ?? order.requirePlaceStage(P.projectDir, orderKey, ctx.flag("paint-only") ? "bare-renders" : "sited", "zonegen concept", ctx.world);
+    const refused = order.requirePlaceStage(P.projectDir, orderKey, ctx.flag("paint-only") ? "bare-renders" : "sited", "zonegen concept", ctx.world);
     if (refused) { console.error(refused); return 3; }
   }
   const raw = readJson(P.recipe) as J;
@@ -146,7 +149,8 @@ export async function run(ctx: Ctx): Promise<number> {
   const canopy = (x: number, z: number): number => trees.density(x, z);
   const bareRecipe = worldRecipeSchema.parse(bareRaw), tall = treeSampler(bareRecipe, field, undefined, tallScatterRules(bareRecipe));
   const clutter = (x: number, z: number): number => tall.density(x, z);
-  const approach = approachView(field, center, height, read, roads, approachPts, canopy, clutter);
+  // a town is approached from OUTSIDE its walls (radius + 25 m); a POI from 10 m (its reservation is the whole site)
+  const approach = approachView(field, center, height, read, roads, approachPts, canopy, clutter, townName ? radius + 25 : 10);
   const far = farView(field, center, height, read, [approach.eye[0], approach.eye[2]], canopy, clutter);
   let wall: string | null = null;
   if (townName) {
@@ -173,7 +177,7 @@ export async function run(ctx: Ctx): Promise<number> {
   const frames = { approach: file("-approach.png"), far: file("-far.png") };
   const briefText = conceptBrief(text, fit, height);
   // the two cameras as light-shots spots: a pre-freeze look at the bare site renders them with tools/light-shots.mts --spots
-  if (ctx.flag("dry-run")) console.log(`cameras: ${JSON.stringify([approach, far].map((v, i) => ({ name: `${id}-${i ? "far" : "approach"}`, x: Math.round((v.eye[0] + v.target[0]) / 2), z: Math.round((v.eye[2] + v.target[2]) / 2), camera: v.eye, target: v.target, note: v.note })))}`);
+  if (ctx.flag("dry-run")) console.log(`cameras: ${JSON.stringify([approach, far].map((v, i) => ({ name: `${id}-${i ? "far" : "approach"}`, x: Math.round(v.eye[0]), z: Math.round(v.eye[2]), camera: v.eye, target: v.target, note: v.note })))}`);
   if (ctx.flag("dry-run")) { console.log(`\n--- repaint brief ---\n${briefText}\n--- (dry run: nothing rendered) ---`); return 0; }
 
   // ---- render the bare site ------------------------------------------------------------------------------------------
@@ -200,7 +204,7 @@ export async function run(ctx: Ctx): Promise<number> {
   }
 
   // ---- repaint -------------------------------------------------------------------------------------------------------
-  if (!ctx.flag("renders-only")) {
+  if (!rendersOnly) {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "concept-set-"));
     try {
       const set = {
@@ -223,7 +227,7 @@ export async function run(ctx: Ctx): Promise<number> {
   console.log(`  plan     ${rel(renders.plan)}\n  sheet    ${rel(sheet)}   (open it: judge the painting against the numbers)\n  manifest ${rel(manifestFile)}`);
   if (exists(frames.approach)) console.log(`  design.json: "concept": [${[frames.approach, frames.far].filter(exists).map((f) => `"${rel(f)}"`).join(", ")}]`);
   if (!ctx.flag("paint-only")) { const r = order.recordPlaceStage(P.projectDir, orderKey, "bare-renders", { by: "zonegen concept", evidenceFile: manifestFile }, ctx.world); if (r) console.log(`  ${r}`); }
-  if (!ctx.flag("renders-only")) { const r = order.recordPlaceStage(P.projectDir, orderKey, "concept-painted", { by: "zonegen concept", evidenceFile: sheet }, ctx.world); if (r) console.log(`  ${r}`); }
+  if (!rendersOnly) { const r = order.recordPlaceStage(P.projectDir, orderKey, "concept-painted", { by: "zonegen concept", evidenceFile: sheet }, ctx.world); if (r) console.log(`  ${r}`); }
   return 0;
 }
 
@@ -298,10 +302,12 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "concept-shots-"));
   try {
-    const spots = views.map((v) => ({ name: v.name, x: Math.round((v.eye[0] + v.target[0]) / 2), z: Math.round((v.eye[2] + v.target[2]) / 2), camera: v.eye, target: v.target }));
+    // the body (the streaming centre) stands at the EYE, as a player would: from the eye/target midpoint the trees beside a
+    // far camera were HLOD impostor cut-outs (2026-10-29 redstrand w9; light-shots now checks it per frame)
+    const spots = views.map((v) => ({ name: v.name, x: Math.round(v.eye[0]), z: Math.round(v.eye[2]), camera: v.eye, target: v.target }));
     const spotsFile = path.join(tmp, "spots.json");
     writeJson(spotsFile, spots);
-    const scope = Math.round(Math.max(...views.map((v) => Math.hypot(v.eye[0] - v.target[0], v.eye[2] - v.target[2]) / 2)) + terrainRadius + 150);
+    const scope = Math.round(Math.max(...views.map((v) => Math.hypot(v.eye[0] - v.target[0], v.eye[2] - v.target[2]))) + terrainRadius + 150);
     const port = ctx.opt("port", "5317");
     if (["5173", "5287", "5291", "5293"].includes(port)) return { ok: false, why: `port ${port} belongs to someone else: pass a probe port of your own` };
     console.log(`rendering ${spots.length} bare view(s) of ${sceneId} on :${port} (scope ${scope} m) ...`);

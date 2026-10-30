@@ -18,9 +18,21 @@
  * World: generate -> status-clean -> siting (every declared role has a sited place) -> world-frozen.
  * Place: sited -> bare-renders -> concept-painted -> concept-approved -> design -> design-review -> [town: town-design ->
  *   plan-approved ->] grey-box -> grey-box-review -> detail -> final-review -> installed -> walked.
- * bare-renders also needs world-frozen. A world without a stages file is not enforced (older worlds, test fixtures).
+ * A place needs no world freeze: its stages stand on its LOCAL ground (below), so bare-renders follows an ok `sited`
+ * (2026-10-29 coordinator). A world without a stages file is not enforced.
  *
- * Enforcement (each a small hook in the real command): `zonegen concept` (world-frozen + sited), `place-build
+ * LOCAL GROUND (2026-10-29 redstrand c-concepts: a whole-world hash staled every painting on any world write, so no
+ * place could start while a far fix ran): a PLACE stage hangs on `localGround` — the terrain shape, water, roads and
+ * needs inside the place's footprint (its site circle + every concept camera and the sight line to it), never the whole
+ * world and never scatter / cover / mood / surfaces / textures (a painting replaces those). A write elsewhere leaves the
+ * place ok; a write inside its footprint stales it and names the part that moved. World stages keep the world hash.
+ *
+ * ART MODE (Derek 2026-10-29: "many POIs need NO artwork — small camps are made from assets we already have"): a place
+ * is `art: "painted"` (sited -> bare-renders -> concept-painted -> concept-approved -> design ...) or `art: "catalogue"`
+ * (sited -> bare-renders -> design ...: no painting, no approval; its design names catalogue props only and a Codex /
+ * prop request in it refuses `--done design`). Default: small / roadside / camp roles catalogue, the rest painted.
+ *
+ * Enforcement (each a small hook in the real command): `zonegen concept` (sited on its local ground), `place-build
  * plan/build` (design-review), `town-design propose` (design-review), `worldgen terrace --from-plan` and `town-layout`
  * (plan-approved), `place-build install` / `town-install` (final-review); every worldgen recipe write refuses to change
  * the world hash of a frozen world unless `--unfreeze "<dated ruling>"`, which un-freezes, logs the ruling and names
@@ -48,6 +60,14 @@ export const REVIEW_STAGES = ["design-review", "grey-box-review", "final-review"
 /** Approval stages (`zonegen approve`) and the stage whose evidence they approve. */
 export const APPROVALS = { "concept-approved": "concept-painted", "plan-approved": "town-design" } as const;
 
+const footprintSchema = z.object({
+  center: z.tuple([z.number(), z.number()]),
+  radius: z.number().describe("Site radius + margin (m)."),
+  views: z.array(z.tuple([z.number(), z.number()])).default([]).describe("Concept camera eyes [x, z]; the line from each to the centre is in the footprint."),
+  corridor: z.number().default(30).describe("Half-width (m) of each sight line and the reach round each eye."),
+}).describe("The ground a place stands on and is seen over.");
+export type Footprint = z.infer<typeof footprintSchema>;
+
 const stageRecordSchema = z.object({
   at: z.string().describe("ISO time the stage was recorded."),
   worldHash: z.string().describe("worldHash() of the world recipe when the stage was done. `backfill:unknown` = done before the stage machine existed, on a world nobody hashed (reads STALE)."),
@@ -57,6 +77,11 @@ const stageRecordSchema = z.object({
   approves: z.string().optional().describe("Approvals only: sha256 of the sheet / plan picture that was approved; a repaint after approval makes the approval STALE."),
   ruling: z.string().optional().describe("A dated ruling (YYYY-MM-DD ...) — required for a coordinator approval, an unfreeze, or a status-clean allowance."),
   site: z.object({ center: z.tuple([z.number(), z.number()]), radius: z.number() }).optional().describe("`sited` only: the reservation (POI) or town centre + radius it was sited at; moved = STALE."),
+  ground: z.object({
+    footprint: footprintSchema,
+    hash: z.string().describe("localGround() hash of the footprint when the stage was done."),
+    parts: z.record(z.string(), z.string()).describe("Short hash per ground part (`world:terrain`, `roads/path-a`, ...): a change names the part that moved."),
+  }).optional().describe("Place stages: the LOCAL ground the stage stands on. A record without it (older) is checked against the whole-world hash."),
   note: z.string().optional().describe("Free text: what was done, what was allowed."),
 });
 export type StageRecord = z.infer<typeof stageRecordSchema>;
@@ -67,6 +92,7 @@ const placeSchema = z.object({
   role: z.string().describe("The siting role it fills (one of the world's `roles`)."),
   zone: z.string().optional().describe("The zone (reservations live per zone). Towns may omit it."),
   name: z.string().optional().describe("Other names commands use for it: a town's file stem (authoring/towns/<name>-*.json), a concept id."),
+  art: z.enum(["painted", "catalogue"]).optional().describe("painted: a Codex concept painting + approval before design. catalogue: no artwork — bare renders then a design from catalogue props only (no Codex / prop requests). Omitted: small / roadside / camp roles are catalogue, everything else painted (Derek 2026-10-29)."),
   stages: z.record(z.string(), stageRecordSchema).default({}).describe("Recorded stages by name (the order is fixed by kind)."),
 });
 export type Place = z.infer<typeof placeSchema>;
@@ -92,6 +118,17 @@ const readJson = (f: string): J => JSON.parse(fs.readFileSync(f, "utf8").replace
 export const stagesFile = (projectDir: string, world: string): string => path.join(projectDir, "authoring", "stages", `${world}.json`);
 export const recipeFile = (projectDir: string, world: string): string => path.join(projectDir, "assets", "worlds", `${world}.json`);
 export const fileSha = (f: string): string | null => (fs.existsSync(f) ? sha256(fs.readFileSync(f)) : null);
+/** Top-level design.json fields that hold a coordinator ruling or bookkeeping (tools/poi-review/job.mjs DESIGN_RULING_KEY):
+ *  recording a ruling never stales the design stage or its review (L o-small 2026-10-29). */
+const RULING_KEY = (k: string): boolean => k === "size" || /Ruling$/.test(k);
+/** A stage evidence hash: a design.json is hashed without its ruling fields, any other file by its bytes. */
+export function evidenceSha(f: string): string | null {
+  if (!fs.existsSync(f)) return null;
+  if (path.basename(f) === "design.json") {
+    try { const j = JSON.parse(fs.readFileSync(f, "utf8")); if (j && typeof j === "object" && !Array.isArray(j)) return sha256(Buffer.from(JSON.stringify(Object.fromEntries(Object.entries(j).filter(([k]) => !RULING_KEY(k)))))); } catch { /* not JSON: its bytes */ }
+  }
+  return fileSha(f);
+}
 
 export function loadStages(projectDir: string, world: string): WorldStages | null {
   const f = stagesFile(projectDir, world);
@@ -108,7 +145,34 @@ export function stagedWorlds(projectDir: string): string[] {
   const dir = path.join(projectDir, "authoring", "stages");
   return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)) : [];
 }
-export const stagesOf = (p: Pick<Place, "kind">): readonly string[] => (p.kind === "town" ? TOWN_STAGES : POI_STAGES);
+/** The place's art mode: its `art`, else by role (small / roadside / camp POIs are catalogue). */
+export const artOf = (p: Pick<Place, "kind" | "role" | "art">): "painted" | "catalogue" =>
+  p.art ?? (p.kind === "poi" && /small|roadside|camp/.test(p.role) ? "catalogue" : "painted");
+const PAINT_STAGES = new Set(["concept-painted", "concept-approved"]);
+export const stagesOf = (p: Pick<Place, "kind" | "role" | "art">): readonly string[] => {
+  const all = p.kind === "town" ? TOWN_STAGES : POI_STAGES;
+  return artOf(p) === "catalogue" ? all.filter((s) => !PAINT_STAGES.has(s)) : all;
+};
+const NEW_ART = (s: string): boolean => /\bcodex\b(?!-craft)/i.test(s) || /\b(prop|codex|art) requests?\b/i.test(s);
+/** A catalogue place's design may not ask for new art: a Codex / prop-request mention or a non-empty request field is a
+ *  fault (`codex-craft/<id>` is a catalogue prop and is fine). */
+export function catalogueDesignFaults(text: string): string[] {
+  const faults: string[] = [];
+  let j: unknown;
+  try { j = JSON.parse(text); } catch { j = undefined; }
+  const walk = (v: unknown, at: string): void => {
+    if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${at}[${i}]`));
+    else if (v && typeof v === "object") {
+      for (const [k, x] of Object.entries(v)) {
+        if (/^(codex\w*|prop ?requests?|requests?|codexRequests?)$/i.test(k) && x && (!Array.isArray(x) || x.length)) faults.push(`${at}.${k}: a request field`);
+        walk(x, `${at}.${k}`);
+      }
+    } else if (typeof v === "string" && NEW_ART(v)) faults.push(`${at}: "${v.slice(0, 90)}"`);
+  };
+  if (j !== undefined) walk(j, "design");
+  else text.split(/\r?\n/).forEach((l, i) => { if (NEW_ART(l)) faults.push(`line ${i + 1}: "${l.trim().slice(0, 90)}"`); });
+  return faults;
+}
 export const matchPlace = (p: Place, key: string): boolean => p.id === key || p.name === key;
 
 // ------------------------------------------------------------------ the world hash
@@ -152,6 +216,128 @@ export function worldHash(recipeRaw: unknown, placeIds: Iterable<string> = []): 
 export function currentWorldHash(projectDir: string, doc: WorldStages): string | null {
   const f = recipeFile(projectDir, doc.world);
   return fs.existsSync(f) ? worldHash(readJson(f), doc.places.map((p) => p.id)) : null;
+}
+
+// ------------------------------------------------------------------ the local ground hash
+
+/** Recipe keys that never shape the ground a place stands on (stamps, labels, paint, plants, air). Anything else — the
+ *  seed, bounds, terrain noise, climate relief anchors, a key added later — counts everywhere. */
+const NOT_LOCAL_GROUND = new Set(["features", "pipeline", "name", "version", "surfaces", "biomes", "patches", "scatter", "cover", "regions",
+  "macroNoise", "material", "waterMaterial", "riverMaterial", "marshMaterial", "bridgeMaterial", "splat", "zoneGround", "rockSkins", "textureFilter"]);
+/** Feature kinds that are plants / paint only. */
+const NOT_GROUND_KINDS = new Set(["clearings"]);
+/** Feature fields that only paint or label (never move ground or water). */
+const PAINT_FIELDS = new Set(["surface", "surfaceEdge", "surfaceByBiome", "turf", "mood", "scatter", "cover", "rules", "tags", "name", "story", "reason"]);
+const LINE_KEYS = ["points", "along"];
+const AREA_KEYS = ["polygon", "footprint"];
+const POINT_KEYS = ["center", "position", "near", "at", "start", "end"];
+const REACH_KEYS = ["radius", "falloff", "width", "reach", "within", "inland", "terrainRadius", "feather", "bank"];
+type P2 = [number, number];
+const toXZ = (v: unknown): P2 | null => (Array.isArray(v) && typeof v[0] === "number" ? (v.length >= 3 ? [v[0], v[2] as number] : [v[0], v[1] as number]) : null);
+const ptsOf = (v: unknown): P2[] => { const one = toXZ(v); if (one) return [one]; return Array.isArray(v) ? v.flatMap(ptsOf) : []; };
+const segDist = (p: P2, a: P2, b: P2): number => {
+  const dx = b[0] - a[0], dz = b[1] - a[1], l = dx * dx + dz * dz;
+  const t = l ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l)) : 0;
+  return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dz);
+};
+/** The footprint as probe discs: the site disc, each camera eye, and samples every 10 m along each sight line. */
+function probes(fp: Footprint): { p: P2; r: number }[] {
+  const out = [{ p: fp.center, r: fp.radius }];
+  for (const e of fp.views) {
+    const n = Math.max(1, Math.ceil(Math.hypot(e[0] - fp.center[0], e[1] - fp.center[1]) / 10));
+    for (let i = 0; i <= n; i++) out.push({ p: [e[0] + (fp.center[0] - e[0]) * (i / n), e[1] + (fp.center[1] - e[1]) * (i / n)], r: fp.corridor });
+  }
+  return out;
+}
+/** Does a feature's geometry come within reach of the footprint? A feature with no coordinates counts (it may shape everything). */
+function reachesFootprint(f: J, pr: { p: P2; r: number }[]): boolean {
+  let reach = 0;
+  for (const k of REACH_KEYS) if (typeof f[k] === "number" && Number.isFinite(f[k])) reach = Math.max(reach, f[k]);
+  if (Array.isArray(f.widths)) for (const w of f.widths) if (typeof w === "number") reach = Math.max(reach, w);
+  const lines = LINE_KEYS.map((k) => ptsOf(f[k])).filter((l) => l.length);
+  const points = POINT_KEYS.flatMap((k) => ptsOf(f[k]));
+  if (f.solved) points.push(...ptsOf(f.solved.at));
+  const boxes: [number, number, number, number][] = [];
+  for (const k of AREA_KEYS) { const a = ptsOf(f[k]); if (a.length) boxes.push([Math.min(...a.map((q) => q[0])), Math.min(...a.map((q) => q[1])), Math.max(...a.map((q) => q[0])), Math.max(...a.map((q) => q[1]))]); }
+  const o = toXZ(f.origin), sz = toXZ(f.size) ?? (Array.isArray(f.size) ? [f.size[0], f.size[1]] as P2 : null);
+  if (o && sz) boxes.push([o[0], o[1], o[0] + sz[0], o[1] + sz[1]]);
+  if (!lines.length && !points.length && !boxes.length) return true;
+  for (const { p, r } of pr) {
+    const lim = r + reach;
+    if (points.some((q) => Math.hypot(q[0] - p[0], q[1] - p[1]) <= lim)) return true;
+    for (const l of lines) for (let i = 0; i < l.length; i++) if (segDist(p, l[i]!, l[Math.min(i + 1, l.length - 1)]!) <= lim) return true;
+    for (const [x0, z0, x1, z1] of boxes) if (Math.hypot(Math.max(x0 - p[0], 0, p[0] - x1), Math.max(z0 - p[1], 0, p[1] - z1)) <= lim) return true;
+  }
+  return false;
+}
+const strip = (f: J): J => Object.fromEntries(Object.entries(f).filter(([k]) => !PAINT_FIELDS.has(k)));
+const short12 = (s: string): string => sha256(s).slice(0, 12);
+/** The parsed recipe (parse once, hash many footprints). */
+export const parseRecipe = (raw: unknown): J => worldRecipeSchema.parse(raw) as J;
+/**
+ * The LOCAL ground under a footprint: every global ground key (seed, bounds, terrain noise without its sea-cliff list,
+ * climate relief, ...) plus every world feature, sea-cliff stretch and need that reaches the footprint, with paint-only
+ * fields dropped and the places' own builds left out. Returns the hash and a short hash per part, so a change can say
+ * WHICH part moved.
+ */
+export function localGround(recipe: J, fp: Footprint, placeIds: Iterable<string> = []): { hash: string; parts: Record<string, string> } {
+  const pr = probes(fp);
+  const towns = ((recipe.features?.towns ?? []) as J[]).map((t) => String(t.id));
+  const own = new Set(placeIds), townIds = new Set(towns);
+  const parts: Record<string, string> = {};
+  for (const [k, v] of Object.entries(recipe)) {
+    if (NOT_LOCAL_GROUND.has(k) || v === undefined) continue;
+    if (k === "terrain" && v && typeof v === "object") {
+      const { seaCliffs, ...rest } = v as J;
+      parts["world:terrain"] = short12(stable(rest));
+      for (const c of (seaCliffs ?? []) as J[]) if (reachesFootprint(c, pr)) parts[`seaCliffs/${c.id}`] = short12(stable(strip(c)));
+    } else if (k === "needs" && Array.isArray(v)) {
+      for (const n of v as J[]) if (reachesFootprint(n, pr)) parts[`needs/${n.id}`] = short12(stable(strip(n)));
+    } else parts[`world:${k}`] = short12(stable(v));
+  }
+  for (const [kind, list] of Object.entries((recipe.features ?? {}) as J)) {
+    if (!Array.isArray(list) || NOT_GROUND_KINDS.has(kind)) continue;
+    list.forEach((f: J, i: number) => {
+      if (kind === "towns") { if (reachesFootprint({ center: f.center }, pr)) parts[`towns/${f.id}`] = short12(stable({ id: f.id, tier: f.tier, siteRole: f.siteRole, center: f.center })); return; }
+      if (placeOwned(f, own, townIds) || !reachesFootprint(f, pr)) return;
+      parts[`${kind}/${f.id ?? i}`] = short12(stable(strip(f)));
+    });
+  }
+  return { hash: sha256(stable(parts)), parts };
+}
+/** What moved between two part maps, as `roads/path-a changed`, `lakes/lake-2 new`, `needs/x gone`. */
+export function groundDiff(was: Record<string, string>, now: Record<string, string>): string[] {
+  const out: string[] = [];
+  for (const k of Object.keys({ ...was, ...now }).sort()) {
+    if (!(k in now)) out.push(`${k} gone`);
+    else if (!(k in was)) out.push(`${k} new`);
+    else if (was[k] !== now[k]) out.push(`${k} changed`);
+  }
+  return out;
+}
+/** The footprint a place stands on now: its site (+ 40 m) and the cameras of its current concept manifest. */
+export function currentFootprint(projectDir: string, doc: WorldStages, p: Place): Footprint | null {
+  const site = currentSite(projectDir, doc, p);
+  if (!site) return null;
+  const views: P2[] = [];
+  const mf = conceptManifest(projectDir, doc, p);
+  if (fs.existsSync(mf)) {
+    try {
+      const m = readJson(mf);
+      const c = m.reservation?.center;
+      if (Array.isArray(c) && Math.hypot(c[0] - site.center[0], c[1] - site.center[1]) <= 0.5)
+        for (const r of Object.values((m.renders ?? {}) as J)) { const e = toXZ(r?.camera); if (e) views.push([Math.round(e[0]), Math.round(e[1])]); }
+    } catch { /* no cameras */ }
+  }
+  return { center: site.center, radius: site.radius + 40, views, corridor: 30 };
+}
+/** The `ground` a record made now carries. */
+export function groundRecord(projectDir: string, doc: WorldStages, p: Place, recipe?: J): StageRecord["ground"] | undefined {
+  const fp = currentFootprint(projectDir, doc, p);
+  const f = recipeFile(projectDir, doc.world);
+  if (!fp || (!recipe && !fs.existsSync(f))) return undefined;
+  const g = localGround(recipe ?? parseRecipe(readJson(f)), fp, doc.places.map((x) => x.id));
+  return { footprint: fp, hash: g.hash, parts: g.parts };
 }
 
 // ------------------------------------------------------------------ state
@@ -237,6 +423,23 @@ export function evaluate(projectDir: string, doc: WorldStages): Eval {
     if (r.worldHash !== hash) return `${what} on world ${short(r.worldHash)}, world is now ${hash ? short(hash) : "missing"}`;
     return "";
   };
+  // place records: the LOCAL ground under the place (a record made before local ground falls back to the world hash)
+  const rf = recipeFile(projectDir, doc.world);
+  let parsed: J | null | undefined;
+  const ids = doc.places.map((p) => p.id);
+  const cache = new Map<string, { hash: string; parts: Record<string, string> }>();
+  const placeRec = (r: StageRecord | undefined, what: string): string | null => {
+    if (!r) return null;
+    if (!r.ground) return rec(r, what);
+    if (parsed === undefined) parsed = fs.existsSync(rf) ? parseRecipe(readJson(rf)) : null;
+    if (!parsed) return `${what}, world is missing`;
+    const key = stable(r.ground.footprint);
+    let now = cache.get(key);
+    if (!now) { now = localGround(parsed, r.ground.footprint, ids); cache.set(key, now); }
+    if (now.hash === r.ground.hash) return "";
+    const d = groundDiff(r.ground.parts, now.parts);
+    return `ground under the place moved since ${what}: ${d.slice(0, 4).join(", ")}${d.length > 4 ? ` (+${d.length - 4})` : ""}`;
+  };
   // generate
   const recipeOk = hash !== null;
   world.push({ stage: "generate", state: recipeOk ? "ok" : "MISSING", why: recipeOk ? `world ${short(hash!)}` : "no recipe", how: howFor(doc, null, "generate") });
@@ -252,7 +455,7 @@ export function evaluate(projectDir: string, doc: WorldStages): Eval {
     const r = p.stages["sited"];
     const how = howFor(doc, p, "sited");
     if (!r) return recipeOk ? { stage: "sited", state: "MISSING", why: "not sited", how } : { stage: "sited", state: "BLOCKED", blockedBy: "generate", why: "", how };
-    const w = rec(r, "sited");
+    const w = placeRec(r, "sited");
     if (w) return { stage: "sited", state: "STALE", why: w, how };
     const now = currentSite(projectDir, doc, p);
     if (!now) return { stage: "sited", state: "STALE", why: p.kind === "town" ? `no town ${p.id} in the recipe` : `no reservation ${p.id} in zone ${p.zone}`, how };
@@ -275,7 +478,6 @@ export function evaluate(projectDir: string, doc: WorldStages): Eval {
   world.push(fw === null ? { stage: "world-frozen", state: sitingOk ? "MISSING" : "BLOCKED", blockedBy: sitingOk ? undefined : world.slice(0, 3).find((s) => s.state !== "ok")!.stage, why: "not frozen", how: howFor(doc, null, "world-frozen") }
     : fw ? { stage: "world-frozen", state: "STALE", why: fw, how: howFor(doc, null, "world-frozen") }
     : { stage: "world-frozen", state: sitingOk ? "ok" : "STALE", why: sitingOk ? `frozen ${fr!.at}${fr!.by ? ` by ${fr!.by}` : ""}` : "siting is not ok", how: howFor(doc, null, "world-frozen") });
-  const frozen = world[3]!;
 
   for (const entry of places) {
     const p = entry.place;
@@ -287,15 +489,15 @@ export function evaluate(projectDir: string, doc: WorldStages): Eval {
       if (stage === "sited") s = sited.get(p.id)!;
       else {
         const r = p.stages[stage];
-        // the gate before this stage: the previous place stage, and for bare-renders also the frozen world
-        const gate: StageState = stage === "bare-renders" && frozen.state !== "ok" ? { ...frozen, stage: "world-frozen" } : prev!;
+        // the gate before this stage: the previous place stage (a place needs no world freeze: its ground is local)
+        const gate: StageState = prev!;
         if (!r) s = gate.state === "ok" ? { stage, state: "MISSING", why: "not done", how } : { stage, state: "BLOCKED", blockedBy: gate.state === "BLOCKED" ? gate.blockedBy : gate.stage, why: "", how };
         else {
-          let why = rec(r, "done") ?? "";
+          let why = placeRec(r, "done") ?? "";
           if (!why && r.evidence) {
-            const now = fileSha(path.resolve(projectDir, r.evidence));
+            const ef = path.resolve(projectDir, r.evidence), now = evidenceSha(ef);
             if (now === null) why = `evidence ${r.evidence} is gone`;
-            else if (r.evidenceSha && now !== r.evidenceSha) why = `evidence ${r.evidence} changed since it was recorded`;
+            else if (r.evidenceSha && now !== r.evidenceSha && fileSha(ef) !== r.evidenceSha) why = `evidence ${r.evidence} changed since it was recorded`;
           }
           if (!why && stage in APPROVALS) {
             const of = p.stages[APPROVALS[stage as keyof typeof APPROVALS]];
@@ -345,6 +547,15 @@ export function requirePlaceStage(projectDir: string, key: string, stage: string
   return `${command} refused (world order): no place "${key}" in ${worlds.map((w) => relTo(projectDir, stagesFile(projectDir, w))).join(", ")} — site it first: ${howFor(loadStages(projectDir, worlds[0]!)!, null, "siting")}`;
 }
 
+/** A place's art mode by id / name, or null when no staged world knows it. */
+export function artFor(projectDir: string, key: string, world?: string): "painted" | "catalogue" | null {
+  for (const w of world ? [world] : stagedWorlds(projectDir)) {
+    const p = loadStages(projectDir, w)?.places.find((x) => matchPlace(x, key));
+    if (p) return artOf(p);
+  }
+  return null;
+}
+
 /** Record a place stage done now on the current world hash (the tool that did the work calls it). */
 export function recordPlaceStage(projectDir: string, key: string, stage: string, fields: Partial<StageRecord> & { evidenceFile?: string }, world?: string): string | null {
   for (const w of world ? [world] : stagedWorlds(projectDir)) {
@@ -353,12 +564,13 @@ export function recordPlaceStage(projectDir: string, key: string, stage: string,
     if (!doc || !p) continue;
     const hash = currentWorldHash(projectDir, doc)!;
     const { evidenceFile, ...rest } = fields;
+    const ground = groundRecord(projectDir, doc, p);
     p.stages[stage] = {
-      at: new Date().toISOString(), worldHash: hash, ...rest,
-      ...(evidenceFile ? { evidence: relTo(projectDir, path.resolve(evidenceFile)), evidenceSha: fileSha(path.resolve(evidenceFile)) ?? undefined } : {}),
+      at: new Date().toISOString(), worldHash: hash, ...(ground ? { ground } : {}), ...rest,
+      ...(evidenceFile ? { evidence: relTo(projectDir, path.resolve(evidenceFile)), evidenceSha: evidenceSha(path.resolve(evidenceFile)) ?? undefined } : {}),
     };
     saveStages(projectDir, doc);
-    return `recorded ${p.id} ${stage} on world ${short(hash)} (${relTo(projectDir, stagesFile(projectDir, w))})`;
+    return `recorded ${p.id} ${stage} on world ${short(hash)}${ground ? `, local ground ${short(ground.hash)} (${Object.keys(ground.parts).length} parts, ${ground.footprint.views.length} camera(s))` : ""} (${relTo(projectDir, stagesFile(projectDir, w))})`;
   }
   return null;
 }
@@ -378,18 +590,41 @@ export function guardWorldWrite(file: string, next: unknown, unfreeze: string, c
   const fr = doc.stages["world-frozen"];
   const ids = doc.places.map((p) => p.id);
   const before = fs.existsSync(file) ? worldHash(readJson(file), ids) : null;
-  if (!fr || fr.worldHash !== before) return { ok: true, message: "" }; // not frozen (or already stale: nothing left to protect)
   const after = worldHash(next, ids);
   if (after === before) return { ok: true, message: "" };
-  if (!unfreeze) return { ok: false, message: `${command} refused: world ${doc.world} is FROZEN (${fr.at}${fr.by ? ` by ${fr.by}` : ""}) and this write changes the world (${short(before)} -> ${short(after)}). Places are built on it. Only with a dated ruling: --unfreeze "YYYY-MM-DD <who>: <why>" — every place stage done on this world goes STALE (zonegen stages ${doc.world} --project ${doc.project} lists them).` };
+  // which places this write moves the ground under (their ok stages go STALE); every other place is untouched
+  const moved = groundMoves(projectDir, doc, next);
+  const movedText = moved.length ? moved.map((x) => `${x.place} (${x.stages.join(", ")}: ${x.parts.slice(0, 3).join(", ")}${x.parts.length > 3 ? ` +${x.parts.length - 3}` : ""})`).join("; ") : "";
+  if (!fr || fr.worldHash !== before) return { ok: true, message: movedText ? `world order: this write moves the ground under ${movedText} — those stages go STALE (zonegen stages ${doc.world} --project ${doc.project})` : "" }; // not frozen
+  if (!unfreeze) return { ok: false, message: `${command} refused: world ${doc.world} is FROZEN (${fr.at}${fr.by ? ` by ${fr.by}` : ""}) and this write changes the world (${short(before)} -> ${short(after)}). Places are built on it. Only with a dated ruling: --unfreeze "YYYY-MM-DD <who>: <why>". Place stages it would stale (their local ground moves): ${movedText || "none"}.` };
   if (!isDatedRuling(unfreeze)) return { ok: false, message: `${command}: --unfreeze needs a dated ruling ("YYYY-MM-DD <who>: <why>"), got "${unfreeze}"` };
-  const ev = evaluate(projectDir, doc);
-  const stale: string[] = [];
-  for (const e of ev.places) for (const r of e.rows) if (r.state === "ok") stale.push(`${e.place.id}:${r.stage}`);
+  const stale = moved.flatMap((x) => x.stages.map((st) => `${x.place}:${st}`));
   delete doc.stages["world-frozen"];
   doc.unfreezes.push({ at: new Date().toISOString(), ruling: unfreeze, from: before!, to: after, command, stale });
   saveStages(projectDir, doc);
   return { ok: true, message: `UNFROZE ${doc.world} (${unfreeze}): ${short(before!)} -> ${short(after)}. STALE now (redo in order): ${stale.length ? stale.join(", ") : "nothing"}. Re-freeze: zonegen stages ${doc.world} --project ${doc.project} --freeze` };
+}
+
+/** The places whose ok stages stand on ground that `next` (a recipe about to be written) changes, with the parts that move. */
+export function groundMoves(projectDir: string, doc: WorldStages, next: unknown): { place: string; stages: string[]; parts: string[] }[] {
+  const ev = evaluate(projectDir, doc);
+  const recipe = parseRecipe(next), ids = doc.places.map((p) => p.id), hash = worldHash(next, ids);
+  const cache = new Map<string, { hash: string; parts: Record<string, string> }>();
+  const out: { place: string; stages: string[]; parts: string[] }[] = [];
+  for (const e of ev.places) {
+    const stages: string[] = [], parts = new Set<string>();
+    for (const row of e.rows) {
+      const r = e.place.stages[row.stage];
+      if (row.state !== "ok" || !r) continue;
+      if (!r.ground) { if (r.worldHash !== hash) { stages.push(row.stage); parts.add("world (record has no local ground)"); } continue; }
+      const key = stable(r.ground.footprint);
+      let now = cache.get(key);
+      if (!now) { now = localGround(recipe, r.ground.footprint, ids); cache.set(key, now); }
+      if (now.hash !== r.ground.hash) { stages.push(row.stage); for (const d of groundDiff(r.ground.parts, now.parts)) parts.add(d); }
+    }
+    if (stages.length) out.push({ place: e.place.id, stages, parts: [...parts] });
+  }
+  return out;
 }
 
 /** Place-command hook: print the refusal and exit 3 when the stage is not ok. */

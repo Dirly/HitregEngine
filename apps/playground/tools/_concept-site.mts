@@ -158,7 +158,8 @@ export interface View { name: "approach" | "far"; eye: V3; target: V3; from: num
  * `height` m mark at the centre shows at least READ_PX_MIN px — the farthest such point within 1.25 x the read
  * distance. When none does, the best-seen point (note says so).
  */
-export function approachView(g: Ground, c: V2, height: number, read: number, roads: V2[][], approach: V2[], canopy?: (x: number, z: number) => number, clutter?: (x: number, z: number) => number): View {
+/** `minFrom`: the nearest an approach eye may stand (a town passes its radius: an eye inside the walls is a street view, not an approach; redstrand 2026-10-29 town-1 picked 36 m inside r 45). */
+export function approachView(g: Ground, c: V2, height: number, read: number, roads: V2[][], approach: V2[], canopy?: (x: number, z: number) => number, clutter?: (x: number, z: number) => number, minFrom = 10): View {
   const foot = g.height(c[0], c[1]), top = foot + height;
   const cand: V2[] = [];
   for (const r of roads) {
@@ -172,7 +173,7 @@ export function approachView(g: Ground, c: V2, height: number, read: number, roa
   let first: View | null = null, best: View | null = null;
   for (const p of cand) {
     const d = dist(p, c);
-    if (d > read * 1.25 || d < 10 || wet(g, p[0], p[1])) continue;
+    if (d > read * 1.25 || d < minFrom || wet(g, p[0], p[1])) continue;
     const eye: V3 = [p[0], g.height(p[0], p[1]) + EYE_M, p[1]];
     const r = readPixels(g, eye, { at: c, foot, top });
     if (canopyBlock(g, eye, target, canopy) > CANOPY_BLOCK) r.px = 0; // trees in the way: not seen from here

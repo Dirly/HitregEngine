@@ -13,7 +13,8 @@ npx tsx tools/zonegen.mts status <world> --project <p> --zone <z> --next   # fro
 ```
 
 The ORDER across the world is enforced by `zonegen stages <world> --project <p> --next` (tools/world-order.mts): start
-the file with `--roles`, record each pick with `--site`, `--done status-clean`, `--freeze` before any concept; show Derek
+the file with `--roles`, record each pick with `--site`, `--done status-clean`, `--freeze` for the world stages (a place needs no freeze: it stands on its local ground, and a write
+there stales it); catalogue places (small / roadside / camp) get bare renders and no painting; show Derek
 each on-site sheet and record `zonegen approve --stage concept` before a design starts; record agent stages with
 `--done <stage> --evidence <file>`. Tell Derek what the table says, never a stage from memory. Never unfreeze without a
 dated ruling.

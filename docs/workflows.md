@@ -56,9 +56,9 @@ before repeating a style or major asset group.
   dressing plan (`dress check` / `dress apply`), never by writing a transform, and are chosen
   from `props menu`, never by reading a catalog.
 - **Building places on a generated world (siting, concepts, designs, grey boxes, installs):** the world's ORDER is
-  `zonegen stages <world> --project <p> [--next]` (`tools/world-order.mts`, `authoring/stages/<world>.json`): the world
-  is frozen before any concept, a concept is approved before a design, and every place stage stands on the current
-  world hash. The commands that do the work refuse out of order; `zonegen approve` records approvals.
+  `zonegen stages <world> --project <p> [--next]` (`tools/world-order.mts`, `authoring/stages/<world>.json`): each place
+  stage stands on the place's LOCAL ground (its site + concept camera lines; a far world write never stales it), a
+  painted place's concept is approved before a design, and a catalogue place (small / roadside / camp) has no painting. The commands that do the work refuse out of order; `zonegen approve` records approvals.
 - **Running a whole zone** (design, look, places, life, quests, review): read `docs/zone-creation.md` (the
   `zone-creator` skill wraps it). Places are designed in the zone brief before any quest; reviewers use
   `docs/world-standards/review-rubric.md`.
