@@ -52,7 +52,7 @@
  *                                    a free wall stretch long enough when it needs a wall), with use, wall need, and each set's shape
  *   npx tsx tools/props.mts report                                         (authoring/dressing/prop-report.md: every prop's in-game size,
  *                                                                           real size + scale used, mount, flags, texel density)
- *   npx tsx tools/props.mts proof <prefab id>                              (contact sheet PNG beside a 1.8 m figure)
+ *   npx tsx tools/props.mts proof <prefab id>                              (contact sheet PNG beside a 1.8 m figure; proof --sheet [--figure] <id...>: 6 per row)
  *   npx tsx tools/props.mts reskin-plan [--json]                           (LOW texel density props: size needed, UV fitness, route a/b/c)
  *   npx tsx tools/props.mts reskin <prefab id> --route a|b|c [--role wood|stone] [--art <png>]   (one kit prop to the target)
  *
@@ -90,7 +90,7 @@ const argv = process.argv.slice(2);
 const cmd = argv[0];
 const positional: string[] = [];
 const flags: Record<string, string | true> = {};
-const BOOLEAN = new Set(["redo", "dry", "designs-only", "vocabulary", "json", "all", "sheet", "compact", "next", "quiet", "rooms", "categories", "tags", "surfaces", "force", "uncut"]);
+const BOOLEAN = new Set(["redo", "dry", "designs-only", "vocabulary", "json", "all", "sheet", "compact", "next", "quiet", "rooms", "categories", "tags", "surfaces", "force", "uncut", "figure"]);
 for (let i = 1; i < argv.length; i++) {
   const a = argv[i];
   if (a.startsWith("--")) {
@@ -1006,8 +1006,19 @@ async function proofSheet(ids: string[]) {
       const mf = locate(ASSETS, "materials", `${mat}.json`), map = fs.existsSync(mf) ? readJson(mf).map : null, tf = map && locate(ASSETS, "textures", map);
       pages.set(mat, tf && fs.existsSync(tf) ? (() => { const png = decodePng(fs.readFileSync(tf)); return { width: png.width, height: png.height, rgba: png.data }; })() : null);
     }
-    const tris = geo.tris.map((t) => ({ p: [t.a, t.b, t.c].map((p) => new THREE.Vector3(p[0], p[1], p[2])), uv: t.uv?.map(([u, v]) => [u, 1 - v]) }));
+    const tris: any[] = geo.tris.map((t) => ({ p: [t.a, t.b, t.c].map((p) => new THREE.Vector3(p[0], p[1], p[2])), uv: t.uv?.map(([u, v]) => [u, 1 - v]) }));
     if (!tris.length) return;
+    if (flags.figure) {
+      // --figure (k-city 2026-10-30): a red 1.8 m figure standing on grade (y=0) just in front of the prop's +X front corner
+      let xMax = -Infinity, zMax = -Infinity;
+      for (const t of geo.tris) for (const p of [t.a, t.b, t.c]) { xMax = Math.max(xMax, p[0]); zMax = Math.max(zMax, p[2]); }
+      const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z), col = [220, 60, 50];
+      const [x0, x1, z0, z1] = [xMax - 0.45, xMax, zMax + 0.4, zMax + 0.65];
+      const c = (i: number, j: number, k: number) => V(i ? x1 : x0, j ? 1.8 : 0, k ? z1 : z0);
+      const q = (a: any, b: any, d: any, e: any) => tris.push({ p: [a, b, d], color: col }, { p: [a, d, e], color: col });
+      q(c(0, 1, 0), c(0, 1, 1), c(1, 1, 1), c(1, 1, 0)); q(c(0, 0, 1), c(1, 0, 1), c(1, 1, 1), c(0, 1, 1)); q(c(1, 0, 0), c(1, 0, 1), c(1, 1, 1), c(1, 1, 0));
+      q(c(0, 0, 0), c(0, 0, 1), c(0, 1, 1), c(0, 1, 0)); q(c(0, 0, 0), c(1, 0, 0), c(1, 1, 0), c(0, 1, 0));
+    }
     const img = renderStrip([{ tris }], [new THREE.Vector3(-0.55, -0.45, -0.75)], mat ? pages.get(mat) : null, tile);
     const ox = (k % cols) * tile, oy = Math.floor(k / cols) * tile;
     for (let y = 0; y < tile; y++) for (let x = 0; x < tile; x++) for (let c = 0; c < 4; c++) rgba[((oy + y) * W + ox + x) * 4 + c] = img.rgba[(y * tile + x) * 4 + c];
