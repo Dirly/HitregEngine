@@ -10,7 +10,7 @@
  */
 import { z } from "zod";
 import { facesDir } from "./_compass.mts";
-import { fitRibbon, pathParamsSchema, regionVegetationSchema } from "@hitreg/core";
+import { regionVegetationSchema, REMOVED_RIBBON_OPS, RIBBONS_REMOVED } from "@hitreg/core";
 import { densityNeed, heightForPx, leanQuat, orientBase, POCKET_FLOOR_M, READ_PX_MIN, readPixels, SEAT_GAP_M, scaleBase, seatStructure, SINK_MAX_M, SKIRT_BURY_M, toWorldYaw, wearsCliffTile, type BaseOutline } from "./_place-quality.mts";
 /** Skirt wall thickness (m): its outer face stands ~0.15 m past the structure's base edge (a plinth). */
 export const SKIRT_THICK_M = 0.8;
@@ -81,6 +81,7 @@ export const placeStructureSchema = z.object({
   scale: z.number().min(0.5).max(3).default(1).describe("Uniform scale of the placed piece (a silhouette element taller than its catalogue size). L (PLACES-FIX 2026-10-22): never past its texel floor: the plan refuses a scale that takes the piece under MIN_SCALED_TEXELS tx/m (its catalogue texel density / scale)."),
   landmark: landmarkSchema.nullable().default(null).describe("Present on the ONE landmark (a structure or a wall; L: every place reads from its approaches)."),
   on: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of an earlier structure of the pocket (a crag, a rock): the piece stands on that piece's own mesh top at its spot (a cairn on a crag top), never on the ground."),
+  marker: z.string().regex(/^[a-z0-9-]+$/).optional().describe("With `on`: the host's named marker (its <model>.markers.json, e.g. `fire-1`) the piece stands on: its spot and seat come from the marker, never from `at`. Without it the piece snaps to the centre of the host's top face under it when that face is a pedestal (SUPPORT_SNAP_FACE x its footprint or less). L (Red Dial 2026-10-30, Derek: braziers on pillars \"not centred, hanging off edges and clipping\")."),
   stone: z.string().optional().describe("A stone piece of a BUILT structure (a weighting stone in a basin): the material it draws with instead of the zone's rock skin (a material id, or `@wall:<id>` = that wall's face stone); written as the entity tag `stone:<material>`, read by rock-skins. Set by the planner on a basin's rock-kit contents."),
   lean: leanSchema.optional(),
   onWall: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of a level-topped built wall (kind tower / keep / gatehouse) in the same pocket: the piece stands on its wall walk (the coping top), not on the ground, and is not seated. `at` must lie on the wall line (a tower's ring: [0, size] = its front). L (LANDMARKS 2026-10-21): a wizard's tower is read at dusk by the fire ON its top."),
@@ -230,9 +231,10 @@ export const placeArchetypeSchema = z.object({
   filler: z.array(z.string()).default([]).describe("Catalogued small props the density top-up draws from (every pocket without its own `dressing.filler`): stones, hay, rope coils, firewood. Empty = the role's fill (ROOM_FILL). The top-up never repeats a `dressing.props` entry."),
   views: z.array(z.object({ name: z.string().regex(/^[a-z0-9-]+$/), camera: z.tuple([z.number(), z.number(), z.number()]), target: z.tuple([z.number(), z.number(), z.number()]) }).strict()).max(12).default([])
     .describe("Extra fixed evidence cameras, written by the design before the site is final (`--set views=[...]`): PLACE FRAME, x right / z toward the approach from the plan centre, y over the pad (padY). Merged into views.json like <job>/contract.json views (a contract view of the same name wins)."),
-  route: z.object({ width: z.number().min(1.6).max(5).default(2.4), style: z.enum(["dirt", "cobble", "slab"]).default("dirt"),
-    maxGrade: z.number().min(0.1).max(0.45).default(0.35).describe("Steepest rise/run a footpath climbs as a ramp before the ribbon cuts steps. 0.35 (19 deg) walks; stepped flights on open moor read as sawtooth ground (gate lips alias).") }).strict().prefault({})
-    .describe("Footpaths (path operator ribbons) from the approach to the core and from the core to each pocket."),
+  route: z.object({ width: z.number().min(1.6).max(5).default(2.4).describe("Footpath tread, metres; the carved track is clamped to FOOTPATH_WIDTH_M (2-3 m)."),
+    style: z.enum(["dirt", "cobble", "slab"]).default("dirt").describe("Kept for old archetype files: every footpath track wears the zone's path surface (`worldgen road` picks it)."),
+    maxGrade: z.number().min(0.1).max(0.45).default(0.35).describe("Steepest rise/run a footpath track climbs (its `worldgen road` max grade; the leg router prefers ground under it). 0.35 (19 deg) walks.") }).strict().prefault({})
+    .describe("Footpaths from the core to each pocket: CARVED + PAINTED narrow tracks through the world's road machinery (`worldgen road`, ids road-pb-<id>-to-<pocket>), never ribbons (owner ruling 2026-10-30)."),
   read: z.object({
     ratio: z.number().min(1).max(4).optional().describe("Override of SILHOUETTE_RATIO: how many times the tallest OTHER piece the silhouette must stand (default 2, a tower over sheds). A farm, a steading or a yard whose read is one roof among walls sets ~1.1 (owner ruling 2026-10-23: a burnt croft is never a 9 m tower)."),
     band: xz.optional().describe("Override of the read window [near, far] in metres. Default by tier (READ_BY_TIER): small 110-150 m (a small silhouette is enough), medium 225-300 m, large 340-450 m."),
@@ -350,6 +352,7 @@ const layoutPieceSchema = z.object({
   sink: z.number().min(0).max(6).default(0).describe("Decal pieces: metres the piece stands BELOW the ground at its centre. A piece set INTO a rock face (an opened niche whose back is in the face) has its centre over the face, where the ground is the face itself; `sink` lowers it to the foot so its front stands flush on the flat. L (o-small 2026-10-29). A piece `on` another: metres it is set INTO its host's top (a ring whose own foot and pier stand inside the plinth, so its arcs rest on the top as painted). L (Red Dial scale 2026-10-30)."),
   lift: z.number().min(0).max(2).default(0).describe("Metres the piece stands above its seat (raised foundations: a kit building whose floor slab is at y=0 stands 0.6 m up, like town buildings, so the slab never shares the pad surface — Ashen Vow 2026-10-24: a 410 m2 z-fight)."),
   on: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of an EARLIER piece of the layout: this piece stands on that piece's own mesh top at its `at` (a ring on its plinth, a fire bowl on a pillar cap or a tower top), never on the ground; list it with `over` when the footprints overlap. L (Red Dial 2026-10-29: the ring stands on a 2.4 m plinth, lift caps at 2 m)."),
+  marker: z.string().regex(/^[a-z0-9-]+$/).optional().describe("With `on`: the host's named marker (`fire-1`, `fire-2`: its <model>.markers.json) this piece stands on; `at` is then ignored (a beacon on a tower or gate fire marker). Without it, a piece `on` a pedestal (a pillar cap) snaps to its top-face centre. The `support` gate fails any piece that overhangs its host's top face or that the host's mesh rises into. L (Red Dial 2026-10-30)."),
   lean: leanSchema.optional().describe("Tilt the WHOLE piece from its foot (leanSchema): yaw turns it, lean tips it (also on top of an `on` piece). L (KNUCKLECROWN 2026-10-29)."),
   overrides: z.array(z.object({ path: z.string().min(1), value: z.unknown() }).strict()).max(8).default([]).describe("Prefab-instance overrides on the placed piece (the engine prefab `overrides`: `<local entity>/components/<component>/<field>`; a nested instance is reached through its `<entity>/components/prefab/overrides` array). For a per-place tweak of a catalogued piece that is not a new prop: a camp fire whose light burns at night only. L (o-small2 dropped-hour 2026-10-30)."),
   wet: z.boolean().default(false).describe("The piece may stand at or in water (drowned steps, a pier, a reed clump): wet ground under its footprint is not a refusal. Default: wet ground refuses the piece (Drowning Pools 2026-10-24: the ordeal sanctuary whose steps run into the loch)."),
@@ -501,7 +504,7 @@ export function boxesOverlap(a: { at: [number, number]; half: [number, number]; 
 export function withLayout(a: PlaceArchetype, l: PlaceLayout, info?: (prefab: string) => { size?: number[] } | null): PlaceArchetype {
   const pieces = l.pieces.filter((p) => p.kind !== "decal" && !p.quest).map((p) => {
     const half = pieceHalf(p, info?.(p.prefab)?.size);
-    return { id: p.id, role: pieceRole(p), prefab: p.prefab, choices: [], at: p.at, yaw: p.yaw, footprint: Math.min(20, Math.max(0.5, half ? Math.round(Math.hypot(half[0], half[1]) * 100) / 100 : 1)), scale: p.scale, lift: p.lift ?? 0, landmark: p.landmark ?? null, ...(p.on ? { on: p.on, ...(p.sink ? { sink: p.sink } : {}) } : {}), ...(p.lean && p.lean.deg > 0 ? { lean: p.lean } : {}), overrides: p.overrides ?? [] } as PlaceArchetype["pockets"][number]["structures"][number];
+    return { id: p.id, role: pieceRole(p), prefab: p.prefab, choices: [], at: p.at, yaw: p.yaw, footprint: Math.min(20, Math.max(0.5, half ? Math.round(Math.hypot(half[0], half[1]) * 100) / 100 : 1)), scale: p.scale, lift: p.lift ?? 0, landmark: p.landmark ?? null, ...(p.on ? { on: p.on, ...(p.sink ? { sink: p.sink } : {}), ...(p.marker ? { marker: p.marker } : {}) } : {}), ...(p.lean && p.lean.deg > 0 ? { lean: p.lean } : {}), overrides: p.overrides ?? [] } as PlaceArchetype["pockets"][number]["structures"][number];
   });
   // L (Exiles' Bell 2026-10-24): spreadToFloor had multiplied the core walls' `at` by floor / fit (x1.8), so a chapel the
   // owner drew at [28,-4] stood 51 m out while the pieces beside it stood exactly: under a layout the walls stand where
@@ -719,6 +722,8 @@ export interface PlaceInput {
   texelsOf?: (prefab: string) => number | null;
   /** Highest mesh surface (m, prefab frame, unscaled) of a catalogued piece over a local point; null off its mesh. */
   topOf?: (prefab: string, x: number, z: number) => number | null;
+  /** Lowest mesh surface (m, prefab frame, unscaled) of a catalogued piece over a local point; null off its mesh (support gate). */
+  bottomOf?: (prefab: string, x: number, z: number) => number | null;
   /** A catalogued piece's marker (prefab frame, unscaled: position [x, y, z], size [x, y, z]) from its <model>.markers.json; null when none. */
   markerOf?: (prefab: string, id: string) => { position: [number, number, number]; size: [number, number, number]; shape?: "rect" | "round" } | null;
   /** Quest objects the zone's quest plan declares at this place (kind object/readable); each needs `a.quest[id]`. */
@@ -770,6 +775,47 @@ export function placeFacing(at: V2, faces: string | undefined, approaches: V2[][
 export function waterAtMarker(host: { w: V2; ang: number; y: number; k: number }, mk: { position: [number, number, number] }): { w: V2; y: number; ang: number } {
   const [x, y, z] = mk.position.map((v) => v * host.k) as [number, number, number], c = Math.cos(host.ang), s = Math.sin(host.ang);
   return { w: [r2(host.w[0] + x * c + z * s), r2(host.w[1] - x * s + z * c)], y: r2(host.y + y), ang: host.ang };
+}
+/** SUPPORT (Red Dial 2026-10-30, Derek: "a lot of the braziers that are on top of pillars are not centred, or are hanging off
+ *  edges and clipping through some geometry"): a piece `on` another stands on the host's named marker (`marker`) or, on a
+ *  pedestal top, at that top face's centre; the `support` gate (place-build) fails a piece whose base overhangs the host's
+ *  top face or that the host's mesh rises into. The layout's own marker table had gone stale when the kit re-exported. */
+export const SUPPORT_SNAP_FACE = 2.5; // a top face no larger than this x the piece's largest footprint side (both ways) is a pedestal: snap to its centre
+export const SUPPORT_FACE_TOL_M = 0.12; // a top face: the connected surface within this of the top at the piece's spot
+export const SUPPORT_SEAT_TOL_M = 0.2; // a base point more than this over the host's top under it hangs in the air
+export const SUPPORT_OVERHANG_SHARE = 0.05; // the share of base points that may hang (sampling at the outline's edge)
+export const SUPPORT_CLIP_M = 0.25; // the host's mesh may rise this far over a piece's underside (the seat sets every piece 0.1 m in)
+type SupportHost = { w: V2; ang: number; y: number; prefab: string; k: number };
+/** World xz -> a placed piece's own frame (unscaled), and back (as waterAtMarker turns a marker). Pure. */
+export const hostLocal = (h: { w: V2; ang: number; k: number }, w: V2): V2 => { const dx = w[0] - h.w[0], dz = w[1] - h.w[1], c = Math.cos(h.ang), s = Math.sin(h.ang); return [(dx * c - dz * s) / h.k, (dx * s + dz * c) / h.k]; };
+export const hostWorld = (h: { w: V2; ang: number; k: number }, l: V2): V2 => { const c = Math.cos(h.ang), s = Math.sin(h.ang); return [h.w[0] + h.k * (l[0] * c + l[1] * s), h.w[1] + h.k * (-l[0] * s + l[1] * c)]; };
+/** The flat top face round a local point (a host's frame, unscaled): the grid cells (step) connected to it whose top is
+ *  within `tol` of the top there. `closed` false when the face runs to `reach` (a wall walk, a broad plinth). Pure. */
+export function topFace(top: (x: number, z: number) => number | null, at: V2, reach: number, step: number, tol = SUPPORT_FACE_TOL_M): { centre: V2; size: V2; y: number; closed: boolean } | null {
+  const y0 = top(at[0], at[1]); if (y0 == null) return null;
+  const n = Math.max(1, Math.ceil(reach / step)), seen = new Set<string>(["0,0"]), q: [number, number][] = [[0, 0]];
+  let x0 = 0, x1 = 0, z0 = 0, z1 = 0, closed = true;
+  while (q.length) { const [i, j] = q.pop()!;
+    if (Math.abs(i) >= n || Math.abs(j) >= n) closed = false;
+    x0 = Math.min(x0, i); x1 = Math.max(x1, i); z0 = Math.min(z0, j); z1 = Math.max(z1, j);
+    for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) { const a = i + di, b = j + dj, key = `${a},${b}`; if (seen.has(key) || Math.abs(a) > n || Math.abs(b) > n) continue; seen.add(key);
+      const t = top(at[0] + a * step, at[1] + b * step); if (t != null && Math.abs(t - y0) <= tol) q.push([a, b]); } }
+  return { centre: [at[0] + ((x0 + x1) / 2) * step, at[1] + ((z0 + z1) / 2) * step], size: [(x1 - x0 + 1) * step, (z1 - z0 + 1) * step], y: y0, closed };
+}
+/** How a placed piece sits on its host: its BASE (the sample points of its own mesh whose underside lies within 0.25 m of
+ *  its lowest) must lie over the host's top (overhang = the share of base points with no host top within
+ *  SUPPORT_SEAT_TOL_M under them), and the host's top may not rise into the piece (clip = the most the host's top stands
+ *  over the piece's underside anywhere the piece has mesh). `half` = the piece's footprint half extents (m, scaled). Pure. */
+export function supportOf(piece: { prefab: string; w: V2; ang: number; y: number; k: number; half: V2 }, host: SupportHost, top: (prefab: string, x: number, z: number) => number | null, bottom: (prefab: string, x: number, z: number) => number | null, n = 16): { overhang: number; clip: number; base: number; ok: boolean } {
+  const pts: { w: V2; y: number }[] = [];
+  for (let i = 0; i <= n; i++) for (let j = 0; j <= n; j++) { const l: V2 = [((-1 + (2 * i) / n) * piece.half[0]) / piece.k, ((-1 + (2 * j) / n) * piece.half[1]) / piece.k], b = bottom(piece.prefab, l[0], l[1]); if (b == null) continue; pts.push({ w: hostWorld(piece, l), y: piece.y + b * piece.k }); }
+  if (!pts.length) return { overhang: 0, clip: 0, base: 0, ok: true };
+  const lo = Math.min(...pts.map((q) => q.y)); let base = 0, hang = 0, clip = 0;
+  for (const q of pts) { const hl = hostLocal(host, q.w), t = top(host.prefab, hl[0], hl[1]), ht = t == null ? null : host.y + t * host.k;
+    if (q.y <= lo + 0.25) { base++; if (ht == null || q.y - ht > SUPPORT_SEAT_TOL_M) hang++; }
+    if (ht != null) clip = Math.max(clip, ht - q.y); }
+  const overhang = base ? hang / base : 0;
+  return { overhang: r2(overhang), clip: r2(clip), base, ok: overhang <= SUPPORT_OVERHANG_SHARE && clip <= SUPPORT_CLIP_M };
 }
 export function toWorld(origin: V2, front: V2, local: V2): V2 {
   const right: V2 = [-front[1], front[0]];
@@ -1104,30 +1150,6 @@ export function cutRing(pts: V2[], gaps: { at: number; width: number }[]): V2[][
 }
 
 /** Nearest point on any approach polyline (sampled every 2 m), and its distance. */
-/** L (lips, tinkers-camp 2026-10-20): a footpath LANDS on the ground at both ends. The paved stretch stops at the
- *  pocket's edge (radius - 1), but a leg that comes down a flight to that edge ended its fitted ribbon 1.5 m above the
- *  ground (no room left to come down): the walled end's hard edge beside the fanned foot was a lattice alias. When the
- *  ribbon fitted on the measured ground ends more than LAND_TOL_M off it, the stretch runs on into the pocket along the
- *  planned line (pocket radius x 0.6, then x 0.3) and the stretch whose ends land best is kept. */
-export const LAND_TOL_M = 0.5;
-export function ribbonEndsOff(g: Pick<PlaceGround, "height">, pts: V2[], route: { width: number; style: string; maxGrade: number }): number {
-  if (pts.length < 2) return Infinity;
-  const ps = pts.length === 2 ? [pts[0]!, [(pts[0]![0] + pts[1]![0]) / 2, (pts[0]![1] + pts[1]![1]) / 2] as V2, pts[1]!] : pts;
-  try {
-    const s = fitRibbon(pathParamsSchema.parse({ points: ps.map((q) => [r2(q[0]), r2(q[1])]), width: route.width, style: route.style, maxGrade: route.maxGrade, calm: true }), { height: (x, z) => g.height(x, z) }).ribbon.samples;
-    const off = (p: number[]) => Math.abs(p[1]! - g.height(p[0]!, p[2]!));
-    return Math.max(off(s[0]!), off(s[s.length - 1]!));
-  } catch { return Infinity; }
-}
-export function landedStretch(g: Pick<PlaceGround, "height">, line: V2[], discs: { at: V2; radius: number }[], outside: (poly: V2[], discs: { at: V2; radius: number }[]) => V2[], route: { width: number; style: string; maxGrade: number }): V2[] {
-  let best = outside(line, discs), bestOff = ribbonEndsOff(g, best, route);
-  for (const k of [0.6, 0.3]) {
-    if (bestOff <= LAND_TOL_M) break;
-    const pts = outside(line, discs.map((d) => ({ at: d.at, radius: Math.max(2, d.radius * k) }))), off = ribbonEndsOff(g, pts, route);
-    if (off < bestOff - 0.1) { best = pts; bestOff = off; }
-  }
-  return best;
-}
 export function nearestOnApproach(at: V2, lines: V2[][], ok: (p: V2) => boolean = () => true): { p: V2; d: number; line: number } | null {
   let best: { p: V2; d: number; line: number } | null = null;
   lines.forEach((l, li) => { for (let i = 0; i + 1 < l.length; i++) { const a = l[i]!, b = l[i + 1]!, len = dist(a, b), n = Math.max(1, Math.ceil(len / 2));
@@ -1149,6 +1171,11 @@ export interface PlacePlan {
    *  as `road-pb-<id>-approach`), from `from` (an existing road id, or "the approach line") to the core's edge. null:
    *  a pinpoint, or no walkable way. */
   track: ApproachTrack | null;
+  /** The FOOTPATHS core -> pocket: carved + painted narrow tracks (road-pb-<id>-to-<pocket>), graded like the approach. */
+  footpaths: ApproachTrack[];
+  /** SUPPORT gate rows: each piece `on` another (no sink, no lean): the share of its base hanging off its host's top, the
+   *  most the host's mesh rises into it (m), ok (supportOf). */
+  support: { id: string; on: string; marker?: string; at: V2; overhang: number; clip: number; ok: boolean }[];
 }
 export interface ApproachTrack { id: string; points: V2[]; width: number; maxGrade: number; from: string; lengthM: number; surface?: string }
 
@@ -1298,6 +1325,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   let landmark: { at: V2; foot: number; top: number; fogReach: number } | null = null;
   const smokes: { at: V2; top: number; fogReach: number }[] = [], solids: { at: V2; r: number; band?: number; soft?: boolean }[] = [], solidSegs: [V2, V2, number][] = [], bareSeg = new Map<[V2, V2, number], [V2, V2, number]>();
   const stands: V2[] = [];
+  const support: PlacePlan["support"] = []; // SUPPORT gate rows: every piece `on` another (no sink, no lean)
   const placedAll = new Map<string, { w: V2; ang: number; y: number; prefab: string; k: number }>(); // every pocket's pieces (layout `waters` find their host here)
   // `walk: false`: a structure's own cover clearing is ground cleared under a solid, not a spot a body walks to (poi-walk skips it;
   // L walk, peat-banks 2026-10-21: a marker spread past a bank line became an unreachable walk target, 3 STUCK)
@@ -1344,11 +1372,17 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       if (s.onWall && !host) faults.push(`structure ${p.id}.${s.id}: onWall ${s.onWall} is no tower / keep / gatehouse / basin kerb of the pocket`);
       // a basin's kerb is written level at its basin's top (basinWater): a piece on it lies on the coping
       const kerbTop = host?.basin ? basinWater(host, toWorld(pk.at, front, host.at), front, pocketGround).topY : null;
-      const w = toWorld(pk.at, front, s.at), ang = yaw + (s.yaw * Math.PI) / 180;
+      let w = toWorld(pk.at, front, s.at); const ang = yaw + (s.yaw * Math.PI) / 180;
       // a piece ON another piece (`on`: a cairn on a crag top) stands on that mesh's top at its spot
       const under = s.on ? placed.get(s.on) : undefined; let onY: number | null = null;
       if (s.on && !under) faults.push(`structure ${p.id}.${s.id}: on ${s.on} is no earlier structure of the pocket`);
-      if (under) { const dx = w[0] - under.w[0], dz = w[1] - under.w[1], c = Math.cos(under.ang), sn = Math.sin(under.ang), lx = (dx * c - dz * sn) / under.k, lz = (dx * sn + dz * c) / under.k, t = inp.topOf?.(under.prefab, lx, lz);
+      // SUPPORT: on the host's named marker, else (no sink) at the centre of a pedestal top face under it
+      const psz = inp.propInfo?.(s.prefab)?.size, phalf: V2 | null = psz ? [(psz[0]! * (s.scale ?? 1)) / 2, (psz[2]! * (s.scale ?? 1)) / 2] : null;
+      if (under) { let l = hostLocal(under, w);
+        if (s.marker) { const mk = inp.markerOf?.(under.prefab, s.marker); if (!mk) faults.push(`structure ${p.id}.${s.id}: ${under.prefab} has no marker ${s.marker} (its <model>.markers.json)`); else { l = [mk.position[0], mk.position[2]]; w = hostWorld(under, l); } }
+        else if (!s.sink && phalf && inp.topOf) { const side = 2 * Math.max(phalf[0], phalf[1]), step = Math.max(0.05, side / under.k / 12), f = topFace((x, z) => inp.topOf!(under.prefab, x, z), l, (SUPPORT_SNAP_FACE * side) / under.k, step);
+          if (f && f.closed && f.size[0] * under.k <= SUPPORT_SNAP_FACE * side && f.size[1] * under.k <= SUPPORT_SNAP_FACE * side) { const moved = Math.hypot(f.centre[0] - l[0], f.centre[1] - l[1]) * under.k; l = f.centre; w = hostWorld(under, l); if (moved > 0.05) notes.push(`SUPPORT: ${s.id} snapped ${r2(moved)} m to the centre of ${s.on}'s top face (${r2(f.size[0] * under.k)} x ${r2(f.size[1] * under.k)} m)`); } }
+        const t = inp.topOf?.(under.prefab, l[0], l[1]);
         if (t == null) faults.push(`structure ${p.id}.${s.id}: no top of ${s.on} under it`); else onY = under.y + t * under.k - 0.1 - (s.sink ?? 0); } // `sink`: set into the host's top
       // LEAN: the whole piece tipped toward a place-frame point or direction; its base outline turned with it, sunk (rooted)
       const lean = s.lean && s.lean.deg > 0 && !host ? s.lean : null; // on a piece (`on`): tipped from its foot on that top
@@ -1359,6 +1393,8 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       const seat = base ? seatStructure(base, w, lean ? 0 : ang, planned, { rock: /^rock-kit\//.test(s.prefab) || !!lean, sinkMax: s.role === "dwelling" ? 0 : SINK_MAX_M }) : null, sy0 = r2(kerbTop != null ? kerbTop : host ? y + host.height + 0.3 : onY != null ? onY : seat ? seat.y : planned(w[0], w[1]));
       const sy = r2(sy0 + (s.lift ?? 0)); // raised foundations for a piece that asks for it (`lift`)
       placed.set(s.id, { w, ang, y: sy, prefab: s.prefab, k: s.scale }); placedAll.set(s.id, placed.get(s.id)!);
+      if (under && !s.sink && !s.lean && phalf && inp.topOf && inp.bottomOf) { const r = supportOf({ prefab: s.prefab, w, ang, y: sy, k: s.scale, half: phalf }, under, inp.topOf, inp.bottomOf);
+        support.push({ id: s.id, on: s.on!, ...(s.marker ? { marker: s.marker } : {}), at: [r2(w[0]), r2(w[1])], overhang: r.overhang, clip: r.clip, ok: r.ok }); }
       // raised foundations: the ground under the base is lifted to it (level, raise-only, feathered with the fall)
       if (seat?.level && seat.rect) worldOps.push(rectPadPatch(`pb-${poi}-seat-${p.id}-${s.id}`, toWorldYaw(w, ang, seat.rect.centre[0], seat.rect.centre[1]), seat.rect.half, ang, seat.raise!.y, Math.max(3, Math.min(8, 2 * seat.relief)), g));
       else if (seat?.raise) worldOps.push(padPatch(`pb-${poi}-seat-${p.id}-${s.id}`, w, seat.raise.radius, seat.raise.y, Math.max(4, 3 * seat.relief), true, g));
@@ -1620,9 +1656,9 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
     notes.push(`ring: ${lake ? `round ${lake.id} (dry rim ${r} m, recipe r ${lake.radius} m; paint band waterY - 1 .. + 2.5 at waterY ${lake.waterY})` : `round the core (r ${r} m)`}${R.paint ? `, paint ${R.paint.surface}` : ""}, ${placed}/${n} props placed, ${plants.length}/${sl.length} scatter plants`);
   }
   // footpaths: approach -> core, core -> every pocket. L (walk): every leg is PLANNED over the measured ground round the
-  // walls (gates are gaps), structures, water and steep banks (routeGrid); the path ribbon follows the planned line
-  // outside the pockets (path operator; L: risers <= 0.4 m are the ribbon's own)
-  const routes: any[] = [], lines: V2[][] = [];
+  // walls (gates are gaps), structures, water and steep banks (routeGrid); the footpath track follows the planned line
+  // outside the pockets (a carved + painted road, place-build plan grades it with `worldgen road`)
+  const routes: any[] = [], lines: V2[][] = [], footpaths: ApproachTrack[] = [];
   const obs: RouteObstacles = { discs: solids, segs: [...solidSegs] };
   // L (walk): a wall end left at the operator's default (`terrain`) runs on `tie` m (2 x thickness + 2) past its last
   // point at full height on level ground: the route keeps off that too
@@ -1645,7 +1681,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   const failed = new Set<V2[]>();
   // L (walk, shielings 2026-10-20): a leg first looks for a way whose ground is nowhere steeper than the footpath grade
   // (route.maxGrade), then + 0.1, and only when the ground holds neither may it cross up to 35 deg. Ground steeper than
-  // the ribbon's grade gets a riser: a 29 deg slope on the in-field leg (fell 3 m) and a 0.45 stretch on the approach
+  // the track's grade gets a riser: a 29 deg slope on the in-field leg (fell 3 m) and a 0.45 stretch on the approach
   // (a 2 m riser, fell 2.2 m) were the short ways the router took (2 FALL, 8 STUCK, 8-10 MISS at one spot).
   // a kit structure with a declared footing keeps a leg a grade band further off (its path cut never reaches under it),
   // except the structure the leg starts or ends at (a stand beside the plinth)
@@ -1656,7 +1692,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   // walls 3.5 m apart closes every gap once each carries a 3.5 m band); a leg found only so is a plan NOTE (gate seated judges it)
   const bare = (): RouteObstacles => ({ ...obs, discs: obs.discs.map((d: any) => ({ at: d.at, r: d.r })), segs: obs.segs.map((q) => bareSeg.get(q) ?? q) });
   const leg = (from: V2, to: V2, what: string): V2[] => tryLeg(from, to, legObs(from, to)) ?? tryLeg(from, to, legObs(from, to, false)) ?? ((l) => { if (l) notes.push(`route ${what}: walked only past the pieces' footprints (no grade bands): check seated along it`); return l; })(tryLeg(from, to, bare())) ?? (() => { faults.push(`route ${what}: no walkable way over the ground (water, walls or slopes > 35 deg)`); const l: V2[] = [from, to]; failed.add(l); return l; })();
-  /** The longest run of a planned line outside the given pockets (their radius - 1): the stretch the ribbon paves. */
+  /** The longest run of a planned line outside the given pockets (their radius - 1): the stretch the footpath track carves. */
   const outside = (poly: V2[], discs: { at: V2; radius: number }[]): V2[] => {
     const out = (q: V2) => discs.every((d) => dist(q, d.at) > d.radius - 1), sm: { q: V2; v: boolean }[] = [];
     for (let i = 0; i + 1 < poly.length; i++) { const n = Math.max(1, Math.ceil(dist(poly[i]!, poly[i + 1]!))); for (let t = 0; t < n; t++) sm.push({ q: [poly[i]![0] + ((poly[i + 1]![0] - poly[i]![0]) * t) / n, poly[i]![1] + ((poly[i + 1]![1] - poly[i]![1]) * t) / n], v: t === 0 }); }
@@ -1667,15 +1703,16 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   };
   const path = (id: string, line: V2[], discs: { at: V2; radius: number }[], planned = true) => {
     if (!planned) return;
-    // L (owner ruling, bar-watch 2026-10-21): a pinpoint gets NO footpath ribbon, it is reached on foot over the ground
+    // L (owner ruling, bar-watch 2026-10-21): a pinpoint gets NO footpath, it is reached on foot over the ground
     // as it is; the planned leg is still a walk route (poi-walk) and keeps its lane clearings
     if (place.size === "pinpoint") { notes.push(`footpath ${id}: none (a pinpoint is reached on foot; the leg stays a walk route)`); return; }
-    const edge = outside(line, discs), pts = landedStretch(g, line, discs, outside, { width: a.route.width, style: a.route.style, maxGrade: a.route.maxGrade });
-    if (pts.length !== edge.length || pts.some((q, i) => dist(q, edge[i]!) > 0.01)) notes.push(`footpath ${id}: runs on into the pocket so both ends land on the ground (ribbon at the pocket edge ended ${r2(ribbonEndsOff(g, edge, a.route))} m off it)`);
-    if (pts.length < 2 || pts.slice(1).reduce((m, q, i) => m + dist(pts[i]!, q), 0) < 8) return;
-    const ps = pts.length === 2 ? [pts[0]!, [(pts[0]![0] + pts[1]![0]) / 2, (pts[0]![1] + pts[1]![1]) / 2] as V2, pts[1]!] : pts;
-    operators.push({ id: `pb-${poi}-${id}`, op: "path", points: ps.map((q) => q.map(r2)), width: a.route.width, style: a.route.style, maxGrade: a.route.maxGrade, calm: true });
-    lines.push(ps);
+    // L (owner ruling 2026-10-30, Red Dial: ribbons gone from every tool): a footpath is a CARVED + PAINTED narrow track
+    // graded by the world's road machinery like the approach (place-build plan runs `worldgen road`), never a ribbon
+    const pts = outside(line, discs), len = pts.slice(1).reduce((m, q, i) => m + dist(pts[i]!, q), 0);
+    if (pts.length < 2 || len < 8) return;
+    const t: ApproachTrack = { id: footpathTrackId(poi, id), points: pts.map((q) => q.map(r2) as V2), width: Math.min(FOOTPATH_WIDTH_M[1], Math.max(FOOTPATH_WIDTH_M[0], a.route.width)), maxGrade: a.route.maxGrade, from: "the core", lengthM: Math.round(len) };
+    footpaths.push(t); lines.push(t.points);
+    notes.push(`footpath ${id}: ${t.width} m carved + painted track ${t.id}, ${t.lengthM} m`);
   };
   // L (walk): the footpath joins the approach where the approach itself is dry and near the pad's level (judged per
   // 2 m sample, not per vertex: a segment between two good vertices can cross a cliff foot); in a gully (no sample
@@ -1692,7 +1729,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   // L (owner ruling 2026-10-20, "no ribbon roads: buried by terrain, never approved"): the approach is a CARVED + PAINTED
   // TRACK (a recipe road; place-build grades it with `worldgen road`), TRACK_WIDTH_M wide by tier, from the nearest
   // existing road / path / trail within TRACK_JOIN_M that holds a walkable way to the core (nearest first, 12 m apart, at
-  // most 8 tried), else from the approach join. Never a path-operator ribbon (gate `roads`). A pinpoint gets no track.
+  // most 8 tried), else from the approach join. Never a ribbon (removed 2026-10-30; gate `roads`). A pinpoint gets no track.
   const trackW = TRACK_WIDTH_M[place.size] ?? 0, roads = (inp.roads ?? []).filter((r) => r.points.length >= 2);
   let roadJoin: { p: V2; d: number; line: number } | null = null;
   if (trackW > 0 && roads.length) {
@@ -1742,7 +1779,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
     routes.push({ id: `to-${t.id}`, note: `${k.id} stand -> ${t.id} (its straight reach from the footpath is blocked)`, points: l.map((q) => (k === core ? Y(q) : P3(q))) });
   }
   // L (walk): scatter (boulders in a gully, deadfall) is cleared off every route lane: one polygon clearing per route,
-  // the planned line buffered half the footpath width + 4 m each side (the ribbon's cut and fill shoulders reach past its edge: a scatter rock 4.8 m off the shielings path floated 0.09 m) (scatter only; grass stays; not a walk target: poi-walk targets circles)
+  // the planned line buffered half the footpath width + 4 m each side (the track's cut and fill shoulders reach past its edge: a scatter rock 4.8 m off the shielings path floated 0.09 m) (scatter only; grass stays; not a walk target: poi-walk targets circles)
   // L (scatter-float, kelpmane-cove 2026-10-21): the cut shoulder also leaves the GRASS cover standing 0.5 m over the
   // cut ground 2.9 m past a footpath's edge: a narrower cover band (half the width + COVER_LANE_M) is cleared too; grass
   // stays beyond it
@@ -1835,12 +1872,13 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
     measurements: { adventureSize: place.size, features, approaches: reservation.approaches.filter((l) => l.length).map((_, i) => `approach-${i + 1}`) },
     navigation: { routes, network: lines.map((l) => l.map((q) => q.map(r2))) },
     approachTrack: track ? { id: track.id, width: track.width, from: track.from, lengthM: track.lengthM } : null,
+    footpathTracks: footpaths.map((t) => ({ id: t.id, width: t.width, lengthM: t.lengthM })),
     siteDressing: { lights: a.lights, areas, keepClear },
     landmark: lm ? { at: [r2(lm.at[0]), r2(lm.at[1])], foot: r2(lm.foot), top: r2(lm.top), fogReach: lm.fogReach } : null, smoke: smokes,
     read: { ...a.read, band, approachLine: near && near.d > core.radius + 6 ? near.line : null }, viewpoints: views, populateClearings: encounters.map((e) => e.id),
   };
   notes.push(`TIER: built ${place.size}${a.spreadMax !== undefined ? `; pockets within ${a.spreadMax} m of the core's pad (spreadMax)` : ""}`);
-  return { centre: core.at, padY, front, yaw, faults, notes, pockets, worldOps, operators, clearings, encounters, ops, plans, handoff, propRequests, aerial, track, requested, setViews };
+  return { centre: core.at, padY, front, yaw, faults, notes, pockets, worldOps, operators, clearings, encounters, ops, plans, handoff, propRequests, aerial, track, footpaths, requested, setViews, support };
 }
 
 /** L (approach, peat-banks/gibbet-rise 2026-10-20): a reservation's approach may name only what it is reached `from`
@@ -2023,7 +2061,7 @@ export function firstPlanItems(props: { prop: string; count: number; prefer: str
   return list.map((q) => { const base = `${q.fill ? "fill-" : ""}${q.prop.split("/").pop()!}`, n = (seen.get(base) ?? 0) + 1; seen.set(base, n); return { id: `${base}-${n}`, prop: q.prop, place: { kind: "auto", room, prefer: q.prefer } }; });
 }
 
-/** Metres past a footpath's edge the grass cover is cleared (the ribbon's cut shoulder: kelpmane-cove cover 2.9 m off the edge floated 0.5 m). */
+/** Metres past a footpath's edge the grass cover is cleared (the cut shoulder: kelpmane-cove cover 2.9 m off the edge floated 0.5 m). */
 export const COVER_LANE_M = 3.5;
 /** L (owner ruling 2026-10-20: "no ribbon roads: buried by terrain, never approved"): a place's approach is a CARVED +
  *  PAINTED recipe road (`worldgen road`: the roadFrom grading + painted tread the world's paths and town ramps use), wider
@@ -2037,8 +2075,20 @@ export const TRACK_JOIN_M = 350;
 export const TRACK_CUT_M = 1.5, TRACK_FILL_M = 0.8;
 /** The recipe road id of a place's approach track (`worldgen road` ids start with road-; place-build owns road-pb-<id>-*). */
 export const trackId = (poi: string) => `road-pb-${poi}-approach`;
-/** GATE `roads` (place-build) and zonegen status `poi <id>`: a job may not carry its approach as a ribbon: a `path` (or
- *  `ribbon`) operator, or a features.ribbons edit, whose id names the approach. One line per offender; empty = clean. */
+/** Tread of a footpath track, metres [min, max] (owner ruling 2026-10-30: narrow, 2-3 m; the approach track is wider). */
+export const FOOTPATH_WIDTH_M = [2, 3] as const;
+/** The recipe road id of a footpath track core -> pocket (`leg` = `to-<pocket>`). */
+export const footpathTrackId = (poi: string, leg: string) => `road-pb-${poi}-${leg}`;
+/** Ribbons were removed 2026-10-30 (owner ruling): every `path`/`ribbon` operator and every features.ribbons world-op a job
+ *  or a world still declares, as `<what>: RIBBONS_REMOVED` lines. place-build (gate `roads`, plan, build) and zonegen
+ *  status `poi <id>` fail on any line: an old file fails loudly, never silently. Empty = clean. No allow-list. */
+export function ribbonsDeclared(operators: unknown[] = [], worldOps: unknown[] = [], ribbons: unknown[] = []): string[] {
+  return [
+    ...(operators as any[]).filter((o) => REMOVED_RIBBON_OPS.includes(o?.op)).map((o) => `operator ${o.id} (op ${o.op}): ${RIBBONS_REMOVED}`),
+    ...(worldOps as any[]).filter((o) => o?.kind === "ribbons").map((o) => `world-op features.ribbons ${o.feature?.id ?? o.id}: ${RIBBONS_REMOVED}`),
+    ...(ribbons as any[]).map((r) => `features.ribbons ${r?.id}: ${RIBBONS_REMOVED}`),
+  ];
+}
 /** How far from its centreline an approach track reshapes the ground: half its width + the shoulder (3.5 m) + the
  *  smoothing band (7 m) roadFrom writes for a 5 m track, + 1 m. */
 export const trackBand = (width: number) => width / 2 + 3.5 + 7 + 1;
@@ -2104,13 +2154,7 @@ export function approachForBuilt(g: PlaceGround, b: BuiltPlace): { track: Approa
   const keepClear = [{ id: "route-approach", why: "walk route", points: leg.map((q) => [r2(q[0]), r2(q[1])]), width: 2.4 }, ...(track ? [{ id: "track-approach", why: "approach track", points: track.points, width: track.width + 1.2 }] : [])];
   return { track, route, clearings, keepClear, notes, faults };
 }
-export function ribbonApproachOps(operators: unknown[] = [], worldOps: unknown[] = []): string[] {
-  const isApproach = (id: unknown) => typeof id === "string" && /(^|-)approach($|[-:.])/.test(id);
-  return [
-    ...(operators as any[]).filter((o) => (o?.op === "path" || o?.op === "ribbon") && isApproach(o.id)).map((o) => `operator ${o.id} (${o.op} ribbon)`),
-    ...(worldOps as any[]).filter((o) => o?.kind === "ribbons" && isApproach(o.feature?.id)).map((o) => `features.ribbons ${o.feature.id}`),
-  ];
-}
+
 /** Read distance per size tier (owner ruling 2026-10-19): a small place only has to show as a silhouette from about
  *  150 m; medium and larger keep the 300 m read, scaled by tier; a pinpoint (one marker at the end of its path, weepmouth
  *  2026-10-21) shows from 60 m. The window is [0.75 R, R]. */
@@ -2385,30 +2429,30 @@ export function uniqueItemIds<T extends { id: string }>(items: T[]): T[] {
  *  place installs and its pieces are re-seated on the live solid (float's seat rule) with the float gate run on the live
  *  scene; above it the place is re-planned. 0.05 m and under is the same ground. */
 export const RESEAT_MAX_M = 0.5;
-/** Half-width a footpath operator grades either side of its centre line (its ribbon samples carry 3.5 m). */
+/** Half-width a footpath track grades either side of its centre line (narrow tread + shoulder). */
 export const PATH_GRADE_BAND_M = 3.5;
 export function installGuard(maxDiffM: number): "same" | "reseat" | "refuse" {
   return maxDiffM <= 0.05 ? "same" : maxDiffM <= RESEAT_MAX_M ? "reseat" : "refuse";
 }
 
-/** L (walk, hags-garth 2026-10-20): the planned route is a taut polyline, the built footpath a spline RIBBON smoothed
- *  through it; at a bend the polyline ran 2.2 m off a 2.4 m ribbon into its retaining wall's face cut (2 STUCK). A walk
- *  route follows the ribbon AS BUILT: every run of 2+ route points within `hw` + 4 m of the ribbon is replaced by the
- *  ribbon's own samples between them (about every `step` m); points off it (pocket ends) are kept. Points [x, y, z];
- *  samples [x, y, z, ...]. */
-export function routeOnRibbon(points: number[][], samples: number[][], hw: number, step = 3): number[][] {
+/** L (walk, hags-garth 2026-10-20): the planned route is a taut polyline, the built footpath a TRACK (a recipe road) graded
+ *  through it; at a bend the polyline ran 2.2 m off the built footpath into a wall's face cut (2 STUCK). A walk
+ *  route follows the track AS BUILT: every run of 2+ route points within `hw` + 4 m of the track is replaced by the
+ *  track's own points between them (about every `step` m); points off it (pocket ends) are kept. Points [x, y, z];
+ *  track points [x, y, z]. */
+export function routeOnTrack(points: number[][], samples: number[][], hw: number, step = 3): number[][] {
   if (samples.length < 2) return points;
   const near = (q: number[]) => { let bi = 0, bd = Infinity; samples.forEach((s, i) => { const d = Math.hypot(s[0]! - q[0]!, s[2]! - q[2]!); if (d < bd) { bd = d; bi = i; } }); return { i: bi, d: bd }; };
-  // L (walk, burnt-steading 2026-10-21): a point past the ribbon's END is not on it (it was within hw + 4 of the end sample, so
+  // L (walk, burnt-steading 2026-10-21): a point past the track's END is not on it (it was within hw + 4 of the end sample, so
   // the planned way round a pen wall to its gate collapsed onto the end and the route cut straight through the wall)
   const hit = points.map(near), on = hit.map((h) => h.d <= ((h.i === 0 || h.i === samples.length - 1) ? hw + 0.5 : hw + 4)), out: number[][] = [];
   for (let k = 0; k < points.length; ) {
     if (!on[k]) { out.push(points[k]!); k++; continue; }
     let e = k; while (e + 1 < points.length && on[e + 1]) e++;
     if (e === k) { out.push(points[k]!); k++; continue; }
-    // L (walk, net-green 2026-10-21: FALL 2.48 m off a fill shoulder): the ribbon runs on PAST the last point on it toward
+    // L (walk, net-green 2026-10-21: FALL 2.48 m off a fill shoulder): the track runs on PAST the last point on it toward
     // the next one (a pocket stand beyond the paved end, the core before its start); the taut chord to that point left the
-    // ribbon's bow 2.4 m to one side and the walk stepped off the fill. Follow the samples while they near that point.
+    // track's bow 2.4 m to one side and the walk stepped off the fill. Follow the samples while they near that point.
     const toward = (i: number, q: number[] | undefined, d: number) => { if (!q) return i; const dq = (j: number) => Math.hypot(samples[j]![0]! - q[0]!, samples[j]![2]! - q[2]!);
       while (i + d >= 0 && i + d < samples.length && dq(i + d) < dq(i)) i += d; return i; };
     let a = hit[k]!.i, b = hit[e]!.i; const dir = b >= a ? 1 : -1; let last: number[] | null = null;

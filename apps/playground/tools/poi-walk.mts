@@ -92,11 +92,11 @@ const SCENE = sceneOf();
 // ---- boot like serve.ts
 const b: ServerBody = await bootServerBody({ playground: PLAYGROUND, scene: SCENE, peer: "poi-walk" });
 const { world, terrain } = b;
-const field = terrain.resolved.field as unknown as WalkDeps["field"] & { recipe: { cellSize: number; features: { landmarks?: LandmarkDoc[]; ribbons?: { id: string; samples: number[][] }[] } } };
+const field = terrain.resolved.field as unknown as WalkDeps["field"] & { recipe: { cellSize: number; features: { landmarks?: LandmarkDoc[] } } };
 const dt = world.fixedDt;
 
 // ---- routes and targets
-const routes: Route[] = [...declaredRoutes(job.handoff), ...derivedRoutes(job.worldOps, field.recipe.features.ribbons ?? [])];
+const routes: Route[] = [...declaredRoutes(job.handoff), ...derivedRoutes(job.worldOps)];
 const trial = flag("routes") ? declaredRoutes({ navigation: JSON.parse(fs.readFileSync(flag("routes")!, "utf8")) }).map((r) => ({ ...r, id: `trial:${r.id}` })) : [];
 routes.push(...trial);
 const faults: Fault[] = [];

@@ -8,7 +8,7 @@ export interface SurfaceMeshSource {
   uvs?: number[];
   /** Optional second uv (a fall curtain's across/down, read by the water material's dissolve). */
   uv1s?: number[];
-  /** Optional flat r, g, b, a per vertex (a path ribbon's verge fade: drawn under an `alphaHash` material). */
+  /** Optional flat r, g, b, a per vertex (an edge fade: drawn under an `alphaHash` material). */
   colors?: number[];
 }
 

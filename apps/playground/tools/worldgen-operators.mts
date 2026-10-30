@@ -19,7 +19,6 @@
  * Every command takes `--recipe <file>` (worldgen-wide) to work on a scratch copy.
  */
 import fs from "node:fs";
-import { missingRibbonMaterials, writeRibbonMaterials } from "./_ribbon-materials.mts";
 import { unbakedLandmarks } from "./_landmark-bakes.mts";
 import path from "node:path";
 import os from "node:os";
@@ -50,8 +49,6 @@ import {
   operatorParams,
   recipeEditSchema,
   removeOperator,
-  ribbonArc,
-  ribbonHalfWidth,
   withoutOperatorPieces,
   operatorDependencies,
   type OperatorFieldReader,
@@ -158,12 +155,6 @@ export function commandOp(host: OpHost): void {
       const pf = paintPaletteFault(recipe, o as never);
       if (pf) { console.log(`  PALETTE    ${pf}`); process.exitCode = 1; }
     }
-    // a ribbon without its material draws flat white-grey: `--apply` writes them, --check fails while any is missing
-    const missing = missingRibbonMaterials(recipe, file);
-    if (missing.length) {
-      console.log(`  MISSING    ribbon materials: ${missing.join(", ")} — worldgen op ${recipe.name} --apply <any path id> writes them (or tools/worldgen-ribbon.mts materials <world.json>)`);
-      process.exitCode = 1;
-    }
     // an applied landmark/wall whose prefab was never baked is simply absent in game (the chunk skips it)
     for (const u of unbakedLandmarks(recipe, file)) {
       const opId = u.id.replace(/^op:/, "").replace(/:landmark$/, "");
@@ -233,12 +224,6 @@ export function commandOp(host: OpHost): void {
   const inv = keepInverse(file, recipe, `apply-${path.basename(apply!, ".json")}`, inverse, opt(argv, "inverse"));
   host.writeRecipe(current, file);
   console.log(`  inverse: ${inv}  (worldgen op ${recipe.name} --undo <it>)`);
-  // the materials every ribbon draws with, next to the world (overwritten in place): never left for an installer to forget
-  if ((current.features.ribbons ?? []).length) {
-    const mat = writeRibbonMaterials(current, file);
-    for (const w of mat.warnings) console.warn(`  ribbon materials: ${w}`);
-    console.log(`  ribbon materials: ${mat.wrote.length} file(s) written`);
-  }
   const fine = fineCarves(current, { legacy: readLegacy(file), excepted: readFineExceptions(file) });
   console.log(`  6 m gate: ${fine.ok ? "ok" : `${fine.faults.length} fault(s)`}${fine.legacy.length ? ` (${fine.legacy.length} legacy)` : ""}`);
 }
@@ -376,47 +361,7 @@ class Canvas {
   }
 }
 
-/** The SOLVED ribbon of a `path` op as map lines (op-preview): edges of the walk surface (green, magenta where a retaining wall
- *  stands on that side), the centreline (grey), stair flights (yellow, a tick per tread) and switchback turns (red). Open
- *  polylines, unlike the closed operator outlines. */
 interface OverlayLine { pts: [number, number][]; col: [number, number, number]; w: number }
-function ribbonOverlay(recipe: WorldRecipe | null, opId: string): OverlayLine[] {
-  const r = recipe?.features?.ribbons?.find((x) => x.id === `op:${opId}:ribbon`);
-  if (!r) return [];
-  const arc = ribbonArc(r), S = r.samples, out: OverlayLine[] = [];
-  const edge = (i: number, side: -1 | 1): [number, number] => {
-    const a = S[Math.max(0, i - 1)]!, b = S[Math.min(S.length - 1, i + 1)]!;
-    const dx = b[0] - a[0], dz = b[2] - a[2], l = Math.hypot(dx, dz) || 1;
-    const hw = ribbonHalfWidth(r, arc[i]!, side);
-    return [S[i]![0] + (-dz / l) * side * hw, S[i]![2] + (dx / l) * side * hw];
-  };
-  out.push({ pts: S.map((p) => [p[0], p[2]] as [number, number]), col: [200, 200, 200], w: 1 });
-  for (const side of [-1, 1] as const) {
-    let run: [number, number][] = [], wall = false;
-    const flush = () => { if (run.length > 1) out.push({ pts: run, col: wall ? [255, 0, 255] : [90, 255, 90], w: 2 }); };
-    for (let i = 0; i < S.length; i++) {
-      const w = (side > 0 ? S[i]![4] : S[i]![3]) < 0;
-      if (i > 0 && w !== wall) { flush(); run = run.length ? [run[run.length - 1]!] : []; }
-      wall = w; run.push(edge(i, side));
-    }
-    flush();
-  }
-  for (const f of r.flights) {
-    out.push({ pts: S.slice(f.from, f.to + 1).map((p) => [p[0], p[2]] as [number, number]), col: [255, 220, 0], w: 3 });
-    for (const t of f.treads) {   // a tick across the ribbon at each tread's start
-      let i = f.from; while (i < f.to && arc[i]! < t[0]) i++;
-      out.push({ pts: [edge(i, -1), edge(i, 1)], col: [255, 220, 0], w: 1 });
-    }
-  }
-  let lastTurn = -99;   // switchback turns: the heading reverses by more than ~100 degrees over 8 m each way
-  for (let i = 8; i < S.length - 8; i++) {
-    const a = [S[i]![0] - S[i - 8]![0], S[i]![2] - S[i - 8]![2]], b = [S[i + 8]![0] - S[i]![0], S[i + 8]![2] - S[i]![2]];
-    const c = (a[0]! * b[0]! + a[1]! * b[1]!) / ((Math.hypot(a[0]!, a[1]!) * Math.hypot(b[0]!, b[1]!)) || 1);
-    if (c < -0.2 && i - lastTurn > 12) { lastTurn = i; out.push({ pts: [[S[i]![0] - 1.5, S[i]![2] - 1.5], [S[i]![0] + 1.5, S[i]![2] + 1.5]], col: [255, 60, 60], w: 4 }); }
-  }
-  return out;
-}
-
 /** An operator's compiled kit walls (`features.kitWalls` `op:<id>:wall-*`): map lines along each face (magenta) and,
  *  for the 3D page, one quad per 2 m module from its foot to its cap (grey stone). */
 type WallQuad = { a: [number, number]; b: [number, number]; y0: number; y1: number };
@@ -604,7 +549,7 @@ export function commandOpPreview(host: OpHost): void {
   const o = doc ? getOperator(String(doc.op)) : undefined;
   const outlines = o?.outline ? o.outline(o.schema.parse(operatorParams(doc!)) as never) : [];
   const kw = doc ? kitWallOverlay(after, id) : { lines: [], quads: [] };
-  const overlay = [...(doc && String(doc.op) === "path" ? ribbonOverlay(after, id) : []), ...kw.lines];
+  const overlay = [...kw.lines];
   const panel = 600, pad = 8;
   const cv = new Canvas(gAfter ? panel * 2 + pad * 3 : panel + pad * 2, panel + pad * 2);
   cv.rect(0, 0, cv.w, cv.h, [24, 24, 28]);

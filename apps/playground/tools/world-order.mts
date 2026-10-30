@@ -271,6 +271,32 @@ function reachesFootprint(f: J, pr: { p: P2; r: number }[]): boolean {
   return false;
 }
 const strip = (f: J): J => Object.fromEntries(Object.entries(f).filter(([k]) => !PAINT_FIELDS.has(k)));
+/** How far a road's ground influence reaches past its band (m): the seam blend and the lattice beside the band. */
+export const ROAD_GROUND_MARGIN = 15;
+/**
+ * The part of a ROAD that can move a footprint's ground: its segments whose band (half width + shoulder + smooth) plus
+ * ROAD_GROUND_MARGIN reaches a probe, one segment either side (the seam blend mixes neighbours), with the per-point
+ * values at their ends and the doc's scalars. Null when no segment reaches. Hashing the whole doc made an edit 400 m
+ * along the road stale every place it passes (2026-10-30 redstrand w13: trimming the first point of a path piece by
+ * lake-1 staled red-dial at its far end).
+ */
+export function roadLocal(f: J, pr: { p: P2; r: number }[]): J | null {
+  const pts = ptsOf(f.points);
+  if (pts.length < 2) return reachesFootprint(f, pr) ? strip(f) : null;
+  const band = (Number(f.width) || 0) / 2 + (Number(f.shoulder) || 0) + (Number(f.smooth) || 0) + ROAD_GROUND_MARGIN;
+  const hit = new Set<number>();
+  for (let i = 0; i + 1 < pts.length; i++) {
+    if (pr.some(({ p, r }) => segDist(p, pts[i]!, pts[i + 1]!) <= r + band)) for (const k of [i - 1, i, i + 1]) if (k >= 0 && k + 1 < pts.length) hit.add(k);
+  }
+  if (!hit.size) return null;
+  const idx = [...new Set([...hit].flatMap((k) => [k, k + 1]))].sort((a, b) => a - b);
+  const out: J = {};
+  for (const [k, v] of Object.entries(strip(f))) {
+    if (Array.isArray(v) && v.length === pts.length) out[k] = idx.map((i) => v[i]);
+    else out[k] = v;
+  }
+  return out;
+}
 const short12 = (s: string): string => sha256(s).slice(0, 12);
 /** The parsed recipe (parse once, hash many footprints). */
 export const parseRecipe = (raw: unknown): J => worldRecipeSchema.parse(raw) as J;
@@ -280,7 +306,7 @@ export const parseRecipe = (raw: unknown): J => worldRecipeSchema.parse(raw) as 
  * fields dropped and the places' own builds left out. Returns the hash and a short hash per part, so a change can say
  * WHICH part moved.
  */
-export function localGround(recipe: J, fp: Footprint, placeIds: Iterable<string> = []): { hash: string; parts: Record<string, string> } {
+export function localGround(recipe: J, fp: Footprint, placeIds: Iterable<string> = [], scheme: GroundScheme = "segments"): { hash: string; parts: Record<string, string> } {
   const pr = probes(fp);
   const towns = ((recipe.features?.towns ?? []) as J[]).map((t) => String(t.id));
   const own = new Set(placeIds), townIds = new Set(towns);
@@ -299,11 +325,35 @@ export function localGround(recipe: J, fp: Footprint, placeIds: Iterable<string>
     if (!Array.isArray(list) || NOT_GROUND_KINDS.has(kind)) continue;
     list.forEach((f: J, i: number) => {
       if (kind === "towns") { if (reachesFootprint({ center: f.center }, pr)) parts[`towns/${f.id}`] = short12(stable({ id: f.id, tier: f.tier, siteRole: f.siteRole, center: f.center })); return; }
-      if (placeOwned(f, own, townIds) || !reachesFootprint(f, pr)) return;
+      if (placeOwned(f, own, townIds)) return;
+      if (kind === "roads" && scheme === "segments") {
+        const local = roadLocal(f, pr);
+        if (local) parts[`${kind}/${f.id ?? i}`] = short12(stable(local));
+        return;
+      }
+      if (!reachesFootprint(f, pr)) return;
       parts[`${kind}/${f.id ?? i}`] = short12(stable(strip(f)));
     });
   }
   return { hash: sha256(stable(parts)), parts };
+}
+/**
+ * Records made before 2026-10-30 hashed every reaching road as its whole doc ("doc"). `rehashGround` moves them to the
+ * segment scheme on the world they were made on (`was`): a record whose doc-scheme hash on `was` matches is re-hashed
+ * there; any other is left alone (it was already stale there, and stays so).
+ */
+export type GroundScheme = "segments" | "doc";
+export function rehashGround(doc: WorldStages, was: J): { rehashed: string[]; left: string[] } {
+  const ids = doc.places.map((p) => p.id), rehashed: string[] = [], left: string[] = [];
+  for (const p of doc.places) for (const [stage, r] of Object.entries(p.stages)) {
+    if (!r?.ground) continue;
+    const old = localGround(was, r.ground.footprint, ids, "doc");
+    if (old.hash !== r.ground.hash) { left.push(`${p.id}:${stage}`); continue; }
+    const now = localGround(was, r.ground.footprint, ids, "segments");
+    r.ground = { ...r.ground, hash: now.hash, parts: now.parts };
+    rehashed.push(`${p.id}:${stage}`);
+  }
+  return { rehashed, left };
 }
 /** What moved between two part maps, as `roads/path-a changed`, `lakes/lake-2 new`, `needs/x gone`. */
 export function groundDiff(was: Record<string, string>, now: Record<string, string>): string[] {

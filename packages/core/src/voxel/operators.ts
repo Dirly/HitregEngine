@@ -30,7 +30,6 @@ import {
 } from "./operator-registry.js";
 import type { WorldRecipe } from "./recipe.js";
 import "./operators-terrace.js";
-import "./operators-path.js";
 import "./operators-cave.js";
 import "./operators-ledges.js";
 import "./operators-landmark.js";
@@ -78,7 +77,7 @@ export function operatorPieces(recipe: WorldRecipe, id: string): { kind: Feature
 /**
  * The operators whose output an operator's `compile` must NOT see: itself and every operator AFTER it in
  * `features.operators` order. Operators compose in recipe order — each reads the ground the operators before it made —
- * so two that overlap (a landmark's ground blend under a path ribbon) converge: re-applying in recipe order is a fixed
+ * so two that overlap (a landmark's ground blend under a terrace) converge: re-applying in recipe order is a fixed
  * point, and `--check` compares each one against the ground it was really built on. (Reading every OTHER operator's
  * output made overlapping pairs mutually STALE forever: re-applying either moved the ground under the other.) An id
  * not in the list (a doc about to be appended) excludes only itself.

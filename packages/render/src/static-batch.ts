@@ -125,7 +125,7 @@ function prepForMerge(geometry: THREE.BufferGeometry, keepColor: false | 3 | 4 =
   const g = (geometry.index ? geometry.toNonIndexed() : geometry.clone()) as THREE.BufferGeometry;
   // Vertex colours (baked AO on kit pieces) ride through a merge exactly like uv: a world-space bake does not change
   // them. Only kept when the bucket's material reads them; normalised to 3 floats so every member matches (4 under an
-  // `alphaHash` material: the alpha is its dithered fade, e.g. a path ribbon's verge).
+  // `alphaHash` material: the alpha is its dithered fade, e.g. a strip's edge).
   const color = g.getAttribute("color");
   if (keepColor) {
     const size = keepColor;

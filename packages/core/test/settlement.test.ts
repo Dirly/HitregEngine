@@ -55,7 +55,7 @@ describe("settlement grammar: isle village (the Totem Isles)", () => {
     expect(settlementSiteDressing(plan, frogkin).areas.length).toBe(plan.areas.length);
     const ops = settlementWorldOps(plan, frogkin, "isles");
     expect(ops.clearings.every((c) => c.cover && c.scatter)).toBe(true);
-    expect(ops.operators).toEqual([]); // fords, not ribbons
+    expect(ops.tracks).toEqual([]); // fords, not tracks
     expect(settlementSvg(plan)).toContain("<svg");
   });
 });
@@ -68,7 +68,7 @@ describe("settlement grammar: camp round a fire on dry ground", () => {
     household: [{ role: "sleeping", props: ["ogre/hides"], place: "side" }, { role: "storage", props: ["ogre/sack"], place: "back" }],
     gathering: { kind: "hearth", centre: ["ogre/bonfire"], radius: 10 },
     work: [{ id: "butchery", where: "downwind", props: ["ogre/spit"], radius: 8 }],
-    paths: { kind: "ribbon", width: 3 },
+    paths: { kind: "track", width: 3 },
     defences: { props: ["ogre/pike"], count: 4 },
   };
   const plan = planSettlement({ id: "scrape", culture: ogre, households: 4, clusters: 1, centre: [0, 0], radius: 80, anchors: { approach: [0, -78] } }, plain);
@@ -89,10 +89,12 @@ describe("settlement grammar: camp round a fire on dry ground", () => {
     expect(plan.defences).toHaveLength(4);
     for (const d of plan.defences) expect(d.at[1]).toBeLessThan(plan.gathering.at[1]);
   });
-  it("lays ribbon path operators and passes its check, with the tier's creature groups", () => {
+  it("lays carved + painted tracks (never ribbons) and passes its check, with the tier's creature groups", () => {
     const ops = settlementWorldOps(plan, ogre, "scrape");
-    expect(ops.operators.length).toBeGreaterThan(0);
-    expect(ops.operators[0]).toMatchObject({ op: "path", width: 3 });
+    expect(ops.tracks.length).toBeGreaterThan(0);
+    expect(ops.tracks[0]).toMatchObject({ width: 3 });
+    expect(ops.tracks[0]!.id).toMatch(/^road-settle-scrape-/);
+    expect(() => settlementWorldOps(plan, { ...ogre, paths: { ...ogre.paths, kind: "ribbon" as never } }, "scrape")).toThrow(/ribbons were removed 2026-10-30/);
     const r = checkSettlement(plan, ogre, { households: 4, tier: { id: "small", minCreatureGroups: 1, footprintDiameterM: { min: 90, max: 150 } } });
     expect(r.findings.filter((f) => f.code !== "tier-footprint")).toEqual([]);
     expect(plan.clearings.some((c) => c.why === "fire")).toBe(true);

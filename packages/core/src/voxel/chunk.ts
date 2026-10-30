@@ -26,7 +26,6 @@ import { terraceWallEntities } from "./terrace-walls.js";
 import { kitWallEntities } from "./kit-walls.js";
 import { landmarkColliderTileRefs, landmarkEntities } from "./ledge-landmark.js";
 import { bridgeSpanEntities } from "./bridge-spans.js";
-import { ribbonEntities, type RibbonDoc, type RibbonSurfaceResolver } from "./ribbon.js";
 import { regionAt } from "./regions.js";
 import { FALL_FACE_CLEAR, columnReachesPool, fallColumn, fallProbeDepth, fitFall, groundAtProfile, profileFace, type FallFitField } from "./fall-fit.js";
 import { resolveCellMesher, type VoxelMesherChoice } from "./mesh.js";
@@ -1414,63 +1413,13 @@ export function voxelChunkDoc(
   // Operator kit walls (`terrace` risers): one prefab instance per piece, in the cell its origin stands in.
   kitWallEntities(recipe.features.kitWalls, recipe.cellSize, cx, cz, entities, options.assetExists);
   landmarkEntities(recipe.features.landmarks, recipe.cellSize, cx, cz, entities, options.assetExists);
-  // Path ribbons: the walk surface + stair treads (one surface mesh per ribbon per cell, with its collider) and wall pieces.
-  if (recipe.features.ribbons?.length) ribbonEntities(recipe.features.ribbons, ribbonSurfaces(recipe, field), recipe.cellSize, cx, cz, entities, options.assetExists);
 
   return { version: 1, entities };
 }
 
 /**
- * Which palette surfaces a ribbon draws with, all read from the zone at the ribbon's middle (a nested town zone with
- * no tiles of its own uses its parent's): its own `surface`, else cobble / slab -> the zone's `paving`, dirt -> the
- * zone's `road` tile as trodden earth (its main worn surface, never the grass the ribbon happens to lie on; `ground`
- * when the zone has no road tile) drawn by a `--trodden` material (a smoothed, slightly lifted copy of the tile), else
- * plain `dirt` / `gravel`. Walls wear the zone's stone (`ground.cliff`) unless `wallSkin` says otherwise.
- */
-export function ribbonSurfaces(recipe: WorldRecipe, field?: Pick<WorldField, "tintAt">): RibbonSurfaceResolver {
-  const names = new Map(recipe.surfaces.map((s) => [s.name, s]));
-  const regions = recipe.regions ?? [];
-  const zoneTile = (r: RibbonDoc, role: string): string | null => {
-    const mid = r.samples[Math.floor(r.samples.length / 2)]!;
-    let zone = regionAt(regions, mid[0], mid[2]);
-    for (let hop = 0; zone && !(zone.ground as Record<string, string> | undefined)?.[role] && zone.within && hop < 4; hop++) {
-      const parent: string = zone.within;
-      zone = regions.find((q) => q.id === parent) ?? null;
-    }
-    const pick = (zone?.ground as Record<string, string> | undefined)?.[role];
-    return pick && names.has(pick) ? pick : null;
-  };
-  /** The tile a default dirt ribbon wears as trodden earth: the zone's road, else its ground; null = not trodden. */
-  const trodden = (r: RibbonDoc): string | null => {
-    if (r.style !== "dirt" || (r.surface && names.has(r.surface))) return null;
-    return zoneTile(r, "road") ?? zoneTile(r, "ground");
-  };
-  return {
-    surfaceOf(r: RibbonDoc): string {
-      if (r.surface && names.has(r.surface)) return r.surface;
-      const t = trodden(r);
-      if (t) return t;
-      const role = r.style === "dirt" ? "road" : "paving";
-      const pick = zoneTile(r, role);
-      if (pick) return pick;
-      const fallback = role === "road" ? "dirt" : "gravel";
-      return names.has(fallback) ? fallback : recipe.surfaces[0]?.name ?? "dirt";
-    },
-    uvScaleOf: (name) => names.get(name)?.uvScale ?? 4,
-    troddenToward: (r) => trodden(r),
-    // the biome tint the terrain mesher writes into COLOR_0 under the same tile: the ribbon wears it per vertex
-    ...(field ? { tintAt: (x: number, y: number, z: number): [number, number, number] => { const o = new Float32Array(3); field.tintAt(x, y, z, 1, o, 0); return [o[0]!, o[1]!, o[2]!]; } } : {}),
-    wallSkinOf(r: RibbonDoc): string | null {
-      if (r.wallSkin === "kit") return null;
-      if (r.wallSkin) return names.has(r.wallSkin) ? r.wallSkin : null;
-      return r.pieces.length ? zoneTile(r, "cliff") : null;
-    },
-  };
-}
-
-/**
  * Placeholder bridges for one cell: a deck slab from abutment to abutment
- * (a `path` ribbon with thickness, clipped to the cell like the water) and
+ * (a `path` component strip with thickness, clipped to the cell like the water) and
  * a box pier every few metres down to the river bed. Each carries a
  * collider so the crossing is walkable the moment the world streams in.
  * A WFC bridge builder replaces these by reading `features.bridges`; the

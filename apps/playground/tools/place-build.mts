@@ -16,6 +16,9 @@
  *     approach                          re-plan the APPROACH only on the recorded site (no site search): the carved + painted
  *                                       track (worldgen road, road-pb-<id>-approach in world-ops.json), its route, lanes and
  *                                       keep-clear; structures, walls and dressing plans kept. Then lab -> build -> gates -> install.
+ *                                       Also MIGRATES an old job's footpath ribbons (`path` operators, removed 2026-10-30) to
+ *                                       carved + painted footpath tracks (road-pb-<id>-to-<pocket>) on the same lines.
+ *     tracks                            ONLY that migration (no approach re-plan, no build): old footpath ribbons -> tracks.
  *     dress                             re-lay the DRESSING only (vignettes by pocket role, from the live plans; quest objects kept)
  *     lab    [--lab <name>]             (re)make the lab project projects/<lab>/ (default pb-<id>) from the LIVE world + scene,
  *                                       the place's own entities and features taken out
@@ -57,11 +60,11 @@ import { spawnSync } from "node:child_process";
 import { runCapped, shotsCapMs } from "./_run-capped.mts";
 import { seatPlaced } from "./float.mts";
 import { skinPlacedOps } from "./rock-skins.mts";
-import { applyOps, applyRecipeEdits, ComponentRegistry, createWorldField, registerChunkComponents, registerCoreComponents, worldRecipeSchema } from "@hitreg/core";
+import { applyOps, applyRecipeEdits, ComponentRegistry, createWorldField, registerChunkComponents, registerCoreComponents, REMOVED_RIBBON_OPS, worldRecipeSchema } from "@hitreg/core";
 import { assetIds, findAsset, PROJECTS } from "./_closure.mjs";
 import {
-  sinkToBase, seatPad, mergeSeatPads, type SeatPadRaw, padPatch, applySets, silhouetteHeight, SILHOUETTE_RATIO, arrangeFirstPlan, DENIED_PROPS, approachLines, burnsAtDusk, forTier, newZfightClusters, approachReadAny, fillOk, installGuard, RESEAT_MAX_M, routeOnRibbon, hull, readBand, pickArchetype, roomFill, placeArchetypeSchema, planPlace, primitiveMeshes, siteSearch, staleEntities, unclearedStructures, uniqueItemIds, usableArea, type PlaceArchetype, type PlaceGround, type PlaceTier, type SiteBlockers, type SiteChoice,
-  ribbonApproachOps, approachForBuilt, trackId, trimTrack, TRACK_CUT_M, TRACK_FILL_M, type ApproachTrack, type PlacePlan,
+  sinkToBase, seatPad, mergeSeatPads, type SeatPadRaw, padPatch, applySets, silhouetteHeight, SILHOUETTE_RATIO, arrangeFirstPlan, DENIED_PROPS, approachLines, burnsAtDusk, forTier, newZfightClusters, approachReadAny, fillOk, installGuard, RESEAT_MAX_M, routeOnTrack, hull, readBand, pickArchetype, roomFill, placeArchetypeSchema, planPlace, primitiveMeshes, siteSearch, staleEntities, unclearedStructures, uniqueItemIds, usableArea, type PlaceArchetype, type PlaceGround, type PlaceTier, type SiteBlockers, type SiteChoice,
+  ribbonsDeclared, footpathTrackId, FOOTPATH_WIDTH_M, approachForBuilt, trackId, trimTrack, TRACK_CUT_M, TRACK_FILL_M, type ApproachTrack, type PlacePlan,
   fillerFor, requestedShortfall, type PlanDrop, placeLayoutSchema, withLayout, layoutCoverage, layoutSizeWarn, type PlaceLayout, toWorld, gradePatch,
 } from "./_place-archetype.mts";
 import os from "node:os";
@@ -137,6 +140,16 @@ function gradeTrack(recipe: any, t: ApproachTrack | null): any[] {
     return [...built.roads.map((f) => ({ edit: "add-feature", kind: "roads", feature: f })), ...built.bridges.map((f) => ({ edit: "add-feature", kind: "bridges", feature: f }))];
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 }
+/** The zone's PATH surface a footpath track wears (owner ruling 2026-10-30): the place's zone `ground.road` tile (a nested
+ *  zone with none takes its parent's), when the palette has it; undefined = `worldgen road`'s default. */
+function zonePathSurface(recipe: any): string | undefined {
+  const regions = (recipe.regions ?? []) as any[], names = new Set(((recipe.surfaces ?? []) as any[]).map((s) => s.name));
+  let r = regions.find((x) => x.id === zone);
+  for (let hop = 0; r && !r.ground?.road && r.within && hop < 4; hop++) r = regions.find((x) => x.id === r.within);
+  const s = r?.ground?.road;
+  return s && names.has(s) ? s : undefined;
+}
+const onZonePath = (recipe: any) => (t: ApproachTrack): ApproachTrack => { const s = t.surface ?? zonePathSurface(recipe); return s ? { ...t, surface: s } : t; };
 function withoutPlace(w: any) { const features: any = {}; for (const [k, v] of Object.entries(w.features ?? {})) features[k] = Array.isArray(v) ? v.filter((f) => !ownsFeature(f)) : v; return { ...w, features }; }
 /** A prop's catalogue dressing declaration (the prefab root's `dressing` component), for the plan's culture checks. */
 const propInfoCache = new Map<string, { cultures?: string[]; height?: number; size?: number[]; footing?: number } | null>();
@@ -154,13 +167,22 @@ function texelsOf(prefab: string): number | null {
   if (!texCache2.has(prefab)) { let v: number | null = null; try { const A = path.join(PROJECTS, project, "assets"); v = texelDensity(prefabGeometry(A, prefab), { projected: projectedTexels(A) }).median || null; } catch { v = null; } texCache2.set(prefab, v); }
   return texCache2.get(prefab)!;
 }
+/** A catalogued piece's triangles (cached: the support gate asks a host's top a few hundred times). */
+const trisCache = new Map<string, any[] | null>();
+function trisOf(prefab: string): any[] | null {
+  if (!trisCache.has(prefab)) { let t: any[] | null = null; try { t = prefabGeometry(path.join(PROJECTS, project, "assets"), prefab).tris; } catch { t = null; } trisCache.set(prefab, t); }
+  return trisCache.get(prefab)!;
+}
 /** Highest mesh surface of a catalogued piece over a local point (prefab frame), for a piece set `on` it. */
-function topOf(prefab: string, x: number, z: number): number | null {
-  let tris: any[]; try { tris = prefabGeometry(path.join(PROJECTS, project, "assets"), prefab).tris; } catch { return null; }
+function topOf(prefab: string, x: number, z: number): number | null { return surfaceOf(prefab, x, z, 1); }
+/** Lowest mesh surface of a catalogued piece over a local point (prefab frame): its underside (support gate). */
+function bottomOf(prefab: string, x: number, z: number): number | null { return surfaceOf(prefab, x, z, -1); }
+function surfaceOf(prefab: string, x: number, z: number, sign: 1 | -1): number | null {
+  const tris = trisOf(prefab); if (!tris) return null;
   let best: number | null = null;
   for (const t of tris) { const [a, b, c] = [t.a, t.b, t.c]; const d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]); if (Math.abs(d) < 1e-9) continue;
     const l1 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d, l2 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d, l3 = 1 - l1 - l2;
-    if (l1 < 0 || l2 < 0 || l3 < 0) continue; const y = l1 * a[1] + l2 * b[1] + l3 * c[1]; if (best === null || y > best) best = y; }
+    if (l1 < 0 || l2 < 0 || l3 < 0) continue; const y = l1 * a[1] + l2 * b[1] + l3 * c[1]; if (best === null || y * sign > best * sign) best = y; }
   return best;
 }
 /** A catalogued piece's marker (prefab frame) from the <model>.markers.json beside its mesh (layout `waters`: a kit basin's level). */
@@ -218,13 +240,17 @@ const worldFile = (p: string, w: string) => path.join(PROJECTS, p, "assets", "wo
 const sceneFile = (p: string, w: string) => path.join(PROJECTS, p, "assets", "scenes", `${w}.scene.json`);
 
 // ---------------------------------------------------------------------------------------------------------------------
-/** `approach`: re-plan the approach only (owner ruling 2026-10-20: the approach becomes a carved + painted track). */
+/** `approach`: re-plan the approach only (owner ruling 2026-10-20: the approach becomes a carved + painted track); old
+ *  footpath ribbons become footpath tracks (owner ruling 2026-10-30: ribbons removed from every tool). */
 let approachOnly = false;
+/** `tracks`: migrate the job's footpath ribbons to carved + painted tracks only (migrateFootpaths). */
+let tracksOnly = false;
 /** APPROACH ONLY: the place planned again on its RECORDED site, pockets and tier (no site search, no tier change) and only
- *  its approach taken from that plan: the approach ribbon operator out, the graded track (road-pb-<id>-approach) into
- *  world-ops.json, the approach route, its lane clearings, keep-clear lines and network line replaced. Structures, walls,
- *  pocket footpaths and the dressing plans stay as built and reviewed. Refused when the re-plan does not land on the
- *  recorded core (> 0.5 m). */
+ *  its approach taken from that plan: the graded track (road-pb-<id>-approach) into world-ops.json, the approach route,
+ *  its lane clearings, keep-clear lines and network line replaced. Every old `path`/`ribbon` operator goes: the approach
+ *  one is replaced by the track, a footpath one by a footpath track on its own line (footpathTrackId, graded by `worldgen
+ *  road` like the approach). Structures, walls and the dressing plans stay as built and reviewed. Refused when the re-plan
+ *  does not land on the recorded core (> 0.5 m). */
 function spliceApproach(recipe: any, g: PlaceGround, approaches: V2[][]) {
   const J = (f: string) => path.join(JOB, f), old = read(J("reports/plan.json")), brief = read(J("brief.json"));
   const operators = read(J("operators.json")) as any[], worldOps = read(J("world-ops.json")) as any[], clearings = read(J("clearings.json")) as any[], hand = read(J("handoff.json"));
@@ -237,11 +263,12 @@ function spliceApproach(recipe: any, g: PlaceGround, approaches: V2[][]) {
     walls: operators.filter((o) => o.op === "wall"), approaches, roads: existingRoads(recipe),
   });
   if (!built.route) fail(`approach: ${built.faults.join("; ")}`);
-  const ribbon = operators.find((o) => ribbonApproachOps([o]).length), oldTrack = (hand.siteDressing?.keepClear ?? []).find((k: any) => k.id === "track-approach")?.points;
-  const ownTrack = (id: unknown) => typeof id === "string" && (id.startsWith(`road-${PREFIX}`) || id.startsWith(`bridge-road-${PREFIX}`));
+  // an old ribbon approach (removed 2026-10-30) goes; the footpath ribbons were already migrated (migrateFootpaths)
+  const ribbon = operators.find((o) => REMOVED_RIBBON_OPS.includes(o.op) && /(^|-)approach$/.test(String(o.id))), oldTrack = (hand.siteDressing?.keepClear ?? []).find((k: any) => k.id === "track-approach")?.points;
+  const ownTrack = (id: unknown) => typeof id === "string" && (id === trackId(poi) || id.startsWith(`${trackId(poi)}.`) || id.startsWith(`bridge-${trackId(poi)}`));
   const lanes = new Set([`${poi}-lane-approach`, `${poi}-lane-cover-approach`]), same = (l: any, m: any) => !!m && JSON.stringify(l) === JSON.stringify(m);
-  write(J("operators.json"), operators.filter((o) => !ribbonApproachOps([o]).length));
-  write(J("world-ops.json"), [...worldOps.filter((o) => !ownTrack(o.feature?.id) && !ribbonApproachOps([], [o]).length), ...gradeTrack(recipe, built.track)]);
+  write(J("operators.json"), operators.filter((o) => !REMOVED_RIBBON_OPS.includes(o.op)));
+  write(J("world-ops.json"), [...worldOps.filter((o) => !ownTrack(o.feature?.id) && o.kind !== "ribbons"), ...gradeTrack(recipe, built.track)]);
   write(J("clearings.json"), [...clearings.filter((c) => !lanes.has(c.id)), ...built.clearings]);
   const i = hand.navigation.routes.findIndex((r: any) => r.id === "approach");
   if (i >= 0) hand.navigation.routes[i] = built.route; else hand.navigation.routes.unshift(built.route);
@@ -249,9 +276,34 @@ function spliceApproach(recipe: any, g: PlaceGround, approaches: V2[][]) {
   hand.siteDressing.keepClear = [...(hand.siteDressing.keepClear as any[]).filter((k) => k.id !== "route-approach" && k.id !== "track-approach" && !(k.why === "footpath" && same(k.points, ribbon?.points))), ...built.keepClear];
   hand.approachTrack = built.track ? { id: built.track.id, width: built.track.width, from: built.track.from, lengthM: built.track.lengthM } : null;
   write(J("handoff.json"), hand); write(J("walk-route.json"), hand.navigation.routes[0]);
-  write(J("reports/plan.json"), { ...old, approach: { at: new Date().toISOString(), why: "approach re-planned only (place-build approach) round the place as built: carved + painted track, the ribbon removed", track: hand.approachTrack, removed: ribbon?.id ?? null, notes: built.notes } });
-  console.log(`approach ${poi}: ${ribbon ? `ribbon ${ribbon.id} removed, ` : ""}${built.track ? `track ${built.track.id} ${built.track.width} m x ${built.track.lengthM} m from ${built.track.from}` : "no track"}; planned round the place as built`);
+  write(J("reports/plan.json"), { ...read(J("reports/plan.json")), approach: { at: new Date().toISOString(), why: "approach re-planned only (place-build approach) round the place as built: carved + painted track", track: hand.approachTrack, removed: ribbon?.id ?? null, notes: built.notes } });
+  console.log(`approach ${poi}: ${ribbon ? `old ribbon ${ribbon.id} removed, ` : ""}${built.track ? `track ${built.track.id} ${built.track.width} m x ${built.track.lengthM} m from ${built.track.from}` : "no track"}; planned round the place as built`);
   for (const n of built.notes) console.log(`  NOTE: ${n}`);
+}
+/** `tracks` (and the first step of `approach`): MIGRATE an old job's FOOTPATH ribbons (ribbons removed 2026-10-30, owner
+ *  ruling) without re-planning or building: every non-approach `path`/`ribbon` operator in operators.json becomes a
+ *  footpath track on its own control line (footpathTrackId, tread clamped to FOOTPATH_WIDTH_M, graded by `worldgen road`
+ *  dry run on the world without this place, like the approach) in world-ops.json; any features.ribbons world-op goes;
+ *  handoff footpathTracks and its footpath keep-clear widths follow. The ribbon approach is left for `approach`. */
+function migrateFootpaths(recipe: any): void {
+  const J = (f: string) => path.join(JOB, f), brief = read(J("brief.json"));
+  const operators = read(J("operators.json")) as any[], worldOps = read(J("world-ops.json")) as any[], hand = read(J("handoff.json"));
+  const a = placeArchetypeSchema.parse(applySets(archetypes().find((x) => x.a.id === brief.archetype)?.raw ?? fail(`no archetype ${brief.archetype}`), brief.sets ?? []));
+  const isApproachOp = (o: any) => /(^|-)approach$/.test(String(o.id));
+  const old = operators.filter((o) => REMOVED_RIBBON_OPS.includes(o.op) && !isApproachOp(o));
+  const footpaths: ApproachTrack[] = old.filter((o) => (o.points ?? []).length >= 2).map((o) => { const pts = (o.points as number[][]).map((q) => [q[0]!, q[1]!] as V2);
+    return { id: footpathTrackId(poi, String(o.id).replace(PREFIX, "")), points: pts, width: Math.min(FOOTPATH_WIDTH_M[1], Math.max(FOOTPATH_WIDTH_M[0], Number(o.width ?? a.route.width))), maxGrade: Number(o.maxGrade ?? a.route.maxGrade), from: "the core", lengthM: Math.round(pts.slice(1).reduce((m, q, i) => m + Math.hypot(q[0] - pts[i]![0], q[1] - pts[i]![1]), 0)) }; });
+  const mine = new Set(footpaths.map((t) => t.id)), ownTrack = (id: unknown) => typeof id === "string" && [...mine].some((t) => id === t || id.startsWith(`${t}.`) || id.startsWith(`bridge-${t}`));
+  const ribbonOps = worldOps.filter((o) => o.kind === "ribbons").length;
+  if (!old.length && !ribbonOps) { console.log(`tracks ${poi}: no footpath ribbons in the job`); return; }
+  write(J("world-ops.json"), [...worldOps.filter((o) => !ownTrack(o.feature?.id) && o.kind !== "ribbons"), ...footpaths.map(onZonePath(recipe)).flatMap((t) => gradeTrack(recipe, t))]);
+  write(J("operators.json"), operators.filter((o) => !(REMOVED_RIBBON_OPS.includes(o.op) && !isApproachOp(o))));
+  hand.footpathTracks = footpaths.map((t) => ({ id: t.id, width: t.width, lengthM: t.lengthM }));
+  const r2p = (l: V2[]) => JSON.stringify(l.map((q) => q.map((v) => Math.round(v * 100) / 100)));
+  for (const k of (hand.siteDressing?.keepClear ?? []) as any[]) { const t = k.why === "footpath" ? footpaths.find((x) => r2p(x.points) === r2p(k.points)) : undefined; if (t) { k.width = t.width + 1.2; k.track = t.id; } }
+  write(J("handoff.json"), hand);
+  write(J("reports/plan.json"), { ...read(J("reports/plan.json")), tracks: { at: new Date().toISOString(), why: "footpath ribbons (removed 2026-10-30) migrated to carved + painted footpath tracks (place-build tracks)", removed: old.map((o) => o.id), footpathTracks: hand.footpathTracks } });
+  console.log(`tracks ${poi}: ${old.length} footpath ribbon operator(s) -> ${footpaths.length} carved + painted track(s) (${footpaths.map((t) => `${t.id} ${t.width} m x ${t.lengthM} m`).join(", ")})${ribbonOps ? `; ${ribbonOps} features.ribbons world-op(s) dropped` : ""}`);
 }
 /** DRESSING ONLY: every dressing plan of the place as built laid out again in VIGNETTES (arrangeFirstPlan by the pocket's
  *  role and structures), no site search, no other job file touched. The base is the project's LIVE plan when there is one
@@ -339,6 +391,7 @@ function plan() {
   if (noKindMat.length) fail(`zone builtKinds materials not in ${project}'s closure: ${[...new Set(noKindMat)].join(", ")} (${zdf})`);
   const t0 = Date.now();
   const recipe = withoutPlace(read(worldFile(project, world)));
+  if (tracksOnly) return migrateFootpaths(recipe); // footpath ribbons -> tracks on their own lines: no ground survey, no re-plan
   let g = ground(recipe);
   // ONE palette per role per zone (recipe regions[].palette.builtStone): the zone defaults may not name a stone outside it
   const zpal = zonePalette(recipe, zone);
@@ -357,7 +410,7 @@ function plan() {
   if (apr.resolved.length) console.log(`  APPROACH: resolved from the world (the reservation had no points): ${apr.resolved.join(", ")}`);
   if (apr.unresolved.length) console.log(`  FIT: approach from ${apr.unresolved.join(", ")}: no road, river, town, POI, region or reservation of that id`);
   const blockers = siteBlockers(recipe, approaches);
-  if (approachOnly) return spliceApproach(recipe, g, approaches); // the approach only, round the place as built
+  if (approachOnly) { migrateFootpaths(recipe); return spliceApproach(recipe, g, approaches); } // the approach only, round the place as built
   // the brief's words drive row counts and ring switches (expandRows, ring.when); its people (place.culture) the fill
   const briefText = [place.read, place.landmark, ...(place.features ?? [])].filter(Boolean).join(" ");
   const culture = place.culture ? ([] as string[]).concat(place.culture) : null;
@@ -367,7 +420,7 @@ function plan() {
   const roam = +(opt("roam") ?? 1.5), sites: Record<string, SiteChoice | null> = {};
   const planAt = (size: PlaceTier) => {
     const at0 = forTier(a, size, heightOf), at_ = layout ? withLayout(at0, layout, propInfo) : at0; // L (weepmouth 2026-10-21): a pinpoint is the core pocket only
-    const base = { world, zone, project, place: { id: poi, name: place.name, size, at, faces, text: briefText, ...(culture ? { culture } : {}) }, reservation: { center: res.center, radius: res.radius, approaches }, propInfo, texelsOf, topOf, markerOf, questObjects, waters, builtStone, builtKinds, structureBase, materialExists: (m: string) => !!findAsset(project, `materials/${m}.json`), ...(layout ? { layout, catalogued: (id: string) => !!findAsset(project, `prefabs/${id}.json`), surfaces: ((recipe.surfaces ?? []) as any[]).map((x) => x.name as string), surfaceColors: Object.fromEntries(((recipe.surfaces ?? []) as any[]).filter((x) => typeof x.color === "string").map((x) => [x.name as string, x.color as string])) } : {}), scatterRules: ((recipe.scatter ?? []) as any[]).map((s) => s.id as string), roads: existingRoads(recipe), kitBuildings: assetIds(project, "prefabs/wfc-ruins").size > 0 };
+    const base = { world, zone, project, place: { id: poi, name: place.name, size, at, faces, text: briefText, ...(culture ? { culture } : {}) }, reservation: { center: res.center, radius: res.radius, approaches }, propInfo, texelsOf, topOf, bottomOf, markerOf, questObjects, waters, builtStone, builtKinds, structureBase, materialExists: (m: string) => !!findAsset(project, `materials/${m}.json`), ...(layout ? { layout, catalogued: (id: string) => !!findAsset(project, `prefabs/${id}.json`), surfaces: ((recipe.surfaces ?? []) as any[]).map((x) => x.name as string), surfaceColors: Object.fromEntries(((recipe.surfaces ?? []) as any[]).filter((x) => typeof x.color === "string").map((x) => [x.name as string, x.color as string])) } : {}), scatterRules: ((recipe.scatter ?? []) as any[]).map((s) => s.id as string), roads: existingRoads(recipe), kitBuildings: assetIds(project, "prefabs/wfc-ruins").size > 0 };
     const site = sites[size] = siteSearch(at_, base, g, { needM2: tierFor(size).minUsableAreaM2, roam, pinned, blockers, read: { band: readBand(size, a.read.band) } });
     const p = planPlace(at_, site ? { ...base, place: { ...base.place, at: site.at }, pocketAt: site.pockets } : base, g);
     const bcn = [...at_.pockets[0]!.structures, ...at_.pockets[0]!.walls].find((x) => x.id === "beacon");
@@ -431,7 +484,8 @@ function plan() {
   const layoutRoads: ApproachTrack[] = (layout?.roads ?? []).map((r) => { const pts = r.points.map((q) => toWorld(p.centre as V2, p.front as V2, q as V2).map((v) => Math.round(v * 100) / 100) as V2);
     if (r.surface && !((recipe.surfaces ?? []) as any[]).some((x) => x.name === r.surface)) fail(`layout road ${r.id}: surface ${r.surface} is not in the recipe's surfaces`);
     return { id: `road-${PREFIX}${r.id}`, points: pts, width: r.width, maxGrade: r.maxGrade, from: "layout", ...(r.surface ? { surface: r.surface } : {}), lengthM: Math.round(pts.slice(1).reduce((n, q, i) => n + Math.hypot(q[0] - pts[i]![0], q[1] - pts[i]![1]), 0)) }; });
-  write(path.join(JOB, "world-ops.json"), [...gradeOps, ...p.worldOps, ...gradeTrack(recipe, p.track), ...layoutRoads.flatMap((t) => gradeTrack(recipe, t))]);
+  write(path.join(JOB, "world-ops.json"), [...gradeOps, ...p.worldOps, ...gradeTrack(recipe, p.track), ...p.footpaths.map(onZonePath(recipe)).flatMap((t) => gradeTrack(recipe, t)), ...layoutRoads.flatMap((t) => gradeTrack(recipe, t))]);
+  { const left = ribbonsDeclared(p.operators, p.worldOps); if (left.length) fail(`plan ${poi}: ${left.join("; ")}`); } // never: the planner emits tracks
   write(path.join(JOB, "operators.json"), p.operators);
   write(path.join(JOB, "clearings.json"), [...p.clearings]);
   write(path.join(JOB, "encounter-clearings.json"), p.encounters);
@@ -463,7 +517,7 @@ function plan() {
   write(path.join(JOB, "views.json"), [...views.filter((v) => !cviews.some((c) => c.name === v.name) && !setViews.some((c: any) => c.name === v.name)), ...setViews, ...cviews.map((v) => ({ name: v.name, x: v.x ?? v.camera[0], z: v.z ?? v.camera[2], y: v.y ?? Math.round((v.camera[1] - 1.7) * 10) / 10, camera: v.camera, target: v.target }))]);
   write(path.join(JOB, "walk-route.json"), p.handoff.navigation.routes[0]);
   if (!fs.existsSync(path.join(JOB, "progress.json"))) write(path.join(JOB, "progress.json"), { version: 1, poiId: poi, ownerAgentId: "place-build", stage: "blockout", mode: "build" });
-  write(path.join(JOB, "reports", "plan.json"), { archetype: a.id, sets: setList, ...(layout ? { layout: { pieces: layout.pieces.length, ground: layout.ground.length, views: layout.views.length, origin: layout.origin ?? null } } : {}), site: siteRecord(sites[size] ?? null), centre: p.centre, padY: p.padY, front: p.front, faults: p.faults, notes: p.notes, adventureSize: size, tierDowngrade: downgrade, requested: p.requested, pockets: p.pockets.map((k) => ({ id: k.id, at: k.at, y: k.y, relief: Math.round(k.fit.stats.relief * 10) / 10, ok: k.fit.ok, why: k.fit.why })), usableAreaM2: p.handoff.measurements.measuredCombinedUsableAreaM2, seconds: Math.round((Date.now() - t0) / 1000) });
+  write(path.join(JOB, "reports", "plan.json"), { archetype: a.id, sets: setList, ...(layout ? { layout: { pieces: layout.pieces.length, ground: layout.ground.length, views: layout.views.length, origin: layout.origin ?? null } } : {}), site: siteRecord(sites[size] ?? null), centre: p.centre, padY: p.padY, front: p.front, faults: p.faults, notes: p.notes, adventureSize: size, tierDowngrade: downgrade, requested: p.requested, pockets: p.pockets.map((k) => ({ id: k.id, at: k.at, y: k.y, relief: Math.round(k.fit.stats.relief * 10) / 10, ok: k.fit.ok, why: k.fit.why })), usableAreaM2: p.handoff.measurements.measuredCombinedUsableAreaM2, support: p.support, seconds: Math.round((Date.now() - t0) / 1000) });
   console.log(`plan ${poi}: archetype ${a.id}${setList.length ? ` (${setList.join(" ")})` : ""}, core ${p.centre.map(Math.round)} y ${p.padY}, ${p.pockets.length} pockets, ${p.ops.length} entities, ${p.operators.length} operators, ${p.plans.length} dressing plans, usable ${p.handoff.measurements.measuredCombinedUsableAreaM2} m2 -> ${path.relative(process.cwd(), JOB)}`);
   const sc = sites[size]; if (sc) console.log(`  SITE: core ${sc.at.map(Math.round)} (${sc.moved} m from the brief site): ${sc.why}`);
   if (downgrade) console.log(`  TIER: ${downgrade.from} -> ${downgrade.to}: ${downgrade.why} (now ${downgrade.after} m2)`);
@@ -673,8 +727,13 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
   }
   if (!remove && p === lab) { // L: routes on the walk surface as BUILT (pads, raiseOnly, the footpaths' grade patches): re-measured on the lab ground AFTER the operators
     const f = createWorldField(worldRecipeSchema.parse(read(WF))), hand = read(path.join(JOB, "handoff.json"));
-    const ribbons = (read(WF).features.ribbons ?? []) as any[]; // the footpath legs follow their ribbon as built (routeOnRibbon)
-    for (const r of hand.navigation.routes) { const rb = ribbons.find((x) => x.id === `op:${PREFIX}${r.id}:ribbon`); if (rb) r.points = routeOnRibbon(r.points, rb.samples, rb.width / 2); }
+    // the footpath legs follow their carved track as built (routeOnTrack: the road's own graded points, its pieces in order)
+    const roads = (read(WF).features.roads ?? []) as any[];
+    for (const r of hand.navigation.routes) {
+      const id = footpathTrackId(poi, r.id), pieces = roads.filter((x) => x.id === id || String(x.id).startsWith(`${id}.`));
+      const pts = pieces.flatMap((x) => (x.points ?? []) as number[][]).map((q) => (q.length >= 3 ? [q[0]!, q[1]!, q[2]!] : [q[0]!, f.height(q[0]!, q[1]!), q[1]!]));
+      if (pts.length >= 2) r.points = routeOnTrack(r.points, pts, (pieces[0]?.width ?? FOOTPATH_WIDTH_M[1]) / 2);
+    }
     for (const r of hand.navigation.routes) if (!r.onBuilt) for (const q of r.points) q[1] = Math.round(f.height(q[0], q[2]) * 100) / 100; // a deck route stays on the deck
     write(path.join(JOB, "handoff.json"), hand); write(path.join(JOB, "walk-route.json"), hand.navigation.routes[0]);
   }
@@ -783,7 +842,7 @@ export function gatePlan(job: string, hand: any): { centre: V2; pockets: { at: V
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-const GATES = ["design", "size", "fine", "roads", "lips", "scatter-float", "float", "seated", "rock-skins", "water-edges", "zfight", "op-check", "art", "scale", "wash", "walk", "dress", "place"] as const;
+const GATES = ["design", "size", "fine", "roads", "lips", "scatter-float", "float", "seated", "rock-skins", "water-edges", "zfight", "op-check", "art", "scale", "support", "wash", "walk", "dress", "place"] as const;
 function gates(onlyArg?: string[]) {
   const hand = read(path.join(JOB, "handoff.json")), plan = gatePlan(JOB, hand);
   const pts = [plan.centre, ...plan.pockets.map((k: any) => k.at)] as V2[], c = plan.centre as V2;
@@ -846,6 +905,7 @@ function gates(onlyArg?: string[]) {
   // L (art, signal-tower 2026-10-21): measured in the LAB (the live scene still held the old install's barrel)
   gate("art", () => { const r = tool("art", ["tools/art-check.mts", JOB, "--culture", "human", "--project", lab, "--world", labWorld]); return { ok: r.status === 0 && okOf("art-check"), detail: last(r.out).slice(0, 220) }; });
   gate("scale", () => scaleCheck());
+  gate("support", () => supportCheck());
   gate("wash", () => washCheck());
   gate("walk", () => { const r = tool("walk", ["tools/poi-walk.mts", JOB, "--scene", labWorld]); return { ok: r.status === 0 && okOf("walk"), detail: last(r.out).slice(0, 220) }; });
   gate("dress", () => { const bad: string[] = []; for (const f of fs.readdirSync(path.join(JOB, "dressing")).filter((f) => f.endsWith(".json") && !/.(report|inverse|walk).json$/.test(f))) { const id = f.replace(/\.json$/, ""); const nf = noFloor(lab, id); if (nf !== null) { bad.push(`${id}: no open floor on its socket map (${nf}): the pocket is not on level ground, re-plan (site search)`); continue; } const r = tool(`check-${id}`, ["tools/dress.mts", "check", "--project", lab, "--plan", id, "--scene", labWorld, "--at", "0,0,0", "--quiet", "--poi", poi]); if (r.status) bad.push(`${id}: ${last(r.out).slice(0, 120)}`); }
@@ -870,6 +930,19 @@ function gates(onlyArg?: string[]) {
  *  judges every frame against the wash band (near/mid luma, blown white, glare, and the share the halos + lamp fog glow
  *  alone brighten) and every far fire at dusk by its FLAME with a modest glow (tools/_light-wash.mts). Read from
  *  evidence/<lab>.json; a run without it fails ("run shots"). */
+/** SUPPORT (Red Dial 2026-10-30, Derek: "a lot of the braziers that are on top of pillars are not centred, or are hanging
+ *  off edges and clipping through some geometry"): every piece `on` another (no sink, no lean) as planned stands on its
+ *  host's named marker or a pedestal's top-face centre; its base may not hang off the host's top (overhang share >
+ *  SUPPORT_OVERHANG_SHARE) and the host's mesh may not rise into it (clip > SUPPORT_CLIP_M). Read from reports/plan.json
+ *  `support` (planPlace supportOf), written to reports/support.json. */
+function supportCheck(): { ok: boolean; detail: string } {
+  const f = path.join(JOB, "reports", "plan.json"); if (!fs.existsSync(f)) return { ok: false, detail: "no reports/plan.json: run plan" };
+  const rows = read(f).support as { id: string; on: string; overhang: number; clip: number; ok: boolean }[] | undefined;
+  if (!rows) return { ok: false, detail: "the plan has no support rows (planned before the support gate): run plan" };
+  const bad = rows.filter((r) => !r.ok);
+  write(path.join(JOB, "reports", "support.json"), { ok: !bad.length, at: new Date().toISOString(), rows });
+  return { ok: !bad.length, detail: bad.length ? `${bad.length} of ${rows.length}: ${bad.slice(0, 4).map((r) => `${r.id} on ${r.on} overhang ${Math.round(r.overhang * 100)} % clip ${r.clip} m`).join("; ")}` : `${rows.length} piece(s) on hosts: none overhangs or clips` };
+}
 function washCheck(): { ok: boolean; detail: string } {
   const f = path.join(JOB, "evidence", `${labWorld}.json`);
   if (!fs.existsSync(f)) return { ok: false, detail: "no evidence run: run shots" };
@@ -933,20 +1006,22 @@ function scaleExtent(marks: ConceptMarks, site: any, want: Set<string>): ExtentR
   const xz: number[] = []; for (const g of geo.filter((g) => structs.has(g.id))) for (let i = 0; i < g.world.length; i += 3) xz.push(g.world[i]!, g.world[i + 2]!);
   return compareExtent(ext, cam, zoom, ground(read(worldFile(lab, labWorld))).height, xz, marks.tolerance);
 }
-/** ROADS (owner ruling 2026-10-20: "no ribbon roads: buried by terrain, never approved"): the job carries no ribbon /
- *  path-operator approach (ribbonApproachOps; zonegen status `poi <id>` fails on the same rule), and the approach track
- *  it declares (handoff approachTrack) is a carved + painted road in the lab world. reports/roads.json. */
+/** ROADS (owner rulings 2026-10-20 "no ribbon roads" and 2026-10-30 "ribbons removed from the tools"): the job and the lab
+ *  world carry NO ribbon at all (ribbonsDeclared: a `path`/`ribbon` operator, a features.ribbons world-op or a lab
+ *  features.ribbons entry; zonegen status `poi <id>` fails on the same rule; no allow-list), and every track it declares
+ *  (handoff approachTrack, approachTracks, footpathTracks) is a carved + painted road in the lab world. reports/roads.json. */
 function roadsCheck(hand: any): { ok: boolean; detail: string } {
-  const ribbons = ribbonApproachOps(read(path.join(JOB, "operators.json")), read(path.join(JOB, "world-ops.json")));
-  const t = hand.approachTrack ?? null, labRoads = (read(worldFile(lab, labWorld)).features.roads ?? []) as any[], built = t ? labRoads.filter((r) => r.id === t.id || r.id.startsWith(`${t.id}.`)) : [];
+  const labDoc = read(worldFile(lab, labWorld));
+  const ribbons = ribbonsDeclared(read(path.join(JOB, "operators.json")), read(path.join(JOB, "world-ops.json")), labDoc.features.ribbons ?? []);
+  const t = hand.approachTrack ?? null, labRoads = (labDoc.features.roads ?? []) as any[], built = t ? labRoads.filter((r) => r.id === t.id || r.id.startsWith(`${t.id}.`)) : [];
   // a bridge place declares a track per end (handoff approachTracks): every one carved + painted in the lab
-  const more = ((hand.approachTracks ?? []) as any[]).filter((x) => x.id !== t?.id), moreBuilt = more.map((x) => ({ x, r: labRoads.filter((r) => r.id === x.id || r.id.startsWith(`${x.id}.`)) }));
-  const faults = [...ribbons.map((r) => `ribbon approach ${r}: re-plan the approach (place-build approach)`), ...(t && !built.length ? [`approach track ${t.id} is not in the lab world (build)`] : []), ...built.filter((r) => !r.surface).map((r) => `track ${r.id} is not painted`),
+  const more = [...(hand.approachTracks ?? []), ...(hand.footpathTracks ?? [])].filter((x: any) => x.id !== t?.id), moreBuilt = more.map((x) => ({ x, r: labRoads.filter((r) => r.id === x.id || r.id.startsWith(`${x.id}.`)) }));
+  const faults = [...ribbons.map((r) => `${r} (migrate: place-build approach, or re-plan: place-build plan)`), ...(t && !built.length ? [`approach track ${t.id} is not in the lab world (build)`] : []), ...built.filter((r) => !r.surface).map((r) => `track ${r.id} is not painted`),
     // L (fowlers-drop 2026-10-21): a track without keepLandforms clears every sea cliff / butte round it (a 120 m headland fell)
     ...built.filter((r) => !r.keepLandforms).map((r) => `track ${r.id} has no keepLandforms: it clears the sea cliffs and buttes round it (re-plan: place-build plan)`),
     ...moreBuilt.flatMap(({ x, r }) => (r.length ? r.filter((q) => !q.surface).map((q) => `track ${q.id} is not painted`) : [`track ${x.id} is not in the lab world (build)`]))];
   write(path.join(JOB, "reports", "roads.json"), { ok: !faults.length, faults, ribbons, track: t, built: built.map((r) => ({ id: r.id, width: r.width, points: r.points.length, surface: r.surface })) });
-  return { ok: !faults.length, detail: faults.join("; ") || (t ? `approach track ${t.id}: ${t.width} m carved + painted, ${t.lengthM} m from ${t.from}; no ribbon approach` : "no ribbon approach (no track: pinpoint or no walkable leg)") };
+  return { ok: !faults.length, detail: faults.join("; ") || (t ? `approach track ${t.id}: ${t.width} m carved + painted, ${t.lengthM} m from ${t.from}; ${more.length} more track(s); no ribbon` : `no ribbon (no approach track: pinpoint or no walkable leg; ${more.length} other track(s))`) };
 }
 /** SEATED (signal-tower 2026-10-21, owner: "the ruins are floating"; float passed it on ONE contact within 0.05 m): every
  *  structure of the place (not a fire or a boat) is measured along its whole BASE OUTLINE on the lab's built ground: the
@@ -1153,7 +1228,7 @@ async function quality() {
       density: { props: inArea.length, areaM2, per100, floor: dFloor, ok: per100 >= dFloor, coverCleared: coverClearedShare(c, area.radius, fs.existsSync(path.join(J, "clearings.json")) ? read(path.join(J, "clearings.json")) : []) },
       built: { walls: walls.length, cliff, materials: mats, bigRocks, ok: cliff === 0 },
       read: { view: rv?.name ?? null, distance: best?.r.distance ?? null, px: best?.r.px ?? null, floor: READ_PX_MIN, ok: (best?.r.px ?? 0) >= READ_PX_MIN, target: best?.t.what ?? null } };
-    rows.push({ ...row, ribbons: ops.filter((o) => o.op === "path").map((o) => String(o.id).replace(`pb-${id}-`, "")), score: gradeScore(row) });
+    rows.push({ ...row, ribbons: ops.filter((o) => REMOVED_RIBBON_OPS.includes(o.op)).map((o) => String(o.id).replace(`pb-${id}-`, "")), score: gradeScore(row) });
   }
   rows.sort((x, y) => x.score - y.score || x.id.localeCompare(y.id));
   const rel = (f: string) => path.relative(path.join(ZONE, "reports"), f).split(path.sep).join("/");
@@ -1266,7 +1341,7 @@ function bridgeJob() {
   if (faults.length) process.exitCode = 1;
 }
 
-const ID_CMDS = new Set(["bridge", "survey", "plan", "props", "approach", "dress", "lab", "build", "gates", "scale", "shots", "all", "install", "evidence"]);
+const ID_CMDS = new Set(["bridge", "survey", "plan", "props", "approach", "tracks", "dress", "lab", "build", "gates", "scale", "shots", "all", "install", "evidence"]);
 if (cmd === "archetypes") { for (const { a } of archetypes()) console.log(`${a.id.padEnd(14)} ${a.pockets.length} pockets  ${a.description}`); }
 else if (cmd === "lift") { const { liftCommand } = await import("./_place-lift.mts"); await liftCommand(argv.slice(1)); } // a winch lift beside a long descent (tools/_place-lift.mts)
 else if (cmd === "quality") { if (!world || !zone) fail("usage: place-build quality <world> --zone <z> [--shots] [--only a,b] [--port p]"); await quality(); }
@@ -1280,6 +1355,7 @@ else if (ID_CMDS.has(cmd ?? "")) {
   if (cmd === "survey") survey();
   if (cmd === "bridge") bridgeJob();
   if (cmd === "approach") { approachOnly = true; plan(); }
+  if (cmd === "tracks") { tracksOnly = true; plan(); }
   if (cmd === "dress") redress(); // the dressing only, round the place as built
   if (cmd === "plan" || cmd === "all") plan();
   if (cmd === "props") await layoutPropsSheet(); // the layout's hero-prop sheet (no browser): before a chain

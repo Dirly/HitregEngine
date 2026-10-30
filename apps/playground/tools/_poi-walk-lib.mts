@@ -149,17 +149,12 @@ export function declaredRoutes(handoff: Record<string, unknown>): Route[] {
   return out;
 }
 
-/** Routes the job's world ops imply: every path centreline, every landmark's targets in declared order. L (walk,
- *  hags-garth 2026-10-20): a path is walked along its RIBBON as built (`ribbons`: the world's features.ribbons; its
- *  samples about every 3 m), never its control polyline: the spline bows up to 2.3 m off a long straight leg and the
- *  stick walked into the retaining-wall end beside the ribbon (2 STUCK, 2 MISS coming back). */
-export function derivedRoutes(worldOps: Array<Record<string, unknown>>, ribbons: Array<{ id: string; samples: number[][] }> = []): Route[] {
+/** Routes the job's world ops imply: every landmark's targets in declared order. (Footpaths are carved + painted tracks
+ *  since ribbons were removed 2026-10-30: their walk routes are the handoff's own, laid on the track as built by
+ *  place-build build — routeOnTrack.) */
+export function derivedRoutes(worldOps: Array<Record<string, unknown>>): Route[] {
   const out: Route[] = [];
   for (const op of worldOps) {
-    if (op["op"] === "path" && Array.isArray(op["points"]) && (op["points"] as unknown[]).length >= 2) {
-      const rb = ribbons.find((r) => r.id === `op:${op["id"]}:ribbon`), pts = rb && rb.samples.length >= 2 ? ribbonPoints(rb.samples) : (op["points"] as number[][]).map(pt);
-      out.push({ id: `path:${op["id"]}`, source: "path", points: pts, drops: [], jump: true, driver: "stick" });
-    }
     const targets = Array.isArray(op["targets"]) ? (op["targets"] as Array<{ at: number[] }>) : [];
     if (op["op"] === "landmark" && Array.isArray(op["at"]) && targets.length >= 2) {
       out.push({ id: `landmark:${op["id"]}`, source: "landmark", points: targets.map((t) => landmarkToWorld(op, t.at)), drops: [], jump: true, driver: "planner" });
@@ -168,12 +163,6 @@ export function derivedRoutes(worldOps: Array<Record<string, unknown>>, ribbons:
   return out;
 }
 
-/** A ribbon's walk line: its samples [x, y, z, ...] about every `step` m, both ends kept; y left to the walk (null). */
-export function ribbonPoints(samples: number[][], step = 3): Pt[] {
-  const out: Pt[] = [];
-  samples.forEach((q, i) => { const l = out[out.length - 1]; if (!l || i === samples.length - 1 || Math.hypot(q[0]! - l[0], q[2]! - l[2]) >= step) out.push([q[0]!, null, q[2]!]); });
-  return out;
-}
 
 /** Split a route's points into stick legs no longer than `step` metres (the stick aims at the next point). */
 export function densifyPts(points: Pt[], step: number): Pt[] {

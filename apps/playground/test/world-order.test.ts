@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { defaultWorldRecipe, worldRecipeSchema } from "@hitreg/core";
 import {
-  artOf, catalogueDesignFaults, evaluate, groundRecord, guardWorldWrite, stagesOf, loadStages, nextOf, recordPlaceStage, requirePlaceStage, reviewVerdict, saveStages, worldHash, worldStagesSchema, type WorldStages,
+  artOf, catalogueDesignFaults, evaluate, groundRecord, localGround, parseRecipe, rehashGround, guardWorldWrite, stagesOf, loadStages, nextOf, recordPlaceStage, requirePlaceStage, reviewVerdict, saveStages, worldHash, worldStagesSchema, type WorldStages,
 } from "../tools/world-order.mts";
 import { run as stagesRun } from "../tools/zonegen/commands/stages.mts";
 import { run as approveRun } from "../tools/zonegen/commands/approve.mts";
@@ -244,5 +244,31 @@ describe("world order", () => {
     assert.ok(stages.indexOf("design-review") < stages.indexOf("town-design"));
     assert.ok(stages.indexOf("plan-approved") < stages.indexOf("grey-box"));
     assert.ok(!rowsOf("dial").some((r) => r.stage === "plan-approved"));
+  });
+});
+
+// 2026-10-30 redstrand w13: trimming the first point of a path piece by lake-1 staled red-dial 400 m along the same road.
+// A place's local ground holds only the road SEGMENTS whose band (+15 m) reaches its footprint.
+describe("localGround: roads count by the segments that reach the place", () => {
+  const base = worldRecipeSchema.parse(defaultWorldRecipe());
+  const fp = { center: [0, 0] as [number, number], radius: 100, views: [] as [number, number][], corridor: 30 };
+  const road = (pts: [number, number][]) => ({ id: "path-a", points: pts, width: 4, shoulder: 3, smooth: 5, surfaceY: pts.map((p) => 10 + p[0] / 100), flatten: 1 });
+  const line: [number, number][] = [[600, 0], [500, 0], [400, 0], [300, 0], [200, 0], [100, 0], [50, 0]];
+  const with_ = (r: unknown) => parseRecipe({ ...base, features: { ...base.features, roads: [r] } });
+  it("an edit 400 m along the road leaves the place's ground hash alone", () => {
+    const a = localGround(with_(road(line)), fp), b = localGround(with_(road(line.slice(1))), fp);
+    assert.equal(a.hash, b.hash);
+  });
+  it("an edit inside the reach stales it", () => {
+    const moved = line.map((p, i) => (i === line.length - 1 ? [50, 20] : p)) as [number, number][];
+    assert.notEqual(localGround(with_(road(line)), fp).hash, localGround(with_(road(moved)), fp).hash);
+  });
+  it("rehashGround moves a whole-doc record to the segment scheme on the world it was made on", () => {
+    const was = with_(road(line));
+    const old = localGround(was, fp, [], "doc");
+    const doc = { places: [{ id: "p", stages: { sited: { at: "", worldHash: "", ground: { footprint: fp, hash: old.hash, parts: old.parts } } } }] } as unknown as WorldStages;
+    const res = rehashGround(doc, was);
+    assert.deepEqual(res.rehashed, ["p:sited"]);
+    assert.equal((doc.places[0]!.stages as Record<string, { ground: { hash: string } }>).sited!.ground.hash, localGround(with_(road(line.slice(1))), fp).hash);
   });
 });

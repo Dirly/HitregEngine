@@ -35,6 +35,8 @@ export interface TerrainLipOptions {
   aliasTol?: number;
   /** Rise/run between neighbouring lattice samples that counts as a step. Default 1.6 (58 deg). */
   maxSlope?: number;
+  /** Per-cell override of `maxSlope` (cell centre x, z); undefined keeps `maxSlope`. */
+  maxSlopeAt?: (x: number, z: number) => number | undefined;
   /** One-sample rim/slot height (m) above the reference's that counts as a lip. Default 0.75. */
   lipTol?: number;
   /** Where |edited - reference| is below this (m) at all four corners, the cell is untouched. Default 0.15. */
@@ -140,10 +142,11 @@ export function measureTerrainLips(
       if (excess > aliasTol) add("alias", i, j, excess);
       // STEP: a wall between neighbouring samples that the reference does not have
       let step = 0;
+      const cellSlope = options.maxSlopeAt?.(cx + s / 2, cz + s / 2) ?? maxSlope;
       for (const [a, b, c, d] of [[0, 0, 1, 0], [0, 0, 0, 1], [1, 0, 1, 1], [0, 1, 1, 1]] as const) {
         const de = Math.abs(at(E, i + a, j + b) - at(E, i + c, j + d));
         const dr = Math.abs(at(R, i + a, j + b) - at(R, i + c, j + d));
-        if (de > maxSlope * s && de > dr + 0.5) step = Math.max(step, de);
+        if (de > cellSlope * s && de > dr + 0.5) step = Math.max(step, de);
       }
       if (step > 0) add("step", i, j, step);
       // LIP: a one-sample rim or slot - a sample standing above (or sunk

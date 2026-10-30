@@ -333,7 +333,7 @@ export interface WaterSample {
  * because the alternative is two numbers that have to agree forever: an
  * author who widens the pool's plane and forgets its component gets a pool you
  * can drown beside. `water.size` overrides it for the meshes the measurement
- * cannot see — an imported GLB, a path ribbon — and for fencing a swimmable
+ * cannot see — an imported GLB, a built landmark — and for fencing a swimmable
  * area smaller than its sheet.
  *
  * `doc` should be EXPANDED (prefab instances resolved), since a pool inside a

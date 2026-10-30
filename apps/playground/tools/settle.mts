@@ -16,7 +16,7 @@
  *        culture also writes its compound prefabs + deck frame (assets/prefabs/generated/settle/<poi>/). Never writes the
  *        world or the scene.
  *   npx tsx tools/settle.mts apply --project p --poi <id> --scene <name|file> [--recipe <file>] [--dry]
- *        world ops (vegetation clearings owner settle-<poi>, cover CLEARED; ribbon path operators via `worldgen op --apply`)
+ *        world ops (vegetation clearings owner settle-<poi>, cover CLEARED; carved + painted tracks via `worldgen road`)
  *        and the stilt structures (one ops batch into the scene; inverse kept). Then: copy handoff-siteDressing.json into
  *        the POI's handoff.json `siteDressing`, `site-sockets`, and `dress check` / `dress apply --at 0,0,0 --yaw 0` per plan.
  *   npx tsx tools/settle.mts structures --project p --poi <id>
@@ -33,7 +33,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  applyOps, checkSettlement, ComponentRegistry, clearingSchema, dressingSchema, createWorldField, isLooseClutter, planSettlement, registerCoreComponents, settlementCultureSchema, settlementDressingPlans,
+  applyOps, checkSettlement, ComponentRegistry, RIBBONS_REMOVED, clearingSchema, dressingSchema, createWorldField, isLooseClutter, planSettlement, registerCoreComponents, settlementCultureSchema, settlementDressingPlans,
   settlementSiteDressing, settlementSvg, settlementWorldOps, stiltFootprint, stiltRoutes, walkwayPieces, worldRecipeSchema, type SettlementCulture, type SettlementPlan, type SettleGround, type SettlePropInfo, type WorldRecipe,
 } from "@hitreg/core";
 import { closure, findAsset, PROJECTS } from "./_closure.mjs";
@@ -415,12 +415,13 @@ function apply(): void {
   if (flag("dry")) edit(readJ(recipeFile));
   else updateJsonFile(recipeFile, (raw) => edit(raw), { label: `settle ${poi}`, indent: 1, trailer: "" });
   console.log(`clearings: ${ops.clearings.length} (owner ${owner}, cover CLEARED) in ${rel(recipeFile)}${flag("dry") ? " — DRY" : ""}`);
-  if (ops.operators.length) {
-    const f = path.join(dir, "path-operators.json");
-    writeJ(f, ops.operators);
+  if ((ops as { operators?: unknown[] }).operators?.length) fail(`${rel(path.join(dir, "world-ops.json"))} declares path operators: ${RIBBONS_REMOVED} (re-plan: settle plan)`);
+  // the dry legs: carved + painted narrow tracks through the world's road machinery (owner ruling 2026-10-30: no ribbons)
+  for (const t of ops.tracks ?? []) {
     const world = path.basename(recipeFile, ".json");
-    const r = spawnSync(process.execPath, [path.join("node_modules", "tsx", "dist", "cli.mjs"), "tools/worldgen.mts", "op", world, "--apply", f, "--recipe", recipeFile, "--inverse", path.join(dir, "path-operators.inverse.json"), ...(flag("dry") ? ["--dry-run"] : [])], { stdio: "inherit", cwd: path.resolve(PROJECTS, "..") });
-    if (r.status) fail(`worldgen op --apply exited ${r.status}`);
+    const r = spawnSync(process.execPath, [path.join("node_modules", "tsx", "dist", "cli.mjs"), "tools/worldgen.mts", "road", world, "--recipe", recipeFile, "--id", t.id,
+      "--points", t.points.map((q) => `${q[0]},${q[1]}`).join(";"), "--width", String(t.width), "--max-grade", String(t.maxGrade), "--keep-landforms", ...(flag("dry") ? ["--dry-run"] : [])], { stdio: "inherit", cwd: path.resolve(PROJECTS, "..") });
+    if (r.status) fail(`worldgen road ${t.id} exited ${r.status}`);
   }
   const so = readJ<{ ops: { op: string; id: string }[] }>(path.join(dir, "scene-ops.json"));
   if (so.ops.length) {

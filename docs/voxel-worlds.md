@@ -3973,19 +3973,9 @@ the coordinator rules an exception for (e.g. a walk-in stair tunnel whose lining
 
 **The doc.** `features.operators: [{ id, op, ...params }]`. Each `op` registers a Zod params schema (listed with its
 descriptions in the engine spec's `landformOperators`); an unknown op or a bad param fails recipe validation. Shipped:
-`terrace`, `path`, `ledges`, `cave`, `landmark`, `scree`, `paint`, `wall`. Planned: `harbor`.
+`terrace`, `ledges`, `cave`, `landmark`, `scree`, `paint`, `wall`. Planned: `harbor`.
 
-**Path ribbons** (`path`, ribbon.ts): a ribbon plus one masked grade patch, levelled under the walk and feathered back
-over each shoulder. Rules the fitter keeps so the lattice can draw it: a wall run's end fades the next feathered
-shoulder in over `RIBBON_WALL_END_TAPER` (8 m) instead of a hard cut at the face; no shoulder lifts ground within 6 m of a
-FILL wall's face cut (the field reads the wall foot there, so lifted ground would end in a trench edge); inside a turn
-the level blends the branch's segments within 2 m (no step where the nearest arm flips); a wall run is never closed
-across a sample too tight for a wall (that bridge was the hairpin out-of-memory). It cannot fix a LINE whose legs run
-side by side closer than two cores and a shoulder: the fit warns `legs too close` with the place: spread the legs.
-Two ribbons laid end to end on the same anchor (within 0.5 m) are cut flush on the joint's bisector (`ribbonJoins`):
-one surface, no overlapping round ends; three ends on a point keep their round ends. `worldgen op --apply` writes the
-ribbon materials (`ribbon/<surface>[--trodden]`, `ribbon-wall/*`; a ribbon without one draws flat white-grey) and
-`worldgen op --check` fails while any is missing.
+**Path ribbons were REMOVED 2026-10-30** (owner ruling: buried by terrain, never approved, then "it shouldn't even be part of our world-building tools anymore"). The `path` operator, `features.ribbons`, ribbon.ts and the ribbon materials are gone; a recipe, an operator doc or a recipe edit that still declares one fails to load with `ribbons were removed 2026-10-30: use carved+painted tracks`. Walks are carved + painted tracks: `worldgen road` (a recipe road graded into the voxels and painted).
 
 **Walls and causeways are swept, never stacked boxes**: the `wall` operator (`operators-wall.ts`) sweeps one profile (thickness, batter, coping, terrain-following footing, seeded per-block jitter, bevels) along a plan spline as a built landmark (UVs in metres, a material per part, per-cell collider, baked by `tools/landmark.mts <p> <world> <id>` like any landmark); variants `free` / `retaining` (+`backfill`) / `quay` / `ramp` (deck + kerbs/parapet, flights wherever steeper than `maxGrade`, risers <= 0.4 m), with buttresses, crenellated parapet, gates, stair flights and pier or into-the-hill ends; `scale: giant` wants a face texture tile >= 4.8 m (the bake warns).
 Corners: `smooth: true` (default) bends through a spline, fine for curves whose radius exceeds the half-width (the report warns

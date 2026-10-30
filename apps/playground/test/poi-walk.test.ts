@@ -24,25 +24,14 @@ test("declaredRoutes: navigation.routes and a bare array; [x,z] points have no h
   assert.equal(b[0]!.jump, false);
   assert.equal(declaredRoutes({ navigation: [] }).length, 0);
 });
-test("derivedRoutes: every path centreline and every landmark's targets in order (planner)", () => {
+test("derivedRoutes: every landmark's targets in order (planner); a removed `path` op derives nothing", () => {
   const r = derivedRoutes([
     { id: "levee", op: "path", points: [[0, 0], [10, 0], [20, 5]] },
     { id: "ramp", op: "landmark", at: [100, 200], y: 10, yaw: 0, targets: [{ name: "foot", at: [0, 0, 0] }, { name: "head", at: [0, 20, -50] }] },
     { id: "door", op: "landmark", at: [0, 0], y: 0, targets: [{ name: "only", at: [0, 0, 0] }] },
   ]);
-  assert.deepEqual(r.map((x) => [x.id, x.driver]), [["path:levee", "stick"], ["landmark:ramp", "planner"]]);
-  assert.deepEqual(r[1]!.points, [[100, 10, 200], [100, 30, 150]]);
-});
-test("derivedRoutes: a path with a built ribbon is walked along the ribbon, not its control polyline (hags-garth)", () => {
-  // the spline bows 2 m off the straight control leg
-  const samples = Array.from({ length: 21 }, (_, i) => [i, 50, 2 * Math.sin((i / 20) * Math.PI), 1.75, 1.75]);
-  const [r] = derivedRoutes([{ id: "lane", op: "path", points: [[0, 0], [20, 0]] }], [{ id: "op:lane:ribbon", samples }]);
-  assert.ok(r!.points.length >= 7, `${r!.points.length} points`);
-  assert.deepEqual(r!.points[0], [0, null, 0]);
-  assert.deepEqual(r!.points[r!.points.length - 1]!.map((v) => (v === null ? null : Math.round(v * 1e6) / 1e6)), [20, null, 0]);
-  assert.ok(r!.points.some((p) => p[2] > 1.9), "follows the bow");
-  // no ribbon: the control polyline
-  assert.deepEqual(derivedRoutes([{ id: "lane", op: "path", points: [[0, 0], [20, 0]] }])[0]!.points, [[0, null, 0], [20, null, 0]]);
+  assert.deepEqual(r.map((x) => [x.id, x.driver]), [["landmark:ramp", "planner"]]);
+  assert.deepEqual(r[0]!.points, [[100, 10, 200], [100, 30, 150]]);
 });
 test("reverseRoute: points reversed, drop legs renumbered", () => {
   const r = reverseRoute({ id: "x", source: "handoff", points: [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]], drops: [0], jump: true, driver: "stick" });

@@ -27,7 +27,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { applyRecipeEdits, createWorldField, type RecipeEdit, type RoadDoc, type BridgeDoc, type WorldField, type WorldRecipe } from "@hitreg/core";
 import { sideDir } from "./worldgen-operators.mts";
-import { routeBetween, smoothRoute, type RouteGrid } from "./worldgen-routing.mts";
+import { lakeToll, routeBetween, smoothRoute, type RouteGrid } from "./worldgen-routing.mts";
 
 export interface RoadGradeOptions {
   width: number;
@@ -90,10 +90,10 @@ export function densify(points: readonly (readonly [number, number])[], step: nu
 }
 
 /** The edits that put `roads`/`bridges` in under `id` (dropping the last run's pieces of that id first), or with none, take it out. */
-export function roadEdits(recipe: WorldRecipe, id: string, roads: RoadDoc[], bridges: BridgeDoc[]): RecipeEdit[] {
+export function roadEdits(recipe: WorldRecipe, id: string, roads: RoadDoc[], bridges: BridgeDoc[], exact = false): RecipeEdit[] {
   const edits: RecipeEdit[] = [];
-  // a road split at a bridge is <id>, <id>.2, ...
-  const own = (fid: string): boolean => fid === id || fid.startsWith(`${id}.`);
+  // a road split at a bridge is <id>, <id>.2, ...; a stage PIECE (--stage-piece) is that one id only (its .s2 is another piece)
+  const own = (fid: string): boolean => fid === id || (!exact && fid.startsWith(`${id}.`));
   for (const r of recipe.features.roads) if (own(r.id)) edits.push({ edit: "remove-feature", kind: "roads", id: r.id });
   for (const b of recipe.features.bridges) if (b.id.startsWith(`bridge-${id}-`)) edits.push({ edit: "remove-feature", kind: "bridges", id: b.id });
   for (const r of roads) edits.push({ edit: "add-feature", kind: "roads", feature: r });
@@ -124,7 +124,12 @@ export function inAvoid(a: RouteAvoid | undefined, x: number, z: number): boolea
   }
   return false;
 }
-export interface RouteGround { ground(x: number, z: number): number; wet(x: number, z: number): boolean }
+export interface RouteGround {
+  ground(x: number, z: number): number;
+  wet(x: number, z: number): boolean;
+  /** Per-cell cost multiplier (worldgen-routing `lakeToll`: a lake's footprint and low shore are dear, so a road goes round). */
+  toll?(x: number, z: number, ground: number): number;
+}
 export interface RouteAnchorOptions { step?: number; maxGrade?: number; hardGrade?: number; maxCross?: number; pad?: number; avoid?: RouteAvoid }
 const segDistance = (x: number, z: number, pts: readonly (readonly [number, number])[]): number => {
   let best = Infinity;
@@ -152,7 +157,7 @@ export function routeAnchors(anchors: readonly (readonly [number, number])[], g:
   for (let iz = 0; iz < n; iz++) for (let ix = 0; ix < n; ix++) {
     const x = x0 + ix * step, z = z0 + iz * step, i = ix + iz * n;
     height[i] = g.ground(x, z);
-    cost[i] = blocked(x, z) ? Infinity : 1 + Math.max(0, segDistance(x, z, anchors) - 24) / 30;
+    cost[i] = blocked(x, z) ? Infinity : (1 + Math.max(0, segDistance(x, z, anchors) - 24) / 30) * (g.toll?.(x, z, height[i]!) ?? 1);
   }
   const gradX = new Float32Array(n * n), gradZ = new Float32Array(n * n);
   for (let iz = 0; iz < n; iz++) for (let ix = 0; ix < n; ix++) {
@@ -213,11 +218,17 @@ export function commandRoad(host: RoadHost): void {
     return;
   }
   const id = opt(argv, "id") ?? fail("road: --id road-<name> (or --remove <id>)");
-  if (!id.startsWith("road-") || STAGE_OWNED.test(id)) fail(`road: id "${id}" must start with road- (path-/trail-/barrier-/pass- are rewritten by their stages)`);
+  // --stage-piece: re-route ONE existing stage-owned piece (path-*, trail-*) in place, keeping its id, width and caps, when
+  // a router fix must reach a road the stage would only redo by rewriting every path in the world (Derek 2026-10-30: the
+  // path through the top of lake-1 beside Rustgut's; the next `worldgen paths` routes it the same way by itself)
+  const stagePiece = argv.includes("--stage-piece");
+  const existing = recipe.features.roads.find((r) => r.id === id);
+  if (stagePiece) { if (!STAGE_OWNED.test(id) || !existing) fail(`road: --stage-piece wants an existing path-/trail- piece id, not "${id}"`); }
+  else if (!id.startsWith("road-") || STAGE_OWNED.test(id)) fail(`road: id "${id}" must start with road- (path-/trail-/barrier-/pass- are rewritten by their stages)`);
   const drawn = parsePoints(opt(argv, "points") ?? fail('road: --points "x,z;x,z;..."'));
   if (drawn.length < 2 || drawn.some((p) => !Number.isFinite(p[0]) || !Number.isFinite(p[1]))) fail("road: --points needs at least two x,z pairs");
   // graded (and measured) on the ground WITHOUT this road's last run, so a re-run gives the same road
-  const own = (fid: string): boolean => fid === id || fid.startsWith(`${id}.`);
+  const own = (fid: string): boolean => fid === id || (!stagePiece && fid.startsWith(`${id}.`));
   const ground: WorldRecipe = { ...recipe, features: { ...recipe.features, roads: recipe.features.roads.filter((r) => !own(r.id)) } };
   const field = host.field?.(ground) ?? createWorldField(ground);
   let line: [number, number][] = drawn;
@@ -225,7 +236,11 @@ export function commandRoad(host: RoadHost): void {
     const avoidFile = opt(argv, "avoid");
     const avoid = avoidFile ? (JSON.parse(fs.readFileSync(avoidFile, "utf8")) as RouteAvoid) : undefined;
     const wet = (x: number, z: number) => { const w = field.waterY(x, z); return w != null && w > field.ground(x, z) - 0.1; };
-    const routed = routeAnchors(drawn, { ground: (x, z) => field.ground(x, z), wet }, {
+    // the lake toll reads the ground WITHOUT any road: a neighbouring road's own fill along a shore otherwise lifts that
+    // shore out of the toll and the two roads keep each other on it
+    const bare = createWorldField({ ...recipe, features: { ...recipe.features, roads: [] } });
+    const lakeCost = lakeToll(recipe.features.lakes);
+    const routed = routeAnchors(drawn, { ground: (x, z) => field.ground(x, z), wet, toll: (x, z) => lakeCost(x, z, bare.ground(x, z)) }, {
       maxGrade: num(argv, "route-grade") ?? 0.15, hardGrade: num(argv, "hard-grade") ?? 0.6, avoid,
     });
     if ("error" in routed) fail(`road: ${id}: ${routed.error}`);
@@ -237,7 +252,7 @@ export function commandRoad(host: RoadHost): void {
   const points = densify(line, num(argv, "step") ?? 2);
   const paint = host.surfaces?.(recipe);
   const options: RoadGradeOptions = {
-    width: num(argv, "width") ?? 6,
+    width: num(argv, "width") ?? (stagePiece ? existing!.width : 6),
     maxGrade: num(argv, "max-grade") ?? 0.18,
     maxCut: num(argv, "max-cut") ?? 3,
     maxFill: num(argv, "max-fill") ?? 0.8,
@@ -288,7 +303,7 @@ export function commandRoad(host: RoadHost): void {
       `y ${first.surfaceY?.[0]} -> ${last.surfaceY?.at(-1)}, climbs ${climb.toFixed(1)} m, steepest ${(steepest * 100).toFixed(0)} %, ` +
       `max cut ${cut.toFixed(2)} m, max fill ${fill.toFixed(2)} m, width ${options.width}${built.bridges.length ? `, ${built.bridges.length} bridge(s)` : ""}`,
   );
-  const edits = roadEdits(recipe, id, built.roads, built.bridges);
+  const edits = roadEdits(recipe, id, built.roads, built.bridges, stagePiece);
   if (dry) {
     console.log(`  [dry-run] ${edits.length} edit(s); not written`);
     const out = opt(argv, "out");
@@ -299,4 +314,97 @@ export function commandRoad(host: RoadHost): void {
   const inv = keep(file, recipe, `road-${id}`, res.inverse, opt(argv, "inverse"));
   host.writeRecipe(res.recipe, file);
   console.log(`  wrote ${id} (${edits.length} edit(s)); inverse: ${inv}  (worldgen op ${recipe.name} --undo <it>)`);
+}
+
+/** A road stretch on a lake's footprint or low shore that a dry detour of at most `maxDetour` x its length avoids. */
+export interface RoadLakeFill { road: string; from: [number, number]; to: [number, number]; length: number; detour: number }
+
+/**
+ * `worldgen road-water`: every road stretch FILLED (over ROAD_LAKE_FILL m above the ground without roads) on a lake's
+ * footprint or its low shore (worldgen-routing `lakeToll`) where a dry way round exists of at most `maxDetour` (2) times the stretch's length (from 8 m before it to
+ * 8 m after it, Dijkstra on a 4 m grid with the footprint, the shore and the water as walls). A road may cross water
+ * only at a deliberate crossing (a river bridge or ford); a fill across a lake's edge to save a few metres is a fault
+ * (Derek 2026-10-30, the path through the top of lake-1 beside Rustgut's Trough).
+ */
+export const ROAD_LAKE_FILL = 0.6;
+export function roadLakeFills(recipe: WorldRecipe, ground: (x: number, z: number) => number, wet: (x: number, z: number) => boolean, surfaceOf: (roadId: string) => (x: number, z: number) => number, o: { maxDetour?: number; ids?: readonly string[] } = {}): RoadLakeFill[] {
+  const maxDetour = o.maxDetour ?? 2, toll = lakeToll(recipe.features.lakes), out: RoadLakeFill[] = [];
+  const onLake = (x: number, z: number) => toll(x, z, ground(x, z)) > 1;
+  // a stretch counts where the road stands FILLED (over ROAD_LAKE_FILL m) on the footprint or the low shore: a road
+  // skimming a lake shore on its own ground is a lakeside road, not a causeway
+  for (const r of recipe.features.roads) {
+    if (o.ids && !o.ids.includes(r.id)) continue;
+    // THIS road's fill (the ground with only it): a neighbour's band beside it is that neighbour's
+    let surface: ((x: number, z: number) => number) | null = null;
+    const filled = (x: number, z: number) => onLake(x, z) && (surface ??= surfaceOf(r.id))(x, z) - ground(x, z) > ROAD_LAKE_FILL;
+    // samples every 2 m along the line
+    const S: [number, number, number][] = [];
+    let along = 0;
+    for (let i = 0; i + 1 < r.points.length; i++) {
+      const [ax, az] = r.points[i]!, [bx, bz] = r.points[i + 1]!, L = Math.hypot(bx - ax, bz - az);
+      for (let s = 0; s < L; s += 2) S.push([ax + ((bx - ax) * s) / L, az + ((bz - az) * s) / L, along + s]);
+      along += L;
+    }
+    const last = r.points[r.points.length - 1]!;
+    S.push([last[0], last[1], along]);
+    for (let k = 0; k < S.length; k++) {
+      if (!filled(S[k]![0], S[k]![1])) continue;
+      let e = k;
+      while (e + 1 < S.length && filled(S[e + 1]![0], S[e + 1]![1])) e++;
+      const a = S.reduce((b, p) => (p[2] <= S[k]![2] - 8 && p[2] > b[2] ? p : b), S[0]!);
+      const b = S.reduceRight((b2, p) => (p[2] >= S[e]![2] + 8 && p[2] < b2[2] ? p : b2), S[S.length - 1]!);
+      const length = b[2] - a[2];
+      k = e;
+      if (length < 4) continue;
+      const detour = dryDetour([a[0], a[1]], [b[0], b[1]], length * maxDetour, (x, z) => wet(x, z) || onLake(x, z));
+      if (detour !== null && detour <= length * maxDetour) out.push({ road: r.id, from: [Math.round(a[0]), Math.round(a[1])], to: [Math.round(b[0]), Math.round(b[1])], length: Math.round(length), detour: Math.round(detour) });
+    }
+  }
+  return out;
+}
+
+/** Shortest walk (m) from a to b on a 4 m 8-neighbour grid avoiding `blocked`, within reach of both; null when none is within `limit`. */
+export function dryDetour(a: [number, number], b: [number, number], limit: number, blocked: (x: number, z: number) => boolean, step = 4): number | null {
+  const pad = limit / 2;
+  const x0 = Math.min(a[0], b[0]) - pad, z0 = Math.min(a[1], b[1]) - pad;
+  const nx = Math.ceil((Math.max(a[0], b[0]) + pad - x0) / step) + 1, nz = Math.ceil((Math.max(a[1], b[1]) + pad - z0) / step) + 1;
+  const wall = new Uint8Array(nx * nz), dist = new Float64Array(nx * nz).fill(Infinity);
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) wall[i + j * nx] = blocked(x0 + i * step, z0 + j * step) ? 1 : 0;
+  const cell = (p: [number, number]) => Math.round((p[0] - x0) / step) + Math.round((p[1] - z0) / step) * nx;
+  const s = cell(a), g = cell(b);
+  wall[s] = 0; wall[g] = 0;
+  dist[s] = 0;
+  // a small binary heap keyed on distance
+  const heap: number[] = [s];
+  const push = (v: number) => { heap.push(v); let i = heap.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (dist[heap[p]!]! <= dist[heap[i]!]!) break; [heap[p], heap[i]] = [heap[i]!, heap[p]!]; i = p; } };
+  const pop = () => { const top = heap[0]!, end = heap.pop()!; if (heap.length) { heap[0] = end; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && dist[heap[l]!]! < dist[heap[m]!]!) m = l; if (r < heap.length && dist[heap[r]!]! < dist[heap[m]!]!) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i]!, heap[m]!]; i = m; } } return top; };
+  while (heap.length) {
+    const c = pop(), d = dist[c]!;
+    if (c === g) return d;
+    if (d > limit) return null;
+    const ci = c % nx, cj = (c / nx) | 0;
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      if (!di && !dj) continue;
+      const i = ci + di, j = cj + dj;
+      if (i < 0 || j < 0 || i >= nx || j >= nz) continue;
+      const q = i + j * nx;
+      if (wall[q]) continue;
+      const nd = d + step * (di && dj ? Math.SQRT2 : 1);
+      if (nd < dist[q]!) { dist[q] = nd; push(q); }
+    }
+  }
+  return null;
+}
+
+export function commandRoadWater(host: RoadHost): void {
+  const { recipe } = host.loadRecipe();
+  const bare = createWorldField({ ...recipe, features: { ...recipe.features, roads: [] } });
+  const ids = opt(host.argv, "ids")?.split(",").filter(Boolean);
+  const maxDetour = Number(opt(host.argv, "max-detour") ?? 2);
+  const wet = (x: number, z: number) => { const w = bare.waterY(x, z); return w != null && w > bare.ground(x, z) - 0.1; };
+  const surfaceOf = (id: string) => { const f = createWorldField({ ...recipe, features: { ...recipe.features, roads: recipe.features.roads.filter((r) => r.id === id) } }); return (x: number, z: number) => f.ground(x, z); };
+  const found = roadLakeFills(recipe, (x, z) => bare.ground(x, z), wet, surfaceOf, { maxDetour, ids });
+  for (const f of found) console.log(`  FAIL ${f.road}: ${f.length} m filled on a lake's footprint/shore [${f.from.join(",")}] -> [${f.to.join(",")}]; a dry way round is ${f.detour} m`);
+  console.log(found.length ? `FAIL: ${found.length} road stretch(es) fill across a lake's edge where a dry detour under ${maxDetour}x exists: re-route them (worldgen paths / worldgen road --route; the routers toll a lake's footprint)` : "OK: no road fills across a lake's edge it could go round");
+  if (found.length) process.exitCode = 1;
 }

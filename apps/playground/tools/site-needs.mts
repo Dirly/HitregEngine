@@ -945,6 +945,10 @@ const SHORE_LIP = 12, SHORE_FALL = 2.5, SHORE_KEEP = 12, SHORE_KEEP_CLIFF = 8;
 const CREASE_SOFT = 6;
 const smin = (a: number, b: number, k: number) => { const h = Math.max(k - Math.abs(a - b), 0) / k; return Math.min(a, b) - (h * h * k) / 4; };
 const smax = (a: number, b: number, k: number) => -smin(-a, -b, k);
+/** max(0, s) with its kink rounded over `w` m (a centred quadratic; equal to max(0, s) outside [-w/2, w/2]). */
+export const softRamp = (s: number, w: number): number => (s <= -w / 2 ? 0 : s >= w / 2 ? s : ((s + w / 2) ** 2) / (2 * w));
+/** Width (m) of the curve the shore fall starts on (two lattice steps). */
+const SHORE_TOE = 4;
 
 /**
  * BROKEN ROCK (2026-10-30 redstrand w12: both generated faces read as smooth pyramids — one plane up the front, smooth
@@ -1149,29 +1153,87 @@ function lakeOutline(l: HeldLake): (x: number, z: number) => { inside: boolean; 
   };
 }
 
-/** The rim a held lake needs at (x, z): water + freeboard within RIM_FLAT m outside the outline, easing to the ground at RIM_REACH. */
+/**
+ * A held lake's water reaches past its outline wherever the ground beside it lies under its level (the field floods the
+ * hollow within the lake's bank): lake-3's east dam stood on a flooded hollow 8-14 m outside the outline, so a rim
+ * measured from the OUTLINE had a 6 m flat, not 20, and fell straight back to the ground under the road (w13).
+ */
+const RIM_FLOOD = 24;
+/** Inside the water the rim's foot is a bank falling RIM_INNER_FALL (rise/run) to the bed, never a wall at the waterline. */
+const RIM_INNER_FALL = 1, RIM_INNER_REACH = 16, RIM_INNER_SOFT = 2;
+
+/** Chamfer distance (m) to the nearest `src` sample on a `cell` m grid over `box`, read bilinearly (continuous, so a raster drawn from it has no steps). */
+function chamferField(box: [number, number, number, number], cell: number, src: (x: number, z: number) => boolean): (x: number, z: number) => number {
+  const nx = Math.max(2, Math.ceil((box[2] - box[0]) / cell) + 1), nz = Math.max(2, Math.ceil((box[3] - box[1]) / cell) + 1);
+  const d = new Float32Array(nx * nz);
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) d[j * nx + i] = src(box[0] + i * cell, box[1] + j * cell) ? 0 : 1e9;
+  const D = cell * Math.SQRT2;
+  const relax = (k: number, q: number, step: number) => { if (d[q]! + step < d[k]!) d[k] = d[q]! + step; };
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+    const k = j * nx + i;
+    if (i > 0) relax(k, k - 1, cell);
+    if (j > 0) { relax(k, k - nx, cell); if (i > 0) relax(k, k - nx - 1, D); if (i < nx - 1) relax(k, k - nx + 1, D); }
+  }
+  for (let j = nz - 1; j >= 0; j--) for (let i = nx - 1; i >= 0; i--) {
+    const k = j * nx + i;
+    if (i < nx - 1) relax(k, k + 1, cell);
+    if (j < nz - 1) { relax(k, k + nx, cell); if (i < nx - 1) relax(k, k + nx + 1, D); if (i > 0) relax(k, k + nx - 1, D); }
+  }
+  return (x, z) => {
+    const u = (x - box[0]) / cell, v = (z - box[1]) / cell;
+    if (u < 0 || v < 0 || u > nx - 1 || v > nz - 1) return Infinity;
+    const i = Math.min(nx - 2, Math.floor(u)), j = Math.min(nz - 2, Math.floor(v)), fx = u - i, fz = v - j, k = j * nx + i;
+    const a = d[k]! + (d[k + 1]! - d[k]!) * fx, b = d[k + nx]! + (d[k + nx + 1]! - d[k + nx]!) * fx;
+    return a + (b - a) * fz;
+  };
+}
+
+/**
+ * The rim a held lake needs at (x, z): water + freeboard within RIM_FLAT m of its WATER (not its outline: the water floods
+ * past it), easing to the ground at RIM_REACH; inside the water within RIM_INNER_REACH of the dry rim, a bank falling to
+ * the bed at RIM_INNER_FALL (raise only, blended into the bed), so the rim's lake side is a shore, not a 14 m wall under
+ * the road that crosses the dam (w13: the east dam's waterline read as 40 alias cells beside road-moon).
+ */
 function heldRimY(g: NeedGround, lakes: readonly HeldLake[]): { at: (x: number, z: number) => number | null; box: [number, number, number, number] | null } {
   if (!lakes.length) return { at: () => null, box: null };
   const shapes = lakes.map((l) => ({ l, o: lakeOutline(l) }));
   let box: [number, number, number, number] | null = null;
+  const pad = RIM_REACH + RIM_FLOOD;
   for (const { l } of shapes) {
     const pts = l.polygon && l.polygon.length >= 3 ? l.polygon : [[l.center[0] - l.radius, l.center[1] - l.radius], [l.center[0] + l.radius, l.center[1] + l.radius]] as V2[];
-    const b: [number, number, number, number] = [Math.floor(Math.min(...pts.map((p) => p[0])) - RIM_REACH), Math.floor(Math.min(...pts.map((p) => p[1])) - RIM_REACH), Math.ceil(Math.max(...pts.map((p) => p[0])) + RIM_REACH), Math.ceil(Math.max(...pts.map((p) => p[1])) + RIM_REACH)];
+    const b: [number, number, number, number] = [Math.floor(Math.min(...pts.map((p) => p[0])) - pad), Math.floor(Math.min(...pts.map((p) => p[1])) - pad), Math.ceil(Math.max(...pts.map((p) => p[0])) + pad), Math.ceil(Math.max(...pts.map((p) => p[1])) + pad)];
     box = box ? [Math.min(box[0], b[0]), Math.min(box[1], b[1]), Math.max(box[2], b[2]), Math.max(box[3], b[3])] : b;
   }
+  // the held lake nearest (x, z) (inside its outline, or within its flood + rim reach of it)
+  const lakeAt = (x: number, z: number): HeldLake | null => {
+    let best: HeldLake | null = null, bd = Infinity;
+    for (const { l, o } of shapes) {
+      const r = o(x, z), d = r.inside ? 0 : r.d;
+      if (d <= pad && d < bd) { bd = d; best = l; }
+    }
+    return best;
+  };
+  const toWater = chamferField(box!, 2, (x, z) => g.wet(x, z) && lakeAt(x, z) !== null);
+  const toDry = chamferField(box!, 2, (x, z) => !g.wet(x, z) && lakeAt(x, z) !== null);
   return {
     box,
     at: (x, z) => {
-      if (g.wet(x, z)) return null;
-      let best: number | null = null;
-      for (const { l, o } of shapes) {
-        const { inside, d } = o(x, z);
-        if (inside || d > RIM_REACH) continue;
-        const t = Math.max(0, Math.min(1, (d - RIM_FLAT) / (RIM_REACH - RIM_FLAT))), e = t * t * (3 - 2 * t);
-        const y = l.waterY + RIM_FREEBOARD + (g.height(x, z) - l.waterY - RIM_FREEBOARD) * e;
-        if (y > g.height(x, z) && (best === null || y > best)) best = y;
+      const l = lakeAt(x, z);
+      if (!l) return null;
+      const ground = g.height(x, z), top = l.waterY + RIM_FREEBOARD;
+      if (g.wet(x, z)) {
+        const d = toDry(x, z);
+        if (d > RIM_INNER_REACH) return null;
+        const y = smax(ground, top - d * RIM_INNER_FALL, RIM_INNER_SOFT);
+        return y > ground + 0.05 ? y : null;
       }
-      return best;
+      // from the nearer of the water and the outline (a lake whose water the ground does not show yet is held at its outline)
+      const out = shapes.find((s) => s.l === l)!.o(x, z);
+      const d = Math.min(toWater(x, z), out.inside ? Infinity : out.d);
+      if (d > RIM_REACH) return null;
+      const t = Math.max(0, Math.min(1, (d - RIM_FLAT) / (RIM_REACH - RIM_FLAT))), e = t * t * (3 - 2 * t);
+      const y = top + (ground - top) * e;
+      return y > ground ? y : null;
     },
   };
 }
@@ -1322,14 +1384,16 @@ export function solveCliffFace(g: NeedGround, need: GroundNeedDoc, area: NeedAre
     const u = (x - fx) * ix + (z - fz) * iz, v = Math.abs((x - fx) * px + (z - fz) * pz);
     // the apron and its 45 deg fill fall to the ground on their own, and never fill standing water: by a lake they ease
     // down to the shore at EDGE_FALL (a lake-side apron), never a wall at the waterline
-    if (u < 0) return g.wet(x, z) ? null : Math.min(y, g.height(x, z) + shore.d(x, z) * EDGE_FALL);
+    if (u < 0) return g.wet(x, z) ? null : smin(y, g.height(x, z) + softRamp(shore.d(x, z), SHORE_TOE) * EDGE_FALL, CREASE_SOFT);
     const d = Math.min(u - behind, run + crest + back - u, half + taper - v);
     // the clamps blend over CREASE_SOFT m (a hard min of the edge fall and the shore fall creased the Moon's west taper, w11)
     // a beach keeps SHORE_KEEP m of natural ground; a cliff top (the ground well over its water: the Moon's arm stands
     // 128 m over the sea) keeps SHORE_KEEP_CLIFF, else the gentler fall (w12) cost the narrow arm its face height
     const over = g.height(x, z) - shore.level(x, z);
     const keep = SHORE_KEEP - (SHORE_KEEP - SHORE_KEEP_CLIFF) * Math.max(0, Math.min(1, (over - 6) / 10));
-    const clamp = smin(g.height(x, z) + Math.max(0, d) * EDGE_FALL, Math.max(0, shore.d(x, z) - keep) * SHORE_FALL + g.height(x, z), CREASE_SOFT);
+    // the shore fall starts on a SHORE_TOE m curve, not a kink: the kink at the keep line stood the block's toe on a road
+    // along the shore as a crease the lattice drew as a sawtooth (w13: the Sun's east end over road-moon, 12 cells)
+    const clamp = smin(g.height(x, z) + Math.max(0, d) * EDGE_FALL, softRamp(shore.d(x, z) - keep, SHORE_TOE) * SHORE_FALL + g.height(x, z), CREASE_SOFT);
     return smin(y, clamp, CREASE_SOFT);
   };
   // a held lake's rim rides in the same patch (the box grows to cover it); the higher of the two wins, blended (a hard

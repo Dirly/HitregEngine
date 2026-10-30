@@ -479,6 +479,55 @@ function segmentBuckets(segments: readonly PolySegment[], reach: (owner: number)
   });
 }
 
+/** Extra width (m) of the pooled seam span over `1 + 0.35 * distance`: the runner-up blend's largest disagreement term. */
+const POOL_SPAN_EXTRA = 2;
+/** The pooled seam span at `distance` from the line: a segment farther than this behind the nearest is not mixed in. */
+const poolSpan = (distance: number): number => 1 + 0.35 * distance + POOL_SPAN_EXTRA;
+
+/**
+ * The POOLED seam (`RoadDoc.seam: "pooled"`): every segment of the owner within a span of the nearest is mixed in, each
+ * weighted by how close it is to being the nearest (1 for the nearest, falling smoothly to 0 a span behind it). The
+ * runner-up blend keeps only the second-nearest segment, and beside a short segment the two segments either side of it
+ * are both about a span away and swap places as runner-up along their bisector: the embankment band took one
+ * neighbour's grade on one side of that line and the other's on the other, a 1.2 m step 11 m off road-moon (redstrand
+ * [1890,900], 2026-10-30) that the lattice drew as a wall beside the tread. Weights continuous in the query point leave
+ * nothing to swap.
+ */
+function poolSegments(near: readonly PolySegment[], x: number, z: number, hit: OwnerHit): void {
+  const span = poolSpan(hit.distance);
+  let wv = 0, sv = 0, wa = 0, sa = 0, ws = 0, ss = 0, ww = 0, sw = 0;
+  for (let i = 0; i < near.length; i++) {
+    const s = near[i]!;
+    if (s.owner !== hit.owner) continue;
+    const dx = s.bx - s.ax;
+    const dz = s.bz - s.az;
+    const lenSq = dx * dx + dz * dz;
+    const t = lenSq < 1e-12 ? 0 : clamp(((x - s.ax) * dx + (z - s.az) * dz) / lenSq, 0, 1);
+    const px = x - (s.ax + dx * t);
+    const pz = z - (s.az + dz * t);
+    const d = Math.sqrt(px * px + pz * pz);
+    const gap = d - hit.distance;
+    if (gap >= span) continue;
+    const w = 1 - smoothstep(0, span, Math.max(0, gap));
+    if (w <= 0) continue;
+    if (!Number.isNaN(s.va)) { wv += w; sv += w * (s.va + (s.vb - s.va) * t); }
+    wa += w; sa += w * (s.ta + (s.tb - s.ta) * t);
+    if (!Number.isNaN(s.wa)) { ww += w; sw += w * (s.wa + (s.wb - s.wa) * t); }
+    if (!Number.isNaN(s.la)) {
+      // the side pick as in nearestPerOwner: weighted by how square the offset is to this segment
+      const lateral = (dx * pz - dz * px) / (Math.sqrt(lenSq) || 1);
+      const wl = d > 1e-9 ? 0.5 + (0.5 * lateral) / d : 0.5;
+      const lv = s.la + (s.lb - s.la) * t;
+      const rv = s.ra + (s.rb - s.ra) * t;
+      ws += w; ss += w * (rv + (lv - rv) * wl);
+    }
+  }
+  if (wv > 0) hit.value = sv / wv;
+  if (wa > 0) hit.along = sa / wa;
+  if (ws > 0) hit.side = ss / ws;
+  if (ww > 0) hit.width = sw / ww;
+}
+
 /**
  * Nearest point per OWNER among the segments near (x, z). Two rivers may both
  * be within reach of one column and each carves independently, so the answer
@@ -499,13 +548,14 @@ function segmentBuckets(segments: readonly PolySegment[], reach: (owner: number)
  * toward their mean, the span widening with distance (the crack grows with
  * it) and with the size of the disagreement (so the blended slope stays
  * walkable). On a straight run the runner-up is far behind and nothing
- * changes.
+ * changes. An owner flagged in `pooled` mixes every segment near the nearest instead (`poolSegments`).
  */
 function nearestPerOwner(
   buckets: FeatureBuckets<PolySegment>,
   x: number,
   z: number,
   hits: OwnerHit[],
+  pooled?: readonly boolean[],
 ): number {
   const near = bucketAt(buckets, x, z);
   let count = 0;
@@ -599,6 +649,10 @@ function nearestPerOwner(
   }
   for (let k = 0; k < count; k++) {
     const hit = hits[k]!;
+    if (pooled?.[hit.owner]) {
+      poolSegments(near, x, z, hit);
+      continue;
+    }
     if (hit.distance2 === Infinity) continue;
     const gap = hit.distance2 - hit.distance;
     const disagreement = Number.isNaN(hit.value2) || Number.isNaN(hit.value) ? 0 : Math.abs(hit.value2 - hit.value);
@@ -1643,13 +1697,16 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     return valleySegs!;
   }
+  /** Roads whose seam is pooled (`RoadDoc.seam`): every segment near the nearest is mixed in (poolSegments). */
+  const roadPooled = roadDocs.map((r) => r.seam === "pooled");
   const roadSegs = segmentBuckets(
     segmentsOf(
       roadDocs,
       (r) => r.surfaceY,
       (r) => (roadSmooth(r) > 0 ? [r.leftY, r.rightY] : [undefined, undefined]),
     ),
-    roadReach,
+    // a pooled road mixes in segments up to a seam span behind the nearest: they must be in the bucket too
+    (i) => roadReach(i) + (roadPooled[i] ? poolSpan(roadReach(i)) : 0),
   );
   // The same segments bucketed wider for `featureClearance`: a scatter rule
   // asks "how far to the nearest path" from up to a dozen metres out, and a
@@ -1812,8 +1869,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   interface TerraceCut { ox: number; oz: number; dx: number; dz: number; s0: number; s1: number; n0: number; n1: number; y0: number; y1: number; face: boolean }
   const CUT_FALLOFF = 4;
   const terraceCuts: TerraceCut[] = [];
-  // path ribbons (`features.ribbons`, compiled by the `path` operator) cut the low side of their retaining walls the same way
-  const wallCutSets = [...(recipe.features.terraceWalls ?? []).map((tw) => tw.solved?.cuts ?? []), ...(recipe.features.ribbons ?? []).map((r) => r.cuts), ...(recipe.features.kitWalls ?? []).map((w) => w.cuts)];
+  // operator kit walls cut the low side of their faces the same way
+  const wallCutSets = [...(recipe.features.terraceWalls ?? []).map((tw) => tw.solved?.cuts ?? []), ...(recipe.features.kitWalls ?? []).map((w) => w.cuts)];
   for (const cuts of wallCutSets) {
     for (const c of cuts) {
       const l = Math.hypot(c.dir[0], c.dir[1]) || 1;
@@ -3272,7 +3329,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       }
     }
 
-    count = nearestPerOwner(roadSegs, x, z, hits);
+    count = nearestPerOwner(roadSegs, x, z, hits, roadPooled);
     // the ground under the roads, before any of them: an embankment band is held against THIS, not the running
     // height, or roads that overlap (a shared stretch of a path and a trail) ratchet the band down a hand per road
     const underRoads = out;
@@ -3330,7 +3387,20 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       // a full overshoot inside both bounds, is untouched): a hard clamp creases the band where it
       // takes over, and a crease across a lattice cell draws as a sawtooth
       const held = smoothMax(Math.min(value, underRoads) - ROAD_BANK_OVERSHOOT, curve, ROAD_BANK_OVERSHOOT);
-      const embankment = -smoothMax(-(Math.max(value, underRoads) + ROAD_BANK_OVERSHOOT), -held, ROAD_BANK_OVERSHOOT);
+      let embankment = -smoothMax(-(Math.max(value, underRoads) + ROAD_BANK_OVERSHOOT), -held, ROAD_BANK_OVERSHOOT);
+      // `capBand: "taper"`: the tread's cut/fill caps taper to nothing across the band, so a tread held at maxCut under
+      // the ground climbs back to it over the whole band. Without it the band stayed at the tread's depth (its side
+      // height was sampled for the uncapped grade) and the outer fade lifted 3 m back to the ground in its last 4 m:
+      // a rim 12 m beside road-weeping-sun (redstrand [1819-1853,811], 2026-10-30). The tread itself is untouched.
+      if (road.capBand === "taper" && (road.maxCut !== undefined || road.maxFill !== undefined)) {
+        const keep = 1 - smoothstep(half, outer, hit.distance);
+        const k = ROAD_BANK_OVERSHOOT * keep;
+        const depth = embankment - underRoads;
+        let held2 = depth;
+        if (road.maxCut !== undefined) held2 = smoothMax(-road.maxCut * keep - k, held2, k);
+        if (road.maxFill !== undefined) held2 = -smoothMax(-(road.maxFill * keep + k), -held2, k);
+        embankment = underRoads + held2;
+      }
       const w = (1 - smoothstep(half + road.shoulder + road.smooth * 0.5, outer, hit.distance)) * road.flatten * dry;
       if (w <= 0) continue;
       out = out + (embankment - out) * w;

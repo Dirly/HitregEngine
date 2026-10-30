@@ -170,7 +170,7 @@ export interface VegetationRecipe {
   cover?: readonly { id: string }[];
   features: {
     clearings?: readonly ClearingDoc[];
-    ribbons?: readonly { clearing?: [number, number][] }[];
+
     groundPaints?: readonly { polygon?: [number, number][]; center?: [number, number]; radius?: number; feather?: number; clear?: { scatter: boolean; cover: boolean } }[];
     kitWalls?: readonly { cuts: readonly { origin: readonly number[]; dir: readonly number[]; s: readonly number[]; n: readonly number[] }[] }[];
   };
@@ -303,10 +303,7 @@ export class VegetationIndex {
     });
 
     // ---- clearings
-    // a path ribbon keeps its own outline clear (scatter and cover), feathered a little past the verge
-    const ribbonClearings = (recipe.features.ribbons ?? []).flatMap((r, i) =>
-      r.clearing && r.clearing.length >= 3 ? [clearingSchema.parse({ id: `ribbon-${i}`, polygon: r.clearing, feather: 1.5 })] : [],
-    );
+
     // an operator's kit wall run keeps its face clear: the strip behind the wall top and the carved ground in front
     const wallClearings = (recipe.features.kitWalls ?? []).flatMap((w, i) => {
       if (!w.cuts.length) return [];
@@ -326,7 +323,7 @@ export class VegetationIndex {
         ? [clearingSchema.parse({ id: `paint-${i}`, ...(p.polygon ? { polygon: p.polygon } : { center: p.center, radius: p.radius }), feather: Math.min(60, p.feather ?? 3), scatter: p.clear.scatter, cover: p.clear.cover })]
         : [],
     );
-    this.clearings = [...(recipe.features.clearings ?? []), ...ribbonClearings, ...wallClearings, ...paintClearings];
+    this.clearings = [...(recipe.features.clearings ?? []), ...wallClearings, ...paintClearings];
     this.hasClearings = this.clearings.length > 0;
     this.clearingIndex = this.hasClearings
       ? new PolygonIndex(

@@ -2,9 +2,9 @@
  * `features.kitWalls` — retaining-wall runs COMPILED by a landform operator (ids `op:<id>:wall-<n>`; today `terrace`).
  *
  * One entry is one run of world-kit retaining-wall pieces standing on a shelf riser: 2 m straights plus caps, placed
- * exactly like a path ribbon's walls (piece origin = the face start at the wall foot, the low side to the right of the
+ * exactly like a terrace wall's (piece origin = the face start at the wall foot, the low side to the right of the
  * run). Each module carries one `face` cut that carves the low side, so the terrain riser stands inside the wall body
- * and `height()` reads the foot in front of it. Derived like `terraceWalls` / `ribbons`: never hand-edited.
+ * and `height()` reads the foot in front of it. Derived like `terraceWalls`: never hand-edited.
  */
 import { z } from "zod";
 import type { ChunkDoc } from "../chunks.js";

@@ -26,7 +26,7 @@ import { streetLightingFile } from "../town-lights-rule.mts";
 import { atlasState } from "../town-atlas.mjs";
 import { readableReportFile } from "../_dress-report.mts";
 import { portalDigest, walkThroughPortals } from "../_portal-veil-ops.mts";
-import { ribbonApproachOps } from "../_place-archetype.mts";
+import { ribbonsDeclared } from "../_place-archetype.mts";
 import { smokeReport } from "../_smoke-check.mts";
 import { lintMood, worldLights } from "../zone-mood.mjs";
 import { designBlock } from "../../../../tools/poi-review/job.mjs";
@@ -613,12 +613,13 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
       continue;
     }
     const stage = (readJson(progress) as { stage?: string }).stage ?? "?";
-    // L (owner ruling 2026-10-20: "no ribbon roads: buried by terrain, never approved"): a job still carrying its approach
-    // as a ribbon / path operator fails (place-build gate `roads`, same rule): the approach is a carved + painted track
+    // L (owner rulings 2026-10-20 "no ribbon roads" and 2026-10-30 "ribbons removed from the tools"): a job still carrying
+    // ANY ribbon (a path/ribbon operator or a features.ribbons world-op, approach or footpath) fails (place-build gate
+    // `roads`, same rule; no allow-list): every walk is a carved + painted track
     const opsOf = (f: string): unknown[] => { try { const j = readJson(path.join(job, f)); return Array.isArray(j) ? j : []; } catch { return []; } };
-    const ribbons = ribbonApproachOps(opsOf("operators.json"), opsOf("world-ops.json"));
+    const ribbons = ribbonsDeclared(opsOf("operators.json"), opsOf("world-ops.json"));
     if (ribbons.length) {
-      rows.push({ stage: `poi ${l.id}`, who: "opus", state: "FAILED", why: `ribbon approach (owner: carved + painted roads only): ${ribbons.join(", ")}`,
+      rows.push({ stage: `poi ${l.id}`, who: "opus", state: "FAILED", why: `ribbons in the job: ${ribbons.join(", ")}`,
         how: `node node_modules/tsx/dist/cli.mjs tools/place-build.mts approach ${ctx.world} --project ${project} --zone ${zone} --location ${l.id}  -> lab -> build -> gates -> install (docs/place-builder.md)` });
     } else {
       // gate 16 (owner ruling 2026-10-22): a place is designed — premise, journey, story elements, one finished area a fresh

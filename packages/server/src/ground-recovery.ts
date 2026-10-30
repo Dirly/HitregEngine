@@ -2,7 +2,7 @@
  * GROUND RECOVERY — the authority's sensor and safety net for "I fell through the earth".
  *
  * A player body can end up under the voxel ground in a handful of ways that no client can fix: its cell was not
- * resident on this server when it walked in (the ring lagged an overloaded tick), a landmark or ribbon collider was
+ * resident on this server when it walked in (the ring lagged an overloaded tick), a landmark collider was
  * missing where its render mesh stood, a carve opened the closed volume, a portal/spawn point stood under a floor.
  * Once under the surface there is nothing to land on, and the body falls until the world ends.
  *

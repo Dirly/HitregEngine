@@ -7,7 +7,7 @@
  *   surface  the open-air ground the recipe field says is there (`field.surfaceCast`): what the terrain mesh draws;
  *   render   the highest BUILT render surface over the column (landmark render GLBs), or null;
  *   collider the first PHYSICS hit casting straight down, against the colliders the server holds for a body standing
- *            there (terrain cells, landmark collider tiles, ribbons, kit/town pieces, props) — or null.
+ *            there (terrain cells, landmark collider tiles, kit/town pieces, props) — or null.
  * The body walks on `collider`. The player sees max(surface, render). A hole is where what is seen has nothing under it.
  */
 

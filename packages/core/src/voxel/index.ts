@@ -299,7 +299,6 @@ export {
 
 export {
   voxelChunkDoc,
-  ribbonSurfaces,
   voxelChunkOptionsFrom,
   voxelRecipeAssetRefs,
   cellsInRect,
@@ -352,6 +351,8 @@ export {
   operatorNames,
   operatorSpecs,
   operatorDocSchema,
+  RIBBONS_REMOVED,
+  REMOVED_RIBBON_OPS,
   operatorCompiledSchema,
   operatorParams,
   operatorPrefix,
@@ -384,7 +385,6 @@ export { screeOperatorSchema, fanSurface, type ScreeOperatorParams } from "./ope
 export { riverbankOperatorSchema, riverbankStations, type RiverbankOperatorParams } from "./operators-riverbank.js";
 export { groundPaintSchema, groundPaintBounds, createGroundPainter, type GroundPaintDoc, type GroundPainter } from "./ground-paint.js";
 export { rockSetSchema, rockSetBounds, type RockSetDoc } from "./rock-sets.js";
-export * from "./ribbon.js";
 export * from "./floaters.js";
 export * from "./white-water.js";
 export * from "./kit-walls.js";

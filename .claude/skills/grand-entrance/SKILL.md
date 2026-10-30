@@ -1,6 +1,6 @@
 ---
 name: grand-entrance
-description: Make a dungeon entrance or hero landmark GRAND — a built structure that reads from 300 m+ and makes the player want to go in: concept frames first, sized so the interior is believable, man-made parts as BUILT landmarks (real meshes, unique carved textures) and rock as the natural stamp, approach ribbon, stair and plaza, flanking statues, one light bucket, vfx fire, a portal veil, judged in four fixed shots and five gates. Use when designing, building or reviewing any dungeon entrance, gatehouse, temple front, tower or other landmark.
+description: Make a dungeon entrance or hero landmark GRAND — a built structure that reads from 300 m+ and makes the player want to go in: concept frames first, sized so the interior is believable, man-made parts as BUILT landmarks (real meshes, unique carved textures) and rock as the natural stamp, carved + painted approach track, stair and plaza, flanking statues, one light bucket, vfx fire, a portal veil, judged in four fixed shots and five gates. Use when designing, building or reviewing any dungeon entrance, gatehouse, temple front, tower or other landmark.
 ---
 
 # grand-entrance
@@ -44,7 +44,7 @@ One owner, about 1% of the week's target. Pair with `site-standards` (the site),
 - Iterate shape in seconds: `tools/landmark.mts --spec <file> --kind built [--glb-only page.html]`.
 
 ## 5. Grandeur cues (all of them, unless the concept says otherwise)
-- An approach `path` ribbon from open ground >= 150 m out, ending at the plaza foot.
+- A carved + painted approach TRACK (`worldgen road`, never a ribbon: removed 2026-10-30) from open ground >= 150 m out, ending at the plaza foot.
 - A stair (0.25 m risers, landings every 12 steps, cheek walls) up to a terrace, and a plaza at its foot.
 - A flanking statue pair from `statue-maker` (kit body + ubermesh hood/robe/staff parts, a real animation frame),
   in the place's stone, big enough to read at 150 m; check its facing in a picture.

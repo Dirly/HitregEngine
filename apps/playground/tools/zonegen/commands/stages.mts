@@ -11,6 +11,7 @@
  *   stages <world> --project <p> --art painted|catalogue --place <id>   set a place's art mode (catalogue: no painting / approval)
  *   stages <world> --project <p> --done status-clean [--allow row,row --ruling "YYYY-MM-DD ..."]
  *                                                           runs `worldgen status`; records it only when every non-optional row is ok
+ *   stages <world> --project <p> --rehash-ground <was.json>   move records hashed with whole road docs to the road-segment scheme, on the recipe they were made on
  *   stages <world> --project <p> --freeze --by <who>        world-frozen (needs status-clean + siting ok). From here every worldgen
  *                                                           write that changes the world refuses without --unfreeze "<dated ruling>"
  *   stages <world> --project <p> --done <stage> --place <id> --evidence <file> --by <who> [--note ..]
@@ -25,7 +26,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import {
-  MANUAL_STAGES, REVIEW_STAGES, artOf, catalogueDesignFaults, currentSite, groundRecord, currentWorldHash, evaluate, evidenceSha, fileSha, isDatedRuling, loadStages, nextOf, reviewVerdict, saveStages, short, stagesFile,
+  MANUAL_STAGES, REVIEW_STAGES, parseRecipe, rehashGround, artOf, catalogueDesignFaults, currentSite, groundRecord, currentWorldHash, evaluate, evidenceSha, fileSha, isDatedRuling, loadStages, nextOf, reviewVerdict, saveStages, short, stagesFile,
   stagesOf, worldStagesSchema, type StageState, type WorldStages,
 } from "../../world-order.mts";
 
@@ -137,6 +138,15 @@ export async function run(ctx: Ctx): Promise<number> {
     doc.stages["status-clean"] = { at: now(), worldHash: hash, by: by || "zonegen stages", note: allow.length ? `allowed open: ${allow.join(", ")}` : "every non-optional row ok", ...(allow.length ? { ruling: ctx.opt("ruling") } : {}) };
     saveStages(projectDir, doc);
     console.log(`status-clean recorded on world ${short(hash)}`);
+    return 0;
+  }
+
+  // ---- rehash-ground: move records made under the whole-doc road hash to the segment scheme, on the world they were made on ----
+  if (ctx.opt("rehash-ground")) {
+    const was = parseRecipe(JSON.parse(fs.readFileSync(path.resolve(ctx.opt("rehash-ground")), "utf8")));
+    const { rehashed, left } = rehashGround(doc, was);
+    saveStages(projectDir, doc);
+    console.log(`rehashed ${rehashed.length} record(s) on the given world (${rehashed.join(", ") || "none"}); left ${left.length} that did not match it (${left.join(", ") || "none"})`);
     return 0;
   }
 

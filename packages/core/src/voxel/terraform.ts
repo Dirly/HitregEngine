@@ -14,8 +14,8 @@ import {
   type WorldRecipe,
 } from "./recipe.js";
 import { cellsInRect } from "./chunk.js";
-import { getOperator, operatorDocSchema, operatorParams } from "./operator-registry.js";
-import { ribbonSchema } from "./ribbon.js";
+import { getOperator, operatorDocSchema, operatorParams, RIBBONS_REMOVED } from "./operator-registry.js";
+
 import { kitWallSchema } from "./kit-walls.js";
 import { landmarkSchema } from "./ledge-landmark.js";
 import { groundPaintBounds, groundPaintSchema } from "./ground-paint.js";
@@ -68,7 +68,6 @@ export const FEATURE_KINDS = [
   "passages",
   "pois",
   "operators",
-  "ribbons",
   "kitWalls",
   "landmarks",
   "groundPaints",
@@ -92,7 +91,7 @@ const FEATURE_SCHEMAS: Record<FeatureKind, z.ZodType> = {
   passages: passageSchema,
   pois: poiSchema,
   operators: operatorDocSchema,
-  ribbons: ribbonSchema,
+
   kitWalls: kitWallSchema,
   landmarks: landmarkSchema,
   groundPaints: groundPaintSchema,
@@ -127,22 +126,28 @@ export type RecipeEdit =
   | { edit: "update-feature"; kind: FeatureKind; id: string; feature: unknown }
   | { edit: "remove-feature"; kind: FeatureKind; id: string };
 
+/** A feature kind; the removed `ribbons` kind fails with RIBBONS_REMOVED (never "invalid enum value"). */
+const featureKindSchema = z
+  .string()
+  .refine((k) => k !== "ribbons", RIBBONS_REMOVED)
+  .pipe(z.enum(FEATURE_KINDS));
+
 export const recipeEditSchema: z.ZodType<RecipeEdit> = z.discriminatedUnion("edit", [
   z.object({
     edit: z.literal("add-feature"),
-    kind: z.enum(FEATURE_KINDS),
+    kind: featureKindSchema,
     feature: z.unknown(),
     index: z.number().int().min(0).optional(),
   }),
   z.object({
     edit: z.literal("update-feature"),
-    kind: z.enum(FEATURE_KINDS),
+    kind: featureKindSchema,
     id: z.string().min(1),
     feature: z.unknown(),
   }),
   z.object({
     edit: z.literal("remove-feature"),
-    kind: z.enum(FEATURE_KINDS),
+    kind: featureKindSchema,
     id: z.string().min(1),
   }),
 ]) as z.ZodType<RecipeEdit>;
@@ -247,11 +252,7 @@ export function featureFootprint(kind: FeatureKind, feature: unknown): Footprint
     }
     case "pois":
       return null;
-    case "ribbons": {
-      // the walk surface, its stair treads and wall pieces; pad covers the verge and the wall cuts
-      const samples = (f["samples"] as number[][] | undefined) ?? [];
-      return samples.length ? pointsBounds(samples.map((p) => [p[0]!, p[2]!]), 12) : null;
-    }
+
     case "landmarks": {
       const p = (f["position"] as number[] | undefined) ?? [0, 0, 0];
       return pointsBounds([[p[0]!, p[2]!]], Number(f["radius"] ?? 0) + 4);
@@ -459,7 +460,7 @@ export function applyRecipeEdits(recipe: WorldRecipe, edits: readonly RecipeEdit
   });
 
   // the optional kinds (every kind whose recipe schema is `.optional()`) are dropped when empty: no `operators: []` noise, and undoing the first install restores the recipe exactly
-  for (const kind of ["operators", "ribbons", "kitWalls", "landmarks", "groundPaints", "rockSets", "terraceWalls", "clearings"] as const) {
+  for (const kind of ["operators", "kitWalls", "landmarks", "groundPaints", "rockSets", "terraceWalls", "clearings"] as const) {
     if (features[kind].length === 0) delete (features as Partial<Record<FeatureKind, AnyFeature[]>>)[kind];
   }
   return {

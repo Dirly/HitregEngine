@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  ribbonApproachOps, approachForBuilt, trackId, trimTrack, trackBand, TRACK_WIDTH_M, TRACK_JOIN_M,
-  applySets, silhouetteHeight, forTier, approachLines, approachRead, approachReadAny, readHeightNeeded, readTargets, installGuard, RESEAT_MAX_M, SMOKE_READ_M, shoreRise, waterLevelNear, SHORE_RISE_M, routeOnRibbon, briefCount, expandRows, CAMP_ONLY_RE, ROOM_FILL, cutRing, wallGates, towerSides, withoutDenied, MIN_GATE_M, siteSearch, slopeMap, uniqueItemIds, DENIED_PROPS, fillOk, routeGrid, usableArea, approachSpots, readBand, firstPlanItems, arrangeFirstPlan, fitPocket, pickArchetype, placeArchetypeSchema, planPlace, primitiveMeshes, staleEntities, unclearedStructures, type PlaceGround,
+  ribbonsDeclared, footpathTrackId, FOOTPATH_WIDTH_M, approachForBuilt, trackId, trimTrack, trackBand, TRACK_WIDTH_M, TRACK_JOIN_M,
+  applySets, silhouetteHeight, forTier, approachLines, approachRead, approachReadAny, readHeightNeeded, readTargets, installGuard, RESEAT_MAX_M, SMOKE_READ_M, shoreRise, waterLevelNear, SHORE_RISE_M, routeOnTrack, briefCount, expandRows, CAMP_ONLY_RE, ROOM_FILL, cutRing, wallGates, towerSides, withoutDenied, MIN_GATE_M, siteSearch, slopeMap, uniqueItemIds, DENIED_PROPS, fillOk, routeGrid, usableArea, approachSpots, readBand, firstPlanItems, arrangeFirstPlan, fitPocket, pickArchetype, placeArchetypeSchema, planPlace, primitiveMeshes, staleEntities, unclearedStructures, type PlaceGround,
 } from "../tools/_place-archetype.mts";
 import { placeLayoutSchema, withLayout, layoutCoverage, toWorld, discStats, waterAtMarker, waterSheet, fallStreaks, STREAK_MIN_WIDTH_M, sinkToBase, seatPad, mergeSeatPads, SEAT_PAD_MAX_M, PATH_GRADE_BAND_M, siteScale } from "../tools/_place-archetype.mts";
 import { patchReaches } from "../tools/worldgen-scatter-float.mts";
@@ -73,7 +73,7 @@ test("the plan is deterministic and complete (pads, clearings, routes, plans, la
   const p1 = planPlace(a, input, ground), p2 = planPlace(a, input, ground);
   assert.deepEqual(JSON.parse(JSON.stringify(p1)), JSON.parse(JSON.stringify(p2)));
   assert.equal(p1.worldOps.length, p1.pockets.filter((k) => k.fit.stats.relief > 2).length);
-  assert.ok(p1.ops.length > 3 && p1.operators.some((o) => o.op === "wall") && p1.operators.some((o) => o.op === "path"));
+  assert.ok(p1.ops.length > 3 && p1.operators.some((o) => o.op === "wall") && p1.footpaths.length > 0 && !p1.operators.some((o) => o.op === "path"));
   assert.ok(p1.handoff.navigation.routes.length >= 2 && p1.handoff.landmark);
   assert.deepEqual(unclearedStructures(p1.handoff.siteDressing.keepClear, p1.clearings), []);
   // an outline clearing (no centre) never crashes the check (RETTING 2026-10-23: the place gate died 'reading 0')
@@ -174,8 +174,8 @@ test("a walled graveyard: every route goes through its gates and round the bell 
       for (const b of posts) assert.ok(segD(b, pts[i], pts[i + 1]) >= 1.5, `${r.id} leg ${i} passes through a structure at ${b}`);
     }
   }
-  // the footpath ribbons follow the planned lines, so they never cross a wall either
-  for (const p of plan.operators.filter((o: any) => o.op === "path")) for (let i = 0; i + 1 < p.points.length; i++) for (const [a2, b2] of walls) assert.ok(!cross(p.points[i], p.points[i + 1], a2, b2), `${p.id} crosses a wall`);
+  // the footpath tracks follow the planned lines, so they never cross a wall either
+  for (const p of plan.footpaths) for (let i = 0; i + 1 < p.points.length; i++) for (const [a2, b2] of walls) assert.ok(!cross(p.points[i], p.points[i + 1], a2, b2), `${p.id} crosses a wall`);
   assert.deepEqual(plan.faults, []);
   // every clearing a body can stand in is reached from the route graph in a straight line that meets no wall
   const graph = plan.handoff.navigation.routes.flatMap((r: any) => r.points.slice(1).flatMap((q: number[], i: number) => { const p = r.points[i], n = Math.max(1, Math.ceil(Math.hypot(q[0]! - p[0], q[2]! - p[2]) / 2)); return Array.from({ length: n + 1 }, (_, t) => [p[0] + ((q[0]! - p[0]) * t) / n, p[2] + ((q[2]! - p[2]) * t) / n]); })); // poi-walk: 2 m samples
@@ -568,36 +568,18 @@ test("a shore core stays on the shore of the brief's own water: a cliff top over
   assert.equal(shoreRise(g, [70, 0], 0), Infinity, "the tarn is not the brief's sea");
 });
 
-test("a walk route follows its footpath ribbon as built, not the taut polyline across the bend (hags-garth)", () => {
-  // polyline corner at (0,0); the ribbon rounds it 3 m inside
+test("a walk route follows its footpath track as built, not the taut polyline across the bend (hags-garth)", () => {
+  // polyline corner at (0,0); the track rounds it 3 m inside
   const pts = [[-40, 0, 0], [0, 0, 0], [0, 0, 40], [5, 0, 60]];
   const samples: number[][] = [];
   for (let x = -40; x <= -6; x += 1) samples.push([x, 0, 0]);
   for (let a = 0; a <= 90; a += 10) { const t = (a * Math.PI) / 180; samples.push([-6 + 6 * Math.sin(t), 0, 6 - 6 * Math.cos(t)]); }
   for (let z = 7; z <= 40; z += 1) samples.push([0, 0, z]);
-  const r = routeOnRibbon(pts, samples, 1.2);
+  const r = routeOnTrack(pts, samples, 1.2);
   const off = (q: number[]) => Math.min(...samples.map((s) => Math.hypot(s[0]! - q[0]!, s[2]! - q[2]!)));
-  assert.ok(r.slice(0, -1).every((q) => off(q) < 0.01), "every point but the pocket end lies on the ribbon");
-  assert.deepEqual(r[r.length - 1], [5, 0, 60], "the end off the ribbon is kept");
-  assert.ok(!r.some((q) => q[0] === 0 && q[2] === 0), "the corner the ribbon rounds is gone");
-});
-
-test("a footpath lands on the ground: a leg coming down a steep bank runs on into the pocket (tinkers-camp)", async () => {
-  const { landedStretch, ribbonEndsOff, LAND_TOL_M } = await import("../tools/_place-archetype.mts");
-  // a 0.45 bank falling east onto level ground at x >= -10; the pocket (r 10) at the origin
-  const bank = { height: (x: number) => (x < -10 ? 0.45 * (-10 - x) : 0) };
-  const line: [number, number][] = Array.from({ length: 41 }, (_, i) => [-40 + i, 0]);
-  const outside = (poly: [number, number][], discs: { at: [number, number]; radius: number }[]) => poly.filter((q) => discs.every((d) => Math.hypot(q[0] - d.at[0], q[1] - d.at[1]) > d.radius - 1));
-  const route = { width: 2.4, style: "dirt", maxGrade: 0.35 };
-  const edge = outside(line, [{ at: [0, 0], radius: 10 }]);
-  const offEdge = ribbonEndsOff(bank, edge, route);
-  assert.ok(offEdge > LAND_TOL_M, `the ribbon stopped at the pocket edge should end off the ground (${offEdge})`);
-  const landed = landedStretch(bank, line, [{ at: [0, 0], radius: 10 }], outside, route);
-  assert.ok(landed[landed.length - 1]![0] > edge[edge.length - 1]![0], "the stretch runs on into the pocket");
-  assert.ok(ribbonEndsOff(bank, landed, route) < offEdge, "and its end lands nearer the ground");
-  // level ground: nothing changes
-  const flat = { height: () => 5 };
-  assert.deepEqual(landedStretch(flat, line, [{ at: [0, 0], radius: 10 }], outside, route), edge);
+  assert.ok(r.slice(0, -1).every((q) => off(q) < 0.01), "every point but the pocket end lies on the track");
+  assert.deepEqual(r[r.length - 1], [5, 0, 60], "the end off the track is kept");
+  assert.ok(!r.some((q) => q[0] === 0 && q[2] === 0), "the corner the track rounds is gone");
 });
 
 test("a landmark pyre burns at dusk (coffin-road: the name test missed it)", async () => {
@@ -628,10 +610,10 @@ test("a pinpoint is the core pocket only: one marker, its fire, no satellites, r
   assert.deepEqual(p.pockets.map((k) => k.id), ["core"]);
   assert.ok(p.handoff.landmark && p.handoff.measurements.adventureSize === "pinpoint");
   assert.deepEqual(readBand("pinpoint"), [45, 60]);
-  // owner ruling (bar-watch 2026-10-21): a pinpoint is reached on foot, no footpath ribbon; the leg stays a walk route
-  assert.equal(p.operators.filter((o: any) => o.op === "path").length, 0, "no path operator for a pinpoint");
+  // owner ruling (bar-watch 2026-10-21): a pinpoint is reached on foot, no footpath; the leg stays a walk route
+  assert.equal(p.footpaths.length, 0, "no footpath track for a pinpoint");
   assert.ok(p.handoff.navigation.routes.some((r: any) => r.id === "approach"), "the approach is still walked");
-  assert.ok(planPlace(forTier(shrine, "small"), input, ground).operators.some((o: any) => o.op === "path"), "a small place keeps its footpath");
+  assert.ok(planPlace(forTier(shrine, "small"), input, ground).footpaths.length > 0, "a small place keeps its footpath");
 });
 
 test("read.views adds far evidence views looking at the landmark (bar-watch 2026-10-21: across the gorge)", () => {
@@ -771,10 +753,10 @@ test("evidence views keep clear of the built pieces (the aerial sat in the pyre 
     assert.ok(Math.hypot(plan.aerial[0] - at[0]!, plan.aerial[1] - at[1]!) > 2, `aerial body ${plan.aerial} off the pyre ${at}`); }
 });
 
-test("a route point past the ribbon's end stays (the way round a pen wall to its gate never collapses onto the end sample)", () => {
+test("a route point past the track's end stays (the way round a pen wall to its gate never collapses onto the end sample)", () => {
   const samples = [[0, 0, 0], [5, 0, 0], [10, 0, 0]];
   const pts = [[0, 0, 0], [10, 0, 0], [12, 0, 3], [12, 0, 6], [6, 0, 6]];
-  const r = routeOnRibbon(pts, samples, 1.2);
+  const r = routeOnTrack(pts, samples, 1.2);
   assert.ok(r.some((q) => q[0] === 12 && q[2] === 3), JSON.stringify(r));
 });
 
@@ -787,9 +769,17 @@ test("an area whose own props are all denied still gets a first plan (the densit
 test("the approach is a carved + painted TRACK from the nearest road, never a ribbon (owner ruling 2026-10-20)", () => {
   const a = forTier(all.find((x) => x.id === "halt-yard")!, "medium"), road = { id: "path-a-b", points: [[-60, 200], [300, 200]] as [number, number][] };
   const p = planPlace(a, { ...input, roads: [road] }, ground);
-  assert.deepEqual(ribbonApproachOps(p.operators, p.worldOps), [], "no ribbon approach");
+  assert.deepEqual(ribbonsDeclared(p.operators, p.worldOps), [], "no ribbon anywhere");
   assert.ok(!p.operators.some((o: any) => /approach/.test(o.id)), "no approach operator at all");
-  assert.ok(p.operators.some((o: any) => o.op === "path"), "the footpaths between pockets stay");
+  assert.ok(!p.operators.some((o: any) => o.op === "path" || o.op === "ribbon"), "no path operator at all (ribbons removed 2026-10-30)");
+  // the footpaths between pockets are carved + painted narrow tracks (owner ruling 2026-10-30)
+  assert.ok(p.footpaths.length > 0, "the footpaths between pockets stay, as tracks");
+  for (const t of p.footpaths) {
+    assert.ok(t.id.startsWith("road-pb-test-place-to-"), t.id);
+    assert.ok(t.width >= FOOTPATH_WIDTH_M[0] && t.width <= FOOTPATH_WIDTH_M[1], `${t.id} width ${t.width}`);
+  }
+  assert.deepEqual(p.handoff.footpathTracks.map((t: any) => t.id), p.footpaths.map((t) => t.id));
+  assert.equal(footpathTrackId("x", "to-yard"), "road-pb-x-to-yard");
   assert.ok(p.track, p.notes.join(" | "));
   assert.equal(p.track!.id, trackId("test-place"));
   assert.equal(p.track!.width, TRACK_WIDTH_M.medium);
@@ -812,9 +802,24 @@ test("the approach is a carved + painted TRACK from the nearest road, never a ri
   assert.ok(far.notes.some((n) => /no road, path or trail within/.test(n)));
 });
 
-test("gate roads: a ribbon / path-operator approach is named, footpaths between pockets are not", () => {
-  assert.deepEqual(ribbonApproachOps([{ id: "pb-x-approach", op: "path" }, { id: "pb-x-to-yard", op: "path" }, { id: "pb-x-wall", op: "wall" }]), ["operator pb-x-approach (path ribbon)"]);
-  assert.deepEqual(ribbonApproachOps([], [{ edit: "add-feature", kind: "ribbons", feature: { id: "op:pb-x-approach:ribbon" } }, { edit: "add-feature", kind: "roads", feature: { id: "road-pb-x-approach" } }]), ["features.ribbons op:pb-x-approach:ribbon"]);
+test("gate roads: EVERY ribbon fails (path/ribbon operators, ribbon world-ops, world features.ribbons; no allow-list, owner ruling 2026-10-30)", async () => {
+  const { RIBBONS_REMOVED, worldRecipeSchema, operatorDocSchema, recipeEditSchema } = await import("@hitreg/core");
+  const lines = ribbonsDeclared([{ id: "pb-x-approach", op: "path" }, { id: "pb-x-to-yard", op: "path" }, { id: "pb-x-r", op: "ribbon" }, { id: "pb-x-wall", op: "wall" }],
+    [{ edit: "add-feature", kind: "ribbons", feature: { id: "op:pb-x-to-yard:ribbon" } }, { edit: "add-feature", kind: "roads", feature: { id: "road-pb-x-approach" } }],
+    [{ id: "op:old:ribbon" }]);
+  assert.equal(lines.length, 5, lines.join(" | "));
+  assert.ok(lines.every((l) => l.includes(RIBBONS_REMOVED)));
+  assert.deepEqual(ribbonsDeclared([{ id: "pb-x-wall", op: "wall" }], [{ edit: "add-feature", kind: "roads", feature: { id: "road-pb-x-to-yard" } }], []), []);
+  // load-time: a world or a job still declaring one fails loudly with the removal message
+  const op = operatorDocSchema.safeParse({ id: "lane", op: "path", points: [[0, 0], [10, 0]] });
+  assert.ok(!op.success && op.error.issues.some((i) => i.message.includes(RIBBONS_REMOVED)));
+  const edit = recipeEditSchema.safeParse({ edit: "add-feature", kind: "ribbons", feature: {} });
+  assert.ok(!edit.success && edit.error.issues.some((i) => i.message.includes(RIBBONS_REMOVED)));
+  const shape = worldRecipeSchema.shape.features.unwrap?.() ?? worldRecipeSchema.shape.features;
+  const ribbons = (shape as any).shape.ribbons;
+  assert.ok(ribbons.safeParse([]).success, "an empty list still loads");
+  const bad = ribbons.safeParse([{ id: "op:x:ribbon" }]);
+  assert.ok(!bad.success && bad.error.issues.some((i: any) => i.message.includes(RIBBONS_REMOVED)));
 });
 
 test("layout road grade: a fixed profile cuts a crest to a level forecourt, feathered, faults past its caps (Red Dial 2026-10-30)", async () => {
@@ -997,13 +1002,13 @@ test("built kinds: a lone tower keeps its size when its pocket is spread to the 
   assert.equal(fire[1] + plan.padY, tower.topY + 0.3);
 });
 
-test("a route follows its ribbon on to the paved end before leaving for a stand past it (net-green 2026-10-21: FALL off the bow)", () => {
-  // a ribbon bowing 3 m north between x 0 and x 40; route points: start on it, then a stand 10 m past its end
+test("a route follows its track on to the carved end before leaving for a stand past it (net-green 2026-10-21: FALL off the bow)", () => {
+  // a track bowing 3 m north between x 0 and x 40; route points: start on it, then a stand 10 m past its end
   const samples = Array.from({ length: 41 }, (_, i) => [i, 0, 3 * Math.sin((Math.PI * i) / 40)]);
-  const r = routeOnRibbon([[0, 0, 0], [5, 0, 2.3], [50, 0, 0]], samples, 1.2);
+  const r = routeOnTrack([[0, 0, 0], [5, 0, 2.3], [50, 0, 0]], samples, 1.2);
   assert.deepEqual(r[r.length - 1], [50, 0, 0]);
   assert.ok(r.some((p) => Math.abs(p[0]! - 20) < 2 && p[2]! > 2.5), "the bow is walked, not the chord");
-  assert.ok(r.some((p) => p[0] === 40), "on to the ribbon's end");
+  assert.ok(r.some((p) => p[0] === 40), "on to the track's end");
 });
 
 test("every place gets ONE silhouette: >= 2x its tallest other piece and the 300 m px floor (owner ruling 2026-10-21 23:25)", () => {

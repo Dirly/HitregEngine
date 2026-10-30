@@ -485,7 +485,7 @@ export const meshSchema = z.object({
           .optional()
           .describe(
             "Optional flat r, g, b, a quadruples, one per vertex (drawn when the material sets `vertexColors`). A " +
-              "path ribbon writes white with the verge / end fade in alpha, drawn dithered by an `alphaHash` material.",
+              "faded strip writes white with its edge / end fade in alpha, drawn dithered by an `alphaHash` material.",
           ),
       })
       .describe(
@@ -1295,7 +1295,7 @@ export const materialSchema = z.preprocess(waterColorFromColor, z.object({
     .optional()
     .describe(
       "Dithered (hashed) alpha: each fragment is kept with probability alpha, so a fade writes depth and never " +
-        "sorts. With `vertexColors` the vertex alpha fades it (a path ribbon's verge into the ground). PSX-style stipple.",
+        "sorts. With `vertexColors` the vertex alpha fades it (a strip's edge into the ground). PSX-style stipple.",
     ),
   alphaTest: z
     .number()

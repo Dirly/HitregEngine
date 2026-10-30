@@ -8,7 +8,7 @@
  *
  * This file holds only the registry and the doc schema (zod + type imports), so `recipe.ts` can validate
  * `features.operators` without an import cycle. Applying, removing and checking operators is `./operators.ts`;
- * each operator registers itself from its own module (`./operators-terrace.ts`, OP-B's `path` ribbon ...).
+ * each operator registers itself from its own module (`./operators-terrace.ts` ...).
  */
 import { z } from "zod";
 
@@ -103,17 +103,30 @@ export const operatorCompiledSchema = z.object({
 export const OPERATOR_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 /**
+ * Owner ruling 2026-10-30: the path RIBBON system (the `path` operator, `features.ribbons`, a world-op of kind
+ * `ribbons`) is gone from the engine and every tool. A world or a job that still declares one fails to load with this
+ * message, never silently: re-plan the walk as a carved + painted track (`worldgen road`, place-build tracks).
+ */
+export const RIBBONS_REMOVED = "ribbons were removed 2026-10-30: use carved+painted tracks";
+/** Operator names that were ribbon builders: a doc naming one fails with RIBBONS_REMOVED. */
+export const REMOVED_RIBBON_OPS: readonly string[] = ["path", "ribbon"];
+
+/**
  * One `features.operators` entry: `{ id, op, ...params }`. The params are validated by the registered operator's
  * schema; an unknown `op` is an error. `compiled` is written by the tool, never by hand.
  */
 export const operatorDocSchema = z
   .object({
     id: z.string().regex(OPERATOR_ID_RE).describe("Slug. Its compiled pieces are `op:<id>:*`; re-applying replaces exactly those."),
-    op: z.string().describe("Registered operator: see the engine spec `landformOperators` (terrace, path, ...)."),
+    op: z.string().describe("Registered operator: see the engine spec `landformOperators` (terrace, ledges, ...)."),
     compiled: operatorCompiledSchema.optional(),
   })
   .passthrough()
   .superRefine((doc, ctx) => {
+    if (REMOVED_RIBBON_OPS.includes(doc.op)) {
+      ctx.addIssue({ code: "custom", path: ["op"], message: `operator "${doc.id}" (op ${doc.op}): ${RIBBONS_REMOVED}` });
+      return;
+    }
     const o = REGISTRY.get(doc.op);
     if (!o) {
       ctx.addIssue({ code: "custom", path: ["op"], message: `unknown landform operator "${doc.op}" (registered: ${operatorNames().join(", ") || "none"})` });

@@ -71,7 +71,7 @@ export interface QualityRow {
   density: { props: number; areaM2: number; per100: number; floor: number; ok: boolean; /** share of the core area whose ground cover the place clears (a bare flat tile to the horizon) */ coverCleared: number };
   built: { walls: number; cliff: number; materials: string[]; bigRocks: number; ok: boolean };
   read: { view: string | null; distance: number | null; px: number | null; floor: number; ok: boolean; target: string | null };
-  /** path-operator ribbons the place owns (its approach and footpaths): the owner rejected ribbon roads (2026-10-20) */
+  /** ribbon operators the place still declares (approach or footpaths): ribbons were removed 2026-10-30, any entry is a fault */
   ribbons: string[];
   score: number;
 }

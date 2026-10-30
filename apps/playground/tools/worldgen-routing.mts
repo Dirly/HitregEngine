@@ -578,3 +578,50 @@ export function nearestRouteCell(n: number, routes: readonly (readonly number[])
   }
   return best;
 }
+
+/**
+ * The lake toll: what a route pays per cell on a lake's FOOTPRINT. The routers walled only cells whose ground lies under
+ * the water, so a lake's marshy lobe (ground a hand over its level, inside its outline) cost nothing and a path ran 70 m
+ * through the top of lake-1 beside Rustgut's Trough, filling a causeway where it could have gone round in a few tens of
+ * metres (Derek, redstrand 2026-10-30). Inside the outline a cell costs LAKE_FOOTPRINT_TOLL times the ground, and the
+ * low shore beside it (within the lake's `shore` band, under LAKE_SHORE_RISE over the water; a held rim at +1.5 is a bank) LAKE_SHORE_TOLL times, so
+ * any dry detour shorter than many times the crossing wins. A deliberate crossing is a bridge or a ford over a river,
+ * never a fill across a lake.
+ */
+export const LAKE_FOOTPRINT_TOLL = 25, LAKE_SHORE_TOLL = 8, LAKE_SHORE_RISE = 1;
+export interface TollLake { polygon?: readonly (readonly number[])[]; center: readonly number[]; radius: number; waterY?: number; shore?: number }
+/** Inside test + distance to a lake's outline (the polygon, else its circle). */
+export function lakeOutlineAt(l: TollLake): (x: number, z: number) => { inside: boolean; d: number } {
+  const poly = l.polygon && l.polygon.length >= 3 ? l.polygon : null;
+  return (x, z) => {
+    if (!poly) { const r = Math.hypot(x - l.center[0]!, z - l.center[1]!); return { inside: r < l.radius, d: Math.abs(r - l.radius) }; }
+    let inside = false, d = Infinity;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const ax = poly[i]![0]!, az = poly[i]![1]!, bx = poly[j]![0]!, bz = poly[j]![1]!;
+      if ((az > z) !== (bz > z) && x < ((bx - ax) * (z - az)) / (bz - az) + ax) inside = !inside;
+      const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1;
+      const t = Math.max(0, Math.min(1, ((x - ax) * ex + (z - az) * ez) / L2));
+      d = Math.min(d, Math.hypot(x - ax - t * ex, z - az - t * ez));
+    }
+    return { inside, d };
+  };
+}
+/** Per-cell multiplier for routing: LAKE_FOOTPRINT_TOLL on a lake's footprint, LAKE_SHORE_TOLL on its low shore, else 1. */
+export function lakeToll(lakes: readonly TollLake[]): (x: number, z: number, ground: number) => number {
+  const shapes = lakes.map((l) => {
+    const pts = l.polygon && l.polygon.length >= 3 ? l.polygon.map((p) => [p[0]!, p[1]!]) : [[l.center[0]! - l.radius, l.center[1]! - l.radius], [l.center[0]! + l.radius, l.center[1]! + l.radius]];
+    const band = Math.max(8, l.shore ?? 0);
+    const box = [Math.min(...pts.map((p) => p[0]!)) - band, Math.min(...pts.map((p) => p[1]!)) - band, Math.max(...pts.map((p) => p[0]!)) + band, Math.max(...pts.map((p) => p[1]!)) + band];
+    return { l, o: lakeOutlineAt(l), band, box };
+  });
+  return (x, z, ground) => {
+    let toll = 1;
+    for (const s of shapes) {
+      if (x < s.box[0]! || z < s.box[1]! || x > s.box[2]! || z > s.box[3]!) continue;
+      const r = s.o(x, z);
+      if (r.inside) return LAKE_FOOTPRINT_TOLL;
+      if (r.d <= s.band && (s.l.waterY === undefined || ground < s.l.waterY + LAKE_SHORE_RISE)) toll = LAKE_SHORE_TOLL;
+    }
+    return toll;
+  };
+}

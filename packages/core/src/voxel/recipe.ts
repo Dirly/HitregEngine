@@ -11,8 +11,7 @@ import { planarCliffsSchema } from "./planar-cliffs.js";
 import { seaCliffsSchema } from "./sea-cliffs.js";
 import { coastSegmentsSchema } from "./coast-plan.js";
 import { buttesSchema } from "./buttes.js";
-import { operatorDocSchema } from "./operator-registry.js";
-import { ribbonSchema } from "./ribbon.js";
+import { operatorDocSchema, RIBBONS_REMOVED } from "./operator-registry.js";
 import { kitWallSchema } from "./kit-walls.js";
 import { landmarkSchema } from "./ledge-landmark.js";
 import { groundPaintSchema } from "./ground-paint.js";
@@ -340,6 +339,8 @@ export const roadSchema = z.object({
   flatten: z.number().min(0).max(1).default(1).describe("How completely the road height wins over natural terrain."),
   maxCut: z.number().min(0).optional().describe("Deepest the road may cut BELOW the ground it crosses, metres, at every point of the roadway, shoulder and band (not only on the centreline). A trail with a small maxCut rides along the slope instead of trenching into it: where the graded surface would sit deeper, the tread follows the ground at that depth. Omitted = no limit (a graded road). The lip gate (`worldgen lips`) fails a cut wall the 2 m lattice draws as a zig-zag."),
   maxFill: z.number().min(0).optional().describe("Highest the road may stand ABOVE the ground it crosses, metres (the fill counterpart of `maxCut`). Omitted = no limit."),
+  seam: z.enum(["runner-up", "pooled"]).optional().describe("How the grade and bank heights of neighbouring segments meet beside a bend. `runner-up` (absent): the nearest segment blended with the second-nearest. `pooled`: every segment within a seam span of the nearest, each weighted by how near it is; beside a short segment the two either side of it no longer swap as runner-up, which stepped the embankment band by a metre or more. `worldgen paths` / `trails` / `road` write `pooled`."),
+  capBand: z.enum(["taper"]).optional().describe("`taper`: the `maxCut` / `maxFill` caps also hold the embankment band, shrinking from the tread's caps at the road edge to nothing at the band's outer edge, so a tread held at its cap under (or over) the ground eases back to that ground across the whole band. Absent: the band keeps the tread's depth out to its outer fade, which drew a rim there. Only with `maxCut` or `maxFill`. `worldgen paths` / `trails` / `road` write `taper`."),
   surface: z
     .string()
     .default("dirt")
@@ -2710,13 +2711,10 @@ export const worldRecipeSchema = z.object({
             "on the meshed ground like fall-site rocks, batched with each rule. Never hand-edited.",
         ),
       ribbons: z
-        .array(ribbonSchema)
+        .array(z.unknown())
+        .max(0, RIBBONS_REMOVED)
         .optional()
-        .describe(
-          "Path RIBBONS: solved walk surfaces laid over graded ground (steps, switchbacks, retaining walls). COMPILED by the " +
-            "`path` landform operator (ids `op:<id>:ribbon`); never hand-edited. The streamer draws each as a surface mesh with a " +
-            "collider; the field carves its wall faces; vegetation keeps its outline clear. Paths are ribbons: never carve a path.",
-        ),
+        .describe("REMOVED 2026-10-30 (owner ruling): path ribbons are gone. Any entry fails to load; walks are carved + painted `roads` tracks."),
       fallSites: z
         .array(fallSiteSchema)
         .optional()

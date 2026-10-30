@@ -19,10 +19,14 @@
  * A terrace wall's own riser is exempt: the lattice cell holding each fitted
  * `features.terraceWalls` face (and the cell in front, holding the berm the cut removes) is the wall, drawn by the
  * retaining-wall geometry and cut sharp by the terrace's passages, not a fault
- * of its patch. Its strip, pad and feathers are measured like any patch. A path ribbon's retaining walls
- * (`features.ribbons[].cuts`, kind face) and operator kit walls (`features.kitWalls[].cuts`) are exempt the same way.
+ * of its patch. Its strip, pad and feathers are measured like any patch. Operator kit walls (`features.kitWalls[].cuts`,
+ * kind face) are exempt the same way.
  *
- * Faults are attributed to the nearest patch / road and the command exits 1
+ * A cell in the bands of two or more edits is charged to the edit that MADE it: the one whose removal changes the drawn
+ * ground there most (`cellMaker`), so a road's cut edge inside a big patch's raster is the road's and a patch face over a
+ * road is the patch's. Only where no single edit moves the cell is it charged to the nearest band (2026-10-30 redstrand
+ * w13: the band faults of two roads inside the Weeping Sun's 391 m raster were all charged to that patch).
+ * Faults are attributed that way and the command exits 1
  * when any are found (an `--allow`ed id is reported, not failed). Thresholds:
  * `--alias 0.5` (m the drawn ground misses the field by), `--max-slope 1.6`
  * (rise/run between lattice samples), `--lip 0.75` (one-sample rim/slot, m).
@@ -138,7 +142,7 @@ export interface LipsResult {
 /**
  * A `wall` operator's retaining/quay body as riser faces: the bank it retains is the wall's job, drawn by its baked
  * geometry, not a fault of the patch that cut the ground in front of it (or of its own backfill). One face per plan leg,
- * re-based to the exposed face (`face: right` = right of travel, the normal [-dz, dx] as for ribbons); the band runs
+ * re-based to the exposed face (`face: right` = right of travel, the normal [-dz, dx]); the band runs
  * from 2.2 m in front of the battered foot (+ footing projection) back over the body and its backfill width.
  */
 export function wallOperatorFaces(recipe: WorldRecipe): { a: number[]; b: number[]; normal: number[]; reach: number }[] {
@@ -187,9 +191,8 @@ export function wallOperatorFaces(recipe: WorldRecipe): { a: number[]; b: number
 /** Cells whose centre is in a fitted terrace wall's riser band (the lattice cell behind each face). */
 export function terraceRiserBand(recipe: WorldRecipe): (x: number, z: number) => boolean {
   const faces: { a: readonly number[]; b: readonly number[]; normal: readonly number[]; reach?: number }[] = (recipe.features.terraceWalls ?? []).flatMap((t) => t.solved?.faces ?? []);
-  // a path ribbon's retaining walls: each face cut is one wall face (n = right of its run = the low side)
   // operator kit walls (`features.kitWalls`, e.g. terrace risers) the same way
-  for (const r of [...(recipe.features.ribbons ?? []), ...(recipe.features.kitWalls ?? [])]) for (const c of r.cuts) {
+  for (const r of recipe.features.kitWalls ?? []) for (const c of r.cuts) {
     if (c.kind !== "face") continue;
     faces.push({ a: c.origin, b: [c.origin[0] + c.dir[0] * c.s[1], c.origin[1] + c.dir[1] * c.s[1]], normal: [-c.dir[1], c.dir[0]], reach: c.n[1] + 0.5 });
   }
@@ -216,7 +219,7 @@ export function terraceRiserBand(recipe: WorldRecipe): (x: number, z: number) =>
 /**
  * Cells an OPEN box passage cuts (a way, a court, a cleft open to the sky: its ceiling stands above the ground there): the
  * drawn surface in them is the passage floor and walls, which the heightfield `height()` the lips measure reads cannot
- * see, so a patch is not charged for a step the passage carves away (a path ribbon ending in a cut court mouth). A
+ * see, so a patch is not charged for a step the passage carves away (a path ending in a cut court mouth). A
  * tunnel (ceiling under the ground) does not open the cell. Footprint + one lattice step.
  */
 /**
@@ -268,6 +271,58 @@ export function openCutBand(recipe: WorldRecipe, height: (x: number, z: number) 
       if (h > q.floor + 0.25 && q.top >= h) return true;
     }
     return false;
+  };
+}
+
+/**
+ * Which edit MADE the drawn ground of the lattice cell centred at (x, z), among the owners whose bands hold it: the one
+ * whose removal moves the ground there most (centre and the four half-cell corners), as `kind:id`. Undefined when no
+ * candidate moves it by more than the gate's touched tolerance (0.15 m): the caller falls back to the nearest band.
+ * The fields without each edit are built lazily, one per edit id; answers are cached per cell.
+ */
+export interface CellMaker {
+  /** `kind:id` of the edit whose removal moves the cell most (undefined: none moves it past 0.15 m). */
+  made: string | undefined;
+  /** Every candidate whose removal moves the cell more than 0.5 m. */
+  moved: string[];
+}
+export function cellMaker(recipe: WorldRecipe, field: { height(x: number, z: number): number }, step = 2): (x: number, z: number, candidates: { kind: string; id: string }[]) => CellMaker {
+  const without = new Map<string, { height(x: number, z: number): number }>();
+  const fieldWithout = (kind: string, id: string) => {
+    const key = `${kind}:${id}`;
+    let f = without.get(key);
+    if (!f) {
+      f = createWorldField({
+        ...recipe,
+        features: kind === "road"
+          ? { ...recipe.features, roads: recipe.features.roads.filter((r) => r.id !== id) }
+          : { ...recipe.features, heightPatches: recipe.features.heightPatches.filter((p) => p.id !== id) },
+      });
+      without.set(key, f);
+    }
+    return f;
+  };
+  const cache = new Map<string, CellMaker>();
+  const h = step / 2;
+  const pts: [number, number][] = [[0, 0], [-h, -h], [h, -h], [-h, h], [h, h]];
+  return (x, z, candidates) => {
+    const ids = [...new Set(candidates.map((c) => `${c.kind}:${c.id}`))].sort();
+    const key = `${x},${z}|${ids.join("|")}`;
+    const hit = cache.get(key);
+    if (hit) return hit;
+    const here = pts.map(([dx, dz]) => field.height(x + dx, z + dz));
+    let best: string | undefined, bestD = 0.15;
+    const moved: string[] = [];
+    for (const k of ids) {
+      const sep = k.indexOf(":"), f = fieldWithout(k.slice(0, sep), k.slice(sep + 1));
+      let d = 0;
+      pts.forEach(([dx, dz], i) => { d = Math.max(d, Math.abs(here[i]! - f.height(x + dx, z + dz))); });
+      if (d > bestD) { bestD = d; best = k; }
+      if (d > 0.5) moved.push(k);
+    }
+    const out = { made: best, moved };
+    cache.set(key, out);
+    return out;
   };
 }
 
@@ -329,7 +384,8 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
   const rows: LipsResult["owners"] = [];
   const all: (TerrainLipFault & { owner: string })[] = [];
   const totals = { alias: 0, step: 0, lip: 0, cells: 0, touched: 0 };
-  // measured owner by owner; a cell in two bands is attributed to the nearer one
+  // measured owner by owner; a cell in two bands is attributed to the edit that made it (else to the nearer band)
+  const maker = cellMaker(recipe, field);
   for (const o of list) {
     let [x0, z0, x1, z1] = o.box;
     if (opts.near) {
@@ -349,13 +405,25 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
       // a ground-need patch (`need-*`, worldgen needs) IS a rock face: its 45-60 deg face is the point, so only a wall
       // steeper than NEED_FACE_MAX_SLOPE counts (2026-10-29 redstrand w6: the weeping-sun scarp read as 1173 steps)
       aliasTol: opts.aliasTol, maxSlope: o.kind === "patch" && o.id.startsWith("need-") ? Math.max(opts.maxSlope ?? 1.6, NEED_FACE_MAX_SLOPE) : opts.maxSlope, lipTol: opts.lipTol,
+      // a cell a need face also moved is that face's rock wherever it stands: a road cut deepening its toe is charged to
+      // the road, at the face's slope (the steepest tolerance of the edits that moved the cell)
+      maxSlopeAt: (x, z) => {
+        const rivals = others.filter((q) => q.band(x, z) <= 0);
+        if (!rivals.length) return undefined;
+        return maker(x, z, [o, ...rivals]).moved.some((k) => k.startsWith("patch:need-")) ? Math.max(opts.maxSlope ?? 1.6, NEED_FACE_MAX_SLOPE) : undefined;
+      },
       include: (x, z) => {
         const mine = o.band(x, z);
         if (mine > 0) return false;
         if (riser(x, z)) return false;
         if (built(x, z)) return false;
         if (cut(x, z)) return false;
-        for (const q of others) if (q.band(x, z) < mine) return false;
+        const rivals = others.filter((q) => q.band(x, z) <= 0);
+        if (!rivals.length) return true;
+        const { made } = maker(x, z, [o, ...rivals]);
+        if (made && made !== `${o.kind}:${o.id}`) return false;
+        // made by this edit (or by none): the nearest band among the claimants (a long road is several owners, one id)
+        for (const q of rivals) if ((!made || (q.kind === o.kind && q.id === o.id)) && q.band(x, z) < mine) return false;
         return true;
       },
     });

@@ -6,7 +6,7 @@
  * GameServer + one loopback body) and sweeps the area block by block (2 x 2 map cells): the body is held at the
  * block's corner until the server's own ring around it is resident — what a player standing there has, no more — and
  * every sample point of the block is cast straight down against the PHYSICS (sim.raycast: terrain cells, landmark
- * collider tiles, ribbons, kit/town pieces, props), next to the ground the player sees: the recipe field's surface
+ * collider tiles, kit/town pieces, props), next to the ground the player sees: the recipe field's surface
  * (what the terrain mesh draws) and every landmark's RENDER mesh (its baked GLBs). The lattice is `--coarse` (4 m)
  * over the area and `--fine` (1 m) on places (landmarks, POIs, towns: their radius + 20 m) and along roads (4 m each
  * side). Faults (tools/_holes.mts classifyColumn):

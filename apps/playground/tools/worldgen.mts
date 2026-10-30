@@ -88,7 +88,7 @@ import {
   RIVER_FALL_MIN,
 } from "@hitreg/core";
 import { adoptDroppedParents, basinFootprint, joinParentHeadLake, loopsBackToLake, splitClearOfLakes, runGradeNeed, computeHydrology, extractBasins, extractChannels, simplifyLoop, traceOutline, type Channel, type HydroGrid } from "./worldgen-hydrology.mts";
-import { nearestRouteCell, routeBetween, smoothRoute, solveProfile, type RouteGrid, type RouteOptions } from "./worldgen-routing.mts";
+import { lakeToll, nearestRouteCell, routeBetween, smoothRoute, solveProfile, type RouteGrid, type RouteOptions } from "./worldgen-routing.mts";
 import { auditWorld } from "./worldgen-audit.mts";
 import { modelBounds } from "./_gltf-bounds.mjs";
 import { borderClassifier, borderReport, planBarriers, snowLineOf, stripBarrierFeatures, type BorderPairReport } from "./worldgen-borders.mts";
@@ -125,7 +125,7 @@ import { PROGRAM_RULE, bandStreet, kerbedBand, loadTownProgram, measureShelfFlat
 import { COASTAL_TOWN, TERRACE_DEFAULTS, coastalTownFindings, findCoastalSites, landGate, terraceReach } from "./worldgen-coastal-towns.mts";
 import { commandVegetation } from "./worldgen-vegetation.mts";
 import { commandNeeds, commandSitingMap, commandTownsPick, commandTownsPropose, needsStageCheck, townNeedsFindings, type SiteNeedsHost } from "./worldgen-site-needs.mts";
-import { commandRoad } from "./worldgen-road.mts";
+import { commandRoad, commandRoadWater } from "./worldgen-road.mts";
 import { commandFine, commandOp, commandOpPreview, fineStatusLine, stampGateStage } from "./worldgen-operators.mts";
 import { findAsset } from "./_closure.mjs";
 import { briefStories, zonegenPopulated, zoneStoriesMissing } from "./_zone-sources.mts";
@@ -5725,6 +5725,14 @@ function routeGridFor(
       }
     }
   }
+  // a lake's footprint (its marshy lobes a hand over the water included) and low shore are tolled, so a road goes round
+  // a lake instead of filling a causeway across its edge (worldgen-routing lakeToll; Derek 2026-10-30, Rustgut's)
+  const toll = lakeToll(recipe.features.lakes);
+  for (let i = 0; i < total; i++) {
+    if (!Number.isFinite(cost[i]!)) continue;
+    const x = grid.worldX(i % n), z = grid.worldZ((i / n) | 0);
+    cost[i] = cost[i]! * toll(x, z, grid.height[i]!);
+  }
   // The banks: dearer to travel, so a road keeps off them unless it is
   // crossing. A road that ran along a river inside its bank band regraded
   // the bank into a beach (its embankment reached into the channel), and a
@@ -6511,6 +6519,10 @@ function roadFrom(
       leftY,
       rightY,
       flatten: 1,
+      // every segment near a bend shares the band (no runner-up swap), and the tread's cut/fill caps taper across the band
+      // (2026-10-30 redstrand w13: 1.2 m steps and a 1 m rim beside road-moon / road-weeping-sun; RoadDoc.seam / capBand)
+      seam: "pooled",
+      capBand: "taper",
       surface: options.surface ?? "dirt",
       surfaceEdge: options.width > 4 ? 2.5 : 1.5,
       ...(options.surfaceByBiome ? { surfaceByBiome: options.surfaceByBiome } : {}),
@@ -11124,6 +11136,10 @@ switch (command) {
     break;
   case "trails":
     commandTrails();
+    break;
+  case "road-water":
+    // roads filled across a lake's edge where a dry detour under 2x exists (worldgen-road roadLakeFills)
+    commandRoadWater({ argv, loadRecipe: () => loadRecipe(), writeRecipe, fail, grade: () => fail("road-water does not grade") });
     break;
   case "road":
     // one carved+painted road along a drawn line (an approach to a landmark): graded by roadFrom with every point

@@ -8,7 +8,7 @@ description: Shape the ground of a site or route in a voxel world and prove it c
 Sources: `docs/voxel-worlds.md` "Height-patch edges", section 31 "What grows in a region, and clearings", 25b
 "Plants over a carve"; `docs/zone-creation.md` phase 2 (vegetation by place mood). Run from `apps/playground`.
 
-**Paths are ribbons; never carve a path into the terrain**: a route is a `path` operator (docs/voxel-worlds.md "Path ribbons"), never a road band, carve boxes or a hand patch.
+**Paths are carved + painted tracks** (`worldgen road`, a narrow tread on the zone's path surface; place-build footpaths and approaches do it for you). Ribbons were removed 2026-10-30 (owner ruling): a `path` operator or `features.ribbons` entry fails to load. Never carve boxes or a hand patch for a route.
 
 **A wall, retaining wall, quay or causeway ramp is the `wall` operator** (a swept profile along a line, `variant` free/retaining/quay/ramp), never a chain of boxes or a terrain step: it stands on its own terrain-following footing, ties its ends into the hill, and its ramp turns steep stretches into stairs.
 
@@ -50,6 +50,9 @@ pnpm -F playground exec tsx tools/voxel-blades.mts <recipe.json> --sites --caves
   A riser that cannot pass is shortened, then left a graded voxel riser by the stage (it says which gate failed).
 - Roads: `maxCut` / `maxFill` cap tread, shoulder and band against the ground, so a trail rides the slope; the
   centreline `--max-cut` alone still cuts a wall beside it.
+- A road never fills across a lake's edge it could go round: `worldgen road-water` (re-route with `worldgen road --route`,
+  or `--stage-piece` for one path piece). Roads written since 2026-10-30 carry `seam: pooled` + `capBand: taper`; an older
+  road with steps or a rim in its band gets them (op `update-feature`).
 
 ## Gates: failure -> fix
 - `lips` `alias` (sawtooth), `step` (wall), `lip` (rim/slot) -> widen feather, set `filter`, `maxSlope` on low risers,

@@ -590,7 +590,7 @@ export function applyMaterialCommon(material: THREE.Material, data: MaterialData
   // face-tinted meshes by cloning the material after it is built, and the
   // schema field exists for the OTHER case (imported geometry with COLOR_0).
   if (data.vertexColors === true) material.vertexColors = true;
-  // dithered alpha (a path ribbon's verge fade): a compile-time switch, keyed above
+  // dithered alpha (a strip's edge fade): a compile-time switch, keyed above
   material.alphaHash = data.alphaHash === true;
   if ((data.shader ?? "standard") === "standard") {
     const pbr = material as THREE.Material & { envMapIntensity?: number; envMap?: THREE.Texture | null };
