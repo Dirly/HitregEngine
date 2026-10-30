@@ -430,7 +430,7 @@ function uncatalogued(): string[] {
  */
 const FAMILIES: [string, RegExp][] = [
   ["barrel", /barrel|cask|keg|\btun\b/], ["crate", /crate/], ["tent", /\btent\b/], ["cart", /\bcart\b(?! wheel)|handcart|wagon|wheel ?barrow|caravan/], ["torch", /torch/],
-  ["bones", /bone|skull/], ["sack", /sack/], ["basket", /basket/], ["chest", /\bchest\b|coffer/], ["cage", /cage/], ["banner", /banner|pennant/],
+  ["bones", /bone|skull/], ["sack", /sack/], ["basket", /basket/], ["chest", /\bchest\b|coffer/], ["cage", /(?<!rib )cage/], ["banner", /banner|pennant/],
   ["campfire", /campfire|fire-?pit/], ["table", /\btable\b/], ["bench", /\bbench\b/], ["stool", /stool/], ["chair", /chair/], ["bed", /(?<!(reed|river|sea|flower|peat) )\bbeds?\b/],
   ["lantern", /lantern/],["shelter", /tarp|lean-to|shelter/], ["brazier", /brazier/], ["gravestone", /grave-?stone|headstone/],
   ["column", /column|pillar/], ["statue", /statue/],
