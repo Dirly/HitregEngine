@@ -206,10 +206,10 @@ export interface WoodlandSpecies {
 /** Ordered by preference within a role; the first one allowed is used. */
 export const WOODLAND_SPECIES: readonly WoodlandSpecies[] = [
   { id: "woodland-botany/vine-hung-jungle", model: "woodland-botany/vine-hung-jungle.glb", role: "canopy", kind: "jungle", leaves: "leaves,vine", scale: [0.85, 1.15], footprint: 1.2, collider: "cylinder", colliderSize: [0.9, 6, 0.9] },
-  { id: "woodland-botany/great-canopy", model: "woodland-botany/great-canopy.glb", role: "canopy", kind: "broadleaf", leaves: "leaves", scale: [0.8, 1.15], footprint: 1.6, collider: "cylinder", colliderSize: [1, 7, 1] },
+  { id: "woodland-botany/great-canopy", model: "woodland-botany/great-canopy.glb", role: "canopy", kind: "broadleaf", leaves: "leaves", scale: [2.0, 3.0], footprint: 1.6, collider: "cylinder", colliderSize: [1, 7, 1] },
   { id: "woodland-botany/tropical-broadleaf", model: "woodland-botany/tropical-broadleaf.glb", role: "understory", kind: "jungle", leaves: "leaves,broadlea", scale: [0.8, 1.2], footprint: 0.6, collider: "none", colliderSize: [1, 1, 1] },
   { id: "woodland-botany/woodland-fern", model: "woodland-botany/woodland-fern.glb", role: "understory", kind: null, leaves: "leaves,fern,frond", scale: [0.8, 1.3], footprint: 0.55, collider: "none", colliderSize: [1, 1, 1] },
-  { id: "woodland-botany/weeping-willow", model: "woodland-botany/weeping-willow.glb", role: "shore", kind: "broadleaf", leaves: "leaves,willow", scale: [0.85, 1.2], footprint: 1.3, collider: "cylinder", colliderSize: [0.9, 5, 0.9] },
+  { id: "woodland-botany/weeping-willow", model: "woodland-botany/weeping-willow.glb", role: "shore", kind: "broadleaf", leaves: "leaves,willow", scale: [2.0, 3.0], footprint: 1.3, collider: "cylinder", colliderSize: [0.9, 5, 0.9] },
 ];
 
 /** The generated rule id per role (rewritten on every run). */
