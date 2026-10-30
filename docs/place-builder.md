@@ -34,6 +34,7 @@ $T approach <world> --zone <z> --location <id>                               # r
 $T dress <world> --zone <z> --location <id>                                  # re-lay the DRESSING only (vignettes by pocket role, from the LIVE plans: swaps and quest objects kept); then lab, build, gates, install
 $T props <world> --zone <z> --location <id>                                  # the layout's hero-prop sheet (reports/layout-props.png, no browser)
 $T evidence <world> --zone <z> --location <id>                               # progress.json evidence.readShot from taken shots
+$T scale <world> --zone <z> --location <id> [--live]                        # a PAINTED place vs its painting (concept-marks.json), in the painting's pixels
 $T install <world> --zone <z> --location <id> [--dry-run | --uninstall]        # coordinator, after a fresh review
 $T quality <world> --zone <z> [--shots] [--only a,b] [--port p]              # every installed place of the zone graded in the LIVE world
 ```
@@ -50,6 +51,8 @@ missing from the closure.
 
 A pinned core (`--at`) ignores the brief's `site.faces` (it described another spot) and faces the nearest approach point 40 m+ away, which can be the OTHER approach's end: `--faces <compass>` names the front (kept in brief.json). A landmark owner writes `<job>/contract.json` `{ idea, mustRead[], views[] }` BEFORE the grey box (HERO-BRIDGE discipline: one idea, 3 fixed cameras incl. the 300 m road view, `camera` + `target` each); every `plan` merges those views into `views.json` and `shots` takes them.
 
+Scale (gate 17, Red Dial 2026-10-30: "you don't have the scale correct with the concept art"): a place with an approved painting (`<zone>/concept/<id>.site.json`) writes `<job>/concept-marks.json` `{ view, marks: [{ id, pieces[], box: [x0,y0,x1,y1], dims }] }` — each hero piece's (or group's) box in the painting's pixels; `scale` projects the built pieces through the painting's own camera (vfov 60) and fails any judged width/height more than 15 % off, naming the factor (`reports/scale.json`, a gates row, read by the install guard). Judge `w` only where the painting hides a piece's foot; a group (ring + plinth) measures a silhouette whose ends are both visible. Fix PROPORTIONS, not one piece: the ring read small because the pillars were tall.
+
 The job dir is `zonegen/<world>/zones/<z>/pois/<id>/`: `handoff.json` (routes for poi-walk, `siteDressing`, measured
 size, landmark, viewpoints), `ops.json`, `world-ops.json` (pads), `operators.json` (walls, footpaths),
 `clearings.json`, `encounter-clearings.json`, `dressing/<id>-<pocket>.json`, `views.json`, `prop-requests.json`,
@@ -65,13 +68,15 @@ builder decided where things went (TOOLS-LAYOUT 2026-10-24). The owner writes `<
 
 ```
 { "version": 1, "frame": "place", "origin": [x, z],
-  "pieces": [{ "id", "element", "kind": "structure"|"prop"|"fire"|"decal", "prefab", "at": [x, z], "yaw"?, "scale"?, "pocket"?, "role"?, "landmark"?, "over"?: [ids], "on"?: "<earlier piece id>", "quest"?: "<slot>" }],
+  "pieces": [{ "id", "element", "kind": "structure"|"prop"|"fire"|"decal", "prefab", "at": [x, z], "yaw"?, "scale"?, "pocket"?, "role"?, "landmark"?, "over"?: [ids], "on"?: "<earlier piece id>", "sink"?: m (a decal: below the ground; a piece `on` a host: set into its top), "quest"?: "<slot>" }],
+  "roads"?: [{ "id", "element"?, "points": [[x, z], ...], "width"?: 7, "maxGrade"?: 0.12, "surface"?: "<recipe surface>", "grade"?: { "forecourt"?: 10, "past"?: 0, "width"?, "forecourtWidth"?, "level"?: 0, "feather"?: 10, "maxCut"?: 3, "maxFill"?: 2 } }],   // carved + painted roads inside the place (an avenue to a stair): `road-pb-<poi>-<id>`, graded like the approach track, never a ribbon
   "views":  [{ "name", "camera": [x, y, z], "target": [x, y, z] }],
   "ground": [{ "id", "element"?, "kind": "wear"|"mud"|"ash"|"paving"|"rubble", "at": [x, z], "radius"?, "texture"? }],
   "waters": [{ "id", "element"?, "on": "<piece id>", "marker"?: "basin-water", "material", "depth"?, "swim"? }],
   "areas":  [{ "id", "role", "at": [x, z], "radius", "note"?, "reach"?: [x, z] }] }
 ```
 
+- **A graded avenue** (road `grade`, `surface`): `worldgen road` follows the ground, so a crest mid-avenue stays (Red Dial: cut 0.14 m) and hides the stair foot. `grade` writes ONE masked height patch `pb-<poi>-grade-<id>` (cut and fill): a straight grade from the natural ground at the first point to a level forecourt (ground at the last point + `level`) for `forecourt` m before the end and `past` m beyond it (under a plinth), `width` wide (`forecourtWidth` at the forecourt), smoothstep-feathered `feather` m. It goes on the ground BEFORE the pieces seat (the plan runs again on it) and leads world-ops (seat pads win). `LAYOUT:` faults: a grade over `maxGrade`, a cut/fill under the band over `maxCut`/`maxFill`. `surface` paints the tread with a named recipe surface (a zone remaps the default dirt to its own ground: the avenue read as the field); then `lips` and `seated` as for any patch.
 - **Extra dressing areas** (`areas`): a midden, an opened tomb, beyond the pockets' own areas (a pinpoint has one pocket). Each joins
   handoff siteDressing.areas, gets its own fresh dresser and plan `dressing/<poi>-<id>.json`, which `plan` keeps; `reach` is the
   walk gate's point at the area's edge (default the centre, where its props stand).
@@ -94,7 +99,7 @@ builder decided where things went (TOOLS-LAYOUT 2026-10-24). The owner writes `<
 - **The layout is the whole composition**: the archetype's structures, its `read.beacon` (and the silhouette tower)
   and its pockets' listed `dressing.props` are not added. The archetype still gives terrain (pocket fits, pads), walls,
   clearings, encounters, the quest slots and the FILLER, which treats every piece's footprint as occupied ground. A pocket
-  named by pieces (`pocket`) is centred on them. Layout `views` replace the `views` set (contract.json views still win).
+  named by pieces (`pocket`) is centred on them. Layout `views` replace the `views` set (contract.json views still win). The painting's cameras are never copied by hand: `concept-<view>` shots come from the concept-on-site record (`<zone>/concept/<poi>.site.json` `renders`, world space); a layout view of that name more than 5 m off is a `LAYOUT:` fault (Red Dial 2026-10-30: hand-copied world offsets read in the turned place frame put the far camera 134 deg off).
 - **Walls share the frame**: under a layout the core pocket's `walls` (`<pocket>.walls` sets) stand at their written `at` /
   `points` in the same place frame as the pieces; the tier spread (`spreadToFloor`, floor / fit) is undone for them, so a
   chapel drawn at [28,-4] beside a bell at [16,-2] is 12 m from it, not 35 (Exiles' Bell 2026-10-24).

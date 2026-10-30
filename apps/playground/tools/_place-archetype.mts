@@ -76,6 +76,7 @@ export const placeStructureSchema = z.object({
   yaw: z.number().default(0).describe("Degrees about +Y in the place frame (0: the prefab's +Z front faces the approach)."),
   footprint: z.number().min(0.5).max(20).default(2.5).describe("Radius of what it stands on, metres: its pad, its cover clearing and the dressers' keep-out."),
   lift: z.number().min(0).max(2).default(0).describe("Metres above its seat (layout pieces: `lift`)."),
+  sink: z.number().min(0).max(6).default(0).describe("A piece `on` another: metres it is set INTO its host's top (layout pieces: `sink`). Ignored off a host."),
   scale: z.number().min(0.5).max(3).default(1).describe("Uniform scale of the placed piece (a silhouette element taller than its catalogue size). L (PLACES-FIX 2026-10-22): never past its texel floor: the plan refuses a scale that takes the piece under MIN_SCALED_TEXELS tx/m (its catalogue texel density / scale)."),
   landmark: landmarkSchema.nullable().default(null).describe("Present on the ONE landmark (a structure or a wall; L: every place reads from its approaches)."),
   on: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of an earlier structure of the pocket (a crag, a rock): the piece stands on that piece's own mesh top at its spot (a cairn on a crag top), never on the ground."),
@@ -308,7 +309,7 @@ const layoutPieceSchema = z.object({
   landmark: landmarkSchema.optional().describe("The ONE piece the approach read and the silhouette rule judge (at most one per layout)."),
   over: z.array(z.string()).default([]).describe("Piece ids this piece is MEANT to overlap (a hoist gantry straddling the bell, a tarp standing over a crate): those footprint pairs are exempt from the overlap refusal, both directions. L (Exiles' Bell 2026-10-24)."),
   quest: z.string().regex(/^[a-z0-9-]+$/).optional().describe("A quest slot (the quest plan's object id, `--set quest.<slot>=<prop>`): the slot's prop (the set's prop; this piece's `prefab` when the set names none) is placed HERE as the quest entity (a fixed floor item of the core plan at this `at`/`yaw`), never at the dressing plan's auto spot; the piece is not also built as a structure."),
-  sink: z.number().min(0).max(4).default(0).describe("Decal pieces only: metres the piece stands BELOW the ground at its centre. A piece set INTO a rock face (an opened niche whose back is in the face) has its centre over the face, where the ground is the face itself; `sink` lowers it to the foot so its front stands flush on the flat. L (o-small 2026-10-29)."),
+  sink: z.number().min(0).max(6).default(0).describe("Decal pieces: metres the piece stands BELOW the ground at its centre. A piece set INTO a rock face (an opened niche whose back is in the face) has its centre over the face, where the ground is the face itself; `sink` lowers it to the foot so its front stands flush on the flat. L (o-small 2026-10-29). A piece `on` another: metres it is set INTO its host's top (a ring whose own foot and pier stand inside the plinth, so its arcs rest on the top as painted). L (Red Dial scale 2026-10-30)."),
   lift: z.number().min(0).max(2).default(0).describe("Metres the piece stands above its seat (raised foundations: a kit building whose floor slab is at y=0 stands 0.6 m up, like town buildings, so the slab never shares the pad surface — Ashen Vow 2026-10-24: a 410 m2 z-fight)."),
   on: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of an EARLIER piece of the layout: this piece stands on that piece's own mesh top at its `at` (a ring on its plinth, a fire bowl on a pillar cap or a tower top), never on the ground; list it with `over` when the footprints overlap. L (Red Dial 2026-10-29: the ring stands on a 2.4 m plinth, lift caps at 2 m)."),
   lean: leanSchema.optional().describe("Tilt the WHOLE piece from its foot (leanSchema): yaw turns it, lean tips it (also on top of an `on` piece). L (KNUCKLECROWN 2026-10-29)."),
@@ -372,6 +373,24 @@ export const placeLayoutSchema = z.object({
     note: z.string().default("").describe("What the area is for, printed in the dresser brief."),
     reach: xz.optional().describe("Place frame point poi-walk walks to for this area: open ground at its edge, on the walk side (default the centre, where the dresser's props and the area's own pieces stand; a reach there walked into a basin and through a sack)."),
   }).strict()).max(4).default([]).describe("Extra DRESSING AREAS beyond the pockets' (handoff siteDressing.areas): a midden, an opened tomb at the rib foot, each dressed by its own fresh dresser. Plan never wipes their plan files. L (o-small2 dropped-hour 2026-10-30)."),
+  roads: z.array(z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/).describe("Road id: the world feature `road-pb-<poi>-<id>` (owned by the place, removed by --uninstall)."),
+    element: z.string().optional().describe("The design element the road belongs to (checked like a piece's)."),
+    points: z.array(xz).min(2).max(16).describe("Place frame centre line, in order (an avenue: from its far end to the stair foot)."),
+    width: z.number().min(3).max(10).default(7).describe("Tread width, metres."),
+    maxGrade: z.number().min(0.04).max(0.3).default(0.12).describe("Steepest rise/run along it."),
+    surface: z.string().optional().describe("Recipe surface the tread is painted with (`worldgen road --surface`; default the road machinery's dirt, which a zone's ground remap paints as its OWN ground). A worn avenue names a contrasting zone surface (<world>-road, <world>-paving). L (Red Dial 2026-10-30: the avenue tread read as the field's red)."),
+    grade: z.object({
+      forecourt: z.number().min(0).max(60).default(10).describe("Metres of LEVEL ground at the road's END (the stair foot), along the axis."),
+      past: z.number().min(0).max(40).default(0).describe("Metres the level forecourt runs on PAST the end point (under a plinth, so it seats on the same level)."),
+      width: z.number().min(3).max(40).optional().describe("Full width of the graded band along the avenue, metres (default the tread width): wide enough for pillar rows to stand on it."),
+      forecourtWidth: z.number().min(3).max(60).optional().describe("Full width of the level forecourt, metres (default `width`)."),
+      level: z.number().min(-4).max(4).default(0).describe("Forecourt level: metres above (+) or below (-) the natural ground at the road's last point."),
+      feather: z.number().min(4).max(30).default(10).describe("Metres outside the band over which the patch fades back to the natural ground (smoothstep, masked weights)."),
+      maxCut: z.number().min(0).max(6).default(3).describe("Deepest cut under the band (natural ground over the profile) before the plan refuses."),
+      maxFill: z.number().min(0).max(6).default(2).describe("Highest fill under the band (profile over the natural ground) before the plan refuses."),
+    }).strict().optional().describe("FIXED-PROFILE grade (`pb-<poi>-grade-<id>`, a masked height patch, cut AND fill, applied to the ground BEFORE the pieces are seated): a straight grade from the natural ground at the first point to a level forecourt at the end, so a crest mid-avenue never hides the stair foot. `worldgen road` alone follows the ground (it cut a 1 m crest by 0.14 m). L (Red Dial 2026-10-30)."),
+  }).strict()).max(3).default([]).describe("CARVED + PAINTED ROADS inside the place (the world's road machinery: `worldgen road` dry run, the approach track's cut/fill caps and keep-landforms; the cover clears along a road): an avenue of worn earth between pillar rows straight to a stair. Never a ribbon. L (Red Dial 2026-10-30: the painted avenue was a grass hump with no path)."),
   vegetation: regionVegetationSchema.optional().describe("The place's OWN region vegetation (recipe regions[id = the poi].vegetation, a place region): species swaps, thinning and cover filters over the whole place, applied by build/install (removed by --uninstall). Clearings only thin; this says WHAT grows (broadleaf -> dead pines on a heath crown). L (KNUCKLECROWN 2026-10-29: a heath crown stood in lush broadleaf with no data path to say otherwise)."),
 }).strict().superRefine((l, ctx) => {
   const ids = l.pieces.map((p) => p.id);
@@ -437,7 +456,7 @@ export function boxesOverlap(a: { at: [number, number]; half: [number, number]; 
 export function withLayout(a: PlaceArchetype, l: PlaceLayout, info?: (prefab: string) => { size?: number[] } | null): PlaceArchetype {
   const pieces = l.pieces.filter((p) => p.kind !== "decal" && !p.quest).map((p) => {
     const half = pieceHalf(p, info?.(p.prefab)?.size);
-    return { id: p.id, role: pieceRole(p), prefab: p.prefab, choices: [], at: p.at, yaw: p.yaw, footprint: Math.min(20, Math.max(0.5, half ? Math.round(Math.hypot(half[0], half[1]) * 100) / 100 : 1)), scale: p.scale, lift: p.lift ?? 0, landmark: p.landmark ?? null, ...(p.on ? { on: p.on } : {}), ...(p.lean && p.lean.deg > 0 ? { lean: p.lean } : {}), overrides: p.overrides ?? [] } as PlaceArchetype["pockets"][number]["structures"][number];
+    return { id: p.id, role: pieceRole(p), prefab: p.prefab, choices: [], at: p.at, yaw: p.yaw, footprint: Math.min(20, Math.max(0.5, half ? Math.round(Math.hypot(half[0], half[1]) * 100) / 100 : 1)), scale: p.scale, lift: p.lift ?? 0, landmark: p.landmark ?? null, ...(p.on ? { on: p.on, ...(p.sink ? { sink: p.sink } : {}) } : {}), ...(p.lean && p.lean.deg > 0 ? { lean: p.lean } : {}), overrides: p.overrides ?? [] } as PlaceArchetype["pockets"][number]["structures"][number];
   });
   // L (Exiles' Bell 2026-10-24): spreadToFloor had multiplied the core walls' `at` by floor / fit (x1.8), so a chapel the
   // owner drew at [28,-4] stood 51 m out while the pieces beside it stood exactly: under a layout the walls stand where
@@ -833,6 +852,11 @@ const encloses = (w: z.infer<typeof placeWallSchema>, r: number) => w.shape !== 
  *  2 m from every structure footprint and wall line, so routes, dressing areas and clearings never end inside a wall or a kiln. */
 export function standPoint(p: z.infer<typeof placePocketSchema>, at: V2, front: V2): V2 {
   const clearOf = pocketClearance(p);
+  // L (Red Dial 2026-10-30, o-large3): the pocket's own fight ground (encounter.at, e.g. the stair foot the boss guards) is
+  // where the routes arrive when it is clear: the search below walks toward the frame's +z, which a turned layout's avenue
+  // need not follow (the core stand fell behind the plinth, boxed in by the avenue walls: approach "no walkable way")
+  const ea = p.encounter?.at as V2 | undefined;
+  if (ea && clearOf(ea) >= 2) return toWorld(at, front, ea).map(r2) as V2;
   for (const c of [[0, 0], [0, 3], [3, 3], [-3, 3], [0, 6], [4, 6], [-4, 6], [0, 9]] as V2[]) if (clearOf(c) >= 2) return toWorld(at, front, c).map(r2) as V2;
   // L (Red Dial 2026-10-29: a 24 x 18 m plinth over the core centre put every stand inside it; all routes "no walkable
   // way"): further out toward the approach, nearest first, inside the pocket
@@ -1081,7 +1105,45 @@ export interface PlacePlan {
    *  a pinpoint, or no walkable way. */
   track: ApproachTrack | null;
 }
-export interface ApproachTrack { id: string; points: V2[]; width: number; maxGrade: number; from: string; lengthM: number }
+export interface ApproachTrack { id: string; points: V2[]; width: number; maxGrade: number; from: string; lengthM: number; surface?: string }
+
+/** A layout road's FIXED-PROFILE grade (layout roads[].grade): one masked height patch over the band along the centre line
+ *  `pts` (world xz, in order, the last point the stair foot): a straight grade from the natural ground at the first point to
+ *  the forecourt level (natural ground at the last point + `level`), level for `forecourt` m before the end and `past` m
+ *  beyond it, `width` wide (`forecourtWidth` over the forecourt), smoothstep-feathered `feather` m outside (cut AND fill).
+ *  Faults: a grade steeper than `maxGrade`, a cut/fill under the band over its cap. Pure. L (Red Dial 2026-10-30: a 1 m crest
+ *  mid-avenue hid the stair foot; `worldgen road` follows the ground and cut it 0.14 m). */
+export function gradePatch(id: string, pts: V2[], road: { width: number; maxGrade: number; grade: { forecourt: number; past: number; width?: number; forecourtWidth?: number; level: number; feather: number; maxCut: number; maxFill: number } }, g: Pick<PlaceGround, "height">) {
+  const gr = road.grade, segs: { a: V2; d: V2; len: number; s0: number }[] = [];
+  let L = 0;
+  for (let i = 1; i < pts.length; i++) { const a = pts[i - 1]!, b = pts[i]!, len = Math.hypot(b[0] - a[0], b[1] - a[1]); if (len < 1e-6) continue; segs.push({ a, d: [(b[0] - a[0]) / len, (b[1] - a[1]) / len], len, s0: L }); L += len; }
+  if (!segs.length) throw new Error(`grade ${id}: the road has no length`);
+  const half = (gr.width ?? road.width) / 2, fHalf = (gr.forecourtWidth ?? gr.width ?? road.width) / 2, flatFrom = Math.max(0, L - gr.forecourt), end = L + gr.past;
+  const y0 = g.height(pts[0]![0], pts[0]![1]), yF = g.height(pts[pts.length - 1]![0], pts[pts.length - 1]![1]) + gr.level;
+  const profile = (s: number) => (s >= flatFrom ? yF : y0 + ((yF - y0) * Math.max(0, s)) / flatFrom);
+  /** arc position, lateral distance; the first segment runs on back past the start, the last on past the end */
+  const locate = (q: V2) => { let best = { s: 0, d: Infinity };
+    segs.forEach((sg, i) => { const t = (q[0] - sg.a[0]) * sg.d[0] + (q[1] - sg.a[1]) * sg.d[1], tc = Math.min(i === segs.length - 1 ? Infinity : sg.len, Math.max(i === 0 ? -Infinity : 0, t));
+      const d = Math.hypot(q[0] - (sg.a[0] + sg.d[0] * tc), q[1] - (sg.a[1] + sg.d[1] * tc)); if (d < best.d) best = { s: sg.s0 + tc, d }; });
+    return best; };
+  const reach = Math.max(half, fHalf) + gr.feather + 2, all = [...pts, ...[pts[pts.length - 1]!].map((p) => [p[0] + segs[segs.length - 1]!.d[0] * gr.past, p[1] + segs[segs.length - 1]!.d[1] * gr.past] as V2)];
+  const x0 = Math.min(...all.map((p) => p[0])) - reach, x1 = Math.max(...all.map((p) => p[0])) + reach, z0 = Math.min(...all.map((p) => p[1])) - reach, z1 = Math.max(...all.map((p) => p[1])) + reach;
+  const step = 2, cols = Math.ceil((x1 - x0) / step) + 1, rows = Math.ceil((z1 - z0) / step) + 1, heights: number[] = [], weights: number[] = [];
+  let cut = 0, fill = 0;
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    const q: V2 = [x0 + i * step, z0 + j * step], { s, d } = locate(q), sc = Math.min(end, Math.max(0, s)), y = profile(sc);
+    const out = Math.hypot(Math.max(0, d - (s >= flatFrom ? fHalf : half)), s < 0 ? -s : s > end ? s - end : 0), t = Math.min(1, out / gr.feather), w = 1 - t * t * (3 - 2 * t);
+    if (out === 0) { const n = g.height(q[0], q[1]); cut = Math.max(cut, n - y); fill = Math.max(fill, y - n); }
+    heights.push(r2(y)); weights.push(r2(w));
+  }
+  const grade = flatFrom > 0 ? Math.abs(yF - y0) / flatFrom : 0, faults: string[] = [];
+  if (grade > road.maxGrade + 1e-9) faults.push(`grade ${id}: ${y0.toFixed(2)} -> ${yF.toFixed(2)} m over ${flatFrom.toFixed(0)} m is ${grade.toFixed(3)}, steeper than maxGrade ${road.maxGrade} (raise level or shorten the forecourt)`);
+  if (cut > gr.maxCut + 1e-9) faults.push(`grade ${id}: cuts ${cut.toFixed(2)} m under the band (maxCut ${gr.maxCut}): narrow the band or raise level`);
+  if (fill > gr.maxFill + 1e-9) faults.push(`grade ${id}: fills ${fill.toFixed(2)} m under the band (maxFill ${gr.maxFill}): narrow the band or lower level`);
+  // L (lips): the masked smoothstep feather, the tent prefilter and the soft automatic edge, like every pad
+  const op = { edit: "add-feature", kind: "heightPatches", feature: { id, origin: [r2(x0), r2(z0)] as V2, size: [r2((cols - 1) * step), r2((rows - 1) * step)] as V2, columns: cols, rows, heights, weights, blend: 2, edgeSlope: 0.6, filter: 2, calm: true } };
+  return { op, startY: r2(y0), levelY: r2(yF), grade: Math.round(grade * 1000) / 1000, cut: r2(cut), fill: r2(fill), lengthM: r2(L), faults };
+}
 
 /** Plan a place: fit every pocket, level pads, place structures (catalogued prefabs), walls (wall operator), footpaths
  *  (path operator), clearings (L: cover cleared under every structure), creature clearings, a first dressing plan per
@@ -1189,7 +1251,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   const ops: any[] = [{ op: "add-entity", id: `poi-${poi}`, entity: { name: place.name, parent: null, tags, components: { transform: { position: [core.at[0], padY, core.at[1]] } } } }];
   const features: any[] = [], keepClear: any[] = [];
   let landmark: { at: V2; foot: number; top: number; fogReach: number } | null = null;
-  const smokes: { at: V2; top: number; fogReach: number }[] = [], solids: { at: V2; r: number; band?: number; soft?: boolean }[] = [];
+  const smokes: { at: V2; top: number; fogReach: number }[] = [], solids: { at: V2; r: number; band?: number; soft?: boolean }[] = [], solidSegs: [V2, V2, number][] = [], bareSeg = new Map<[V2, V2, number], [V2, V2, number]>();
   const stands: V2[] = [];
   const placedAll = new Map<string, { w: V2; ang: number; y: number; prefab: string; k: number }>(); // every pocket's pieces (layout `waters` find their host here)
   // `walk: false`: a structure's own cover clearing is ground cleared under a solid, not a spot a body walks to (poi-walk skips it;
@@ -1242,7 +1304,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       const under = s.on ? placed.get(s.on) : undefined; let onY: number | null = null;
       if (s.on && !under) faults.push(`structure ${p.id}.${s.id}: on ${s.on} is no earlier structure of the pocket`);
       if (under) { const dx = w[0] - under.w[0], dz = w[1] - under.w[1], c = Math.cos(under.ang), sn = Math.sin(under.ang), lx = (dx * c - dz * sn) / under.k, lz = (dx * sn + dz * c) / under.k, t = inp.topOf?.(under.prefab, lx, lz);
-        if (t == null) faults.push(`structure ${p.id}.${s.id}: no top of ${s.on} under it`); else onY = under.y + t * under.k - 0.1; }
+        if (t == null) faults.push(`structure ${p.id}.${s.id}: no top of ${s.on} under it`); else onY = under.y + t * under.k - 0.1 - (s.sink ?? 0); } // `sink`: set into the host's top
       // LEAN: the whole piece tipped toward a place-frame point or direction; its base outline turned with it, sunk (rooted)
       const lean = s.lean && s.lean.deg > 0 && !host ? s.lean : null; // on a piece (`on`): tipped from its foot on that top
       const leanDir = lean ? (lean.toward ? (() => { const t = toWorld(pk.at, front, lean.toward!); return Math.atan2(t[0] - w[0], t[1] - w[1]); })() : yaw + ((lean.dir ?? 0) * Math.PI) / 180) : 0;
@@ -1273,7 +1335,16 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       // ...and so does every other ground piece (Red Dial 2026-10-30: the paths re-baked over the seat pads cut 0.7-0.9 m under
       // the avenue's pillars); a piece `on` another rides its host's band
       // (soft: dropped for a leg that finds no way with it)
-      if (!host && !under) solids.push({ at: w, r: s.footprint, band: PATH_GRADE_BAND_M, ...((inp.propInfo?.(s.prefab) as { footing?: number } | null)?.footing ? {} : { soft: true }) });
+      // L (Red Dial 2026-10-30, o-large3): a LONG piece (a 24 x 4.5 m avenue wall) is a capsule along its long axis, never
+      // its half-diagonal disc: two continuous wall runs 29 m apart drew 15.7 m discs (+ band) over the whole avenue and the
+      // approach had "no walkable way"
+      const sz = inp.propInfo?.(s.prefab)?.size, hx = sz ? (sz[0]! * (s.scale ?? 1)) / 2 : 0, hz = sz ? (sz[2]! * (s.scale ?? 1)) / 2 : 0, longH = Math.max(hx, hz), shortH = Math.min(hx, hz);
+      const footed = !!(inp.propInfo?.(s.prefab) as { footing?: number } | null)?.footing;
+      if (!host && !under && sz && longH > 6 && longH > 2.5 * shortH) {
+        const ax: V2 = hx >= hz ? [Math.cos(ang), -Math.sin(ang)] : [Math.sin(ang), Math.cos(ang)], e = longH - shortH;
+        const sg: [V2, V2, number] = [[r2(w[0] - ax[0] * e), r2(w[1] - ax[1] * e)], [r2(w[0] + ax[0] * e), r2(w[1] + ax[1] * e)], r2(shortH + (footed ? PATH_GRADE_BAND_M : 0))];
+        solidSegs.push(sg); bareSeg.set(sg, [sg[0], sg[1], r2(shortH)]);
+      } else if (!host && !under) solids.push({ at: w, r: s.footprint, band: PATH_GRADE_BAND_M, ...(footed ? {} : { soft: true }) });
       if (SMOKE_READ_M[s.prefab]) smokes.push({ at: [r2(w[0]), r2(w[1])], top: r2(sy + SMOKE_READ_M[s.prefab]!), fogReach: s.landmark?.fogReach ?? 600 });
       ops.push({ op: "add-entity", id: `${poi}-${p.id}-${s.id}`, entity: { name: `${s.id} (${s.prefab})`, parent: `poi-${poi}`, tags: [...tags.slice(1), `slot:${s.role}`, ...(s.on ? [`on:${s.on}`] : s.onWall ? [`on:${s.onWall}`] : []), ...(s.stone ? [`stone:${stoneOf(s.stone)}`] : []), ...(s.lift ? [`lift:${s.lift}`] : []), ...(lean ? [`lean:${lean.deg}`] : [])], components: comps } });
       if (host || under) continue; // up on the wall: no ground cleared, nothing kept clear on the ground
@@ -1498,7 +1569,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   // walls (gates are gaps), structures, water and steep banks (routeGrid); the path ribbon follows the planned line
   // outside the pockets (path operator; L: risers <= 0.4 m are the ribbon's own)
   const routes: any[] = [], lines: V2[][] = [];
-  const obs: RouteObstacles = { discs: solids, segs: [] };
+  const obs: RouteObstacles = { discs: solids, segs: [...solidSegs] };
   // L (walk): a wall end left at the operator's default (`terrain`) runs on `tie` m (2 x thickness + 2) past its last
   // point at full height on level ground: the route keeps off that too
   const runOn = (run: V2[], o: any): V2[] => {
@@ -1527,7 +1598,10 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
   const legObs = (from: V2, to: V2, soft = true): RouteObstacles => ({ ...obs, discs: obs.discs.map((d: any) => (d.band && (soft || !d.soft) && dist(from, d.at) > d.r + d.band + 1 && dist(to, d.at) > d.r + d.band + 1 ? { at: d.at, r: d.r + d.band } : d)) });
   const tryLeg = (from: V2, to: V2, obs: RouteObstacles): V2[] | null => routeGrid(g, from, to, obs, { prefer: a.route.maxGrade, maxSlope: a.route.maxGrade }) ?? routeGrid(g, from, to, obs, { prefer: a.route.maxGrade, maxSlope: a.route.maxGrade + 0.1 }) ?? routeGrid(g, from, to, obs, { prefer: a.route.maxGrade });
   // every piece's grade band first; a leg with no way through them keeps only the footing structures' bands (the old rule)
-  const leg = (from: V2, to: V2, what: string): V2[] => tryLeg(from, to, legObs(from, to)) ?? tryLeg(from, to, legObs(from, to, false)) ?? (() => { faults.push(`route ${what}: no walkable way over the ground (water, walls or slopes > 35 deg)`); const l: V2[] = [from, to]; failed.add(l); return l; })();
+  // L (Red Dial 2026-10-30, o-large3): last, the pieces' own footprints with NO grade bands (an avenue of footed pillars and
+  // walls 3.5 m apart closes every gap once each carries a 3.5 m band); a leg found only so is a plan NOTE (gate seated judges it)
+  const bare = (): RouteObstacles => ({ ...obs, discs: obs.discs.map((d: any) => ({ at: d.at, r: d.r })), segs: obs.segs.map((q) => bareSeg.get(q) ?? q) });
+  const leg = (from: V2, to: V2, what: string): V2[] => tryLeg(from, to, legObs(from, to)) ?? tryLeg(from, to, legObs(from, to, false)) ?? ((l) => { if (l) notes.push(`route ${what}: walked only past the pieces' footprints (no grade bands): check seated along it`); return l; })(tryLeg(from, to, bare())) ?? (() => { faults.push(`route ${what}: no walkable way over the ground (water, walls or slopes > 35 deg)`); const l: V2[] = [from, to]; failed.add(l); return l; })();
   /** The longest run of a planned line outside the given pockets (their radius - 1): the stretch the ribbon paves. */
   const outside = (poly: V2[], discs: { at: V2; radius: number }[]): V2[] => {
     const out = (q: V2) => discs.every((d) => dist(q, d.at) > d.radius - 1), sm: { q: V2; v: boolean }[] = [];

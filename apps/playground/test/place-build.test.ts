@@ -817,6 +817,38 @@ test("gate roads: a ribbon / path-operator approach is named, footpaths between 
   assert.deepEqual(ribbonApproachOps([], [{ edit: "add-feature", kind: "ribbons", feature: { id: "op:pb-x-approach:ribbon" } }, { edit: "add-feature", kind: "roads", feature: { id: "road-pb-x-approach" } }]), ["features.ribbons op:pb-x-approach:ribbon"]);
 });
 
+test("layout road grade: a fixed profile cuts a crest to a level forecourt, feathered, faults past its caps (Red Dial 2026-10-30)", async () => {
+  const { gradePatch } = await import("../tools/_place-archetype.mts");
+  // ground: 0 m at z 0 (the stair foot) and z 80 (the approach), a 1.5 m crest at z 40, rising 0.2 per m to the west (x < -12)
+  const g = { height: (x: number, z: number) => 1.5 * Math.max(0, 1 - Math.abs(z - 40) / 25) + 0.2 * Math.max(0, -12 - x) };
+  const road = { width: 7, maxGrade: 0.12, grade: { forecourt: 10, past: 8, width: 20, level: -0.5, feather: 8, maxCut: 3, maxFill: 2 } };
+  const r = gradePatch("pb-x-grade-avenue", [[0, 80], [0, 0]], road, g);
+  assert.deepEqual(r.faults, []);
+  assert.equal(r.startY, 0); assert.equal(r.levelY, -0.5); assert.ok(r.cut >= 1.5 && r.cut < 2.1, `cut ${r.cut}`);
+  const f = r.op.feature, at = (x: number, z: number) => { const i = Math.round((x - f.origin[0]) / 2), j = Math.round((z - f.origin[1]) / 2); return { y: f.heights[j * f.columns + i]!, w: f.weights[j * f.columns + i]! }; };
+  assert.equal(f.heights.length, f.columns * f.rows); assert.equal(f.calm, true); assert.equal(f.filter, 2);
+  const crest = at(0, 40); assert.equal(crest.w, 1); assert.ok(crest.y < 0 && crest.y > -0.5, "the crest is cut to the straight grade");
+  assert.deepEqual(at(0, 4), { y: -0.5, w: 1 }, "level forecourt at the foot");
+  assert.deepEqual(at(0, -6), { y: -0.5, w: 1 }, "the forecourt runs on PAST the end (under a plinth)");
+  assert.equal(at(0, -6 - 10).w, 0, "faded out past the end + feather");
+  assert.ok(at(12, 40).w > 0 && at(12, 40).w < 1, "feathered at the band edge"); assert.equal(at(20, 40).w, 0);
+  assert.equal(at(0, 92).w, 0, "faded before the start");
+  // the profile never climbs faster than its grade: a straight line from the start to the forecourt
+  for (let z = 10; z <= 80; z += 2) { const y0 = at(0, z).y, y1 = at(0, z - 2).y; assert.ok(Math.abs(y1 - y0) / 2 <= road.maxGrade + 0.01); }
+  const steep = gradePatch("pb-x-grade-a", [[0, 30], [0, 0]], { ...road, grade: { ...road.grade, level: -4 } }, g);
+  assert.ok(steep.faults.some((x) => /steeper than maxGrade/.test(x)));
+  const deep = gradePatch("pb-x-grade-b", [[0, 80], [0, 0]], { ...road, grade: { ...road.grade, width: 40, maxCut: 1 } }, g);
+  assert.ok(deep.faults.some((x) => x.includes("(maxCut 1)")), deep.faults.join("; "));
+  assert.ok(placeLayoutSchema.parse({ version: 1, frame: "place", pieces: [{ id: "p", element: "e", kind: "prop", prefab: "a/b", at: [0, 0] }], views: [], roads: [{ id: "avenue", points: [[0, 80], [0, 0]], surface: "x-road", grade: { forecourt: 10 } }] }).roads[0]!.grade!.feather === 10);
+});
+
+test("the core stand is the pocket's fight ground when that is clear (Red Dial 2026-10-30: a turned avenue's stand fell behind the plinth)", async () => {
+  const { standPoint } = await import("../tools/_place-archetype.mts");
+  const pocket: any = { radius: 40, walls: [], structures: [{ at: [0, 0], footprint: 14 }], encounter: { radius: 12, for: "x", at: [0, -20] } };
+  assert.deepEqual(standPoint(pocket, [100, 100], [0, 1]), [100, 80], "the encounter spot, not the frame's +z");
+  assert.notDeepEqual(standPoint({ ...pocket, encounter: { ...pocket.encounter, at: [0, -10] } }, [100, 100], [0, 1]), [100, 90], "a spot inside a footprint is not taken");
+});
+
 test("the track stops where its regraded band would reach a built piece (kirk-knowe 2026-10-21: a bell post lifted 0.55 m)", () => {
   const band = trackBand(5);
   assert.deepEqual(trimTrack([[0, 0], [0, 40]], 5, [{ at: [0, 50], r: 2 }], []), [[0, 0], [0, 34]]);
@@ -1413,12 +1445,15 @@ test("layout: `on` passes through to the core structure; `waters` parse, count f
   assert.throws(() => layoutOf([{ id: "a", element: "p", kind: "structure", prefab: "x/a", at: [0, 0] }], { waters: [{ id: "w", on: "a" }] }));
 });
 
-test("layout sink: a decal piece may stand below its centre ground (a niche set into a face toe); other pieces default to 0", () => {
+test("layout sink: a decal piece may stand below its centre ground (a niche set into a face toe), an `on` piece sinks into its host; other pieces default to 0", () => {
   const base = { version: 1, frame: "place", pieces: [{ id: "niche", element: "e", kind: "decal", prefab: "x/y", at: [0, 0], sink: 2.75 }, { id: "jar", element: "e", kind: "prop", prefab: "x/z", at: [3, 0] }] };
   const l = placeLayoutSchema.parse(base);
   assert.equal(l.pieces[0]!.sink, 2.75);
   assert.equal(l.pieces[1]!.sink, 0);
-  assert.throws(() => placeLayoutSchema.parse({ ...base, pieces: [{ ...base.pieces[0], sink: 5 }] }), /sink|4/);
+  assert.throws(() => placeLayoutSchema.parse({ ...base, pieces: [{ ...base.pieces[0], sink: 7 }] }), /sink|6/);
+  // L (Red Dial scale 2026-10-30): a piece `on` a host is set INTO its top by `sink` (a ring whose foot hides in the plinth)
+  const on = placeLayoutSchema.parse({ ...base, pieces: [{ id: "plinth", element: "e", kind: "structure", prefab: "x/p", at: [0, 0] }, { id: "ring", element: "e", kind: "structure", prefab: "x/r", at: [0, 0], on: "plinth", sink: 5, over: ["plinth"] }] });
+  assert.equal(on.pieces[1]!.sink, 5);
 });
 
 // L (Red Dial 2026-10-29): a large place needs a water/cave/interior feature; a layout `waters` sheet in a built basin
@@ -1495,3 +1530,35 @@ test("layout areas join the handoff's dressing areas in world coordinates; one r
   assert.ok(bad.faults.some((f: string) => /area core repeats/.test(f)), bad.faults.join(" | "));
 });
 
+
+// SCALE (Red Dial 2026-10-30): the built place in the painting's own pixels
+import { compareMark, conceptMarksSchema, projector, screenBox, paintedViews, SCALE_TOL } from "../tools/_place-scale.mts";
+test("scale: a piece through the painting's camera is measured in its pixels, and 15 % off fails naming the factor", () => {
+  // the play camera (vfov 60, 1280 x 720) looking level down -z from 1.7 m; a 10 m tall, 4 m wide box 50 m away
+  const cam = { eye: [0, 1.7, 0] as [number, number, number], target: [0, 1.7, -50] as [number, number, number], vfov: 60, width: 1280, height: 720 };
+  const f = 360 / Math.tan(Math.PI / 6), p = projector(cam)([0, 1.7, -50])!;
+  assert.deepEqual(p.map((v) => Math.round(v)), [640, 360, 50]);
+  const box: number[] = []; for (const x of [-2, 2]) for (const y of [0, 10]) for (const z of [-49, -51]) box.push(x, y, z);
+  const s = screenBox(box, cam)!;
+  assert.ok(Math.abs(s.box[3] - s.box[1] - (10 * f) / 49) < 0.5, `height ${s.box[3] - s.box[1]}`);
+  const marks = conceptMarksSchema.parse({ view: "approach", marks: [{ id: "tower", pieces: ["tower"], box: [s.box[0], s.box[1], s.box[2], s.box[1] + (s.box[3] - s.box[1]) * 1.5] }] });
+  const tall = compareMark(marks.marks[0]!, s);
+  assert.equal(tall.ok, false); assert.equal(tall.ratio.w, 1); assert.equal(tall.change.h, 1.5); assert.match(tall.why, /height .* x1\.5/);
+  // width-only marks (a foot hidden behind a stair) judge the width alone
+  const wOnly = compareMark({ ...marks.marks[0]!, dims: ["w"] }, s);
+  assert.ok(wOnly.ok && wOnly.ratio.h === null);
+  const near = compareMark({ ...marks.marks[0]!, box: [s.box[0], s.box[1], s.box[2], s.box[1] + (s.box[3] - s.box[1]) * (1 + SCALE_TOL * 0.8)] }, s);
+  assert.ok(near.ok, near.why);
+  assert.equal(compareMark(marks.marks[0]!, null).ok, false);
+  assert.deepEqual(paintedViews({ renders: { approach: { camera: [0, 0, 0], target: [1, 0, 0] }, plan: { file: "x" } } }), ["approach"]);
+  assert.deepEqual(paintedViews(null), []);
+});
+
+// L (Red Dial 2026-10-30): a layout road (an avenue) parses with its tread and grade defaults; never past 10 m wide
+test("layout roads: an avenue road parses with a 7 m tread and 0.12 grade by default", () => {
+  const base = { version: 1, frame: "place", pieces: [{ id: "a", element: "e", kind: "structure", prefab: "x/a", at: [0, 0] }] };
+  const l = placeLayoutSchema.parse({ ...base, roads: [{ id: "avenue", points: [[0, 80], [0, 13]] }] });
+  assert.equal(l.roads[0]!.width, 7); assert.equal(l.roads[0]!.maxGrade, 0.12);
+  assert.throws(() => placeLayoutSchema.parse({ ...base, roads: [{ id: "avenue", points: [[0, 80], [0, 13]], width: 12 }] }));
+  assert.deepEqual(placeLayoutSchema.parse(base).roads, []);
+});

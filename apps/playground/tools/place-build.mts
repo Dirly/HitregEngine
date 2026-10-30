@@ -22,6 +22,9 @@
  *     build  [--lab <name>]             apply the job to the lab (scene ops, pads, operators + wall bakes, clearings, sockets,
  *                                       dressing plans): the same code path as `install`
  *     gates  [--lab <name> | --live] [--only a,b]  every install gate on the lab (--live: on the live world after install) -> <job>/reports/*.json + reports/gates.json (table)
+ *     scale  [--lab <name> | --live]    a PAINTED place against its painting: <job>/concept-marks.json (each hero piece's painted
+ *                                       pixel box) vs the built pieces projected through the painting's own camera; > 15 % off
+ *                                       fails -> reports/scale.json (also the gates' `scale` row; the install guard reads it)
  *     shots  [--lab <name>] [--port 5291] [--shots-timeout 15]  (hard cap, minutes) play-mode pictures from views.json at hours 12 and 20 -> <job>/evidence/
  *     all    [--archetype a] [--set ..] [--port p]   plan -> lab -> build -> gates -> shots
  *     evidence                          record progress.json evidence.readShot (+ viewpoints) from pictures already taken
@@ -59,12 +62,13 @@ import { assetIds, findAsset, PROJECTS } from "./_closure.mjs";
 import {
   sinkToBase, seatPad, mergeSeatPads, type SeatPadRaw, padPatch, applySets, silhouetteHeight, SILHOUETTE_RATIO, arrangeFirstPlan, DENIED_PROPS, approachLines, burnsAtDusk, forTier, newZfightClusters, approachReadAny, fillOk, installGuard, RESEAT_MAX_M, routeOnRibbon, hull, readBand, pickArchetype, roomFill, placeArchetypeSchema, planPlace, primitiveMeshes, siteSearch, staleEntities, unclearedStructures, uniqueItemIds, usableArea, type PlaceArchetype, type PlaceGround, type PlaceTier, type SiteBlockers, type SiteChoice,
   ribbonApproachOps, approachForBuilt, trackId, trimTrack, TRACK_CUT_M, TRACK_FILL_M, type ApproachTrack, type PlacePlan,
-  fillerFor, requestedShortfall, type PlanDrop, placeLayoutSchema, withLayout, layoutCoverage, layoutSizeWarn, type PlaceLayout,
+  fillerFor, requestedShortfall, type PlanDrop, placeLayoutSchema, withLayout, layoutCoverage, layoutSizeWarn, type PlaceLayout, toWorld, gradePatch,
 } from "./_place-archetype.mts";
 import os from "node:os";
 import { baseGap, lowerPatch, planBridge } from "./_place-bridge.mts";
 import { baseOutline, coverClearedShare, isLeaned, orientBase, scaleBase, seatGap, SEAT_GAP_M, type BaseOutline } from "./_place-quality.mts";
-import { prefabGeometry, projectedTexels, texelDensity } from "./_prop-geometry.mts";
+import { prefabGeometry, projectedTexels, sceneGeometry, texelDensity } from "./_prop-geometry.mts";
+import { compareMark, conceptMarksSchema, paintedViews, screenBox, type ScaleRow } from "./_place-scale.mts";
 import { CLASS_FOOTPRINT_M, gradeScore, heightForPx, POCKET_FLOOR_M, READ_PX_MIN, readPixels, spanOf, wearsCliffTile, type QualityRow, type Tier } from "./_place-quality.mts";
 // @ts-ignore untyped engine tool module
 import { designFaults, requireFinalReview, setStage } from "../../../tools/poi-review/job.mjs";
@@ -87,7 +91,7 @@ const JOB = path.join(PROJECTS, project, "authoring", "zonegen", world, "zones",
 const ZONE = path.join(PROJECTS, project, "authoring", "zonegen", world, "zones", zone);
 // `gates --live`: the same gates on the LIVE world + scene after an install (the place is in it; float/scatter-float then
 // compare live with itself, so they report only the absolute verdict of the tools run)
-const LIVE = has("live") && cmd === "gates";
+const LIVE = has("live") && (cmd === "gates" || cmd === "scale");
 const lab = LIVE ? project : opt("lab") ?? `pb-${poi}`, labWorld = LIVE ? world : `pb${poi.replace(/[^a-z0-9]/gi, "")}`;
 const TSX = ["--max-old-space-size=6144", "node_modules/tsx/dist/cli.mjs"];
 const PREFIX = `pb-${poi}-`;
@@ -126,7 +130,7 @@ function gradeTrack(recipe: any, t: ApproachTrack | null): any[] {
   try {
     fs.writeFileSync(rf, JSON.stringify(recipe));
     const r = tool("track", ["tools/worldgen.mts", "road", world, "--recipe", rf, "--id", t.id, "--points", t.points.map((q) => `${q[0]},${q[1]}`).join(";"), "--width", String(t.width),
-      "--max-grade", String(t.maxGrade), "--max-cut", String(TRACK_CUT_M), "--max-fill", String(TRACK_FILL_M), "--tread-cut", String(TRACK_CUT_M), "--tread-fill", String(TRACK_FILL_M), "--keep-landforms", "--dry-run", "--out", out]);
+      "--max-grade", String(t.maxGrade), ...(t.surface ? ["--surface", t.surface] : []), "--max-cut", String(TRACK_CUT_M), "--max-fill", String(TRACK_FILL_M), "--tread-cut", String(TRACK_CUT_M), "--tread-fill", String(TRACK_FILL_M), "--keep-landforms", "--dry-run", "--out", out]);
     if (r.status || !fs.existsSync(out)) fail(`approach track ${t.id}: worldgen road failed (reports/track.log): ${r.out.trim().split("\n").slice(-2).join(" | ")}`);
     const built = read(out) as { roads: any[]; bridges: any[] };
     console.log(`  TRACK: ${r.out.split("\n").find((l) => l.includes(`${t.id}:`))?.trim() ?? t.id}`);
@@ -334,7 +338,8 @@ function plan() {
   const noKindMat = Object.values(builtKinds ?? {}).flatMap((r) => Object.values(r).flat()).filter((m) => !findAsset(project, `materials/${m}.json`));
   if (noKindMat.length) fail(`zone builtKinds materials not in ${project}'s closure: ${[...new Set(noKindMat)].join(", ")} (${zdf})`);
   const t0 = Date.now();
-  const recipe = withoutPlace(read(worldFile(project, world))), g = ground(recipe);
+  const recipe = withoutPlace(read(worldFile(project, world)));
+  let g = ground(recipe);
   // ONE palette per role per zone (recipe regions[].palette.builtStone): the zone defaults may not name a stone outside it
   const zpal = zonePalette(recipe, zone);
   if (zpal && Object.keys(zpal.builtStone).length) {
@@ -392,6 +397,20 @@ function plan() {
     downgrade = { from: first, to: size, measuredUsableAreaM2: firstHave, neededM2: tierFor(first).minUsableAreaM2,
       why: `the ground round the reservation holds ${firstHave} m2 of dry ground under 31 deg (flood-filled from every pocket); a ${first} place needs ${tierFor(first).minUsableAreaM2} m2, so it is built at the tier the ground supports` };
   }
+  // L (Red Dial 2026-10-30): a layout road's FIXED-PROFILE grade (roads[].grade) is a height patch on the ground BEFORE the
+  // pieces seat: the plan runs again on the graded ground (pillars, plinth and walls seat on the cut), the patch leads world-ops
+  const gradeOps: any[] = [], gradeFaults: string[] = [];
+  if (layout?.roads.some((r) => r.grade)) {
+    const centre0 = p.centre as V2;
+    for (const r of layout.roads) if (r.grade) {
+      const gp = gradePatch(`${PREFIX}grade-${r.id}`, r.points.map((q) => toWorld(p.centre as V2, p.front as V2, q as V2)), r as any, g);
+      gradeOps.push(gp.op); gradeFaults.push(...gp.faults.map((f) => `LAYOUT: ${f}`));
+      console.log(`  GRADE: ${r.id} ${gp.startY} -> ${gp.levelY} m over ${gp.lengthM} m (grade ${gp.grade}), cut ${gp.cut} / fill ${gp.fill} m under the band`);
+    }
+    recipe.features.heightPatches = [...((recipe.features.heightPatches ?? []) as any[]), ...gradeOps.map((o) => o.feature)];
+    g = ground(recipe); p = planAt(size); p.faults.push(...gradeFaults);
+    if (Math.hypot(p.centre[0] - centre0[0], p.centre[1] - centre0[1]) > 0.5) p.faults.push(`LAYOUT: the plan centre moved ${Math.round(Math.hypot(p.centre[0] - centre0[0], p.centre[1] - centre0[1]))} m on the graded ground: pin layout origin`);
+  }
   if (downgrade) { downgrade.after = p.handoff.measurements.measuredCombinedUsableAreaM2; p.handoff.measurements.adventureSize = size; p.handoff.tierDowngrade = downgrade; }
   // L (size, kelpmane-cove / weepmouth 2026-10-20): the lowest tier the builder makes still does not fit: the brief's size
   // is wrong for this ground. Reported for the zone master (pinpoint, or another site), never forced; the size gate stays red
@@ -408,7 +427,11 @@ function plan() {
   write(path.join(JOB, "brief.json"), { id: poi, name: place.name, adventureSize: size, ...(downgrade ? { tierDowngrade: downgrade } : {}), archetype: a.id, sets: setList, ...(pinned ? { at: pinned } : {}), ...(faces ? { faces } : {}) /* L (o-small 2026-10-29): a --faces equal to the zone brief site.faces was dropped here, and the pinned re-plan of `all` then ignored site.faces and turned the frame to the nearest approach point */, site: siteRecord(sites[size] ?? null), place });
   write(path.join(JOB, "handoff.json"), p.handoff);
   write(path.join(JOB, "ops.json"), p.ops);
-  write(path.join(JOB, "world-ops.json"), [...p.worldOps, ...gradeTrack(recipe, p.track)]);
+  // layout ROADS (an avenue): carved + painted through the same road machinery as the approach track
+  const layoutRoads: ApproachTrack[] = (layout?.roads ?? []).map((r) => { const pts = r.points.map((q) => toWorld(p.centre as V2, p.front as V2, q as V2).map((v) => Math.round(v * 100) / 100) as V2);
+    if (r.surface && !((recipe.surfaces ?? []) as any[]).some((x) => x.name === r.surface)) fail(`layout road ${r.id}: surface ${r.surface} is not in the recipe's surfaces`);
+    return { id: `road-${PREFIX}${r.id}`, points: pts, width: r.width, maxGrade: r.maxGrade, from: "layout", ...(r.surface ? { surface: r.surface } : {}), lengthM: Math.round(pts.slice(1).reduce((n, q, i) => n + Math.hypot(q[0] - pts[i]![0], q[1] - pts[i]![1]), 0)) }; });
+  write(path.join(JOB, "world-ops.json"), [...gradeOps, ...p.worldOps, ...gradeTrack(recipe, p.track), ...layoutRoads.flatMap((t) => gradeTrack(recipe, t))]);
   write(path.join(JOB, "operators.json"), p.operators);
   write(path.join(JOB, "clearings.json"), [...p.clearings]);
   write(path.join(JOB, "encounter-clearings.json"), p.encounters);
@@ -425,6 +448,17 @@ function plan() {
   const cviews = ((contract?.views ?? []) as any[]).filter((v) => Array.isArray(v.camera) && Array.isArray(v.target));
   if (contract && cviews.length !== (contract.views ?? []).length) fail(`${cf}: every contract view needs camera [x,y,z] and target [x,y,z]`);
   // L (TOOLS-PB 2026-10-23): the design's own cameras (archetype `views`, `--set views=[...]`, place frame) ride the same way
+  // L (Red Dial 2026-10-30: the layout's hand-copied concept cameras were world offsets read in the turned place frame, 134
+  // deg off the painting: the far shot showed open ground, no place): the APPROVED painting's own cameras (the concept-on-site
+  // record <zone>/concept/<poi>.site.json, world space) are the concept-<view> shots; a layout view of that name is replaced
+  // and named in the faults when it stands more than 5 m off
+  const sitef = path.join(JOB, "..", "..", "concept", `${poi}.site.json`), site = fs.existsSync(sitef) ? read(sitef) : null;
+  for (const [k, r] of Object.entries((site?.renders ?? {}) as Record<string, any>)) {
+    if (!Array.isArray(r?.camera) || !Array.isArray(r?.target)) continue;
+    const name = `concept-${k}`, own = (p.setViews ?? []).find((v: any) => v.name === name);
+    if (own?.camera && Math.hypot(own.camera[0] - r.camera[0], own.camera[2] - r.camera[2]) > 5) p.faults.push(`LAYOUT: view ${name} stands ${Math.round(Math.hypot(own.camera[0] - r.camera[0], own.camera[2] - r.camera[2]))} m off the painting's camera [${r.camera.join(", ")}] (concept site record): the painting's camera is used; layout views are in the PLACE frame`);
+    if (!cviews.some((c) => c.name === name)) cviews.push({ name, camera: r.camera, target: r.target });
+  }
   const setViews = (p.setViews ?? []).filter((v: any) => !cviews.some((c) => c.name === v.name));
   write(path.join(JOB, "views.json"), [...views.filter((v) => !cviews.some((c) => c.name === v.name) && !setViews.some((c: any) => c.name === v.name)), ...setViews, ...cviews.map((v) => ({ name: v.name, x: v.x ?? v.camera[0], z: v.z ?? v.camera[2], y: v.y ?? Math.round((v.camera[1] - 1.7) * 10) / 10, camera: v.camera, target: v.target }))]);
   write(path.join(JOB, "walk-route.json"), p.handoff.navigation.routes[0]);
@@ -749,7 +783,7 @@ export function gatePlan(job: string, hand: any): { centre: V2; pockets: { at: V
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-const GATES = ["design", "size", "fine", "roads", "lips", "scatter-float", "float", "seated", "rock-skins", "water-edges", "zfight", "op-check", "art", "walk", "dress", "place"] as const;
+const GATES = ["design", "size", "fine", "roads", "lips", "scatter-float", "float", "seated", "rock-skins", "water-edges", "zfight", "op-check", "art", "scale", "walk", "dress", "place"] as const;
 function gates(onlyArg?: string[]) {
   const hand = read(path.join(JOB, "handoff.json")), plan = gatePlan(JOB, hand);
   const pts = [plan.centre, ...plan.pockets.map((k: any) => k.at)] as V2[], c = plan.centre as V2;
@@ -811,6 +845,7 @@ function gates(onlyArg?: string[]) {
   gate("op-check", () => { const r = tool("op-check", ["tools/worldgen.mts", "op", labWorld, "--project", lab, "--check"]); const mine = r.out.split("\n").filter((l) => l.includes(PREFIX) && /EDITED|MISSING|STALE/.test(l)); return { ok: mine.length === 0, detail: mine.length ? mine.slice(0, 3).join(" | ") : `${PREFIX}* operators current` }; });
   // L (art, signal-tower 2026-10-21): measured in the LAB (the live scene still held the old install's barrel)
   gate("art", () => { const r = tool("art", ["tools/art-check.mts", JOB, "--culture", "human", "--project", lab, "--world", labWorld]); return { ok: r.status === 0 && okOf("art-check"), detail: last(r.out).slice(0, 220) }; });
+  gate("scale", () => scaleCheck());
   gate("walk", () => { const r = tool("walk", ["tools/poi-walk.mts", JOB, "--scene", labWorld]); return { ok: r.status === 0 && okOf("walk"), detail: last(r.out).slice(0, 220) }; });
   gate("dress", () => { const bad: string[] = []; for (const f of fs.readdirSync(path.join(JOB, "dressing")).filter((f) => f.endsWith(".json") && !/.(report|inverse|walk).json$/.test(f))) { const id = f.replace(/\.json$/, ""); const nf = noFloor(lab, id); if (nf !== null) { bad.push(`${id}: no open floor on its socket map (${nf}): the pocket is not on level ground, re-plan (site search)`); continue; } const r = tool(`check-${id}`, ["tools/dress.mts", "check", "--project", lab, "--plan", id, "--scene", labWorld, "--at", "0,0,0", "--quiet", "--poi", poi]); if (r.status) bad.push(`${id}: ${last(r.out).slice(0, 120)}`); }
     // L (TOOLS-PB 2026-10-23, silent drop): every prop the design asked of a plan is in it, else a fault naming the prop and why
@@ -828,6 +863,34 @@ function gates(onlyArg?: string[]) {
   const merged = [...prev.filter((r: any) => !rows.some((x) => x.gate === r.gate)), ...rows].sort((x, y) => GATES.indexOf(x.gate) - GATES.indexOf(y.gate));
   write(rep("gates"), { ok: merged.length === GATES.length && merged.every((r: any) => r.ok), lab, at: new Date().toISOString(), rows: merged });
   if (rows.some((r) => !r.ok)) process.exitCode = 1;
+}
+/** SCALE (Red Dial 2026-10-30, owner: "you don't have the scale correct with the concept art"; every gate had passed): a
+ *  PAINTED place (concept/<poi>.site.json renders) declares <job>/concept-marks.json (conceptMarksSchema: the painting's
+ *  pixel box of each hero piece or group) and each marked piece's built world triangles (lab scene, sceneGeometry) are
+ *  projected through the painting's own camera (site record camera + target, vfov 60, the painting's size; a piece's
+ *  footing under its origin is counted at grade). A judged
+ *  width or height more than the tolerance (15 %) off fails, naming the factor it needs. reports/scale.json. */
+function scaleCheck(): { ok: boolean; detail: string } {
+  const sitef = path.join(JOB, "..", "..", "concept", `${poi}.site.json`), site = fs.existsSync(sitef) ? read(sitef) : null, views = paintedViews(site);
+  const mf = path.join(JOB, "concept-marks.json"), out = path.join(JOB, "reports", "scale.json");
+  if (!views.length) { write(out, { ok: true, painted: false, at: new Date().toISOString(), rows: [] }); return { ok: true, detail: "not a painted place (no concept site record)" }; }
+  if (!fs.existsSync(mf)) { write(out, { ok: false, painted: true, at: new Date().toISOString(), rows: [], faults: ["no concept-marks.json"] }); return { ok: false, detail: `painted place with no concept-marks.json: mark each hero piece's painted pixel box on ${views.join("/")} (docs/place-builder.md "scale")` }; }
+  const marks = conceptMarksSchema.parse(read(mf)), r = site.renders[marks.view];
+  if (!r?.camera || !r?.target) fail(`concept-marks.json view ${marks.view} is not a render of ${sitef} (${views.join(", ")})`);
+  const cam = { eye: r.camera, target: r.target, vfov: marks.vfov, width: marks.image.width, height: marks.image.height };
+  const want = new Set(marks.marks.flatMap((m) => m.pieces.map((p) => `${poi}-core-${p}`)));
+  const geo = sceneGeometry(path.join(PROJECTS, lab, "assets"), read(sceneFile(lab, labWorld)), (id) => !want.has(id)), byId = new Map(geo.map((g) => [g.id, g]));
+  const rows: ScaleRow[] = marks.marks.map((m) => {
+    const parts = m.pieces.map((p) => byId.get(`${poi}-core-${p}`));
+    if (parts.some((g) => !g)) return compareMark(m, null, marks.tolerance);
+    // a piece's footing (catalogued solids run below its grade, the origin) never shows in a painting: counted at grade
+    const xyz: number[] = []; for (const g of parts) { const gy = g!.m[13]!; for (let i = 0; i < g!.world.length; i += 3) xyz.push(g!.world[i]!, Math.max(g!.world[i + 1]!, gy), g!.world[i + 2]!); }
+    return compareMark(m, screenBox(xyz, cam), marks.tolerance);
+  });
+  const bad = rows.filter((x) => !x.ok);
+  write(out, { ok: !bad.length, painted: true, view: marks.view, camera: { eye: cam.eye, target: cam.target, vfov: cam.vfov }, tolerance: marks.tolerance, lab, at: new Date().toISOString(), rows });
+  for (const x of rows) console.log(`  ${x.ok ? "ok  " : "FAIL"} ${x.id.padEnd(16)} painted ${x.painted.w} x ${x.painted.h} px, built ${x.built ? `${x.built.w} x ${x.built.h} px at ${x.built.depth} m` : "-"}  ratio w ${x.ratio.w ?? "-"} h ${x.ratio.h ?? "-"}${x.ok ? "" : `: ${x.why}`}`);
+  return { ok: !bad.length, detail: bad.length ? bad.slice(0, 4).map((x) => `${x.id}: ${x.why}`).join("; ").slice(0, 400) : `${rows.length} marks within ${Math.round(marks.tolerance * 100)} % of the painting (${marks.view})` };
 }
 /** ROADS (owner ruling 2026-10-20: "no ribbon roads: buried by terrain, never approved"): the job carries no ribbon /
  *  path-operator approach (ribbonApproachOps; zonegen status `poi <id>` fails on the same rule), and the approach track
@@ -1162,7 +1225,7 @@ function bridgeJob() {
   if (faults.length) process.exitCode = 1;
 }
 
-const ID_CMDS = new Set(["bridge", "survey", "plan", "props", "approach", "dress", "lab", "build", "gates", "shots", "all", "install", "evidence"]);
+const ID_CMDS = new Set(["bridge", "survey", "plan", "props", "approach", "dress", "lab", "build", "gates", "scale", "shots", "all", "install", "evidence"]);
 if (cmd === "archetypes") { for (const { a } of archetypes()) console.log(`${a.id.padEnd(14)} ${a.pockets.length} pockets  ${a.description}`); }
 else if (cmd === "lift") { const { liftCommand } = await import("./_place-lift.mts"); await liftCommand(argv.slice(1)); } // a winch lift beside a long descent (tools/_place-lift.mts)
 else if (cmd === "quality") { if (!world || !zone) fail("usage: place-build quality <world> --zone <z> [--shots] [--only a,b] [--port p]"); await quality(); }
@@ -1190,6 +1253,7 @@ else if (ID_CMDS.has(cmd ?? "")) {
   if (cmd === "gates" || cmd === "all") { evidencePending = cmd === "all"; gates(); evidencePending = false; }
   if (cmd === "shots" || cmd === "all") await shots();
   if (cmd === "all") { gates(["place"]); process.exitCode = read(path.join(JOB, "reports", "gates.json")).ok ? 0 : 1; } // the evidence check again, now the shots are newer than the ops; the exit is the final table
+  if (cmd === "scale") gates(["scale"]); // the built place against its painting, in the painting's pixels (also a gates row)
   if (cmd === "evidence") recordReadShot(); // the read shot from pictures already taken (no browser)
   if (cmd === "install") {
     install();

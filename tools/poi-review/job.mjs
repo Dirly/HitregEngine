@@ -72,6 +72,8 @@
  *      naming `Design hash: <job.mjs design>`; `job.mjs design-review <dir> --file <review>` records it. No stage past
  *      greybox-review (no detail: no repeated fences, graves, stalls), and no install, without that PASS; editing
  *      design.json or its sample frames re-opens it. The final review (gate 13) answers P1..P5 again on the whole place.
+ *  17. It matches its painting's scale: a PAINTED place (concept/<poi>.site.json) needs `reports/scale.json` from
+ *      `place-build scale` saying ok (scaleBlock) — its hero pieces' screen sizes through the painting's camera.
  *   3. The loop is capped: `fix` records each fix attempt in progress.json `fixes`; a third attempt is refused unless
  *      the coordinator passes --coordinator (and it is recorded as theirs).
  *
@@ -231,7 +233,7 @@ export function installBlock(dir, { fineExceptions = true } = {}) {
   const p = loadProgress(dir);
   const now = opsHash(dir);
   if (!now) return "the job delivers no ops files";
-  return (ownerApproval(p, now) ? null : finalReviewBlock(dir, p, now) ?? designBlock(dir, p)) ?? sizeBlock(dir) ?? floatBlock(dir) ?? rockSkinsBlock(dir) ?? waterEdgesBlock(dir) ?? walkBlock(dir) ?? artBlock(dir) ?? seeThroughBlock(dir) ?? flatArtBlock(dir) ?? monumentApproachBlock(dir) ?? terrainFineBlock(dir, { exceptions: fineExceptions });
+  return (ownerApproval(p, now) ? null : finalReviewBlock(dir, p, now) ?? designBlock(dir, p)) ?? sizeBlock(dir) ?? floatBlock(dir) ?? rockSkinsBlock(dir) ?? waterEdgesBlock(dir) ?? walkBlock(dir) ?? artBlock(dir) ?? scaleBlock(dir) ?? seeThroughBlock(dir) ?? flatArtBlock(dir) ?? monumentApproachBlock(dir) ?? terrainFineBlock(dir, { exceptions: fineExceptions });
 }
 
 /** Gates 1 + 13: the recorded final review passes for these ops and is a fresh reviewer's, answering the rubric. */
@@ -902,6 +904,29 @@ export function artBlock(dir) {
   const rep = readJson(path.join(dir, "reports", "art-check.json"));
   if (!["architecture", "counts"].includes(rep.materialPolicy)) return `the art-check report predates the architectural material policy (gate 15): rerun ${how}; an old texture-count approval does not check architectural assignments`;
   return null;
+}
+
+/** Is the job a PAINTED place: its zone's concept/<poi>.site.json records a render with a camera (the approved painting's)? */
+export function paintedPlace(dir) {
+  const { poi, zoneDir } = jobSite(dir);
+  if (!zoneDir) return false;
+  const f = path.join(zoneDir, "concept", `${poi}.site.json`);
+  if (!fs.existsSync(f)) return false;
+  try { return Object.values(readJson(f).renders ?? {}).some((r) => Array.isArray(r?.camera) && Array.isArray(r?.target)); } catch { return false; }
+}
+
+/**
+ * Gate 17 (scale, Red Dial 2026-10-30: "you don't have the scale correct with the concept art"): a PAINTED place needs
+ * `reports/scale.json` from `place-build scale` saying ok — every hero piece marked in <job>/concept-marks.json within
+ * 15 % of its painted width/height, projected through the painting's own camera — newer than every delivered ops file.
+ */
+export function scaleBlock(dir) {
+  if (!paintedPlace(dir)) return null;
+  const how = `node node_modules/tsx/dist/cli.mjs tools/place-build.mts scale <world> --zone <z> --location ${jobSite(dir).poi} (from apps/playground; marks in ${path.join(dir, "concept-marks.json")})`;
+  return reportBlock(dir, "scale", 17, how, (rep) => {
+    const bad = (rep.rows ?? []).filter((r) => !r.ok).slice(0, 3).map((r) => `${r.id}: ${r.why}`).join("; ") || (rep.faults ?? []).join("; ") || "faults";
+    return `the scale gate failed (gate 17): the place does not match its painting's proportions — ${bad}; rescale the layout and run it again`;
+  });
 }
 
 /** Does the job deliver built structures (an added `mesh` component in its scene ops)? Gate 8 applies to those. */
