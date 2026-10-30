@@ -1001,12 +1001,18 @@ async function proofSheet(ids: string[]) {
   const pages = new Map<string, any>();
   ids.forEach((id, k) => {
     const { geo } = geometry(id);
+    // every material its own page; a triplanar material is projected in metres, world-UV boxes wrap (r-rubble 2026-10-30:
+    // the sheet drew every part with the first material's page and a triplanar heap as its atlas UVs)
+    const pageOf = (mat: string | undefined) => {
+      if (!mat) return null;
+      if (!pages.has(mat)) {
+        const mf = locate(ASSETS, "materials", `${mat}.json`), md = fs.existsSync(mf) ? readJson(mf) : {}, tf = md.map && locate(ASSETS, "textures", md.map);
+        pages.set(mat, tf && fs.existsSync(tf) ? (() => { const png = decodePng(fs.readFileSync(tf)); return { width: png.width, height: png.height, rgba: png.data, planar: md.triplanar ? (md.triplanarScale ?? 1) : undefined }; })() : null);
+      }
+      return pages.get(mat);
+    };
     const mat = geo.tris.find((t) => t.material)?.material;
-    if (mat && !pages.has(mat)) {
-      const mf = locate(ASSETS, "materials", `${mat}.json`), map = fs.existsSync(mf) ? readJson(mf).map : null, tf = map && locate(ASSETS, "textures", map);
-      pages.set(mat, tf && fs.existsSync(tf) ? (() => { const png = decodePng(fs.readFileSync(tf)); return { width: png.width, height: png.height, rgba: png.data }; })() : null);
-    }
-    const tris: any[] = geo.tris.map((t) => ({ p: [t.a, t.b, t.c].map((p) => new THREE.Vector3(p[0], p[1], p[2])), uv: t.uv?.map(([u, v]) => [u, 1 - v]) }));
+    const tris: any[] = geo.tris.map((t) => { const pg = pageOf(t.material); return { p: [t.a, t.b, t.c].map((p) => new THREE.Vector3(p[0], p[1], p[2])), uv: t.uv?.map(([u, v]) => [u, 1 - v]), ...(pg ? { texture: pg, wrap: true, ...(pg.planar ? { planar: pg.planar } : {}) } : {}) }; });
     if (!tris.length) return;
     if (flags.figure) {
       // --figure (k-city 2026-10-30): a red 1.8 m figure standing on grade (y=0) just in front of the prop's +X front corner

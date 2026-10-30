@@ -77,14 +77,26 @@ export function renderStrip(frames, views, texture, tile = 340, bg = 0x18) {
             const at = y * tile + x;
             if (z >= zbuf[at]) continue;
             let col = tri.color ?? [190, 190, 190];
-            if (texture && tri.uv) {
-              const u = w2 * tri.uv[0][0] + w1 * tri.uv[1][0] + w0 * tri.uv[2][0];
-              const v = w2 * tri.uv[0][1] + w1 * tri.uv[1][1] + w0 * tri.uv[2][1];
-              const tx = Math.min(texture.width - 1, Math.max(0, Math.floor(u * texture.width)));
-              const ty = Math.min(texture.height - 1, Math.max(0, Math.floor(v * texture.height)));
-              const o = (ty * texture.width + tx) * 4;
-              if (texture.rgba[o + 3] < 128) continue; // masked material, hard cutout
-              col = [texture.rgba[o], texture.rgba[o + 1], texture.rgba[o + 2]];
+            // per-triangle page (tri.texture) over the strip's one page; tri.planar = metres per tile of a
+            // world-projected (triplanar) material: the pixel's world point projected along the face's dominant axis
+            const page = tri.texture ?? texture;
+            if (page && (tri.uv || tri.planar)) {
+              let u, v;
+              if (tri.planar) {
+                const ax = Math.abs(n.x), ay = Math.abs(n.y), az = Math.abs(n.z);
+                const wx = w2 * tri.p[0].x + w1 * tri.p[1].x + w0 * tri.p[2].x, wy = w2 * tri.p[0].y + w1 * tri.p[1].y + w0 * tri.p[2].y, wz = w2 * tri.p[0].z + w1 * tri.p[1].z + w0 * tri.p[2].z;
+                [u, v] = ay >= ax && ay >= az ? [wx, wz] : ax >= az ? [wz, -wy] : [wx, -wy];
+                u /= tri.planar; v /= tri.planar;
+              } else {
+                u = w2 * tri.uv[0][0] + w1 * tri.uv[1][0] + w0 * tri.uv[2][0];
+                v = w2 * tri.uv[0][1] + w1 * tri.uv[1][1] + w0 * tri.uv[2][1];
+              }
+              if (tri.wrap || tri.planar) { u -= Math.floor(u); v -= Math.floor(v); }
+              const tx = Math.min(page.width - 1, Math.max(0, Math.floor(u * page.width)));
+              const ty = Math.min(page.height - 1, Math.max(0, Math.floor(v * page.height)));
+              const o = (ty * page.width + tx) * 4;
+              if (page.rgba[o + 3] < 128) continue; // masked material, hard cutout
+              col = [page.rgba[o], page.rgba[o + 1], page.rgba[o + 2]];
             }
             zbuf[at] = z;
             const out = ((oy + y) * width + ox + x) * 4;
