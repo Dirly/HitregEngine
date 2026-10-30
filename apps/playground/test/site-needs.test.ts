@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createWorldField, defaultWorldRecipe, worldRecipeSchema, type GroundNeedDoc, type WorldRecipe } from "@hitreg/core";
-import { measureNeeds, needGroundOf, needsFor, needStillMet, solveCliffFace, solveWalledNeck, needArea, unexcepted, type NeedGround } from "../tools/site-needs.mts";
+import { cliffFaceRelief, measureNeeds, needGroundOf, needsFor, needStillMet, solveCliffFace, solveWalledNeck, needArea, unexcepted, type NeedGround } from "../tools/site-needs.mts";
 import { pickFileSchema, roleOfTown } from "../tools/worldgen-site-needs.mts";
 import { placePickSchema } from "../tools/zonegen/commands/reserve.mts";
 
@@ -160,4 +160,52 @@ test("cliff-face holds: a held lake keeps a rim over its water level where the g
   assert.ok(p.heights[j * p.columns + i]! >= 11, `rim ${p.heights[j * p.columns + i]}`);
   const missing = solveCliffFace(g, { ...need, holds: ["nope"] }, needArea(need.near, need.within, []), { lakes: [lake] });
   assert.equal(missing.ok, false);
+});
+
+// 2026-10-30 redstrand w12: both generated faces read as smooth pyramids (one plane up the front, smooth tapers)
+test("cliff-face: the block is broken rock — ledges, off a plane, a ragged crest — and keeps the face and the foot", () => {
+  const recipe = flatWorld();
+  const g0 = needGroundOf(createWorldField(recipe), recipe.seaLevel);
+  const need = { id: "broken-face", kind: "cliff-face", for: "x", near: [0, 0], within: 120, minHeight: 50, width: 90, apron: 40, radius: 45, neck: 60, flankDrop: 12, faces: 180 } as GroundNeedDoc;
+  const s = solveCliffFace(g0, need, needArea(need.near, need.within, []));
+  assert.equal(s.ok, true, s.message);
+  recipe.features.heightPatches.push(s.patch!);
+  const g1 = needGroundOf(createWorldField(recipe), recipe.seaLevel);
+  const rel = cliffFaceRelief(g1, s.at, s.faces, need.width, need.minHeight);
+  assert.ok(rel.ledges >= 2, `ledges ${rel.ledges}`);
+  assert.ok(rel.planeRms >= 2, `plane rms ${rel.planeRms}`);
+  assert.ok(rel.crestRange >= 5, `crest spread ${rel.crestRange}`);
+  // the old shape (one ramp up the face) measures as a plane with no ledges
+  const ramp = ground((_x, z) => 10 + clamp((-z - 0) * 1.5, 0, 55));
+  const flat = cliffFaceRelief(ramp, [0, 0], 180, 90, 50);
+  assert.equal(flat.ledges, 0);
+  assert.ok(flat.planeRms < 1, `ramp rms ${flat.planeRms}`);
+  // still the asked face over a walkable apron
+  const after = needStillMet(g1, { ...need, solved: { at: s.at, faces: s.faces, height: s.height, patch: s.patch!.id, raised: s.raised, ran: "" } })!;
+  assert.equal(after.met, true, after.message);
+  // a re-shape at a kept foot does not move it
+  const kept = solveCliffFace(g0, need, needArea(need.near, need.within, []), { foot: [s.at[0] + 10, s.at[1]] });
+  assert.deepEqual(kept.at, [s.at[0] + 10, s.at[1]]);
+  // the block never stands steeper than the lips gate allows (3) between 2 m samples
+  let worst = 0;
+  for (let z = s.at[1] - 120; z < s.at[1] + 10; z += 2)
+    for (let x = s.at[0] - 130; x < s.at[0] + 130; x += 2) worst = Math.max(worst, Math.abs(g1.height(x + 2, z) - g1.height(x, z)) / 2, Math.abs(g1.height(x, z + 2) - g1.height(x, z)) / 2);
+  assert.ok(worst <= 3.05, `steepest ${worst}`);
+});
+
+test("cliff-face: the block keeps off a river (a fall pool beside it) like a shore", () => {
+  const recipe = flatWorld();
+  const g0 = needGroundOf(createWorldField(recipe), recipe.seaLevel);
+  const need = { id: "river-face", kind: "cliff-face", for: "x", near: [0, 0], within: 30, minHeight: 50, width: 90, apron: 40, radius: 45, neck: 60, flankDrop: 12, faces: 180 } as GroundNeedDoc;
+  const area = needArea(need.near, need.within, []);
+  const free = solveCliffFace(g0, need, area);
+  // a river running north-south through the block, beside its west end
+  const rx = free.at[0] - 55;
+  const s = solveCliffFace(g0, need, area, { foot: free.at, rivers: [{ id: "r", points: [[rx, free.at[1] - 300], [rx, free.at[1] + 100]], half: 3 }] });
+  const p = s.patch!;
+  const at = (x: number, z: number) => { const i = Math.round((x - p.origin[0]) / (p.size[0] / (p.columns - 1))), j = Math.round((z - p.origin[1]) / (p.size[1] / (p.rows - 1))); return p.weights![j * p.columns + i] ? p.heights[j * p.columns + i]! - g0.height(x, z) : 0; };
+  const without = (x: number, z: number) => { const q = free.patch!; const i = Math.round((x - q.origin[0]) / (q.size[0] / (q.columns - 1))), j = Math.round((z - q.origin[1]) / (q.size[1] / (q.rows - 1))); return q.weights![j * q.columns + i] ? q.heights[j * q.columns + i]! - g0.height(x, z) : 0; };
+  const z = free.at[1] - 40;
+  assert.ok(without(rx + 6, z) > 1, `the free block raises the bank ${without(rx + 6, z)}`);
+  assert.ok(at(rx + 6, z) <= 0.05, `beside the river ${at(rx + 6, z)}`);
 });

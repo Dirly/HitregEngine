@@ -378,7 +378,7 @@ const HELP = `worldgen — procedural world pipeline
   siting-map <world>  one overview map of every proposed siting candidate (towns + zonegen sites), numbered per role:
                    authoring/siting/<world>/candidates-map.png
   needs  <world>   solve the recipe's needs[] (cliff-face for a grand entrance, walled-neck for a walled town) into need-<id>
-                   height patches [--only <id>] [--check]; the needs status row fails an unsolved or no-longer-met need
+                   height patches [--only <id>] [--keep-foot: re-shape a solved face at its foot] [--check]; the needs status row fails an unsolved or no-longer-met need
   town-pins <world> record which towns stay put (\`keep: true\`) without re-siting anything: --keep <ids|all>,
                    --release <ids|all>; lists every town as pinned (tag) / kept / free
   terrace <world>  --from-plan <authoring/towns/<name>-design.json>: cut EXACTLY an approved town design (the

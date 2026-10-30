@@ -48,6 +48,8 @@ npx tsx tools/worldgen.mts towns <world> --project <p> --pick authoring/siting/<
 Failures: `site-need` (reserve) -> re-site through propose/pick, or a dated `needRulings` entry from the coordinator;
 `towns` row "<town> (<role>) <need>" -> `towns --propose` + `--pick`; a SHORTFALL (nothing meets) -> add the printed
 entry to the recipe `needs` (cliff-face / walled-neck), run `worldgen needs <world>`, then propose again.
+A solved face that must not move (a sited place, painted art) is re-shaped with `worldgen needs <world> --only <id>
+--keep-foot`; never a plain re-run (it re-searches the spot and re-solves every need).
 
 ## Gates: failure -> fix
 - `path-leads-nowhere` / `dead-end` (a path climbing >= 25 m to nothing; a hairpin run topping out at nothing) ->

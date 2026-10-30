@@ -887,7 +887,6 @@ export function needArea(near: GroundNeedDoc["near"], within: number, regions: r
   };
 }
 
-const smooth = (t: number) => { const c = Math.max(0, Math.min(1, t)); return c * c * (3 - 2 * c); };
 
 /** A masked, raise-only height patch over a box, from a function giving the wanted height (null = leave the ground). */
 function patchOver(id: string, box: [number, number, number, number], cell: number, natural: (x: number, z: number) => number, wantY: (x: number, z: number) => number | null, blendM?: number): { patch: HeightPatchDoc; raised: number } {
@@ -940,13 +939,198 @@ export interface NeedSolve {
  */
 /** Narrow ground: the dry ground the face needs behind its run (a crest lip), and the steepest fall from the block to a
  *  shore behind it (= worldgen-lips NEED_FACE_MAX_SLOPE, the slope the lips gate allows a need patch). */
-const SHORE_LIP = 12, SHORE_FALL = 3, SHORE_KEEP = 12;
+// SHORE_FALL 2.5, under the gate's 3: at 3 the lattice diagonals beside a road end read as 6-7 m steps (w11/w12 redstrand)
+const SHORE_LIP = 12, SHORE_FALL = 2.5, SHORE_KEEP = 12, SHORE_KEEP_CLIFF = 8;
+/** Width (m) over which the block's clamps (edge fall, shore fall, a held rim) blend: a hard min/max creased the rim. */
+const CREASE_SOFT = 6;
+const smin = (a: number, b: number, k: number) => { const h = Math.max(k - Math.abs(a - b), 0) / k; return Math.min(a, b) - (h * h * k) / 4; };
+const smax = (a: number, b: number, k: number) => -smin(-a, -b, k);
+
+/**
+ * BROKEN ROCK (2026-10-30 redstrand w12: both generated faces read as smooth pyramids — one plane up the front, smooth
+ * tapers down the ends). The block is the MIN of a few surfaces, each no steeper than the lips gate allows:
+ * - the FACE climbs in lifts at rise/run CLIFF_RISER (65 deg: the slope paints the zone's cliff tile, crag cliffEnd
+ *   0.86 = 59 deg) with ledges between (`CLIFF_LEDGE`: the 2 m raster, its prefilter and the voxel lattice round ~3 m off a ledge, so a 4 m one drew as a slope; the flat left stays under the 8 m a face measure walks over);
+ * - the face line steps back in bays along the face (buttresses and set-backs) with a little noise, never forward into
+ *   the apron; the door bay in the middle stays straight and full height;
+ * - the crest line is ragged: each bay its own height;
+ * - V GULLIES cleave the upper face at some bay boundaries (their floor starts above the first lift, so the foot stays clean);
+ * - the ENDS and the BACK fall in terraces (risers + benches), not one smooth taper.
+ */
+export const CLIFF_RISER = 2.2;
+const CLIFF_LEDGE: [number, number] = [6, 8];
+const CLIFF_BAY: [number, number] = [14, 24];
+const CLIFF_BAY_BLEND = 14, CLIFF_CREST_BLEND = 12, CLIFF_GULLY_WALL = 2.4, CLIFF_GULLY_RISE = 0.7, CLIFF_BACK_RISER = 1.4;
+
+function rngOf(seed: string): () => number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) h = Math.imul(h ^ seed.charCodeAt(i), 16777619);
+  let a = h >>> 0;
+  return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+/** Smooth 1D value noise in [-1, 1] at wavelength `wl` (cosine-interpolated hashed lattice). */
+function noise1(seed: number, wl: number): (t: number) => number {
+  const at = (i: number) => { let x = Math.imul(i ^ seed, 0x27d4eb2d); x ^= x >>> 15; x = Math.imul(x, 0x165667b1); x ^= x >>> 13; return ((x >>> 0) / 4294967296) * 2 - 1; };
+  return (t) => { const f = t / wl, i = Math.floor(f), r = (1 - Math.cos((f - i) * Math.PI)) / 2; return at(i) * (1 - r) + at(i + 1) * r; };
+}
+/** Climb at distance t along a terrace: `lifts` (m) at rise/run `slope`, `benches` (m) level between them. */
+function terraced(t: number, lifts: readonly number[], benches: readonly number[], slope: number): number {
+  let pos = 0, acc = 0;
+  for (let i = 0; i < lifts.length; i++) {
+    const r = lifts[i]! / slope;
+    if (t < pos + r) return acc + Math.max(0, t - pos) * slope;
+    pos += r; acc += lifts[i]!;
+    const b = i < lifts.length - 1 ? benches[i] ?? 0 : 0;
+    if (t < pos + b) return acc;
+    pos += b;
+  }
+  return acc;
+}
+const runOf = (lifts: readonly number[], benches: readonly number[], slope: number) => lifts.reduce((a, b) => a + b, 0) / slope + benches.slice(0, lifts.length - 1).reduce((a, b) => a + b, 0);
+/** `n` shares of 1, each within +-jit of 1/n. */
+function shares(rnd: () => number, n: number, jit: number): number[] {
+  const v = Array.from({ length: n }, () => 1 / n + (rnd() * 2 - 1) * jit);
+  const s = v.reduce((a, b) => a + b, 0);
+  return v.map((x) => x / s);
+}
+
+/** The broken-rock shape of a cliff-face block in its own frame: u into the rock from the foot line, s along the face. */
+export function brokenCliff(id: string, footY: number, top: number, half: number, taper: number, crest: number, back: number): { y: (u: number, s: number) => number; run: number } {
+  const rnd = rngOf(id);
+  const rise = top - footY;
+  // the face: three lifts (the lowest the tallest) with two ledges
+  const lf = shares(rnd, 3, 0.05).sort((a, b) => b - a);
+  const lifts = lf.map((f) => f * rise);
+  const ledges = [0, 1].map(() => CLIFF_LEDGE[0] + rnd() * (CLIFF_LEDGE[1] - CLIFF_LEDGE[0]));
+  const run = runOf(lifts, ledges, CLIFF_RISER);
+  // the back: four lifts down `back * 0.35` with benches sharing what is left of the back's run
+  const backDrop = back * 0.35;
+  const backLifts = shares(rnd, 4, 0.08).map((f) => f * backDrop);
+  const backFree = Math.max(0, back - backDrop / CLIFF_BACK_RISER);
+  const backBenches = shares(rnd, 3, 0.1).map((f) => f * backFree);
+  // the ends: three lifts down to the foot over the taper, benches between, each end its own
+  const ends = [0, 1].map(() => {
+    const l = shares(rnd, 3, 0.07).map((f) => f * rise);
+    const free = Math.max(0, taper - rise / CLIFF_RISER);
+    // the first bench starts a little in from the face end so the end riser is not the face's own corner
+    const benches = shares(rnd, 2, 0.12).map((f) => f * free * 0.8);
+    return { lifts: l, benches, lead: free * 0.2, run: free * 0.2 + runOf(l, benches, CLIFF_RISER) };
+  });
+  // bays along the face, outward from a straight door bay
+  const D = Math.max(10, Math.min(16, half * 0.3));
+  type Bay = { s0: number; s1: number; off: number; c: number; kind: "door" | "buttress" | "setback" };
+  const right: Bay[] = [], left: Bay[] = [];
+  for (const [list, sign] of [[right, 1], [left, -1]] as const) {
+    let s = D, kind: Bay["kind"] = "setback";
+    while (s < half + taper) {
+      const w = CLIFF_BAY[0] + rnd() * (CLIFF_BAY[1] - CLIFF_BAY[0]);
+      const off = kind === "setback" ? 3 + rnd() * 1.5 : rnd() * 1;
+      const c = kind === "setback" ? 0.84 + rnd() * 0.1 : 1 + rnd() * 0.08;
+      list.push(sign > 0 ? { s0: s, s1: s + w, off, c, kind } : { s0: -(s + w), s1: -s, off, c, kind });
+      s += w;
+      kind = kind === "setback" ? "buttress" : "setback";
+    }
+  }
+  const bays: Bay[] = [...left.reverse(), { s0: -D, s1: D, off: 0, c: 1, kind: "door" }, ...right];
+  bays[0]!.s0 = -Infinity; bays[bays.length - 1]!.s1 = Infinity;
+  const bayVal = (s: number, key: "off" | "c", tr: number): number => {
+    const i = bays.findIndex((b) => s >= b.s0 && s < b.s1);
+    const b = bays[i]!, a = b[key];
+    if (i > 0 && s - b.s0 < tr / 2) { const t = (s - b.s0 + tr / 2) / tr; return bays[i - 1]![key] * (1 - t) + a * t; }
+    if (i < bays.length - 1 && b.s1 - s < tr / 2) { const t = (s - b.s1 + tr / 2) / tr; return a * (1 - t) + bays[i + 1]![key] * t; }
+    return a;
+  };
+  // gullies at most set-back/buttress boundaries outside the door bay (at least one each side)
+  const gullies: { s: number; floor: number }[] = [];
+  for (const [list, sign] of [[right, 1], [left, -1]] as const) {
+    let made = 0;
+    for (let k = 0; k < list.length; k++) {
+      const b = list[k]!;
+      const edge = sign > 0 ? b.s1 : b.s0;
+      if (Math.abs(edge) > half + taper * 0.6 || b.kind !== "setback") continue;
+      if (made && rnd() > 0.7) continue;
+      gullies.push({ s: edge - sign * (2 + rnd() * 3), floor: (0.3 + rnd() * 0.2) * rise });
+      made++;
+    }
+  }
+  const nOff = noise1(Math.floor(rnd() * 1e9), 11), nCrest = noise1(Math.floor(rnd() * 1e9), 9);
+  const y = (u: number, s: number): number => {
+    const as = Math.abs(s);
+    const quiet = Math.max(0, Math.min(1, (as - D * 0.5) / D));
+    const w = u - bayVal(s, "off", CLIFF_BAY_BLEND) - nOff(s) * 0.8 * quiet;
+    let yf: number;
+    if (w <= 0) yf = footY;
+    else if (w <= run) yf = footY + terraced(w, lifts, ledges, CLIFF_RISER);
+    else if (w <= run + crest) yf = top;
+    else yf = top - terraced(w - run - crest, backLifts, backBenches, CLIFF_BACK_RISER);
+    // the ragged crest
+    let yv = Math.min(yf, footY + rise * bayVal(s, "c", CLIFF_CREST_BLEND) + nCrest(s) * 1.5 * quiet);
+    // the terraced ends
+    if (as > half) {
+      const e = ends[s > 0 ? 0 : 1]!;
+      // past its last lift the end keeps falling like the apron's fill (1:1) instead of standing at the foot level
+      const t = as - half;
+      yv = Math.min(yv, top - terraced(Math.max(0, t - e.lead), e.lifts, e.benches, CLIFF_RISER) - Math.max(0, t - e.run));
+    }
+    for (const g of gullies) yv = Math.min(yv, footY + g.floor + Math.max(0, u) * CLIFF_GULLY_RISE + Math.abs(s - g.s) * CLIFF_GULLY_WALL);
+    // the floor is the apron's level across the face and its 1:1 fill beyond (w12: a flat floor at the foot level out to
+    // the block's ends stood as an 11 m wall along the foot line where the ground beside the apron falls away)
+    return Math.max(footY - Math.max(0, as - half), yv);
+  };
+  return { y, run };
+}
+
+/**
+ * How broken a cliff face reads on the ground (the w12 test metric): profiles across the face every 6 m of its middle
+ * `width`; `ledges` = the median count of level runs (>= 3 m, slope < 0.4) between steep runs (>= 1.5) up a profile;
+ * `planeRms` = the RMS (m) of the face's heights about their best-fit plane (a single-plane pyramid side is ~0);
+ * `crestRange` = the spread (m) of the crest height along the face.
+ */
+export function cliffFaceRelief(g: NeedGround, foot: V2, faces: number, width: number, height: number): { ledges: number; planeRms: number; crestRange: number } {
+  const [fx, fz] = dirOf(faces);
+  const ix = -fx, iz = -fz, px = -iz, pz = ix;
+  const reach = height * 1.2;
+  const ledgeCounts: number[] = [], crests: number[] = [];
+  const pts: [number, number, number][] = [];
+  for (let s = -width / 2; s <= width / 2; s += 6) {
+    const H = (w: number) => g.height(foot[0] + ix * w + px * s, foot[1] + iz * w + pz * s);
+    const y0 = H(0);
+    let ledges = 0, steep = false, flat = 0, longest = 0, top = y0, wTop = 0;
+    for (let w = 0; w < reach; w += 1) {
+      const h = H(w), d = H(w + 1) - h;
+      if (h > top) { top = h; wTop = w; }
+      if (d >= 1.5) { if (steep && longest >= 3 && h - y0 > 3) ledges++; steep = true; flat = 0; longest = 0; }
+      else if (d < 0.4) longest = Math.max(longest, ++flat);
+      else flat = 0;
+    }
+    ledgeCounts.push(ledges);
+    crests.push(top);
+    for (let w = 1; w < wTop * 0.9; w += 2) pts.push([w, s, H(w)]);
+  }
+  // least squares y = a + b w + c s
+  let n = 0, sw = 0, ss = 0, sy = 0, sww = 0, sss = 0, sws = 0, swy = 0, ssy = 0;
+  for (const [w, s, h] of pts) { n++; sw += w; ss += s; sy += h; sww += w * w; sss += s * s; sws += w * s; swy += w * h; ssy += s * h; }
+  let rms = 0;
+  if (n >= 3) {
+    const M = [[n, sw, ss], [sw, sww, sws], [ss, sws, sss]], r = [sy, swy, ssy];
+    const det = (m: number[][]) => m[0]![0]! * (m[1]![1]! * m[2]![2]! - m[1]![2]! * m[2]![1]!) - m[0]![1]! * (m[1]![0]! * m[2]![2]! - m[1]![2]! * m[2]![0]!) + m[0]![2]! * (m[1]![0]! * m[2]![1]! - m[1]![1]! * m[2]![0]!);
+    const D0 = det(M) || 1;
+    const col = (k: number) => M.map((row, i) => row.map((v, j) => (j === k ? r[i]! : v)));
+    const [a, b, c] = [0, 1, 2].map((k) => det(col(k)) / D0) as [number, number, number];
+    for (const [w, s, h] of pts) rms += (h - (a + b * w + c * s)) ** 2;
+    rms = Math.sqrt(rms / n);
+  }
+  ledgeCounts.sort((a, b) => a - b);
+  return { ledges: ledgeCounts[Math.floor(ledgeCounts.length / 2)] ?? 0, planeRms: R1(rms), crestRange: R1(Math.max(...crests) - Math.min(...crests)) };
+}
 /** A set-bearing face may stand on ground rising into it up to this grade (the apron fill levels it). */
 const RISING_APRON_MAX = 0.6;
 
 /** A lake a need may hold (`need.holds`): its outline and surface. */
 export interface HeldLake { id: string; waterY: number; center: V2; radius: number; polygon?: readonly V2[] }
-const RIM_REACH = 36, RIM_FLAT = 20, RIM_FREEBOARD = 1.5, RIM_EASE = 0.5;
+// past its flat the rim eases (smoothstep) down to the ground at RIM_REACH: the old fixed fall (0.5) stopped at 36 m still
+// 5-8 m over the ground and stood as a crease along the east dam (w11/w12). A longer reach reached river-5's outlet gorge.
+const RIM_REACH = 36, RIM_FLAT = 20, RIM_FREEBOARD = 1.5;
 
 /** Signed-free distance from (x, z) to a lake's outline and whether it is inside. */
 function lakeOutline(l: HeldLake): (x: number, z: number) => { inside: boolean; d: number } {
@@ -965,7 +1149,7 @@ function lakeOutline(l: HeldLake): (x: number, z: number) => { inside: boolean; 
   };
 }
 
-/** The rim a held lake needs at (x, z): water + freeboard within RIM_FLAT m outside the outline, easing out to RIM_REACH. */
+/** The rim a held lake needs at (x, z): water + freeboard within RIM_FLAT m outside the outline, easing to the ground at RIM_REACH. */
 function heldRimY(g: NeedGround, lakes: readonly HeldLake[]): { at: (x: number, z: number) => number | null; box: [number, number, number, number] | null } {
   if (!lakes.length) return { at: () => null, box: null };
   const shapes = lakes.map((l) => ({ l, o: lakeOutline(l) }));
@@ -983,7 +1167,8 @@ function heldRimY(g: NeedGround, lakes: readonly HeldLake[]): { at: (x: number, 
       for (const { l, o } of shapes) {
         const { inside, d } = o(x, z);
         if (inside || d > RIM_REACH) continue;
-        const y = l.waterY + RIM_FREEBOARD - Math.max(0, d - RIM_FLAT) * RIM_EASE;
+        const t = Math.max(0, Math.min(1, (d - RIM_FLAT) / (RIM_REACH - RIM_FLAT))), e = t * t * (3 - 2 * t);
+        const y = l.waterY + RIM_FREEBOARD + (g.height(x, z) - l.waterY - RIM_FREEBOARD) * e;
         if (y > g.height(x, z) && (best === null || y > best)) best = y;
       }
       return best;
@@ -991,34 +1176,58 @@ function heldRimY(g: NeedGround, lakes: readonly HeldLake[]): { at: (x: number, 
   };
 }
 
-/** Distance (m) to the nearest wet sample on a `cell` m grid over `box` (two-pass chamfer; Infinity with no water). */
-function waterDistance(g: NeedGround, box: [number, number, number, number], cell: number): (x: number, z: number) => number {
+/**
+ * Distance (m) to the nearest wet sample on a `cell` m grid over `box` (two-pass chamfer; Infinity with no water), and
+ * the level of that water (the sea level, or the bed under a river or lake: a few metres low, never high).
+ */
+function waterDistance(g: NeedGround, box: [number, number, number, number], cell: number, extraWet?: (x: number, z: number) => boolean): { d: (x: number, z: number) => number; level: (x: number, z: number) => number } {
   const nx = Math.max(2, Math.ceil((box[2] - box[0]) / cell) + 1), nz = Math.max(2, Math.ceil((box[3] - box[1]) / cell) + 1);
-  const d = new Float32Array(nx * nz);
+  const d = new Float32Array(nx * nz), lv = new Float32Array(nx * nz);
   let any = false;
-  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) { const w = g.wet(box[0] + i * cell, box[1] + j * cell); d[j * nx + i] = w ? 0 : 1e9; any ||= w; }
-  if (!any) return () => Infinity;
-  const D = cell * Math.SQRT2;
   for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
-    const k = j * nx + i; let v = d[k]!;
-    if (i > 0) v = Math.min(v, d[k - 1]! + cell);
-    if (j > 0) { v = Math.min(v, d[k - nx]! + cell); if (i > 0) v = Math.min(v, d[k - nx - 1]! + D); if (i < nx - 1) v = Math.min(v, d[k - nx + 1]! + D); }
-    d[k] = v;
+    const x = box[0] + i * cell, z = box[1] + j * cell;
+    const w = g.wet(x, z) || !!extraWet?.(x, z);
+    d[j * nx + i] = w ? 0 : 1e9;
+    if (w) lv[j * nx + i] = Math.max(g.sea, g.height(x, z));
+    any ||= w;
+  }
+  if (!any) return { d: () => Infinity, level: () => -Infinity };
+  const D = cell * Math.SQRT2;
+  const relax = (k: number, q: number, step: number) => { if (d[q]! + step < d[k]!) { d[k] = d[q]! + step; lv[k] = lv[q]!; } };
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+    const k = j * nx + i;
+    if (i > 0) relax(k, k - 1, cell);
+    if (j > 0) { relax(k, k - nx, cell); if (i > 0) relax(k, k - nx - 1, D); if (i < nx - 1) relax(k, k - nx + 1, D); }
   }
   for (let j = nz - 1; j >= 0; j--) for (let i = nx - 1; i >= 0; i--) {
-    const k = j * nx + i; let v = d[k]!;
-    if (i < nx - 1) v = Math.min(v, d[k + 1]! + cell);
-    if (j < nz - 1) { v = Math.min(v, d[k + nx]! + cell); if (i < nx - 1) v = Math.min(v, d[k + nx + 1]! + D); if (i > 0) v = Math.min(v, d[k + nx - 1]! + D); }
-    d[k] = v;
+    const k = j * nx + i;
+    if (i < nx - 1) relax(k, k + 1, cell);
+    if (j < nz - 1) { relax(k, k + nx, cell); if (i < nx - 1) relax(k, k + nx + 1, D); if (i > 0) relax(k, k + nx - 1, D); }
   }
-  return (x, z) => {
-    const i = Math.round((x - box[0]) / cell), j = Math.round((z - box[1]) / cell);
-    if (i < 0 || j < 0 || i >= nx || j >= nz) return Infinity;
-    return d[j * nx + i]!;
-  };
+  const idx = (x: number, z: number) => { const i = Math.round((x - box[0]) / cell), j = Math.round((z - box[1]) / cell); return i < 0 || j < 0 || i >= nx || j >= nz ? -1 : j * nx + i; };
+  return { d: (x, z) => { const k = idx(x, z); return k < 0 ? Infinity : d[k]!; }, level: (x, z) => { const k = idx(x, z); return k < 0 ? -Infinity : lv[k]!; } };
 }
 
-export function solveCliffFace(g: NeedGround, need: GroundNeedDoc, area: NeedArea, o: { lakes?: readonly HeldLake[] } = {}): NeedSolve {
+/** A river's centre line and half-width (the block keeps off it like a shore: a fall pool beside the Moon block, w11). */
+export interface NeedRiver { id: string; points: readonly V2[]; half: number }
+function riverWet(rivers: readonly NeedRiver[], box: [number, number, number, number]): ((x: number, z: number) => boolean) | undefined {
+  const segs: [number, number, number, number, number][] = [];
+  for (const r of rivers)
+    for (let i = 0; i + 1 < r.points.length; i++) {
+      const [ax, az] = r.points[i]!, [bx, bz] = r.points[i + 1]!;
+      const m = r.half + 2;
+      if (Math.max(ax, bx) + m < box[0] || Math.min(ax, bx) - m > box[2] || Math.max(az, bz) + m < box[1] || Math.min(az, bz) - m > box[3]) continue;
+      segs.push([ax, az, bx, bz, m]);
+    }
+  if (!segs.length) return undefined;
+  return (x, z) => segs.some(([ax, az, bx, bz, m]) => {
+    const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1;
+    const t = Math.max(0, Math.min(1, ((x - ax) * ex + (z - az) * ez) / L2));
+    return Math.hypot(x - ax - t * ex, z - az - t * ez) <= m;
+  });
+}
+
+export function solveCliffFace(g: NeedGround, need: GroundNeedDoc, area: NeedArea, o: { lakes?: readonly HeldLake[]; rivers?: readonly NeedRiver[]; foot?: V2 } = {}): NeedSolve {
   const held = (need.holds ?? []).map((id) => o.lakes?.find((l) => l.id === id) ?? null);
   const missing = (need.holds ?? []).filter((_, i) => !held[i]);
   if (missing.length) return { ok: false, existing: false, at: area.near, faces: 0, height: 0, raised: 0, patch: null, message: `holds names no lake: ${missing.join(", ")}` };
@@ -1026,7 +1235,13 @@ export function solveCliffFace(g: NeedGround, need: GroundNeedDoc, area: NeedAre
   const H = need.minHeight;
   const step = 24;
   let best: { at: V2; face: number; into: number; score: number } | null = null;
-  for (let z = area.box[1]; z <= area.box[3]; z += step)
+  // a re-shape keeps its solved foot (`needs --keep-foot`): no spot search, for a face with a set bearing
+  if (o.foot && need.faces !== undefined) {
+    const into = (need.faces + 180) % 360, [dx, dz] = dirOf(into);
+    best = { at: [o.foot[0] - dx * (need.apron / 2), o.foot[1] - dz * (need.apron / 2)], face: 0, into, score: 0 };
+  }
+  const kept = best !== null;
+  for (let z = area.box[1]; !kept && z <= area.box[3]; z += step)
     for (let x = area.box[0]; x <= area.box[2]; x += step) {
       if (!area.inside(x, z) || g.wet(x, z)) continue;
       // the apron spot itself must be level, dry ground — or, for a face with a set bearing, ground that rises INTO the face
@@ -1073,17 +1288,18 @@ export function solveCliffFace(g: NeedGround, need: GroundNeedDoc, area: NeedAre
   for (let u = -need.apron; u <= 0; u += 4)
     for (let v = -need.width / 2; v <= need.width / 2; v += 6) footY = Math.max(footY, g.height(fx + ix * u - iz * v, fz + iz * u + ix * v));
   const top = footY + H * 1.05 + 1; // a margin over the asked height: the measure reads the face from where its slope starts
-  const run = H / 1.5, crest = 30, back = Math.min(160, H / 0.35), taper = H;
+  const crest = 30, back = Math.min(160, H / 0.35), taper = H;
   const half = need.width / 2;
+  // broken rock, not a pyramid (w12): lifts and ledges, bays, a ragged crest, gullies, terraced ends and back
+  const rock = brokenCliff(need.id, footY, top, half, taper, crest, back);
+  const run = rock.run;
   const wantY = (x: number, z: number): number | null => {
-    const u = (x - fx) * ix + (z - fz) * iz, v = Math.abs((x - fx) * px + (z - fz) * pz);
+    const u = (x - fx) * ix + (z - fz) * iz, s = (x - fx) * px + (z - fz) * pz, v = Math.abs(s);
     // the APRON: level at the foot across the face, `apron` m deep, then a 45 deg fill down to natural ground (raise-only:
     // only hollows fill), so the plaza and stair have the flat the rock-face need measures
     if (u < 0) return u < -(need.apron + 45) || v > half + 45 ? null : footY - Math.hypot(Math.max(0, -u - need.apron), Math.max(0, v - half));
     if (u > run + crest + back || v > half + taper) return null;
-    let y = u <= run ? footY + (u / run) * (top - footY) : u <= run + crest ? top : top - (u - run - crest) * 0.35;
-    if (v > half) y = footY + (y - footY) * (1 - smooth((v - half) / taper));
-    return y;
+    return rock.y(u, s);
   };
   const span = run + crest + back + 8, wide = half + taper + 8;
   const behind = -(need.apron + 45);
@@ -1098,7 +1314,7 @@ export function solveCliffFace(g: NeedGround, need: GroundNeedDoc, area: NeedAre
   const EDGE_FALL = 1.2;
   // metres from (x, z) to the nearest standing water in any direction (a sea behind the block, a river beside it): a
   // chamfer distance over a 3 m wet mask of the box, so the block falls to every shore, not only the one behind it
-  const shore = waterDistance(g, box, 3);
+  const shore = waterDistance(g, box, 3, riverWet(o.rivers ?? [], box));
   const edgeClamped = (x: number, z: number): number | null => {
     const y = wantY(x, z);
     if (y === null) return null;
@@ -1106,18 +1322,31 @@ export function solveCliffFace(g: NeedGround, need: GroundNeedDoc, area: NeedAre
     const u = (x - fx) * ix + (z - fz) * iz, v = Math.abs((x - fx) * px + (z - fz) * pz);
     // the apron and its 45 deg fill fall to the ground on their own, and never fill standing water: by a lake they ease
     // down to the shore at EDGE_FALL (a lake-side apron), never a wall at the waterline
-    if (u < 0) return g.wet(x, z) ? null : Math.min(y, g.height(x, z) + shore(x, z) * EDGE_FALL);
+    if (u < 0) return g.wet(x, z) ? null : Math.min(y, g.height(x, z) + shore.d(x, z) * EDGE_FALL);
     const d = Math.min(u - behind, run + crest + back - u, half + taper - v);
-    return Math.min(y, g.height(x, z) + Math.max(0, d) * EDGE_FALL, Math.max(0, shore(x, z) - SHORE_KEEP) * SHORE_FALL + g.height(x, z));
+    // the clamps blend over CREASE_SOFT m (a hard min of the edge fall and the shore fall creased the Moon's west taper, w11)
+    // a beach keeps SHORE_KEEP m of natural ground; a cliff top (the ground well over its water: the Moon's arm stands
+    // 128 m over the sea) keeps SHORE_KEEP_CLIFF, else the gentler fall (w12) cost the narrow arm its face height
+    const over = g.height(x, z) - shore.level(x, z);
+    const keep = SHORE_KEEP - (SHORE_KEEP - SHORE_KEEP_CLIFF) * Math.max(0, Math.min(1, (over - 6) / 10));
+    const clamp = smin(g.height(x, z) + Math.max(0, d) * EDGE_FALL, Math.max(0, shore.d(x, z) - keep) * SHORE_FALL + g.height(x, z), CREASE_SOFT);
+    return smin(y, clamp, CREASE_SOFT);
   };
-  // a held lake's rim rides in the same patch (the box grows to cover it); the higher of the two wins
-  const withRim = (x: number, z: number): number | null => {
-    const a = edgeClamped(x, z), b = rim.at(x, z);
-    return a === null ? b : b === null ? a : Math.max(a, b);
-  };
+  // a held lake's rim rides in the same patch (the box grows to cover it); the higher of the two wins, blended (a hard
+  // max creased the east dam, w11)
   const patchBox: [number, number, number, number] = rim.box ? [Math.min(box[0], rim.box[0]), Math.min(box[1], rim.box[1]), Math.max(box[2], rim.box[2]), Math.max(box[3], rim.box[3])] : box;
-  const { patch, raised } = patchOver(`need-${need.id}`, patchBox, 3, (x, z) => g.height(x, z), withRim);
-  return { ok: true, existing: false, at: [Math.round(fx), Math.round(fz)], faces: Math.round(front), height: H, raised: R1(raised), patch, message: `a ${H} m scarp behind [${Math.round(fx)}, ${Math.round(fz)}], front facing ${compassWord(front)}, ${need.width} m wide (lifted at most ${R1(raised)} m)` };
+  // the rim keeps off a river like the block (its outlet's gorge and falls: w12, fall-5 below lake-3)
+  const riverOnly = rim.box ? waterDistance({ ...g, wet: () => false }, patchBox, 3, riverWet(o.rivers ?? [], patchBox)).d : () => Infinity;
+  const withRim = (x: number, z: number): number | null => {
+    const a = edgeClamped(x, z);
+    let b = rim.at(x, z);
+    if (b !== null) { b = smin(b, g.height(x, z) + Math.max(0, riverOnly(x, z) - SHORE_KEEP) * SHORE_FALL, CREASE_SOFT); if (b <= g.height(x, z)) b = null; }
+    return a === null ? b : b === null ? a : smax(a, b, CREASE_SOFT);
+  };
+  // a 2 m raster and a light prefilter: the default (one voxel step) on a 3 m raster rounded the lifts into one slope
+  const { patch, raised } = patchOver(`need-${need.id}`, patchBox, 2, (x, z) => g.height(x, z), withRim);
+  (patch as { filter?: number }).filter = 1;
+  return { ok: true, existing: false, at: [Math.round(fx), Math.round(fz)], faces: Math.round(front), height: H, raised: R1(raised), patch, message: `a ${H} m broken-rock scarp behind [${Math.round(fx)}, ${Math.round(fz)}], front facing ${compassWord(front)}, ${need.width} m wide (lifted at most ${R1(raised)} m)` };
 }
 
 /**
@@ -1312,7 +1541,12 @@ export function needStillMet(g: NeedGround, need: GroundNeedDoc): NeedResult | n
   if (need.kind === "cliff-face") {
     // measured from the apron centre in front of the foot
     const [fx, fz] = dirOf(need.solved.faces);
-    return measureRockFace(g, siteNeedSchema.parse({ kind: "rock-face", minHeight: need.minHeight * 0.95, apronM2: (need.apron * need.apron) / 2, readDistance: 0, footReach: need.apron }) as Extract<SiteNeed, { kind: "rock-face" }>, x + fx * (need.apron / 2), z + fz * (need.apron / 2));
+    const r = measureRockFace(g, siteNeedSchema.parse({ kind: "rock-face", minHeight: need.minHeight * 0.95, apronM2: (need.apron * need.apron) / 2, readDistance: 0, footReach: need.apron }) as Extract<SiteNeed, { kind: "rock-face" }>, x + fx * (need.apron / 2), z + fz * (need.apron / 2));
+    // how broken the face reads (w12): reported, not failed (lab copies of older solves would fail a gate they never ran)
+    const rel = cliffFaceRelief(g, need.solved.at, need.solved.faces, need.width, need.minHeight);
+    r.numbers = { ...r.numbers, ledges: rel.ledges, planeRms: rel.planeRms, crestRange: rel.crestRange };
+    r.message += `; broken rock: ${rel.ledges} ledges, ${rel.planeRms} m off a plane, crest spread ${rel.crestRange} m`;
+    return r;
   }
   return measureDefensible(g, siteNeedSchema.parse({ kind: "defensible", flankDrop: Math.min(need.flankDrop, 8), maxWall: Math.max(260, need.neck * 1.6) }) as Extract<SiteNeed, { kind: "defensible" }>, x, z, need.radius);
 }

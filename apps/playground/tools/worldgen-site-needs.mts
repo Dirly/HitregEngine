@@ -486,6 +486,7 @@ export function commandNeeds(host: SiteNeedsHost): void {
     return;
   }
   const only = arg(argv, "only", "");
+  const keepFoot = argv.includes("--keep-foot");
   const needs = (recipe.needs ?? []).filter((n) => !only || n.id === only);
   if (!needs.length) host.fail(only ? `no need ${only} in the recipe` : "the recipe has no `needs` (add one: { id, kind: cliff-face | walled-neck | roadside-rib, near: [x, z] | \"<zone> <side>\", minHeight / radius, neck })");
   const ids = new Set(needs.map((n) => `need-${n.id}`));
@@ -496,7 +497,14 @@ export function commandNeeds(host: SiteNeedsHost): void {
   for (const need of needs) {
     let area;
     try { area = needArea(need.near, need.within, recipe.regions as never); } catch (e) { console.error(`  ${need.id}: ${(e as Error).message}`); failed++; continue; }
-    const s = need.kind === "cliff-face" ? solveCliffFace(g, need, area, { lakes: recipe.features.lakes.map((l) => ({ id: l.id, waterY: l.waterY, center: [l.center[0], l.center[1]] as [number, number], radius: l.radius, polygon: l.polygon as [number, number][] | undefined })) }) : need.kind === "roadside-rib" ? solveRoadsideRib(g, need, area) : solveWalledNeck(g, need, area);
+    // --keep-foot: re-shape a solved face at its foot (the spot search would move it onto ground the roads changed since)
+    const foot = keepFoot && need.solved && need.faces !== undefined ? need.solved.at : undefined;
+    const s = need.kind === "cliff-face" ? solveCliffFace(g, need, area, {
+      lakes: recipe.features.lakes.map((l) => ({ id: l.id, waterY: l.waterY, center: [l.center[0], l.center[1]] as [number, number], radius: l.radius, polygon: l.polygon as [number, number][] | undefined })),
+      // the block keeps off a river (a fall pool) as off a shore (w11: the Moon block put a 4.5 m ledge in fall-5's drop)
+      rivers: recipe.features.rivers.map((r) => ({ id: r.id, points: r.points.map((q) => [q[0]!, q[q.length - 1]!] as [number, number]), half: Math.max(r.width, ...(r.widths ?? [])) / 2 })),
+      foot,
+    }) : need.kind === "roadside-rib" ? solveRoadsideRib(g, need, area) : solveWalledNeck(g, need, area);
     if (!s.ok) { console.error(`  ${need.id} (${need.kind}): NOT SOLVED: ${s.message}`); failed++; continue; }
     recipe.features.heightPatches = recipe.features.heightPatches.filter((p) => p.id !== `need-${need.id}`);
     if (s.patch) {
