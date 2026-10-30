@@ -13,6 +13,19 @@ const FADE_NEAR = 90;
 const FADE_FAR = 140;
 /** …and in over the first metre or so, so a lantern held to the face does not flood the screen. */
 const CLOSE_FADE = 1.2;
+/** `light.glow` above this draws as this: a halo is a modest glow round a flame, never the read itself. */
+export const MAX_HALO_GLOW = 1.5;
+/** Under full open daylight (worldDaylight.sunlit 1) a halo draws at this share of its strength and size. */
+export const DAY_HALO_STRENGTH = 0.2;
+export const DAY_HALO_SIZE = 0.5;
+/** A far beacon's halo radius never shrinks under this angle (radians: ~3 px at 720p, vfov 60). */
+export const FAR_HALO_ANGLE = 0.005;
+/**
+ * Fog transmission power for halos: a halo stands for a flame far brighter than the screen can hold, so it shows through
+ * thick air as a small bright point where an LDR card would vanish (Red Dial 2026-10-30: the 450 m beacons in the zone
+ * haze read only through 10 m halos; with the halo held to ~3 px they faded out). 1 = like a surface.
+ */
+export const HALO_FOG_THROUGH = 0.35;
 const INITIAL_CAPACITY = 64;
 /** Floats per halo: centre xyz + radius, colour rgb + unused. */
 const STRIDE = 8;
@@ -37,7 +50,7 @@ export function haloMaterial(): THREE.MeshBasicNodeMaterial {
     blending: THREE.AdditiveBlending,
     toneMapped: true,
   });
-  applyAdditiveFog(m);
+  applyAdditiveFog(m, HALO_FOG_THROUGH);
   m.name = "light-glow";
   const a: N = attribute("aHalo", "vec4");
   const tint: N = attribute("aHaloColor", "vec4");
@@ -108,10 +121,15 @@ export class LightGlows {
    * `scale` its current on-ness (time of day; a fire's flicker is already in
    * `light.intensity`).
    */
-  add(light: THREE.PointLight, position: THREE.Vector3, cameraDistance: number, glow: number, scale: number, reach?: number): void {
+  add(light: THREE.PointLight, position: THREE.Vector3, cameraDistance: number, glow: number, scale: number, reach?: number, sunlit = 0): void {
     if (glow <= 0 || scale <= 0.01) return;
-    // a far beacon (`light.glowReach`) fades over the last third of its reach instead of 90-140 m, and grows past
-    // 90 m (square root) so it keeps a readable size on screen
+    // L (Red Dial 2026-10-30, Derek: "so washed out from how bright that lighting is"): glow 4 beacons with glowReach
+    // 800 drew halos ~5 m in radius, growing with distance, at full strength at noon — 45-73 % of a street frame
+    // brightened by 20+ luma. The halo is now capped (MAX_HALO_GLOW), small by day (open daylight: DAY_HALO_*), and a
+    // far beacon holds a few pixels (FAR_HALO_ANGLE) instead of growing: a fire reads at distance by its FLAME.
+    const g = Math.min(glow, MAX_HALO_GLOW);
+    const night = 1 - THREE.MathUtils.clamp(sunlit, 0, 1);
+    // a far beacon (`light.glowReach`) fades over the last third of its reach instead of 90-140 m
     const beacon = reach !== undefined && reach > FADE_FAR;
     const far = beacon
       ? 1 - THREE.MathUtils.smoothstep(cameraDistance, reach * 0.67, reach)
@@ -119,10 +137,13 @@ export class LightGlows {
     const near = THREE.MathUtils.smoothstep(cameraDistance, 0.3, CLOSE_FADE);
     // brightness follows intensity gently (a torch at 8 and a brazier at 15
     // should not differ by 2x in halo), size follows the room it lights
-    const strength = glow * scale * far * near * THREE.MathUtils.clamp(Math.sqrt(light.intensity / 8), 0.25, 1.6) * 0.3;
+    const day = DAY_HALO_STRENGTH + (1 - DAY_HALO_STRENGTH) * night;
+    const strength = g * scale * far * near * day * THREE.MathUtils.clamp(Math.sqrt(light.intensity / 8), 0.25, 1.6) * 0.3;
     if (strength <= 0.002) return;
-    const grow = beacon ? Math.sqrt(Math.max(1, cameraDistance / FADE_NEAR)) : 1;
-    const radius = glow * THREE.MathUtils.clamp(0.3 + light.distance * 0.04, 0.3, 1.3) * grow;
+    const size = DAY_HALO_SIZE + (1 - DAY_HALO_SIZE) * night;
+    let radius = g * THREE.MathUtils.clamp(0.3 + light.distance * 0.04, 0.3, 1.3) * size;
+    // past the distance where it would shrink under ~3 px, a beacon's halo keeps that angular size (no bigger)
+    if (beacon) radius = Math.max(radius, cameraDistance * FAR_HALO_ANGLE);
     if (this.count * STRIDE >= this.data.length) {
       const old = this.data;
       this.buffer = this.allocate((old.length / STRIDE) * 2);

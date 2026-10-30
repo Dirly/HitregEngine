@@ -8,7 +8,7 @@ import {
   ribbonApproachOps, approachForBuilt, trackId, trimTrack, trackBand, TRACK_WIDTH_M, TRACK_JOIN_M,
   applySets, silhouetteHeight, forTier, approachLines, approachRead, approachReadAny, readHeightNeeded, readTargets, installGuard, RESEAT_MAX_M, SMOKE_READ_M, shoreRise, waterLevelNear, SHORE_RISE_M, routeOnRibbon, briefCount, expandRows, CAMP_ONLY_RE, ROOM_FILL, cutRing, wallGates, towerSides, withoutDenied, MIN_GATE_M, siteSearch, slopeMap, uniqueItemIds, DENIED_PROPS, fillOk, routeGrid, usableArea, approachSpots, readBand, firstPlanItems, arrangeFirstPlan, fitPocket, pickArchetype, placeArchetypeSchema, planPlace, primitiveMeshes, staleEntities, unclearedStructures, type PlaceGround,
 } from "../tools/_place-archetype.mts";
-import { placeLayoutSchema, withLayout, layoutCoverage, toWorld, discStats, waterAtMarker, sinkToBase, seatPad, mergeSeatPads, SEAT_PAD_MAX_M, PATH_GRADE_BAND_M, siteScale } from "../tools/_place-archetype.mts";
+import { placeLayoutSchema, withLayout, layoutCoverage, toWorld, discStats, waterAtMarker, waterSheet, fallStreaks, STREAK_MIN_WIDTH_M, sinkToBase, seatPad, mergeSeatPads, SEAT_PAD_MAX_M, PATH_GRADE_BAND_M, siteScale } from "../tools/_place-archetype.mts";
 import { patchReaches } from "../tools/worldgen-scatter-float.mts";
 
 const DIR = "projects/world-kit/authoring/place-archetypes";
@@ -1468,6 +1468,41 @@ test("layout waters: the still sheet stands at the host's marker and counts as t
   assert.ok(p.handoff.measurements.features.some((f: any) => f.kind === "water" && f.id === "water-basin"), JSON.stringify(p.handoff.measurements.features));
   const none = layoutPlan(l, undefined, { markerOf: () => null, materialExists: () => true });
   assert.ok(none.faults.some((f: string) => /no marker basin-water/.test(f)));
+});
+
+// L (o-small3 dropped-hour 2026-10-30, Derek: "the geometry doesn't match the bowl"): a round basin takes a round sheet
+test("layout waters: a `round` marker writes an ellipse sheet fitted to its size, facing up; rect stays the default", () => {
+  const l = layoutOf([FIRE, { id: "bowl", element: "bowl", kind: "structure", prefab: "x/bowl", at: [14, 0] }], { waters: [{ id: "blood", element: "bowl", on: "bowl", material: "terrain/x-water" }] });
+  const p = layoutPlan(l, undefined, { markerOf: (prefab: string) => (prefab === "x/bowl" ? { position: [0, 1.5, 0], size: [2.4, 0, 2.4], shape: "round" } : null), materialExists: () => true });
+  const src = p.ops.find((o: any) => o.id === "test-place-core-blood-water").entity.components.mesh.source;
+  assert.equal(src.positions.length, 3 * 25, "centre + 24 rim points");
+  for (let i = 1; i < 25; i++) assert.ok(Math.abs(Math.hypot(src.positions[i * 3], src.positions[i * 3 + 2]) - 1.2) < 0.002, "every rim point on the 1.2 m radius");
+  const P = (k: number) => [src.positions[k * 3], src.positions[k * 3 + 2]];
+  for (let t = 0; t < src.indices.length; t += 3) { const [a, b, c] = [P(src.indices[t]), P(src.indices[t + 1]), P(src.indices[t + 2])]; assert.ok((b[1] - a[1]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[1] - a[1]) > 0, "up-facing like the rect sheet"); }
+  assert.ok(p.notes.some((n: string) => /still round sheet 2.4 x 2.4/.test(n)));
+  assert.deepEqual(waterSheet("rect", 1, 2).positions, [-1, 0, -2, 1, 0, -2, 1, 0, 2, -1, 0, 2]);
+});
+
+// L (o-small3 dropped-hour 2026-10-30, Derek: the weep disc "looked like a puff of another biome"): a stain down a face is
+// streaks along the fall line, never a disc
+test("layout ground streaks: strips run down the fall line from the seep line to the foot (+ runout), faces painted; a flat start is a refusal", () => {
+  // a face falling toward +z from y 30 at z 0 to y 20 at z 10, flat beyond
+  const face: PlaceGround = { height: (_x, z) => (z <= 0 ? 30 : z >= 10 ? 20 : 30 - z), wet: () => false };
+  const polys = fallStreaks(face.height, [-4, 1], [4, 1], { count: 4, width: 2.5, taper: 0.5, runout: 1.5 });
+  assert.equal(polys.length, 4);
+  for (const poly of polys) {
+    assert.ok(poly, "every start is on the face");
+    const zs = poly!.map((q) => q[1]), xs = poly!.map((q) => q[0]);
+    assert.ok(Math.max(...zs) >= 11 && Math.max(...zs) <= 12.5, `reaches the foot and runs on: ${Math.max(...zs)}`);
+    assert.ok(Math.max(...xs) - Math.min(...xs) <= 2.5 + 0.01, "no wider than the foot width (it runs straight down)");
+  }
+  assert.ok(STREAK_MIN_WIDTH_M >= 2);
+  assert.deepEqual(fallStreaks(face.height, [-4, 20], [4, 20], { count: 2, width: 2, taper: 1, runout: 0 }), [null, null]);
+  const l = layoutOf([FIRE], { ground: [{ id: "weep", kind: "mud", at: [0, 5], radius: 4, faces: true, streaks: { seep: [[-4, 1], [4, 1]], count: 3 } }] });
+  assert.throws(() => layoutOf([FIRE], { ground: [{ id: "w", kind: "mud", at: [0, 0], streaks: { seep: [[0, 0], [1, 0]], width: 1 } }] }), "narrower than the splat is a schema refusal");
+  const flatPlan = layoutPlan(l, undefined, { surfaces: ["mud"] });
+  assert.ok(flatPlan.faults.some((f: string) => /ground weep: streak 1 starts on flat ground/.test(f)), flatPlan.faults.join(" | "));
+  assert.ok(!flatPlan.worldOps.some((w: any) => w.feature?.id === "pb-test-place-ground-weep"), "never the disc");
 });
 
 // L (Red Dial 2026-10-30): the built re-seat sinks a piece to the lowest ground under its WHOLE footprint, capped by footing

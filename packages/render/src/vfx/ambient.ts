@@ -1,6 +1,6 @@
 import * as THREE from "three/webgpu";
 import { readWorldPosition, readWorldQuaternion } from "../static-transforms.js";
-import { paletteFor, paletteFromMaterial, vfxEffectSchema, type Palette, type VfxEffect } from "@hitreg/core";
+import { paletteFor, paletteFromMaterial, smokeLayers, vfxEffectSchema, type Palette, type VfxEffect } from "@hitreg/core";
 import type { VfxFrame } from "./base.js";
 import type { VfxHandle, VfxSystem } from "./system.js";
 
@@ -10,6 +10,8 @@ export interface AmbientVfxData {
   material?: string | undefined;
   playing: boolean;
   cullDistance: number;
+  /** `vfx.smoke`: true plays the effect's smoke layers; unset/false strips them (smoke is off by default). */
+  smoke?: boolean | undefined;
   /**
    * "full" = the play takes the group's whole orientation (an item's frame:
    * emitters turn with a sword); default "yaw" = upright, facing the group's
@@ -40,6 +42,22 @@ interface Entry {
   data: AmbientVfxData;
   frame: VfxFrame;
   handle: VfxHandle | null;
+}
+
+/**
+ * Smoke is OFF by default (Derek 2026-10-30, Red Dial walk: "the smoke ... is just not working, get rid of it all
+ * together"): a standing effect plays without its smoke layers (core smokeLayers: a normal-blended smoke/plume/column
+ * layer, or every layer of a `smoke` effect such as env/smoke-column) unless its `vfx` component sets `smoke: true`.
+ */
+const smokeless = new WeakMap<VfxEffect, VfxEffect>();
+export function withoutSmoke(effect: VfxEffect): VfxEffect {
+  let out = smokeless.get(effect);
+  if (!out) {
+    const drop = new Set(smokeLayers(effect).map((l) => l.index));
+    out = drop.size ? { ...effect, modules: effect.modules.filter((_, i) => !drop.has(i)) } : effect;
+    smokeless.set(effect, out);
+  }
+  return out;
 }
 
 /** Hysteresis on the cull radius: start inside it, stop only past this multiple. */
@@ -227,8 +245,10 @@ export class AmbientVfx {
   }
 
   private start(entry: Entry): VfxHandle | null {
-    const base = this.effectOf(entry.data.effect);
-    if (!base) return null;
+    const asset = this.effectOf(entry.data.effect);
+    if (!asset) return null;
+    const base = entry.data.smoke ? asset : withoutSmoke(asset);
+    if (!base.modules.length) return null;
     const size = entry.data.shapeSize;
     // sized to what it runs along: a copy with the emitters' volume replaced
     const effect: VfxEffect = size

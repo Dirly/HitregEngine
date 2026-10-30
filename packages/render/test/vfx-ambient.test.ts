@@ -98,3 +98,14 @@ describe("AmbientVfx", () => {
     sys.dispose();
   });
 });
+
+describe("standing effects play without smoke by default (owner ruling 2026-10-30)", () => {
+  it("strips a fire's smoke layer and the whole of a smoke effect", async () => {
+    const { withoutSmoke } = await import("../src/vfx/ambient.js");
+    const p = (id: string, blending: "additive" | "normal") => ({ kind: "particles", id, emitter: { blending } }) as any;
+    const fire = { modules: [p("body", "additive"), p("embers", "additive"), p("smoke", "normal"), { kind: "light", id: "light" }] } as any;
+    expect(withoutSmoke(fire).modules.map((m: any) => m.id)).toEqual(["body", "embers", "light"]);
+    const column = { smoke: "pyre", modules: [p("column", "normal")] } as any;
+    expect(withoutSmoke(column).modules).toHaveLength(0);
+  });
+});

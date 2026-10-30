@@ -1,6 +1,6 @@
 import * as THREE from "three/webgpu";
 import { describe, expect, it } from "vitest";
-import { findChimneys } from "../src/chimney-smoke.js";
+import { CHIMNEY_CANDIDATE, CHIMNEYS_KEY, chimneySmokeTops, findChimneys } from "../src/chimney-smoke.js";
 
 function box(w: number, h: number, d: number, x: number, y: number, z: number): THREE.Mesh {
   const g = new THREE.BoxGeometry(w, h, d);
@@ -54,5 +54,23 @@ describe("findChimneys", () => {
     tower.add(box(4, 30, 4, 0, 0, 0));        // tower 4 x 4, x/z -2..2
     tower.add(box(0.8, 19.2, 0.8, 2.6, 0, 2.6)); // angle buttress clear of the +x+z corner (2.2..3.0), top at 19.2
     expect(findChimneys(tower)).toHaveLength(0);
+  });
+});
+
+describe("chimney smoke is opt-in (owner ruling 2026-10-30)", () => {
+  it("finds stacks only on a building model the placement opted in, once per asset", () => {
+    const house = new THREE.Group();
+    house.add(box(10, 8, 10, 0, 0, 0));
+    house.add(box(0.7, 1.6, 0.7, 3, 8, 3));
+    // not a building (no kit glass / town atlas): never smokes
+    expect(chimneySmokeTops("test/plain", house)).toBe(false);
+    expect(house.userData[CHIMNEYS_KEY]).toBeUndefined();
+    house.userData[CHIMNEY_CANDIDATE] = true;
+    expect(chimneySmokeTops("test/house", house)).toBe(true);
+    expect(house.userData[CHIMNEYS_KEY]).toHaveLength(1);
+    const ruin = new THREE.Group();
+    ruin.add(box(10, 3, 0.6, 0, 0, 0)); // a wall with no stack
+    ruin.userData[CHIMNEY_CANDIDATE] = true;
+    expect(chimneySmokeTops("test/ruin-wall", ruin)).toBe(false);
   });
 });

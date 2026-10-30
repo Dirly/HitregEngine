@@ -64,6 +64,7 @@ import { READ_ONLY_POSTS } from "./_readonly-posts.mjs";
 import { frameWatchdog } from "./_frame-watchdog.mts";
 import { SHOT_SPOT_TIMEOUT_S, withSpotTimeout } from "./_run-capped.mts";
 import { changedShare, showVerdict, type ShowRect, type ShowResult } from "./_shot-shows.mts";
+import { FAR_FIRE_M, judgeFrame, layerDelta, washRun, type FireSpot } from "./_light-wash.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -418,6 +419,12 @@ const { chromium } = await loadPlaywright();
 const AB = argv.includes("--ab");
 /** --no-refs: hide the reference characters and sphere (clean read shots / loading art; the frame then has no ref numbers). */
 const NO_REFS = argv.includes("--no-refs");
+/** --layers [halos,pools,fog,shading,bloom]: per frame, one more frame with each point-light contribution OFF
+ *  (<spot>-<hh>-no-<layer>.png) and one with halos+pools+fog+shading all off (-no-lights): what each adds to the frame. */
+const LAYERS = argv.includes("--layers") ? (arg("layers", "").startsWith("--") || !arg("layers") ? "halos,pools,fog,shading,bloom" : arg("layers")).split(",").filter(Boolean) : [];
+/** --wash: the wash gate's second frame — each frame again with the halos and lamp fog glow off (-no-veil.png), so the
+ *  share of the picture the lights' veil brightens is measured (tools/_light-wash.mts). */
+const WASH = argv.includes("--wash");
 const browser = await chromium.launch({ channel: "chrome", headless: !argv.includes("--headed"), args: ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist", ...(AB ? ["--disable-gpu-vsync", "--disable-frame-rate-limit"] : [])] });
 browserRef = browser;
 if (DIAG) {
@@ -627,7 +634,7 @@ await openSession();
 const times = hasClock ? TIMES : [NaN];
 
 type Box = { x0: number; y0: number; x1: number; y1: number };
-type Shot = { rig?: unknown; spot: string; row: string; weather: string; weatherLine: string; time: number | null; clock: string; mood: string; file: string; boxes: Record<string, Box | null>; render?: { drawCalls: number; triangles: number }; camera: { pos: V3; target: V3; distance: number }; shows?: ShowResult[] };
+type Shot = { fires?: FireSpot[]; layers?: Record<string, string>; rig?: unknown; spot: string; row: string; weather: string; weatherLine: string; time: number | null; clock: string; mood: string; file: string; boxes: Record<string, Box | null>; render?: { drawCalls: number; triangles: number }; camera: { pos: V3; target: V3; distance: number }; shows?: ShowResult[] };
 const shots: Shot[] = [];
 const spotInfo: Array<Record<string, unknown>> = [];
 
@@ -753,12 +760,44 @@ async function shootSpot(spot: Spot): Promise<void> {
     const file = path.join(OUT, stem, `${spot.name}${MULTI_WEATHER ? `-${weatherName}` : ""}-${tag}.png`);
     await page.screenshot({ path: file });
     watchdog.frame();
+    // every standing fire's light, projected (the wash gate's far-read: does each far fire read by its flame)
+    const fires = await H_((h) => {
+      const sc = h.scene?.(); const cam = h.camera; if (!sc || !cam) return [];
+      cam.updateMatrixWorld(true);
+      const cp = cam.position.clone(), out: any[] = [], v = cam.position.clone();
+      const on = (o: any) => { let c = o.parent; while (c) { if (!c.visible && !c.isScene) return false; c = c.parent; } return o.userData?.runtimeEnabled !== false; };
+      sc.traverse((o: any) => {
+        if (!o.isPointLight || !(o.userData?.vfx || o.userData?.lightFlicker) || !on(o)) return;
+        o.getWorldPosition(v); const d = v.distanceTo(cp); v.project(cam);
+        if (v.z < -1 || v.z > 1 || Math.abs(v.x) > 1 || Math.abs(v.y) > 1) return;
+        out.push({ x: Math.round((v.x * 0.5 + 0.5) * innerWidth), y: Math.round((-v.y * 0.5 + 0.5) * innerHeight), d: Math.round(d) });
+      });
+      out.sort((a, b) => a.d - b.d);
+      return out.filter((f, i) => !out.slice(0, i).some((g) => Math.abs(g.x - f.x) < 4 && Math.abs(g.y - f.y) < 4));
+    }).catch(() => []) as FireSpot[];
+    const layerFiles: Record<string, string> = {};
+    const layerShot = async (name: string, off: string[]) => {
+      const bloom = off.includes("bloom"), light = off.filter((l) => l !== "bloom");
+      await H_((h, ls: string[], b: boolean) => { for (const l of ls) h.ambience?.setLightLayerEnabled?.(l, false); if (b) { const r = h.renderer; (r as any).__savedFx = r.postFxData; r.setBloom?.(null); } }, light, bloom);
+      await sleep(bloom ? 2500 : 600);
+      const f = file.slice(0, -4) + `-${name}.png`; await page.screenshot({ path: f }); layerFiles[name] = f;
+      await H_((h, ls: string[], b: boolean) => { for (const l of ls) h.ambience?.setLightLayerEnabled?.(l, true); if (b) { const r = h.renderer; if ((r as any).__savedFx) r.setPostFx((r as any).__savedFx); } }, light, bloom);
+      await sleep(bloom ? 2500 : 400);
+    };
+    for (const l of LAYERS) await layerShot(`no-${l}`, [l]);
+    if (LAYERS.length) await layerShot("no-lights", ["halos", "pools", "fog", "shading"]);
+    if (WASH) {
+      await layerShot("no-veil", ["halos", "fog"]);
+      // the layers back on, once more: the wash gate counts only what both on-frames agree the veil adds (a cloud shadow
+      // drifting between the frames is not a halo)
+      const again = file.slice(0, -4) + "-no-veil-on.png"; await page.screenshot({ path: again }); layerFiles["no-veil-on"] = again;
+    }
     const shows = spot.shows?.length ? await showsCheck(spot.shows, file) : undefined;
     const cam = await H_((h) => [h.camera.position.x, h.camera.position.y, h.camera.position.z]);
     // the frame's render cost (Red Dial 2026-10-30: draw calls + triangles per evidence view, the far-frame HLOD rule in
     // docs/performance-lessons.md): the renderer's last-frame counters as the picture was taken
     const render = await H_((h) => { try { const r = h.info().render ?? {}; return { drawCalls: r.drawCalls ?? r.calls ?? -1, triangles: r.triangles ?? -1 }; } catch { return { drawCalls: -1, triangles: -1 }; } }) as { drawCalls: number; triangles: number };
-    shots.push({ spot: spot.name, row, weather: weatherName, weatherLine, time: Number.isFinite(hour) ? hour : null, clock, mood, rig, file, boxes, render, camera: { pos: cam as V3, target: placed.pivot as V3, distance: placed.dist }, ...(shows ? { shows } : {}) });
+    shots.push({ fires, ...(Object.keys(layerFiles).length ? { layers: layerFiles } : {}), spot: spot.name, row, weather: weatherName, weatherLine, time: Number.isFinite(hour) ? hour : null, clock, mood, rig, file, boxes, render, camera: { pos: cam as V3, target: placed.pivot as V3, distance: placed.dist }, ...(shows ? { shows } : {}) });
   }
   }
   console.log(`  ${spot.name} (${region?.zone ?? "-"}${region?.place ? `/${region.place}` : ""}): ${times.length * WEATHERS.length} frames, camera ${placed.dist.toFixed(1)} m — ${((Date.now() - t0) / 1000).toFixed(0)} s`);
@@ -878,6 +917,17 @@ const result = await sheetPage.evaluate(async ({ tiles, rowsNames, colTimes, tit
   });
   return { png: cv.toDataURL("image/png"), measures };
 }, { tiles: tiles.map(({ url, spot, row, time, boxes, mood }) => ({ url, spot, row, time, boxes, mood })), rowsNames, colTimes, title: `${SCENE}${LABEL ? ` · ${LABEL}` : ""} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} · left = light gear, right = dark gear, sphere = mid grey` });
+// the wash band and the far fires (tools/_light-wash.mts), every frame; with --layers, what each light layer adds
+const washFrames: any[] = [];
+for (const s of shots) {
+  const f: any = await judgeFrame(s.file, s.spot, s.time, s.fires ?? []);
+  if (s.layers) f.layers = Object.fromEntries(await Promise.all(Object.entries(s.layers).filter(([k]) => k !== "no-veil-on").map(async ([k, lf]) => [k, await layerDelta(s.file, lf)])));
+  if (s.layers?.["no-veil"]) f.veil = f.layers["no-veil"] = await layerDelta(s.file, s.layers["no-veil"], s.layers["no-veil-on"]);
+  washFrames.push(f);
+}
+const washVerdictRun = washRun(washFrames, shots.some((s) => (s.fires ?? []).some((f) => f.d >= FAR_FIRE_M)));
+for (const f of washFrames) console.log(`  wash ${f.washOk ? "ok  " : "FAIL"} ${(f.spot + "@" + (f.time ?? "-")).padEnd(26)} ${f.washWhy}${f.fires ? ` · far fires ${f.fires.read}/${f.fires.far}` : ""}${f.layers ? " · " + Object.entries(f.layers).map(([k, d]: any) => `${k} -${d.luma} (${(d.lit * 100).toFixed(1)} %)`).join(" ") : ""}`);
+console.log(`wash: ${washVerdictRun.ok ? "ok" : "FAIL"} — ${washVerdictRun.ok ? washVerdictRun.fireLine : washVerdictRun.faults.slice(0, 4).join(" | ")}`);
 const sheetFile = path.join(OUT, `${stem}-sheet.png`);
 fs.writeFileSync(sheetFile, Buffer.from(result.png.split(",")[1]!, "base64"));
 const report = {
@@ -887,7 +937,8 @@ const report = {
   spots: spotInfo,
   weathers: MULTI_WEATHER ? WEATHERS : null,
   ...(abResults.length ? { ab: abResults } : {}),
-  shots: shots.map((s, i) => ({ spot: s.spot, weather: s.weather, weatherLine: s.weatherLine, time: s.time, clock: s.clock, mood: s.mood, rig: s.rig, file: path.relative(OUT, s.file).replace(/\\/g, "/"), camera: s.camera, boxes: s.boxes, render: s.render, ...(s.shows ? { shows: s.shows } : {}), ...result.measures[i] })),
+  shots: shots.map((s, i) => ({ spot: s.spot, weather: s.weather, weatherLine: s.weatherLine, time: s.time, clock: s.clock, mood: s.mood, rig: s.rig, file: path.relative(OUT, s.file).replace(/\\/g, "/"), camera: s.camera, boxes: s.boxes, render: s.render, ...(s.shows ? { shows: s.shows } : {}), fires: s.fires ?? [], ...(s.layers ? { layers: Object.fromEntries(Object.entries(s.layers).map(([k, f]) => [k, path.relative(OUT, f).split(path.sep).join("/")])) } : {}), ...result.measures[i], ...(washFrames[i] ? { wash: washFrames[i] } : {}) })),
+  ...(washVerdictRun ? { washVerdict: washVerdictRun } : {}),
   pageErrors: logs.slice(0, 20),
 };
 fs.writeFileSync(path.join(OUT, `${stem}.json`), JSON.stringify(report, null, 1) + "\n");

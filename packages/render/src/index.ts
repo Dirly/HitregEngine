@@ -165,7 +165,7 @@ export {
 } from "./impostor.js";
 export { LightBudgetSystem } from "./light-budget.js";
 export { chimneySmoke, ChimneySmoke } from "./chimney-smoke.js";
-export { updateWorldAmbience, setWorldExtrasEnabled } from "./ambience.js";
+export { updateWorldAmbience, setWorldExtrasEnabled, setLightLayerEnabled, LIGHT_LAYERS, type LightLayer } from "./ambience.js";
 export { cloudShadow } from "./cloud-shadow.js";
 export { PRECOMPILE_SAFE } from "./precompile-safe.js";
 export { BuilderStateRetention, RETAINED_BUILDER_STATES, retainBuilderStates } from "./builder-state-retention.js";

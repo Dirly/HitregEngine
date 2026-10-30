@@ -36,11 +36,12 @@ export function newZfightClusters(labRep: any, liveRep: any, labWorld: string, w
   const had = (liveRep?.clusters ?? []) as any[];
   return ((labRep?.clusters ?? []) as any[]).filter((c) => c.area >= min && !had.some((h) => pair(h) === pair(c) && Math.hypot(h.centre[0] - c.centre[0], h.centre[1] - c.centre[1], h.centre[2] - c.centre[2]) <= 1));
 }
-/** Landmarks whose read top is a smoke column, not the prop. The smoke standard (core vfx/smoke.ts, Derek 2026-10-22:
- *  "smoke is far too big") caps a pyre's column at ~3x the fire: foundation vfx env/smoke-column now tops out ~8.5 m
- *  (it was ~60 m and read as a smear larger than the castle). A place reads by its structure, never by its smoke. */
+/** Fire props' read top over the ground: the FLAME, never smoke. L (Red Dial 2026-10-30, owner ruling: "the smoke ... is
+ *  just not working, get rid of it all together"): smoke is off by default engine-wide (render vfx/ambient withoutSmoke,
+ *  core vfx.smoke), so a landmark pyre's 8 m column no longer counts as a read target: the pyre reads by its bonfire
+ *  flame, like the bonfire. A place reads by its structure and its fire, never by its smoke. (Name kept: callers.) */
 export const SMOKE_READ_M: Record<string, number> = {
-  "giant-camp/landmark-pyre": 8,
+  "giant-camp/landmark-pyre": 4,
   // L (TOOLS-PB 2026-10-23): every fire prop with a fire vfx (foundation vfx env/fire-*), at an honest column: these carry
   // no smoke column, so the read top is the flame over the ground (bonfire: a ~3.5 m log pile and its licks; a campfire or
   // a brazier: a knee-high flame). Their flames cull at 60-120 m: they never carry a 300 m read on their own.
@@ -292,6 +293,43 @@ export const GROUND_KINDS = ["wear", "mud", "ash", "paving", "rubble"] as const;
 /** L (Exiles' Bell 2026-10-24: 2-3 m discs with a 2 m feather did not read from a walking camera): every ground disc is at
  *  least this wide (radius, metres) with a 1 m feather. */
 export const GROUND_MIN_RADIUS_M = 4, GROUND_FEATHER_M = 1;
+/** Narrowest streak (metres) a ground paint can draw: the splat is per voxel vertex (2 m on redstrand's 48/24 cells). */
+export const STREAK_MIN_WIDTH_M = 2;
+/** Ground slope (rise/run) under which a streak has reached the face foot. */
+export const STREAK_FOOT_SLOPE = 0.25;
+/** STREAKS down a face: from each start on the seep line, walk the ground's fall line (-gradient, 0.5 m steps) until the
+ *  slope drops under STREAK_FOOT_SLOPE (the foot), run on `runout` m, and return the strip as a polygon (world x,z), its
+ *  width growing from taper x width at the top to width at the foot. A start on flat ground gives null. Pure. */
+export function fallStreaks(height: (x: number, z: number) => number, a: V2, b: V2, o: { count: number; width: number; taper: number; runout: number }): (V2[] | null)[] {
+  const H = 0.5, STEP = 0.5, MAX = 120;
+  const grad = (x: number, z: number): V2 => [(height(x + H, z) - height(x - H, z)) / (2 * H), (height(x, z + H) - height(x, z - H)) / (2 * H)];
+  return Array.from({ length: o.count }, (_, i) => {
+    const f = (i + 0.5) / o.count; let p: V2 = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+    const path: V2[] = [p]; let dir: V2 | null = null, run = -1;
+    for (let k = 0; k < MAX; k++) {
+      if (run < 0) { const gr = grad(p[0], p[1]), m = Math.hypot(gr[0], gr[1]); if (m >= STREAK_FOOT_SLOPE) dir = [-gr[0] / m, -gr[1] / m]; else { if (!dir) return null; run = 0; } }
+      if (run >= 0) { if (run >= o.runout) break; run += STEP; }
+      p = [p[0] + dir![0] * STEP, p[1] + dir![1] * STEP]; if (k % 2 === 1 || run >= 0) path.push(p);
+    }
+    if (path.length < 3) return null;
+    const left: V2[] = [], right: V2[] = [];
+    path.forEach((q, j) => {
+      const prev = path[Math.max(0, j - 1)]!, next = path[Math.min(path.length - 1, j + 1)]!, dx = next[0] - prev[0], dz = next[1] - prev[1], l = Math.hypot(dx, dz) || 1;
+      const half = (o.width * (o.taper + (1 - o.taper) * (j / (path.length - 1)))) / 2, n: V2 = [-dz / l, dx / l];
+      left.push([r2(q[0] + n[0] * half), r2(q[1] + n[1] * half)]); right.push([r2(q[0] - n[0] * half), r2(q[1] - n[1] * half)]);
+    });
+    return [...left, ...right.reverse()];
+  });
+}
+/** A still water sheet's mesh in its own frame: `rect` W x D half-extents (the marker default), `round` an ellipse of
+ *  `sides` (a bowl's inner rim). Up-facing. Pure. L (o-small3 dropped-hour 2026-10-30, Derek: "the geometry doesn't match
+ *  the bowl": a square sheet in the round sun-fire-basin showed gaps at its edge mids and buried its corners). */
+export function waterSheet(shape: "rect" | "round", W: number, D: number, sides = 24): { positions: number[]; indices: number[]; uvs: number[] } {
+  if (shape === "rect") return { positions: [-W, 0, -D, W, 0, -D, W, 0, D, -W, 0, D], indices: [0, 2, 1, 0, 3, 2], uvs: [-W, -D, W, -D, W, D, -W, D] };
+  const positions = [0, 0, 0], uvs = [0, 0], indices: number[] = [];
+  for (let i = 0; i < sides; i++) { const t = (i / sides) * Math.PI * 2, x = Math.round(Math.cos(t) * W * 1e3) / 1e3, zz = Math.round(Math.sin(t) * D * 1e3) / 1e3; positions.push(x, 0, zz); uvs.push(x, zz); indices.push(0, 1 + ((i + 1) % sides), 1 + i); }
+  return { positions, indices, uvs };
+}
 /** `rubble`: small rock-kit stones scattered in the disc (catalogued; rock-skins gives them the zone's small-rock skin). */
 /** Metres (x the stone's scale) a rubble stone sits in the ground: it is seated on the field BEFORE the walls/operators regrade it (KNUCKLECROWN 2026-10-29: 3.5 m terraces moved the tread 0.12 m and 8 stones showed their undersides, float FAIL). */
 export const RUBBLE_EMBED_M = 0.3;
@@ -337,6 +375,13 @@ export const placeLayoutSchema = z.object({
     faces: z.boolean().default(false).describe("Also paint the steep faces in the disc (groundPaints `faces`): a pad's cut bank otherwise draws the zone cliff tile at its 20 m scale beside 40 tx/m work (art gate texel). L (KNUCKLECROWN 2026-10-28)."),
     strength: z.number().min(0).max(1).default(0.85),
     breakup: z.number().min(0).max(0.9).default(0.3),
+    streaks: z.object({
+      seep: z.tuple([xz, xz]).describe("Place-frame seep line [a, b] on the face (where the stain leaves the rock). Each streak starts on it and runs DOWN the fall line of the ground to the face foot."),
+      count: z.number().int().min(1).max(12).default(4).describe("Streaks, evenly spaced along the seep line."),
+      width: z.number().min(STREAK_MIN_WIDTH_M).max(6).default(2.5).describe(`Metres across at the foot. At least ${STREAK_MIN_WIDTH_M}: the terrain splat is sampled per voxel vertex (2 m on a 48/24 world), so a narrower streak does not draw.`),
+      taper: z.number().min(0.2).max(1).default(0.5).describe("Width at the seep line as a share of the foot width (a seep widens as it runs)."),
+      runout: z.number().min(0).max(8).default(1.5).describe("Metres the streak runs on past the face foot (a stain pooled at the bottom)."),
+    }).strict().optional().describe("Paint the surface as STREAKS down a face instead of the disc (at/radius are then ignored): narrow polygons along the fall line from a seep line, faces painted. L (o-small3 dropped-hour 2026-10-30, Derek: an r 7.5 faces disc of the weep surface read as a puff of another biome on half the rib)."),
   }).strict()).default([]).describe("Ground WEAR as data (the pocket `floor` path: groundPaints, no geometry): trodden earth round the fire, mud at the horse lines, ash."),
   pools: z.array(z.object({
     id: z.string().regex(/^[a-z0-9-]+$/),
@@ -499,7 +544,7 @@ export function forTier(a: PlaceArchetype, size: PlaceTier, heightOf?: (prefab: 
   return spreadToFloor(withBeacon(one, size, heightOf), size);
 }
 
-/** The heights (above the core's ground) the archetype shows from afar: landmark and smoke columns. */
+/** The heights (above the core's ground) the archetype shows from afar: landmark and fire flames (SMOKE_READ_M; never smoke). */
 const readHeights = (a: PlaceArchetype) => a.pockets.flatMap((p) => [...p.structures.flatMap((s) => [s.landmark?.height ?? 0, SMOKE_READ_M[s.prefab] ?? 0]), ...p.walls.map((w) => w.landmark?.height ?? 0)]);
 /** L (read, Hagsheer 2026-10-21: 1.8-5 m landmarks showed 0-10 px from 300 m) and the owner ruling 2026-10-21 23:25
  *  ("larger and more silhouetted POIs"): every place has ONE silhouette element, built, that reads from its approach:
@@ -507,8 +552,8 @@ const readHeights = (a: PlaceArchetype) => a.pockets.flatMap((p) => [...p.struct
  *  place (walls by their height, structures by `heightOf`, the catalogue's declared size). A landmark that already is
  *  that tall is the silhouette. Otherwise the archetype's `read.beacon` joins the core and becomes the landmark: a wall
  *  beacon (the drystone beacon tower) is raised to the height needed (a `tower` past 12 m); a structure beacon (a pyre,
- *  a crag) keeps standing as the fire / smoke and the default silhouette tower (SILHOUETTE_TOWER) is built beside it,
- *  unless the structure itself is tall enough. Smoke columns count for the dusk read, never as the silhouette. The old
+ *  a crag) keeps standing as the fire and the default silhouette tower (SILHOUETTE_TOWER) is built beside it,
+ *  unless the structure itself is tall enough. Smoke never counts (off by default, 2026-10-30); fire counts for dusk. The old
  *  landmark keeps standing, without the role. */
 /** The lowest texel density a scaled structure may reach. The owner's hard floor is 20 tx/m, but the art gate holds built
  *  surfaces to 40 +- 8 (art standard builtTarget/builtTolerance): a piece scaled under 32 tx/m fails art (wreck-road whale
@@ -675,7 +720,7 @@ export interface PlaceInput {
   /** Highest mesh surface (m, prefab frame, unscaled) of a catalogued piece over a local point; null off its mesh. */
   topOf?: (prefab: string, x: number, z: number) => number | null;
   /** A catalogued piece's marker (prefab frame, unscaled: position [x, y, z], size [x, y, z]) from its <model>.markers.json; null when none. */
-  markerOf?: (prefab: string, id: string) => { position: [number, number, number]; size: [number, number, number] } | null;
+  markerOf?: (prefab: string, id: string) => { position: [number, number, number]; size: [number, number, number]; shape?: "rect" | "round" } | null;
   /** Quest objects the zone's quest plan declares at this place (kind object/readable); each needs `a.quest[id]`. */
   questObjects?: { id: string; kind: string; what?: string }[];
   /** Pocket centres chosen by `siteSearch` (level, dry, connected ground): each pocket's fit only refines within 4 m. */
@@ -1465,7 +1510,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
     }
     for (const q of L.ground) {
       const c = toWorld(core.at, front, q.at), radius = Math.max(GROUND_MIN_RADIUS_M, q.radius);
-      if (radius > q.radius) notes.push(`LAYOUT: ground ${q.id}: radius ${q.radius} m raised to ${radius} m (GROUND_MIN_RADIUS_M: a smaller disc does not read)`);
+      if (radius > q.radius && !q.streaks) notes.push(`LAYOUT: ground ${q.id}: radius ${q.radius} m raised to ${radius} m (GROUND_MIN_RADIUS_M: a smaller disc does not read)`);
       if (q.kind === "rubble") { // 6-10 small catalogued stones inside the disc, seated on the ground (never in water)
         const stones = RUBBLE_STONES.filter((id) => !inp.catalogued || inp.catalogued(id));
         if (!stones.length) { faults.push(`LAYOUT: ground ${q.id}: no rubble stone is catalogued (${RUBBLE_STONES.join(", ")})`); continue; }
@@ -1481,6 +1526,15 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       }
       const surface = q.texture ? (inp.surfaces && !inp.surfaces.includes(q.texture) ? null : q.texture) : inp.surfaces ? wearSurface(q.kind, inp.surfaces, inp.world, inp.zone, inp.surfaceColors) : WEAR_SURFACES[q.kind].at(-1)!;
       if (!surface) { faults.push(`LAYOUT: ground ${q.id}: no ${q.kind} surface in the world palette (${q.texture ? `texture ${q.texture} is not a recipe surface` : `tried ${WEAR_SURFACES[q.kind].map((x) => x.replace("{w}", inp.world).replace("{z}", inp.zone)).join(", ")}`})`); continue; }
+      if (q.streaks) { // narrow strips down the fall line from the seep line, faces painted (never a disc)
+        const S = q.streaks, polys = fallStreaks(g.height, toWorld(core.at, front, S.seep[0]), toWorld(core.at, front, S.seep[1]), S);
+        polys.forEach((poly, i) => {
+          if (!poly) { faults.push(`LAYOUT: ground ${q.id}: streak ${i + 1} starts on flat ground (slope under ${STREAK_FOOT_SLOPE}): move the seep line up the face`); return; }
+          worldOps.push({ edit: "add-feature", kind: "groundPaints", feature: { id: `pb-${poi}-ground-${q.id}-s${i + 1}`, surface, polygon: poly, feather: 0.6, edgeNoise: 0.3, strength: q.strength, breakup: q.breakup, faces: true } });
+        });
+        notes.push(`LAYOUT: ground ${q.id}: ${polys.filter(Boolean).length} streaks of ${surface} down the fall line, ${S.width} m wide at the foot`);
+        continue;
+      }
       worldOps.push({ edit: "add-feature", kind: "groundPaints", feature: { id: `pb-${poi}-ground-${q.id}`, surface, center: [r2(c[0]), r2(c[1])], radius, feather: GROUND_FEATHER_M, edgeNoise: 0.6, strength: q.strength, breakup: q.breakup, ...(q.faces ? { faces: true } : {}) } });
     }
   }
@@ -1515,11 +1569,11 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
     if (!(W > 0 && D > 0)) { faults.push(`LAYOUT: water ${q.id}: marker ${q.marker} of ${host.prefab} has no size (x, z)`); continue; }
     ops.push({ op: "add-entity", id: `${poi}-core-${q.id}-water`, entity: { name: `${q.id} water (${q.material})`, parent: `poi-${poi}`, tags: ["water", ...tags.slice(1), "slot:basin", "layout"],
       components: { transform: { position: [r2(at.w[0] - core.at[0]), r2(at.y - padY), r2(at.w[1] - core.at[1])], rotation: [0, r2(Math.sin(at.ang / 2) * 1e4) / 1e4, 0, r2(Math.cos(at.ang / 2) * 1e4) / 1e4] },
-        mesh: { source: { kind: "surface", positions: [-W, 0, -D, W, 0, -D, W, 0, D, -W, 0, D], indices: [0, 2, 1, 0, 3, 2], uvs: [-W, -D, W, -D, W, D, -W, D] }, material: q.material, static: false, castShadow: false, receiveShadow: false },
+        mesh: { source: { kind: "surface", ...waterSheet(mk.shape === "round" ? "round" : "rect", W, D) }, material: q.material, static: false, castShadow: false, receiveShadow: false },
         water: { depth: q.depth, swim: q.swim } } } });
     // the size gate's water feature (a large place needs water/cave/interior): the basin's still water counts. L (Red Dial 2026-10-29)
     features.push({ id: `water-${q.id}`, kind: "water", linkedTo: ["core"] });
-    notes.push(`LAYOUT: water ${q.id}: still sheet ${r2(2 * W)} x ${r2(2 * D)} m at y ${at.y} (${q.on}'s marker ${q.marker})`);
+    notes.push(`LAYOUT: water ${q.id}: still ${mk.shape === "round" ? "round " : ""}sheet ${r2(2 * W)} x ${r2(2 * D)} m at y ${at.y} (${q.on}'s marker ${q.marker})`);
   }
   if (L) for (const q of L.clearings ?? []) { const c = toWorld(core.at, front, q.at); clearings.push({ id: `${poi}-heath-${q.id}`, center: [r2(c[0]), r2(c[1])], radius: q.radius, feather: q.feather, keep: q.keep, scatter: true, cover: false, owner: poi, walk: false }); }
   // THE RING (archetype `ring`): a ground band round an anchor, as data: a groundPaints feature and catalogued ground

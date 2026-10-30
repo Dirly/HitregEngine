@@ -46,6 +46,7 @@ The design bar for outdoor places. Measured rules live in the task skills: `site
 - Built surfaces use the town texel standard on every face (`props status` HIGH).
 - Material variation follows construction: keep each continuous part coherent and distinguish wall faces from supports, columns, coping/runners, arches and paving where those parts exist. The art gate checks emitted source roles against the bake; texture counts and repeats are diagnostics by default. Never add arbitrary bands to satisfy them. Unavailable or unclassified roles require source and visual review.
 - Frames fit their opening: on the noised opening, aligned, overlapping into the rock; holes keep a spacing.
+- No smoke until the smoke effect works (Derek 2026-10-30): smoke is off by default engine-wide (`vfx.smoke`, `mesh.source.chimneySmoke` opt in); fires read by their FLAME with a modest glow, never a halo (place-build gate `wash`).
 - Camps: catalogue tents at 1.5x, stands 1.25x; the tent door faces the fire.
 - Small pieces that work (a broken house, a hut) are registered for reuse.
 - A route a place depends on is its own plan row with an owner and a gate (cut + real-body walk).

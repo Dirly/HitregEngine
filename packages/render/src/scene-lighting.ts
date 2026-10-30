@@ -825,7 +825,7 @@ export class SceneLighting {
     this.cascades.update(camera);
     this.claimMaterialEnvironment();
     this.syncSun();
-    publishDaylight(this.req.daylight);
+    publishDaylight(this.req.daylight, this.directionalLights.size > 0);
     // the drawn scene's ground: a scene with no weather is dry and snowless
     setWetness(this.ground.wet);
     setSnowLine(this.ground.snowLine);

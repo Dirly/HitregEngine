@@ -732,6 +732,10 @@
                     "mode"
                   ]
                 },
+                "chimneySmoke": {
+                  "description": "Chimney smoke is OFF by default: only a model placed with true has its stacks found and smoking. The detector finds stacks geometrically (a small free-standing flat top high on the model), so a roofless ruin's wall stubs and pillar caps read as stacks (Red Dial 2026-10-30: 210 of them). Owner ruling 2026-10-30: no smoke until the smoke effect works.",
+                  "type": "boolean"
+                },
                 "cameraFade": {
                   "description": "Dissolve this model when it stands between the third-person camera and the character. A leaf card 30cm from the near plane is an opaque wall and the player loses their own character behind it; the usual alternative (shoving the camera out) trades that for the camera lurching past every tree. Only fragments BOTH in front of the character AND near the camera-to-character line fade, so foliage merely beside the player stays solid. Stippled, not alpha-blended - see the grass component on why blending a cutout is a GPU trap. Runtime state (on/off, who the character is) belongs to the app, via setFoliageFade; this field only opts the model in.",
                   "type": "boolean"
@@ -1657,13 +1661,13 @@
         },
         "glow": {
           "default": 1,
-          "description": "point lights only: strength of the soft halo drawn around the light (1 = the default, 0 = none). One shared instanced draw for every halo in view, no light slot and no texture, so lights beyond the dynamic-light budget still read as lit from afar. Size follows `range`, colour follows `color`, it fades with `when` and flickers with the intensity. Turn it off for hidden fill lights that have no visible source.",
+          "description": "point lights only: strength of the soft halo drawn around the light (1 = the default, 0 = none). One shared instanced draw for every halo in view, no light slot and no texture, so lights beyond the dynamic-light budget still read as lit from afar. Size follows `range`, colour follows `color`, it fades with `when` and flickers with the intensity. Turn it off for hidden fill lights that have no visible source. Values above 1.5 draw as 1.5, and under open daylight a halo draws at 20 % strength and half size (a fire glows in the dark, not at noon). A fire reads at distance by its FLAME, never by a big halo (place-build gate wash).",
           "type": "number",
           "minimum": 0,
           "maximum": 4
         },
         "glowReach": {
-          "description": "point lights only: metres the halo stays visible (unset = 140, fading from 90). A beacon meant to read across a valley or a moor at night sets 300-600: the halo then fades over the last third of the reach and grows with distance (square root past 90 m) so it keeps a readable size on screen. Still one shared draw.",
+          "description": "point lights only: metres the halo stays visible (unset = 140, fading from 90). A beacon meant to read across a valley or a moor at night sets 300-600: the halo then fades over the last third of the reach and, once it would shrink under ~3 px, holds that size (it never grows into a disc). It is a modest glow round the flame; the flame itself is the far read. Still one shared draw.",
           "type": "number",
           "minimum": 140,
           "maximum": 1200
@@ -3573,6 +3577,10 @@
           "description": "False parks the effect (a snuffed torch) without removing the component.",
           "type": "boolean"
         },
+        "smoke": {
+          "description": "Smoke is OFF by default: the effect plays without its smoke layers (a normal-blended smoke/plume/column layer, or a whole smoke effect such as env/smoke-column). true plays them. Owner ruling 2026-10-30: no smoke until the smoke effect works (docs/vfx-architecture.md).",
+          "type": "boolean"
+        },
         "cullDistance": {
           "default": 60,
           "description": "Metres from the camera past which the effect stops simulating (it fades out, and fades back in on approach, with 10% hysteresis). Its light is budgeted separately and goes further. 0 = never culled — only for a landmark bonfire meant to be seen across a valley; a dungeon of torches at 0 simulates every one of them.",
@@ -4697,6 +4705,18 @@
         "loose": {
           "description": "floor only: a loose container standing on the floor (a sack, crate, basket, barrel, box). Loose things count against a room's small floor-clutter budget; past it they go on shelves, in a storage room, or are left out. Omitted = derived: a solid floor prop of category storage or trade that does not stand against a wall (shelves, wardrobes and cabinets are furniture, not clutter).",
           "type": "boolean"
+        },
+        "holdsGoods": {
+          "description": "A shelf, bookshelf or dresser whose boards are made to be FILLED (its model carries no goods): every surface socket it provides must hold at least one item placed `on` it (books, jars, crockery, boxes), or `dress check` fails `shelf-empty` (owner 2026-10-30: bare shelves read as an empty house). `on` items naming no socket go to its emptiest board first. Omitted = false.",
+          "type": "boolean"
+        },
+        "hangFrom": {
+          "description": "ceiling only: what it hangs from. `beam`: a heavy hung light (a chandelier) hangs from a structural beam or joist line, never from bare boards between them; `dress check` fails `beam-hang` when its point is off every `beam` anchor of the map (a building export's beam markers) and warns when the map has none. Omitted = `ceiling`.",
+          "type": "string",
+          "enum": [
+            "ceiling",
+            "beam"
+          ]
         }
       },
       "required": [
@@ -34443,7 +34463,7 @@
               "kind": {
                 "type": "string",
                 "minLength": 1,
-                "description": "What the point is for: \"door-side\", \"sign-bracket\", \"door-sign\" (a town exterior's wall point at the centre of a building's door opening, lintel + 0.3 m: a hanging sign hangs with its BOTTOM edge there), \"window\" (a window opening: position its centre, size its [w, h, depth]; nothing hangs in front of it), \"door-sign-beside\" / \"sign-beside\" (a wall point beside a door, within 1.5 m of its edge, where a PROJECTING sign hangs when the wall over the door has no room), \"door-sign-post\" (a FLOOR point 1.0-1.5 m beside a door edge on its window-free side, where a freestanding sign post (tags sign + post) stands when the eave leaves no room for a board), \"hearth\", \"counter\", \"altar\", \"bed-nook\", \"stall\". A plan places by id; the kind lets a designer find it."
+                "description": "What the point is for: \"door-side\", \"sign-bracket\", \"door-sign\" (a town exterior's wall point at the centre of a building's door opening, lintel + 0.3 m: a hanging sign hangs with its BOTTOM edge there), \"window\" (a window opening: position its centre, size its [w, h, depth]; nothing hangs in front of it), \"door-sign-beside\" / \"sign-beside\" (a wall point beside a door, within 1.5 m of its edge, where a PROJECTING sign hangs when the wall over the door has no room), \"door-sign-post\" (a FLOOR point 1.0-1.5 m beside a door edge on its window-free side, where a freestanding sign post (tags sign + post) stands when the eave leaves no room for a board), \"hearth\", \"counter\", \"altar\", \"bed-nook\", \"stall\", \"beam\" (a structural beam or joist line a chandelier hangs from: position = the middle of its underside, yaw = the way the marker FACES, across the beam, size [length, 0, depth]). A plan places by id; the kind lets a designer find it."
               },
               "level": {
                 "default": 0,

@@ -341,6 +341,15 @@ export const meshSchema = z.object({
           "Vertex-shader wind. Costs nothing per frame beyond the displacement itself - no CPU animation, " +
             "and it survives instancing, so a whole streamed forest moves for one shader.",
         ),
+      chimneySmoke: z
+        .boolean()
+        .optional()
+        .describe(
+          "Chimney smoke is OFF by default: only a model placed with true has its stacks found and smoking. The " +
+            "detector finds stacks geometrically (a small free-standing flat top high on the model), so a roofless " +
+            "ruin's wall stubs and pillar caps read as stacks (Red Dial 2026-10-30: 210 of them). Owner ruling " +
+            "2026-10-30: no smoke until the smoke effect works.",
+        ),
       cameraFade: z
         .boolean()
         .optional()
@@ -766,7 +775,9 @@ export const lightSchema = z.object({
       "point lights only: strength of the soft halo drawn around the light (1 = the default, 0 = none). One shared " +
         "instanced draw for every halo in view, no light slot and no texture, so lights beyond the dynamic-light " +
         "budget still read as lit from afar. Size follows `range`, colour follows `color`, it fades with `when` and " +
-        "flickers with the intensity. Turn it off for hidden fill lights that have no visible source.",
+        "flickers with the intensity. Turn it off for hidden fill lights that have no visible source. Values above " +
+        "1.5 draw as 1.5, and under open daylight a halo draws at 20 % strength and half size (a fire glows in the dark, " +
+        "not at noon). A fire reads at distance by its FLAME, never by a big halo (place-build gate wash).",
     ),
   glowReach: z
     .number()
@@ -775,8 +786,9 @@ export const lightSchema = z.object({
     .optional()
     .describe(
       "point lights only: metres the halo stays visible (unset = 140, fading from 90). A beacon meant to read " +
-        "across a valley or a moor at night sets 300-600: the halo then fades over the last third of the reach and " +
-        "grows with distance (square root past 90 m) so it keeps a readable size on screen. Still one shared draw.",
+        "across a valley or a moor at night sets 300-600: the halo then fades over the last third of the reach and, " +
+        "once it would shrink under ~3 px, holds that size (it never grows into a disc). It is a modest glow round " +
+        "the flame; the flame itself is the far read. Still one shared draw.",
     ),
   flicker: z
     .enum(["none", "candle", "torch", "brazier"])
@@ -2940,6 +2952,14 @@ export const vfxComponentSchema = z.object({
         "every effect using it follows. Omitted = the fire element's palette.",
     ),
   playing: z.boolean().default(true).describe("False parks the effect (a snuffed torch) without removing the component."),
+  smoke: z
+    .boolean()
+    .optional()
+    .describe(
+      "Smoke is OFF by default: the effect plays without its smoke layers (a normal-blended smoke/plume/column layer, " +
+        "or a whole smoke effect such as env/smoke-column). true plays them. Owner ruling 2026-10-30: no smoke until " +
+        "the smoke effect works (docs/vfx-architecture.md).",
+    ),
   cullDistance: z
     .number()
     .min(0)

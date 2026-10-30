@@ -218,3 +218,25 @@ describe("light.glowReach (far beacons)", () => {
     g.dispose();
   });
 });
+
+describe("halo wash (Red Dial 2026-10-30)", () => {
+  /** the queued halo's radius and red strength, read back from the instance buffer */
+  const halo = (g: any) => ({ radius: g.data[3] as number, red: g.data[4] as number });
+  it("caps glow, shrinks by day and holds a far beacon to a few pixels", async () => {
+    const { LightGlows, MAX_HALO_GLOW, FAR_HALO_ANGLE } = await import("../src/light-glow.js");
+    const g = new LightGlows();
+    const light = new THREE.PointLight("#ffffff", 90, 36);
+    const at = new THREE.Vector3();
+    g.begin(); g.add(light, at, 20, 4, 1, undefined, 0); const night4 = halo(g);
+    g.begin(); g.add(light, at, 20, MAX_HALO_GLOW, 1, undefined, 0); const nightCap = halo(g);
+    expect(night4).toEqual(nightCap); // glow 4 draws as the cap
+    g.begin(); g.add(light, at, 20, 4, 1, undefined, 1); const noon = halo(g);
+    expect(noon.red).toBeLessThan(nightCap.red * 0.25);
+    expect(noon.radius).toBeLessThan(nightCap.radius * 0.6);
+    // a far beacon: never wider than its fixed angle once past the near size, never growing faster than distance
+    g.begin(); g.add(light, at, 450, 4, 1, 800, 0); const far = halo(g);
+    expect(far.radius).toBeCloseTo(450 * FAR_HALO_ANGLE, 5);
+    expect(far.radius / 450).toBeLessThan(0.006);
+    g.dispose();
+  });
+});

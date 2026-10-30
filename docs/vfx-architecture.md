@@ -695,6 +695,13 @@ integrator (`measurePlume`), no renderer. The chimney batch takes `CHIMNEY_SMOKE
 `npx tsx tools/smoke-check.mts <project> [--zone <z>]` and the `zonegen status` row `smoke`. Places read by their
 structures, never by their smoke.
 
+**Ruling (Derek, Red Dial walk 2026-10-30): no smoke until the smoke effect works. Smoke is OFF by default
+engine-wide.** A standing effect plays without its smoke layers (`smokeLayers`: a fire's smoke puffs, a whole smoke
+effect such as env/smoke-column) unless its `vfx` component sets `smoke: true` (render vfx/ambient.ts `withoutSmoke`).
+Chimney smoke is opt-in per placed model (`mesh.source.chimneySmoke: true`); only then are its stacks found. The
+detector is geometric and also finds a roofless ruin's wall stubs and pillar tops (Red Dial: 210 "chimneys", no
+hearth). Place reads never count smoke (place-build `SMOKE_READ_M` holds flames only).
+
 ## Symbol sheets: how to draw them
 
 One PNG per category (symbols, projectiles, radials…), any size, white on

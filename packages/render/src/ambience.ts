@@ -10,6 +10,7 @@ import { windowCardMaterial } from "./window-lights.js";
 import { cloudShadow } from "./cloud-shadow.js";
 import { fogLamps } from "./atmosphere.js";
 import { setSunGlareEnabled } from "./sun-glare.js";
+import { lightShading } from "./light-budget.js";
 
 let fogGain = fogLamps.gain.value;
 
@@ -26,6 +27,24 @@ export function setWorldExtrasEnabled(on: boolean): void {
   cloudShadow.strength.value = on ? cloudShadow.strength.value : 0;
   cloudShadow.on.value = on ? 1 : 0;
   setSunGlareEnabled(on);
+}
+
+/** What a point light adds to a frame, one switch each (light-shots --layers: which of them washes a frame out). */
+export type LightLayer = "halos" | "pools" | "fog" | "shading";
+export const LIGHT_LAYERS: readonly LightLayer[] = ["halos", "pools", "fog", "shading"];
+
+/**
+ * Switch one point-light contribution off or on — the halo sprites, the screen-space pools past the budget, the lamp
+ * glow in the fog, or the budgeted lights' own shading of surfaces — to measure what each adds to a frame. Material
+ * visibility and uniforms only: no rebuild, no recompile.
+ */
+export function setLightLayerEnabled(layer: LightLayer, on: boolean): void {
+  if (layer === "halos") haloMaterial().visible = on;
+  else if (layer === "pools") poolMaterial().visible = on;
+  else if (layer === "fog") {
+    if (!on && fogLamps.gain.value > 0) fogGain = fogLamps.gain.value;
+    fogLamps.gain.value = on ? fogGain : 0;
+  } else if (layer === "shading") lightShading.enabled = on;
 }
 
 /**

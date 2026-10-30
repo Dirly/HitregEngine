@@ -104,6 +104,7 @@ import {
   LightBudgetSystem,
   updateWorldAmbience,
   setWorldExtrasEnabled,
+  setLightLayerEnabled,
   cloudShadow,
   chimneySmoke,
   updateCharacterGrounding,
@@ -4769,7 +4770,7 @@ async function main(): Promise<void> {
       })(),
       waterWakeUniforms,
       // world ambience (cloud shadows, chimney smoke): a probe can read their live state
-      ambience: { cloudShadow, chimneySmoke, setWorldExtrasEnabled },
+      ambience: { cloudShadow, chimneySmoke, setWorldExtrasEnabled, setLightLayerEnabled },
       // the wake height field: a probe can pin its centre or read its size
       get waterWake() {
         return waterWake;

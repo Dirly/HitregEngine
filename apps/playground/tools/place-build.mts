@@ -165,7 +165,7 @@ function topOf(prefab: string, x: number, z: number): number | null {
 }
 /** A catalogued piece's marker (prefab frame) from the <model>.markers.json beside its mesh (layout `waters`: a kit basin's level). */
 // L (o-small 2026-10-29): a .gltf model's markers were never found (only .glb was stripped)
-function markerOf(prefab: string, id: string): { position: [number, number, number]; size: [number, number, number] } | null {
+function markerOf(prefab: string, id: string): { position: [number, number, number]; size: [number, number, number]; shape?: "rect" | "round" } | null {
   try {
     const pf = findAsset(project, `prefabs/${prefab}.json`); if (!pf) return null;
     for (const e of Object.values(read(pf).entities ?? {}) as any[]) {
@@ -173,7 +173,7 @@ function markerOf(prefab: string, id: string): { position: [number, number, numb
       const mf = findAsset(project, `models/${asset.replace(/.(glb|gltf)$/i, "")}.markers.json`); if (!mf) continue;
       const m = (read(mf).markers ?? []).find((x: any) => x.id === id); if (!m) continue;
       const t = e.components.transform?.position ?? [0, 0, 0];
-      return { position: [m.position[0] + t[0], m.position[1] + t[1], m.position[2] + t[2]], size: m.size ?? [0, 0, 0] };
+      return { position: [m.position[0] + t[0], m.position[1] + t[1], m.position[2] + t[2]], size: m.size ?? [0, 0, 0], ...(m.shape === "round" ? { shape: "round" as const } : {}) };
     }
   } catch {}
   return null;
@@ -783,7 +783,7 @@ export function gatePlan(job: string, hand: any): { centre: V2; pockets: { at: V
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-const GATES = ["design", "size", "fine", "roads", "lips", "scatter-float", "float", "seated", "rock-skins", "water-edges", "zfight", "op-check", "art", "scale", "walk", "dress", "place"] as const;
+const GATES = ["design", "size", "fine", "roads", "lips", "scatter-float", "float", "seated", "rock-skins", "water-edges", "zfight", "op-check", "art", "scale", "wash", "walk", "dress", "place"] as const;
 function gates(onlyArg?: string[]) {
   const hand = read(path.join(JOB, "handoff.json")), plan = gatePlan(JOB, hand);
   const pts = [plan.centre, ...plan.pockets.map((k: any) => k.at)] as V2[], c = plan.centre as V2;
@@ -846,6 +846,7 @@ function gates(onlyArg?: string[]) {
   // L (art, signal-tower 2026-10-21): measured in the LAB (the live scene still held the old install's barrel)
   gate("art", () => { const r = tool("art", ["tools/art-check.mts", JOB, "--culture", "human", "--project", lab, "--world", labWorld]); return { ok: r.status === 0 && okOf("art-check"), detail: last(r.out).slice(0, 220) }; });
   gate("scale", () => scaleCheck());
+  gate("wash", () => washCheck());
   gate("walk", () => { const r = tool("walk", ["tools/poi-walk.mts", JOB, "--scene", labWorld]); return { ok: r.status === 0 && okOf("walk"), detail: last(r.out).slice(0, 220) }; });
   gate("dress", () => { const bad: string[] = []; for (const f of fs.readdirSync(path.join(JOB, "dressing")).filter((f) => f.endsWith(".json") && !/.(report|inverse|walk).json$/.test(f))) { const id = f.replace(/\.json$/, ""); const nf = noFloor(lab, id); if (nf !== null) { bad.push(`${id}: no open floor on its socket map (${nf}): the pocket is not on level ground, re-plan (site search)`); continue; } const r = tool(`check-${id}`, ["tools/dress.mts", "check", "--project", lab, "--plan", id, "--scene", labWorld, "--at", "0,0,0", "--quiet", "--poi", poi]); if (r.status) bad.push(`${id}: ${last(r.out).slice(0, 120)}`); }
     // L (TOOLS-PB 2026-10-23, silent drop): every prop the design asked of a plan is in it, else a fault naming the prop and why
@@ -863,6 +864,19 @@ function gates(onlyArg?: string[]) {
   const merged = [...prev.filter((r: any) => !rows.some((x) => x.gate === r.gate)), ...rows].sort((x, y) => GATES.indexOf(x.gate) - GATES.indexOf(y.gate));
   write(rep("gates"), { ok: merged.length === GATES.length && merged.every((r: any) => r.ok), lab, at: new Date().toISOString(), rows: merged });
   if (rows.some((r) => !r.ok)) process.exitCode = 1;
+}
+/** WASH (Red Dial 2026-10-30, Derek: "so washed out from how bright that lighting is"; the far-read rule "fires > 4 px
+ *  at 450 m" had been passed with glow 4 + glowReach 800 halos 10 m across): the evidence run (shots, light-shots --wash)
+ *  judges every frame against the wash band (near/mid luma, blown white, glare, and the share the halos + lamp fog glow
+ *  alone brighten) and every far fire at dusk by its FLAME with a modest glow (tools/_light-wash.mts). Read from
+ *  evidence/<lab>.json; a run without it fails ("run shots"). */
+function washCheck(): { ok: boolean; detail: string } {
+  const f = path.join(JOB, "evidence", `${labWorld}.json`);
+  if (!fs.existsSync(f)) return { ok: false, detail: "no evidence run: run shots" };
+  const v = read(f).washVerdict;
+  if (!v) return { ok: false, detail: "the evidence run has no wash verdict (shots from before the wash gate): run shots" };
+  write(path.join(JOB, "reports", "wash.json"), { ...v, at: new Date().toISOString(), run: path.relative(JOB, f) });
+  return { ok: !!v.ok, detail: v.ok ? `${v.fireLine}; ${v.veilLine}` : v.faults.slice(0, 4).join("; ").slice(0, 400) };
 }
 /** SCALE (Red Dial 2026-10-30, owner: "you don't have the scale correct with the concept art"; every gate had passed): a
  *  PAINTED place (concept/<poi>.site.json renders) declares <job>/concept-marks.json (conceptMarksSchema: the painting's
@@ -1023,7 +1037,7 @@ async function shots() {
   // tree (vite, the browser) killed on expiry and the stage FAILED with the reason; --shots-timeout <min> (default
   // max(15, spots x 2 x 50 s): the cap grows with the views, shotsCapMs); one stalled spot is skipped after 90 s (light-shots --spot-timeout)
   const nViews = (() => { try { return (read(path.join(JOB, "views.json")) as unknown[]).length; } catch { return 0; } })();
-  const r = await toolTimed("shots", opt("shots-timeout") ? +opt("shots-timeout")! * 60_000 : shotsCapMs(nViews), ["tools/light-shots.mts", "--scene", labWorld, "--spots", path.join(JOB, "views.json"), "--times", "12,20", "--no-refs", "--weather-settle", "4", "--out", path.join(JOB, "evidence"), "--port", port, ...(opt("spot-timeout") ? ["--spot-timeout", opt("spot-timeout")!] : [])]); // --spot-timeout <s>: far read spots stream a lot of world (Wristgate 2026-10-28: 90 s timed out every trail view)
+  const r = await toolTimed("shots", opt("shots-timeout") ? +opt("shots-timeout")! * 60_000 : shotsCapMs(nViews), ["tools/light-shots.mts", "--scene", labWorld, "--spots", path.join(JOB, "views.json"), "--times", "12,20", "--no-refs", "--wash", "--weather-settle", "4", "--out", path.join(JOB, "evidence"), "--port", port, ...(opt("spot-timeout") ? ["--spot-timeout", opt("spot-timeout")!] : [])]); // --spot-timeout <s>: far read spots stream a lot of world (Wristgate 2026-10-28: 90 s timed out every trail view)
   const errLine = r.out.split("\n").map((l) => l.trim()).filter((l) => /^(\w*Error|STOP):/.test(l)).slice(-1).join(" | ");
   const reason = r.timedOut ? `TIMEOUT after ${r.s} s (--shots-timeout <min>; the run and its vite/browser killed)` : r.status ? (errLine || r.out.trim().split("\n").slice(-1)[0] || `exit ${r.status}`).slice(0, 300) : "";
   write(path.join(JOB, "reports", "shots.json"), { ok: !r.status, at: new Date().toISOString(), seconds: r.s, reason, log: "reports/shots.log" });

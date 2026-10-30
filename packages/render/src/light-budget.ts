@@ -1,9 +1,17 @@
 import * as THREE from "three/webgpu";
 import { readWorldPosition } from "./static-transforms.js";
 import { worldDaylight } from "./daylight.js";
-import { DEFAULT_LIGHT_GLOW, LightGlows } from "./light-glow.js";
+import { DEFAULT_LIGHT_GLOW, LightGlows, MAX_HALO_GLOW } from "./light-glow.js";
+
+/** Lamp glow in the fog under full open daylight, as a share of its night strength. */
+const DAY_FOG_GLOW = 0.15;
+/** A light lights the haze with at most this intensity (a bonfire's light): a beacon's 90 is for the ground, not the air. */
+export const FOG_LAMP_MAX_INTENSITY = 40;
 import { LightPools } from "./light-pools.js";
 import { FOG_LAMP_COUNT, fogLamps } from "./atmosphere.js";
+
+/** Diagnostic switch (ambience setLightLayerEnabled "shading"): false = the budgeted slots shade nothing. */
+export const lightShading = { enabled: true };
 
 interface Entry {
   light: THREE.PointLight;
@@ -171,7 +179,7 @@ export class LightBudgetSystem {
         light.visible = true;
         const onness = timeOfDayScale(light);
         readWorldPosition(light, _lightPosition);
-        this.glows.add(light, _lightPosition, _lightPosition.distanceTo(this.cameraPosition), glowOf(light), onness, glowReachOf(light));
+        this.glows.add(light, _lightPosition, _lightPosition.distanceTo(this.cameraPosition), glowOf(light), onness, glowReachOf(light), worldDaylight.sunlit);
         continue;
       }
       // Authored lights are data from here on: hidden once, never toggled
@@ -181,7 +189,7 @@ export class LightBudgetSystem {
       const onness = timeOfDayScale(light);
       if (onness < 0.01) continue;
       const distanceSq = readWorldPosition(light, _lightPosition).distanceToSquared(this.cameraPosition);
-      this.glows.add(light, _lightPosition, Math.sqrt(distanceSq), glowOf(light), onness, glowReachOf(light));
+      this.glows.add(light, _lightPosition, Math.sqrt(distanceSq), glowOf(light), onness, glowReachOf(light), worldDaylight.sunlit);
       const entry = (candidates[count] ??= { light, importance: 1, distanceSq: 0 });
       entry.light = light;
       entry.importance = Math.max(0.001, Number(light.userData["lightImportance"]) || 1);
@@ -211,7 +219,7 @@ export class LightBudgetSystem {
       }
       readWorldPosition(source, slot.position);
       slot.color.copy(source.color);
-      slot.intensity = source.intensity * timeOfDayScale(source);
+      slot.intensity = lightShading.enabled ? source.intensity * timeOfDayScale(source) : 0;
       slot.distance = source.distance;
       slot.decay = source.decay;
     }
@@ -237,7 +245,12 @@ export class LightBudgetSystem {
       }
       readWorldPosition(entry.light, _lightPosition);
       fogLamps.position[i]!.value.set(_lightPosition.x, _lightPosition.y, _lightPosition.z, Math.max(0.1, entry.light.distance || 10));
-      color.copy(entry.light.color).multiplyScalar(entry.light.intensity * timeOfDayScale(entry.light) * glowOf(entry.light));
+      // capped like the halo and mostly gone in open daylight (Red Dial 2026-10-30: 19 beacons at intensity 90 x glow 4
+      // lit the noon haze over a quarter of a street frame)
+      const air = DAY_FOG_GLOW + (1 - DAY_FOG_GLOW) * (1 - worldDaylight.sunlit);
+      // and the intensity it lights the air with is capped at a bonfire's (FOG_LAMP_MAX_INTENSITY): a 90-unit beacon light lit
+      // 6 % of a dusk frame of haze at 20-40 m (Red Dial tower-compounds) where its halo added nothing
+      color.copy(entry.light.color).multiplyScalar(Math.min(entry.light.intensity, FOG_LAMP_MAX_INTENSITY) * timeOfDayScale(entry.light) * Math.min(glowOf(entry.light), MAX_HALO_GLOW) * air);
     }
   }
 

@@ -344,3 +344,24 @@ function inScene(object: THREE.Object3D, scene: THREE.Scene): boolean {
 
 /** The one smoke batch the scene builder registers buildings with. */
 export const chimneySmoke = new ChimneySmoke();
+
+/** userData flag on a loaded building model (kit glass or a town atlas): it MAY carry chimneys. */
+export const CHIMNEY_CANDIDATE = "hitregChimneyCandidate";
+/** Stacks per building asset, found once on the first copy placed with `chimneySmoke: true` (model-root space). */
+const chimneyTopsByAsset = new Map<string, [number, number, number][]>();
+/**
+ * Chimney smoke is OFF by default (owner ruling 2026-10-30): a placed building copy smokes only with
+ * `mesh.source.chimneySmoke: true`, and only then are its model's stacks found. Writes them onto the copy for
+ * {@link chimneySmoke}.register; false when the model is not a building or has none.
+ */
+export function chimneySmokeTops(assetId: string, instance: THREE.Object3D, skip?: (material: THREE.Material) => boolean): boolean {
+  if (instance.userData[CHIMNEY_CANDIDATE] !== true) return false;
+  let tops = chimneyTopsByAsset.get(assetId);
+  if (!tops) {
+    tops = findChimneys(instance, skip).map((t) => [t.x, t.y, t.z] as [number, number, number]);
+    chimneyTopsByAsset.set(assetId, tops);
+  }
+  if (!tops.length) return false;
+  instance.userData[CHIMNEYS_KEY] = tops;
+  return true;
+}

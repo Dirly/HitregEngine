@@ -122,7 +122,8 @@ import type { EnvironmentSettings } from "./environment.js";
 import { findWindows, seedWindowGlass, windowCardGeometry, windowCardMaterial, windowInterior, windowLight, windowOutside, windowSeed, NO_SHADOW_FLAG } from "./window-lights.js";
 import { rimmedCopy } from "./rim-light.js";
 import { setCloudShadowImage } from "./cloud-shadow.js";
-import { CHIMNEYS_KEY, chimneySmoke, findChimneys } from "./chimney-smoke.js";
+import { CHIMNEY_CANDIDATE, chimneySmoke, chimneySmokeTops } from "./chimney-smoke.js";
+
 import { WINDOWS_KEY, distantWindows } from "./distant-windows.js";
 import { SceneLighting, SKY_DOME_UNIFORMS, type SkyData, type SkyDomeUniforms } from "./scene-lighting.js";
 import {
@@ -178,12 +179,9 @@ export function loadGltf(url: string): Promise<LoadedModel> {
         applyWindowGlass(gltf.scene);
         // atlased kits (tools/town-atlas.mjs): one shared tile-sampling material per page
         const atlased = applyAtlasMaterials(gltf.scene);
-        // buildings (kit glass or a town atlas) get their chimneys found once,
-        // for the smoke every placed copy registers (chimney-smoke.ts)
-        if (atlased > 0 || hasWindowGlass(gltf.scene)) {
-          const tops = findChimneys(gltf.scene, (m) => WINDOW_GLASS.test(m.name) || m.userData?.[NO_SHADOW_FLAG] === true);
-          if (tops.length > 0) gltf.scene.userData[CHIMNEYS_KEY] = tops.map((t) => [t.x, t.y, t.z]);
-        }
+        // buildings (kit glass or a town atlas) MAY smoke from their chimneys, but only a copy placed with
+        // `mesh.source.chimneySmoke: true` has its stacks found (chimneySmokeTops, at placement): smoke is off by default
+        if (atlased > 0 || hasWindowGlass(gltf.scene)) gltf.scene.userData[CHIMNEY_CANDIDATE] = true;
         shareModelMaterials(gltf.scene, scope);
         // creatures and characters: a rim keeps them readable in the dark (sky.rim; 0 = off)
         gltf.scene.traverse((node) => {
@@ -645,6 +643,7 @@ interface MeshData {
         textureFilter?: TextureFilter;
         wind?: FoliageWindOptions;
         cameraFade?: boolean;
+        chimneySmoke?: boolean;
         uvRotation?: number;
         vegetationTint?: VegetationTint;
         rockCap?: import("@hitreg/core").RockCap;
@@ -2759,7 +2758,8 @@ function populateEntityGroup(
             group.add(instance);
             // a building's chimneys smoke (the whole model only: a detached node has no roof)
             if (!nodeName) {
-              chimneySmoke.register(instance);
+              // chimney smoke is opt-in (mesh.source.chimneySmoke true): a ruin's wall stubs are not stacks
+              if (meshData.source.kind === "asset" && meshData.source.chimneySmoke === true && chimneySmokeTops(meshData.source.assetId, instance, (m) => WINDOW_GLASS.test(m.name) || m.userData?.[NO_SHADOW_FLAG] === true)) chimneySmoke.register(instance);
               distantWindows.register(instance);
             }
             // The initial decal flush can precede async model arrival. Fit
