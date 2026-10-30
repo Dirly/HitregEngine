@@ -42,7 +42,7 @@
  *
  * Out: <out>/<scene>[-<label>]-sheet.png (rows = spots, columns = times; each tile labelled with the clock and the
  * luma read off it), every frame as <scene>[-<label>]/<spot>-<hh>.png, and <scene>[-<label>].json with per frame:
- * clock, zone mood actually showing (/mood), recipe region, camera, and mean luma (Rec.709 on 0-255 sRGB) of the whole
+ * clock, zone mood actually showing (/mood), recipe region, camera, render { drawCalls, triangles } (that frame), and mean luma (Rec.709 on 0-255 sRGB) of the whole
  * frame, the top fifth (sky), the bottom fifth (ground), each character's screen box and the grey sphere (plus its
  * mean RGB, which shows colour cast).
  *
@@ -627,7 +627,7 @@ await openSession();
 const times = hasClock ? TIMES : [NaN];
 
 type Box = { x0: number; y0: number; x1: number; y1: number };
-type Shot = { rig?: unknown; spot: string; row: string; weather: string; weatherLine: string; time: number | null; clock: string; mood: string; file: string; boxes: Record<string, Box | null>; camera: { pos: V3; target: V3; distance: number }; shows?: ShowResult[] };
+type Shot = { rig?: unknown; spot: string; row: string; weather: string; weatherLine: string; time: number | null; clock: string; mood: string; file: string; boxes: Record<string, Box | null>; render?: { drawCalls: number; triangles: number }; camera: { pos: V3; target: V3; distance: number }; shows?: ShowResult[] };
 const shots: Shot[] = [];
 const spotInfo: Array<Record<string, unknown>> = [];
 
@@ -755,7 +755,10 @@ async function shootSpot(spot: Spot): Promise<void> {
     watchdog.frame();
     const shows = spot.shows?.length ? await showsCheck(spot.shows, file) : undefined;
     const cam = await H_((h) => [h.camera.position.x, h.camera.position.y, h.camera.position.z]);
-    shots.push({ spot: spot.name, row, weather: weatherName, weatherLine, time: Number.isFinite(hour) ? hour : null, clock, mood, rig, file, boxes, camera: { pos: cam as V3, target: placed.pivot as V3, distance: placed.dist }, ...(shows ? { shows } : {}) });
+    // the frame's render cost (Red Dial 2026-10-30: draw calls + triangles per evidence view, the far-frame HLOD rule in
+    // docs/performance-lessons.md): the renderer's last-frame counters as the picture was taken
+    const render = await H_((h) => { try { const r = h.info().render ?? {}; return { drawCalls: r.drawCalls ?? r.calls ?? -1, triangles: r.triangles ?? -1 }; } catch { return { drawCalls: -1, triangles: -1 }; } }) as { drawCalls: number; triangles: number };
+    shots.push({ spot: spot.name, row, weather: weatherName, weatherLine, time: Number.isFinite(hour) ? hour : null, clock, mood, rig, file, boxes, render, camera: { pos: cam as V3, target: placed.pivot as V3, distance: placed.dist }, ...(shows ? { shows } : {}) });
   }
   }
   console.log(`  ${spot.name} (${region?.zone ?? "-"}${region?.place ? `/${region.place}` : ""}): ${times.length * WEATHERS.length} frames, camera ${placed.dist.toFixed(1)} m — ${((Date.now() - t0) / 1000).toFixed(0)} s`);
@@ -884,7 +887,7 @@ const report = {
   spots: spotInfo,
   weathers: MULTI_WEATHER ? WEATHERS : null,
   ...(abResults.length ? { ab: abResults } : {}),
-  shots: shots.map((s, i) => ({ spot: s.spot, weather: s.weather, weatherLine: s.weatherLine, time: s.time, clock: s.clock, mood: s.mood, rig: s.rig, file: path.relative(OUT, s.file).replace(/\\/g, "/"), camera: s.camera, boxes: s.boxes, ...(s.shows ? { shows: s.shows } : {}), ...result.measures[i] })),
+  shots: shots.map((s, i) => ({ spot: s.spot, weather: s.weather, weatherLine: s.weatherLine, time: s.time, clock: s.clock, mood: s.mood, rig: s.rig, file: path.relative(OUT, s.file).replace(/\\/g, "/"), camera: s.camera, boxes: s.boxes, render: s.render, ...(s.shows ? { shows: s.shows } : {}), ...result.measures[i] })),
   pageErrors: logs.slice(0, 20),
 };
 fs.writeFileSync(path.join(OUT, `${stem}.json`), JSON.stringify(report, null, 1) + "\n");
