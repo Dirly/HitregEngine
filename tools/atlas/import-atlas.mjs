@@ -62,7 +62,7 @@ if (!args.key || !args.art) {
   console.error(
     "usage: node tools/atlas/import-atlas.mjs --set <set> --theme <theme>" + String.fromCharCode(10) +
       "   or: node tools/atlas/import-atlas.mjs --key <key.png> --art <art.png> " +
-      "[--manifest m.json] [--out dir] [--size 256] [--bleed 8] [--slices] [--install <dir>]",
+      "[--manifest m.json] [--out dir] [--size 256] [--bleed 8] [--filter nearest|box] [--sample-phase-x 0] [--sample-phase-y 0] [--slices] [--install <dir>]",
   );
   process.exit(1);
 }
@@ -87,6 +87,13 @@ if (!args.slices && fs.existsSync(path.join(OUT, "slices")))
 
 const keyImg = decodePng(fs.readFileSync(args.key));
 const artImg = decodePng(fs.readFileSync(args.art));
+// Native alpha is authoritative. Normalize its invisible RGB for the existing
+// white-ground registration, while retaining enclosed transparent openings.
+const sourceAlpha = Uint8Array.from({ length: artImg.width * artImg.height }, (_, i) => artImg.data[i * 4 + 3]);
+for (let i = 0; i < sourceAlpha.length; i++) {
+  const a = sourceAlpha[i] / 255;
+  if (a < 1) for (let c = 0; c < 3; c++) artImg.data[i * 4 + c] = Math.round(artImg.data[i * 4 + c] * a + 255 * (1 - a));
+}
 if (keyImg.width !== artImg.width || keyImg.height !== artImg.height) {
   console.error(`key ${keyImg.width}x${keyImg.height} and art ${artImg.width}x${artImg.height} must match`);
   process.exit(1);
@@ -617,6 +624,7 @@ for (let i = 0; i < N; i++) {
   const b = artImg.data[i * 4 + 2];
   const [h, s, v] = rgbToHsv(r, g, b);
   const dh = hueDist(h, KEY_HUE);
+  if (sourceAlpha[i] < 128) strong[i] = weak[i] = 1;
   if (dh < 15 && s > 0.55 && v > 0.55) strong[i] = 1;
   if (dh < 30 && s > 0.3 && v > 0.35) weak[i] = 1;
   const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -1785,23 +1793,27 @@ const texelArea = (W / S) * (H / S);
 // A set can ask for it in its manifest (`atlas.filter` in the recipe): the
 // player head does, to match the body's hard, un-averaged pixels.
 const NEAREST = (args.filter ?? manifest.filter) === "nearest";
+// Shift the nearest sampling lattice uniformly, never island geometry or UVs.
+const SAMPLE_PHASE_X = Number(args["sample-phase-x"] ?? 0), SAMPLE_PHASE_Y = Number(args["sample-phase-y"] ?? 0);
+if (![SAMPLE_PHASE_X,SAMPLE_PHASE_Y].every(v=>Number.isFinite(v)&&v>=-.5&&v<=.5)) throw new Error("sample-phase-x/y must be finite target-texel offsets in [-0.5,0.5]");
+if (!NEAREST && (SAMPLE_PHASE_X!==0||SAMPLE_PHASE_Y!==0)) throw new Error("Nonzero sample phase requires nearest filtering");
 
 for (let dy = 0; dy < S; dy++) {
   const y0 = (dy * H) / S;
   const y1 = ((dy + 1) * H) / S;
-  const cy = Math.min(H - 1, Math.floor((y0 + y1) / 2));
+  const cy = Math.min(H - 1, Math.max(0,Math.floor((y0 + y1) / 2 + SAMPLE_PHASE_Y*H/S)));
   for (let dx = 0; dx < S; dx++) {
     const x0 = (dx * W) / S;
     const x1 = ((dx + 1) * W) / S;
-    const cx = Math.min(W - 1, Math.floor((x0 + x1) / 2));
+    const cx = Math.min(W - 1, Math.max(0,Math.floor((x0 + x1) / 2 + SAMPLE_PHASE_X*W/S)));
     const d = dy * S + dx;
     const votes = new Map();
-    for (let sy = Math.floor(y0); sy < Math.ceil(y1); sy++) {
-      const wyFull = Math.min(y1, sy + 1) - Math.max(y0, sy);
-      if (wyFull <= 0) continue;
-      for (let sx = Math.floor(x0); sx < Math.ceil(x1); sx++) {
-        const wxFull = Math.min(x1, sx + 1) - Math.max(x0, sx);
-        if (wxFull <= 0) continue;
+    for (let sy = Math.min(Math.floor(y0),cy); sy < Math.max(Math.ceil(y1),cy+1); sy++) {
+      const wyFull = Math.max(0,Math.min(y1, sy + 1) - Math.max(y0, sy));
+      if (wyFull <= 0 && !(NEAREST && sy===cy)) continue;
+      for (let sx = Math.min(Math.floor(x0),cx); sx < Math.max(Math.ceil(x1),cx+1); sx++) {
+        const wxFull = Math.max(0,Math.min(x1, sx + 1) - Math.max(x0, sx));
+        if (wxFull <= 0 && !(NEAREST && sx===cx)) continue;
         const s = sy * W + sx;
         const w = NEAREST ? (sx === cx && sy === cy ? 1 : 0) : wxFull * wyFull;
         if (w === 0) {
@@ -2297,7 +2309,14 @@ for (let d = 0; d < SN; d++) {
 // points) keep a transparent gutter, which is what their silhouettes need.
 if (manifest.solidGround) {
   for (let d = 0; d < SN; d++) {
-    if (owner[d] < 0 || byId[owner[d]].transparency) continue;
+    if (owner[d] < 0) continue;
+    const island = byId[owner[d]];
+    // A transparency-capable sheet can explicitly forbid cuts on a solid body
+    // island. Its target edge must stay opaque too: with nearest reduction the
+    // centre sample may fall outside the source key while the majority label
+    // still assigns this target texel to that island. Preserve authored cuts
+    // only where the slot actually permits them (robe hems and ornaments).
+    if (island.transparency && manifest.slots[island.hex]?.cut !== false) continue;
     alpha[d] = 255;
   }
 }
@@ -2399,6 +2418,7 @@ const report = {
     size: `${S}x${S}`,
     bleed: BLEED,
     filter: NEAREST ? "nearest" : "box",
+    samplePhaseTexels: [SAMPLE_PHASE_X,SAMPLE_PHASE_Y],
     artMargin: ART_MARGIN,
     colorTexelsPadded: colorFilled,
     alphaTexelsPadded: alphaFilled,

@@ -148,6 +148,40 @@ function inBuilding(p: P2): boolean {
   }
   return false;
 }
+/**
+ * The platform outlines of a designed town (authoring/towns/<town>-design.json, by recipe terrace id `<town>-<id>`):
+ * terrace --from-plan records each platform as a band from one end to the other, and a band's end is on the rim.
+ */
+const designFile = path.join(projectDir, "authoring/towns", `${townName}-design.json`);
+const designPads = new Map<string, P2[]>(
+  fs.existsSync(designFile) ? ((JSON.parse(fs.readFileSync(designFile, "utf8")) as { town: string; terraces?: { id: string; polygon: P2[] }[] }).terraces ?? []).map((t) => [`${town.id}-${t.id}`, t.polygon] as [string, P2[]]) : [],
+);
+/** The point of a pad farthest from its rim (a 1 m grid), skipping house footprints; its middle vertex if none is open. */
+function deepestPoint(poly: P2[]): P2 {
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  for (const [x, z] of poly) { x0 = Math.min(x0, x); z0 = Math.min(z0, z); x1 = Math.max(x1, x); z1 = Math.max(z1, z); }
+  const cands: { p: P2; d: number }[] = [];
+  for (let x = Math.floor(x0); x <= x1; x++) for (let z = Math.floor(z0); z <= z1; z++) {
+    if (!insidePoly(poly, x, z) || inBuilding([x, z])) continue;
+    let d = Infinity;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [ax, az] = poly[j]!, [bx, bz] = poly[i]!;
+      const vx = bx - ax, vz = bz - az;
+      const u = Math.max(0, Math.min(1, ((x - ax) * vx + (z - az) * vz) / (vx * vx + vz * vz || 1)));
+      d = Math.min(d, Math.hypot(x - ax - vx * u, z - az - vz * u));
+    }
+    cands.push({ p: [x, z], d });
+  }
+  // deepest first, skipping a spot something built stands on within 1.5 m (a square's market cross, a well)
+  const occupied = (q: P2): boolean => [[0, 0], [1.5, 0], [-1.5, 0], [0, 1.5], [0, -1.5]].some(([dx, dz]) => {
+    const x = q[0] + dx!, z = q[1] + dz!, g = field.height(x, z);
+    const hit = world.sim.raycast([x, g + 8, z], [0, -1, 0], 7.7, { solid: true });
+    return !!hit && !hit.entityId.includes("/terrain");
+  });
+  cands.sort((a, b) => b.d - a.d);
+  for (const c of cands.slice(0, 400)) if (!occupied(c.p)) return c.p;
+  return cands[0]?.p ?? poly[Math.floor(poly.length / 2)]!;
+}
 /** A tour's raw waypoints: once the planner exists, every jump between two roads is re-routed round the buildings. */
 const tours = new Map<string, P2[]>();
 for (const g of gates) {
@@ -164,7 +198,12 @@ for (const g of gates) {
     here = ordered.at(-1)!;
   }
   for (const t of [...(town.terraces ?? [])].sort((a, b) => dist(here, a.points[0] as P2) - dist(here, b.points[0] as P2))) {
-    const mid = t.points[Math.floor(t.points.length / 2)] as P2;
+    // the pad's deepest open point (farthest from its rim, off every house). A vertex of a big pad is on its rim, and
+    // the rim of a walled town's floor runs under or past its curtain (Bell Strand: the tour was sent into the wall);
+    // a curved pad's centroid can lie off it (a strand round a lake: in the water)
+    const plat = designPads.get(t.id);
+    const ends = t.points as P2[];
+    const mid = plat ? deepestPoint(plat) : ends.length === 2 ? ([(ends[0]![0] + ends[1]![0]) / 2, (ends[0]![1] + ends[1]![1]) / 2] as P2) : ends[Math.floor(ends.length / 2)]!;
     if (inBuilding(mid)) continue; // a building stands on this pad now: its door spur is the proof it is reached
     pts.push(mid);
     here = mid;
@@ -244,6 +283,18 @@ function thinLandmarkNear(x: number, foot: number, z: number): unknown {
   }
   return null;
 }
+/**
+ * A cell INSIDE a thick mesh collider (a 2.4 m kit curtain): a trimesh has no inside, so the rays from 3 m over the
+ * ground and up from the foot both start in it and pass through to the terrain and the open air: the planner routed
+ * a tour straight through Bell Strand's curtain. A face overhead with no underside between it and the foot is the top
+ * of a solid the cell stands in; an arch, an eave or a stall roof has its underside in between.
+ */
+function insideSolid(x: number, foot: number, z: number): { entityId: string } | null {
+  const over = world.sim.raycast([x, foot + 12, z], [0, -1, 0], 9.5, { solid: true });
+  if (!over || over.entityId.includes("/terrain")) return null;
+  const under = world.sim.raycast([x, foot + 0.3, z], [0, 1, 0], Math.max(0.05, over.point[1] - foot - 0.35), { solid: true });
+  return under ? null : { entityId: `${over.entityId} (inside)` };
+}
 function plan(from: P2, to: P2): P2[] | null {
   const pad = 60;
   const x0 = Math.floor(Math.min(from[0], to[0]) - pad);
@@ -278,7 +329,7 @@ function plan(from: P2, to: P2): P2[] | null {
       if (down && down.point[1] > top + 2.9) down = world.sim.raycast([x, top + 1.9, z], [0, -1, 0], 6.9, { solid: true });
       const foot = down ? down.point[1] : top;
       if (down && !down.entityId.includes("/terrain")) built[i + j * w] = 1;
-      const head = world.sim.raycast([x, foot + 0.3, z], [0, 1, 0], 1.5, { solid: true }) ?? thinLandmarkNear(x, foot, z);
+      const head = world.sim.raycast([x, foot + 0.3, z], [0, 1, 0], 1.5, { solid: true }) ?? thinLandmarkNear(x, foot, z) ?? insideSolid(x, foot, z);
       H[i + j * w] = foot;
       const water = field.waterY(x, z);
       // a building's footprint is closed: its door is open and its floor is walkable, so without this a route to the
@@ -341,6 +392,15 @@ function plan(from: P2, to: P2): P2[] | null {
   const hx = (k: number): number => Math.hypot((k % w) - (goal % w), Math.floor(k / w) - Math.floor(goal / w));
   f[start] = hx(start);
   const closed = new Uint8Array(w * h);
+  /** One step between neighbouring cells by height alone. */
+  const stepOk = (c: number, k: number, run: number): boolean => {
+    const grade = Math.abs(H[k]! - H[c]!) / run;
+    // a flight of stairs (both cells built) may rise ~45° — steps the body autosteps; terrain keeps the 40° cap
+    if (grade > (built[k] && built[c] ? 1.5 : CLIMB_TAN)) return false;
+    // a ledge onto (or off) a built surface higher than the body's 0.35 m step (a dais, a plinth, a quay lip): the
+    // grade rule took a 0.45 m market-cross dais for a slope and sent the tour into it
+    return !(built[k] !== built[c] && Math.abs(H[k]! - H[c]!) > 0.35);
+  };
   while (open.length) {
     let bi = 0;
     for (let k = 1; k < open.length; k++) if (f[open[k]!]! < f[open[bi]!]!) bi = k;
@@ -360,8 +420,15 @@ function plan(from: P2, to: P2): P2[] | null {
       if (!ok[k] || closed[k]) continue;
       const run = di && dj ? Math.SQRT2 : 1;
       const grade = Math.abs(H[k]! - H[c]!) / run;
-      // a flight of stairs (both cells built) may rise ~45° — steps the body autosteps; terrain keeps the 40° cap
-      if (grade > (built[k] && built[c] ? 1.5 : CLIMB_TAN)) continue;
+      if (!stepOk(c, k, run)) continue;
+      // a diagonal may not cut a corner: one of its two square-on paths must be walkable too (Bell Strand 10-30: a
+      // diagonal down the bank at a retaining wall's end crossed the wall's coping, which the body could not)
+      if (di && dj) { const a1 = ci + di + cj * w, a2 = ci + (cj + dj) * w; if (!((ok[a1] && stepOk(c, a1, 1) && stepOk(a1, k, 1)) || (ok[a2] && stepOk(c, a2, 1) && stepOk(a2, k, 1)))) continue; }
+      // a wall BETWEEN two open cells (a hollow tower's shell, a curtain's face: a trimesh is open inside, so both
+      // cells read clear) or a post thinner than a cell (a market cross's shaft): rays at the body's knee from one cell
+      // to the next, down the middle and at both shoulders (0.4 m)
+      const ky = Math.max(H[k]!, H[c]!) + 0.6, sx = (-dj / run) * 0.4, sz = (di / run) * 0.4;
+      if ([0, 1, -1].some((m) => world.sim.raycast([x0 + ci + sx * m, ky, z0 + cj + sz * m], [di, 0, dj], run, { solid: true }))) continue;
       const cost = g[c]! + run * (1 + 4 * grade * grade + edge[k]!);
       if (cost < g[k]!) { g[k] = cost; came[k] = c; f[k] = cost + hx(k); open.push(k); }
     }

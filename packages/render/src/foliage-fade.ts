@@ -120,6 +120,6 @@ export function applyFoliageFade(root: THREE.Object3D): number {
     material.opacityNode = step(dither, keep);
     material.userData[FOLIAGE_FADE] = true;
     return true;
-  });
+  }, "fade");
 }
 

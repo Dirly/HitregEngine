@@ -1,14 +1,16 @@
 ---
 name: dungeon-standards
-description: Planning, dressing or reviewing an instanced dungeon: how many per zone, size classes, plan shape language, a room sheet per room, set pieces and unique rooms, caps on repeated rooms and fixtures, level variety, creatures, known engine limits. Use with hitreg-dungeon-authoring; the build and its gates are dungeon-build, light is dungeon-lighting, doors are portals.
+description: "Planning, dressing or reviewing an instanced dungeon: how many per zone, size classes, plan shape language, a room sheet per room, set pieces and unique rooms, caps on repeated rooms and fixtures, level variety, creatures, known engine limits. Use with hitreg-dungeon-authoring; the build and its gates are dungeon-build, light is dungeon-lighting, doors are portals."
 ---
 
 # dungeon-standards
 
 What a dungeon is held to by design. Measured rules live in the tools: `dungeon-build` (geometry and every quality
 gate), `dungeon-lighting` (readability, matte, culling, buckets), `portals` (doors), `site-dressing` /
-`interior-standards` (props). The owner-approved references are the `compare` gate's list
-(`tools/dungeon-pipeline/thresholds.json` `references`); every review starts beside their sheets. Open values:
+`interior-standards` (props). Read [placement and self-review](references/placement-review.md)
+when planning dressing or reviewing a dungeon. Weeping Sun Tombs is the current
+owner-approved quality bar (2026-11-08); the `compare` gate's older reference list
+remains useful construction evidence, not a prop-density target. Open values:
 `docs/world-standards/README.md` "Not encoded yet".
 
 ## How many, how big
@@ -28,8 +30,9 @@ gate), `dungeon-lighting` (readability, matte, culling, buckets), `portals` (doo
   No flat-roofed prisms with box lumps.
 
 ## Every room is a place
-- A room sheet per room (`room-sheet.json`): purpose, who is in it, ONE set piece, its light, one unique art piece
-  (texture, decal, carving). A kitchen has a cook; a chapel its congregation.
+- A room sheet per room (`room-sheet.json`): purpose, occupants, usable space and light. Significant rooms have a
+  clear focal feature, which may be architecture, existing carving, a mechanism or the encounter. Quiet transitions
+  can have no loose props or new unique art. A kitchen has a cook; a chapel its congregation.
 - A set piece shows what the occupants DO there (forge, midden, pen, lookout); lore follows the place, never an
   invented backstory illustrated by an odd object.
 - Set pieces are crafted from the start (DC pieces, catalogue props, owner-made mechanisms); grey-box boxes do not survive.
@@ -42,7 +45,10 @@ gate), `dungeon-lighting` (readability, matte, culling, buckets), `portals` (doo
 - Unique named NPCs fit the rooms they stand in, not only a boss at the end.
 
 ## Dressing and creatures
-- Props by name through dressing plans; walls first, centre clear; link passages on the route stay empty.
+- Props by name through dressing plans; a few purposeful groups, walls first, centre and link passages clear.
+  Reserve pull setup, patrol crossings, camera space and knockback recovery before dressing. Empty floor is valid.
+  Finish with a removal pass for redundant props and their lights/VFX. Do not meet legacy prop/type minima by
+  filling space: use a reasoned scoped exception as described in the placement review; do not waive physical checks.
 - Nothing floats: `dress apply` seats every prop on the real floor (DC mesh, colliders) by its catalogue contact, and the
   pipeline's `float` stage (`tools/float.mts scene <project>`) must pass before portal play; a prop with no support moves in the plan.
 - No see-through: every wall, vault and hull closes on screen — the pipeline's `see-through` stage must pass (docs/see-through.md); vault shells and arch springings at least 3 voxels thick in the source.

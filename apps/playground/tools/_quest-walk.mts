@@ -52,10 +52,14 @@ const CLIMB_TAN = Math.tan((40 * Math.PI) / 180);
  * straight above that foot; `sky` the down-ray from high over the cell. A built solid whose buried bottom faces the
  * bake dropped (a stair, a terrace, a plinth more than 3 m over the terrain) puts the 3 m ray INSIDE it: `lo` lands
  * on the terrain under it, and the first face above is that solid's own top. When the face above the foot and the
- * face under the sky are the same surface (no underside between: not a roof, not a lintel), stand on it.
+ * face under the sky are the same surface (no underside between: not a roof, not a lintel), stand on it. `inside`: the
+ * foot lies INSIDE that built solid (its own bottom face is just under the foot, the terrain poking up through its base),
+ * so the face above is the solid's top even under a roof: a gate's door platform under its arch (o-gates 2026-10-30:
+ * the planner walked the platform at the terrain 4 m under it and sent every walk round the side of the gate).
  */
-export function cellFoot(lo: number, up: number | null, sky: number | null): number {
+export function cellFoot(lo: number, up: number | null, sky: number | null, inside = false): number {
   if (up === null || sky === null) return lo;
+  if (inside && up > lo + 0.3) return up;
   return Math.abs(up - sky) < 0.05 && sky > lo + 0.3 ? sky : lo;
 }
 /**
@@ -104,7 +108,9 @@ function planLeg(d: WalkDeps, from: P2, to: P2, pad: number, snapGoal: number): 
       const lo = down ? down.point[1] : top;
       const up = world.sim.raycast([x, lo + 0.05, z], [0, 1, 0], 40, { solid: true, exclude: [d.bodyId] });
       const sky = up ? world.sim.raycast([x, top + 43, z], [0, -1, 0], 43 - 0.05, { solid: true, exclude: [d.bodyId] }) : null;
-      const foot = cellFoot(lo, up ? up.point[1] : null, sky ? sky.point[1] : null);
+      // the foot inside a built solid: under it, past the terrain, the SAME solid's bottom face (parity: below a bottom, above nothing else)
+      const under = up && down && down.entityId.includes("/terrain") ? world.sim.raycast([x, lo + 0.05, z], [0, -1, 0], 1, { solid: true, exclude: [d.bodyId, down.entityId] }) : null;
+      const foot = cellFoot(lo, up ? up.point[1] : null, sky ? sky.point[1] : null, !!under && under.entityId === up!.entityId);
       if ((down && !down.entityId.includes("/terrain")) || foot !== lo) built[i + j * w] = 1;
       const head = world.sim.raycast([x, foot + 0.3, z], [0, 1, 0], 1.5, { solid: true, exclude: [d.bodyId] });
       H[i + j * w] = foot;

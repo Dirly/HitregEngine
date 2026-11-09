@@ -83,6 +83,7 @@ import { PhysicsSim, initPhysics, type BodyState, type MeshGeometryData, type St
 import { registerCommsEvents } from "@hitreg/comms";
 import { isClientOnlyScript } from "./scripts.js";
 import { fileMeshGeometry } from "./mesh-geometry.js";
+import { modelClipReader } from "./model-clips.js";
 
 /** A keyboard nobody is pressing — the server has no local player. */
 export const NULL_INPUT: InputLike = { isDown: () => false, mouseDelta: () => [0, 0] };
@@ -143,6 +144,9 @@ export class HeadlessWorld {
   /** Runtime scene graph. */
   readonly scene = new THREE.Scene();
   readonly objects = new Map<string, THREE.Object3D>();
+  /** Each animated entity's clip names, and its parent's: a body's scripts ask by the body's id, its model is a child. */
+  private readonly clipTables = new Map<string, string[]>();
+  private readonly clipsOfModel: (assetId: string) => string[];
   readonly sim: PhysicsSim;
   readonly eventBus: EventBus;
   readonly netState = new NetStateStore();
@@ -184,6 +188,7 @@ export class HeadlessWorld {
     this.eventRegistry = opts.events!;
     this.scriptRegistry = opts.scripts!;
     this.assets = opts.assets;
+    this.clipsOfModel = modelClipReader((id) => opts.assets?.getModel(id)?.url);
     this.base = base;
     this.fixedDt = 1 / (opts.fixedHz ?? 60);
     this.profiler = opts.profiler;
@@ -228,7 +233,7 @@ export class HeadlessWorld {
       clearAnimationLayer: (id) => {
         this.animLayers.delete(id);
       },
-      animationClips: () => [],
+      animationClips: (id) => this.clipTables.get(id) ?? [],
       // no mixer here, but the rate a script asks for still replicates: it is
       // the only thing that keeps an NPC's feet planted on the clients
       setAnimationSpeed: (id, multiplier) => {
@@ -295,6 +300,7 @@ export class HeadlessWorld {
   addEntities(doc: SceneDoc, opts: AddEntitiesOptions = {}): void {
     if (this.disposed) return;
     this.entityVersion++;
+    this.noteClipTables(doc); // before the strip: the model is on a presentation child
     const shown = this.presentationOnly(doc);
     if (shown.size > 0) {
       this.strippedCount += shown.size;
@@ -486,6 +492,19 @@ export class HeadlessWorld {
   }
 
   /** Remove entities (and nothing else — pass descendants explicitly, see {@link subtree}). */
+  /** As the client's AnimationSystem.register: the first animated model under a parent stands in for it. */
+  private noteClipTables(doc: SceneDoc): void {
+    for (const [id, entity] of Object.entries(doc.entities)) {
+      if (!entity.components["animator"]) continue;
+      const source = (entity.components["mesh"] as { source?: { kind?: string; assetId?: string } } | undefined)?.source;
+      if (source?.kind !== "asset" || !source.assetId) continue;
+      const clips = this.clipsOfModel(source.assetId);
+      if (clips.length === 0) continue;
+      this.clipTables.set(id, clips);
+      if (entity.parent && !this.clipTables.has(entity.parent)) this.clipTables.set(entity.parent, clips);
+    }
+  }
+
   removeEntities(ids: Iterable<string>, opts: { silent?: boolean } = {}): void {
     const list = [...ids];
     if (list.length === 0) return;
@@ -498,6 +517,8 @@ export class HeadlessWorld {
       this.staticRoots.delete(id);
       this.objects.delete(id);
       this.entities.delete(id);
+      // a silent removal is an authored mob's respawn: its docs come back without the model child this table was read from
+      if (!opts.silent) this.clipTables.delete(id);
       this.anims.delete(id);
       this.animRates.delete(id);
       this.animLayers.delete(id);

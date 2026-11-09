@@ -1,6 +1,7 @@
 ---
 name: interior-standards
-description: Furnishing a building or a dungeon room: dressing plans by name, furnishing that scales with floor area, the set a room role implies, arrangements, facing rules, never-inside rules, walls first and centre clear, lights from one bucket, `dress check` / `dress review` / `dress walk`. Use before writing or reviewing a dressing plan. Outdoor areas: site-dressing; missing props: prop-intake.
+description: >-
+  Furnishing a building or a dungeon room: dressing plans by name, furnishing that scales with floor area, the set a room role implies, arrangements, facing rules, never-inside rules, walls first and centre clear, lights from one bucket, `dress check` / `dress review` / `dress walk`. Use before writing or reviewing a dressing plan. Outdoor areas: site-dressing; missing props: prop-intake.
 ---
 
 # interior-standards
@@ -61,3 +62,22 @@ npx tsx tools/dress.mts walk --project <p> --plan <plan> --scene <s>   # real bo
 - Flame budget: one flame per 12 m² of the level's floor, at least 6 (`flame-budget`).
 - A wall light on a wall over 4 m may hang 1.6-2.4 m (a hall's windows sit high).
 - An altar carries a top surface: candles go `{ "kind": "on", "item": "<altar>" }`.
+
+## Owner rulings 2026-10-30 (Reeve's house; enforced by `dress check`)
+- Wall-mounted things hang on the wall, never on a post, pier or strut standing proud of it: violation `wall-post`.
+- Chandeliers (`hangFrom: "beam"`) hang from the main beam or a joist line (`beam` anchors from the building export): violation `beam-hang`; a house hall takes two, on its main beam, not one per room.
+- Shelves, bookshelves and dressers declared `holdsGoods` carry goods on EVERY board: violation `shelf-empty`; name the `socket` or let unsocketed goods spread.
+- No brazier in a house (room-role warning); a shop sign post (`posed-props/shop-sign-post`) stands outside a shop, never inside; every bed has a bedside table (`codex-craft/nightstand`) with its light on it.
+- Furniture comes from `house-furniture/*` (re-unwrapped, painted); `house-interior/*` furniture rows are superseded.
+
+## Standing furnishing baseline (owner, 2026-11-03)
+
+Carry the Reeve's House furnishing-lab approach into future houses, scaled to their occupants and wealth.
+Reference: `apps/playground/projects/redstrand/authoring/handoffs/f-house.md`,
+`authoring/design/house-reeve/rooms.md` and `authoring/briefs/f-house3.md` under that project.
+
+- Arrange usable groups: seats facing reachable tables; bedside tables immediately beside their beds, with lights socketed on top. Preserve the owner's moved furniture and update its companions to match.
+- Finish inhabited rooms with restrained wall pictures, a mirror above the washstand, and rugs grounding sleeping or sitting groups where appropriate. A poor fisher's house gets modest possessions, not the Reeve's inventory. Rugs stay flat and clear of stair voids and hearth zones.
+- Redstrand has no child character models at this ruling: omit cribs.
+- Fit domestic lighting to the actual architecture: sconces on walls, table candles/lamps on surfaces, hearth fire at the hearth; use the approved fixture bucket. Use `fixtures/window-daylight` on window anchors where daytime interiors remain dark. Check the finished interior in daylight and at night, as well as `dress check` and `dress walk`.
+- Keep furnishings batched by their authored room culling root. Room culling must also sleep its particle/VFX sources and light candidates. Verify a distant street view and an approach into the house; no late furniture reveal inside a room. Keep the renderer's pooled light set fixed. See `docs/culling.md` for distance reveal versus terrain occlusion and place streaming.

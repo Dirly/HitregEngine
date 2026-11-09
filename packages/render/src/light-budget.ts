@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import { readWorldPosition } from "./static-transforms.js";
+import { hierarchyVisible } from "./cull-visibility.js";
 import { worldDaylight } from "./daylight.js";
 import { DEFAULT_LIGHT_GLOW, LightGlows, MAX_HALO_GLOW } from "./light-glow.js";
 
@@ -12,11 +13,23 @@ import { FOG_LAMP_COUNT, fogLamps } from "./atmosphere.js";
 
 /** Diagnostic switch (ambience setLightLayerEnabled "shading"): false = the budgeted slots shade nothing. */
 export const lightShading = { enabled: true };
+/** Share of the budget line's squared distance at which a light starts to fade (0.5 = ~70 % of its distance). */
+const BUDGET_FADE_FROM = 0.5;
 
 interface Entry {
   light: THREE.PointLight;
   importance: number;
   distanceSq: number;
+}
+
+/**
+ * A light near the edge of a nearest-N list fades as it nears the first one left out, so the list changing hands is a
+ * slow fade and not a lamp snapping on as you walk up (the fog glow is the nearest 4: the big glow popped at that line).
+ * `rank` is a light's sort key, `line` the key of the first light past the list, or null when every light fits.
+ */
+export function budgetEdgeFade(rank: number, line: number | null): number {
+  if (line === null || !(line > 0)) return 1;
+  return 1 - THREE.MathUtils.smoothstep(rank / line, BUDGET_FADE_FROM, 1);
 }
 
 function belongsToScene(object: THREE.Object3D, scene: THREE.Scene): boolean {
@@ -26,12 +39,8 @@ function belongsToScene(object: THREE.Object3D, scene: THREE.Scene): boolean {
 }
 
 function ancestorsVisible(object: THREE.Object3D): boolean {
-  let current = object.parent;
-  while (current) {
-    if (!current.visible) return false;
-    current = current.parent;
-  }
-  return true;
+  // Authored light.visible is deliberately false: only its ancestors gate the pool candidate.
+  return hierarchyVisible(object.parent);
 }
 
 /**
@@ -207,6 +216,8 @@ export class LightBudgetSystem {
     live.sort((a, b) => a.distanceSq / a.importance - b.distanceSq / b.importance);
     this.ensureSlots(scene);
     const allowed = Math.min(this.maxPointLights, live.length);
+    const rankOf = (entry: Entry) => entry.distanceSq / entry.importance;
+    const slotLine = allowed < live.length ? rankOf(live[allowed]!) : null;
     for (let i = 0; i < this.slots.length; i++) {
       const slot = this.slots[i]!;
       const source = i < allowed ? live[i]!.light : null;
@@ -219,7 +230,7 @@ export class LightBudgetSystem {
       }
       readWorldPosition(source, slot.position);
       slot.color.copy(source.color);
-      slot.intensity = lightShading.enabled ? source.intensity * timeOfDayScale(source) : 0;
+      slot.intensity = lightShading.enabled ? source.intensity * timeOfDayScale(source) * budgetEdgeFade(rankOf(live[i]!), slotLine) : 0;
       slot.distance = source.distance;
       slot.decay = source.decay;
     }
@@ -228,14 +239,18 @@ export class LightBudgetSystem {
 
     // the lights past the budget: a screen-space pool each, nearest first
     this.pools.begin();
-    for (let i = allowed; i < live.length; i++) {
+    for (let i = 0; i < live.length; i++) {
       const entry = live[i]!;
+      // a light fading out of its slot hands over to its pool by the same share
+      const handover = i < allowed ? 1 - budgetEdgeFade(rankOf(entry), slotLine) : 1;
+      if (handover <= 0) continue;
       readWorldPosition(entry.light, _lightPosition);
-      if (!this.pools.add(entry.light, _lightPosition, Math.sqrt(entry.distanceSq), timeOfDayScale(entry.light))) break;
+      if (!this.pools.add(entry.light, _lightPosition, Math.sqrt(entry.distanceSq), timeOfDayScale(entry.light) * handover)) break;
     }
     this.pools.end(scene);
 
     // the nearest few glow in the fog
+    const fogLine = FOG_LAMP_COUNT < live.length ? rankOf(live[FOG_LAMP_COUNT]!) : null;
     for (let i = 0; i < FOG_LAMP_COUNT; i++) {
       const entry = i < live.length ? live[i]! : null;
       const color = fogLamps.color[i]!.value;
@@ -250,7 +265,7 @@ export class LightBudgetSystem {
       const air = DAY_FOG_GLOW + (1 - DAY_FOG_GLOW) * (1 - worldDaylight.sunlit);
       // and the intensity it lights the air with is capped at a bonfire's (FOG_LAMP_MAX_INTENSITY): a 90-unit beacon light lit
       // 6 % of a dusk frame of haze at 20-40 m (Red Dial tower-compounds) where its halo added nothing
-      color.copy(entry.light.color).multiplyScalar(Math.min(entry.light.intensity, FOG_LAMP_MAX_INTENSITY) * timeOfDayScale(entry.light) * Math.min(glowOf(entry.light), MAX_HALO_GLOW) * air);
+      color.copy(entry.light.color).multiplyScalar(Math.min(entry.light.intensity, FOG_LAMP_MAX_INTENSITY) * timeOfDayScale(entry.light) * Math.min(glowOf(entry.light), MAX_HALO_GLOW) * air * budgetEdgeFade(rankOf(entry), fogLine));
     }
   }
 

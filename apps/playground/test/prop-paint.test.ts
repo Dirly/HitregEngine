@@ -1,5 +1,5 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {fileURLToPath} from 'node:url';
-import {planPainting,importPainting,paintingStatus,paintDir,paintPlanSchema,paintingBrief,type PaintPlan} from '../tools/prop-codex/paint.mts';
+import {paintGrain,SMOOTH_RUN,planPainting,importPainting,paintingStatus,paintDir,paintPlanSchema,paintingBrief,type PaintPlan} from '../tools/prop-codex/paint.mts';
 import {assertAtlasBudget,packBuiltProps,atlasFor} from '../tools/prop-codex/pack.mts';
 import {BLENDER,blenderBuild,gateFaults} from '../tools/prop-codex/check.mts';
 import {writeBrief} from '../tools/prop-codex/brief.mts';
@@ -86,11 +86,10 @@ test('brief makes paint the carrier of ornament, and painted shallow forms need 
  g.paint={surfaces:[{name:'seal',texel:12}]};assert.match(gateFaults(g,{name:g.name,culture:'civic',scale:{id:'human',height:1.8},worldKit:''},[{id:'human',height:1.8}]).join(),/paint surface seal/);
 });
 
-// Synthetic fixtures only. Nothing is installed into world-kit or the visible Blender scene.
-test('Blender end-to-end: panel, back, disc and wrap guides -> artwork -> one embedded material/page; stale paint blocks export', {skip:!fs.existsSync(BLENDER)}, async()=>{
- const wk=fixture();try{
-  const helper=path.join(wk,'authoring/crockin-river-culture/mesh.py'),tc=path.join(wk,'authoring/town-craft/build.py');fs.mkdirSync(path.dirname(helper),{recursive:true});
-  fs.writeFileSync(helper,`# grid adapter markers rid%4 rid//4 ((3-row)*128 /512
+/** The Mesh / town-craft / cleanup stubs build.py loads, written into a synthetic world-kit. */
+function blenderHelpers(wk:string){
+ const helper=path.join(wk,'authoring/crockin-river-culture/mesh.py'),tc=path.join(wk,'authoring/town-craft/build.py');fs.mkdirSync(path.dirname(helper),{recursive:true});
+ fs.writeFileSync(helper,`# grid adapter markers rid%4 rid//4 ((3-row)*128 /512
 class Mesh:
  def __init__(self,name):self.name=name;self.v=[];self.f=[];self.uv=[];self.roles=[];self.parts=[];self.shift=Vector((0,0,0))
  def add(self,verts,faces,role,part,uv=None):
@@ -101,8 +100,66 @@ class Mesh:
  def object(self,wall=False):
   return painted_object(self,{}, {},{'size':1024,'roles':{r:{'x':0,'y':0,'w':128,'h':128} for r in set(self.roles)}},mat,wall)
 `);
-  fs.writeFileSync(tc,'def block(*args,**kwargs):pass\ndef emit(*args,**kwargs):pass\n');
-  fs.copyFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)),'fixtures/prop-paint-cleanup.py'),path.join(wk,'authoring/mesh-cleanup.py'));
+ fs.writeFileSync(tc,'def block(*args,**kwargs):pass\ndef emit(*args,**kwargs):pass\n');
+ fs.copyFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)),'fixtures/prop-paint-cleanup.py'),path.join(wk,'authoring/mesh-cleanup.py'));
+}
+
+// r-ring 2026-10-30: paint(share=, flip=) maps several faces into ONE region at the same metres per texel and
+// paint(mirror=(axis, at)) folds a face's UVs about a plane, so big symmetric landmarks fit one page.
+test('Blender: share/flip and mirror fold UVs into one region at the same scale, and refuse a sharer larger than its target', {skip:!fs.existsSync(BLENDER)}, ()=>{
+ const wk=fixture();try{
+  blenderHelpers(wk);
+  const designs=path.join(wk,'authoring/codex-craft/designs');fs.mkdirSync(designs,{recursive:true});
+  const file=path.join(designs,'share-fixture.py'),bad=path.join(designs,'share-bad.py');
+  // A 2 x 1 x 0.2 slab (front/back) and a 1 x 1 tile beside it.
+  fs.writeFileSync(file,`m=Mesh('share-fixture')
+m.add([(-1,-.1,0),(1,-.1,0),(1,.1,0),(-1,.1,0),(-1,-.1,1),(1,-.1,1),(1,.1,1),(-1,.1,1)],[(0,1,5,4),(2,3,7,6)],'wood','slab')
+m.add([(3,-.1,0),(4,-.1,0),(4,-.1,1),(3,-.1,1)],[(0,1,2,3)],'wood','tile')
+paint(m,'slab-front',part='slab',projection='front',mirror=('x',0),detail='Painted half slab, folded at its centre')
+paint(m,'slab-back',part='slab',projection='back',mirror=('x',0),share='slab-front')
+paint(m,'tile-front',part='tile',projection='front',share='slab-front',flip=True)
+emit(m,'Synthetic share fixture',category='decor',cultures=['civic'])
+`);
+  fs.writeFileSync(bad,`m=Mesh('share-bad')
+m.add([(-1,-.1,0),(1,-.1,0),(1,-.1,1),(-1,-.1,1)],[(0,1,2,3)],'wood','small')
+m.add([(3,-.1,0),(6,-.1,0),(6,-.1,1),(3,-.1,1)],[(0,1,2,3)],'wood','large')
+paint(m,'small-front',part='small',projection='front',detail='Painted panel')
+paint(m,'large-front',part='large',projection='front',share='small-front')
+emit(m,'Synthetic oversized share',category='decor',cultures=['civic'])
+`);
+  const out=path.join(wk,'authoring/codex-craft/source'),geo=path.join(wk,'geometry.json');
+  const [g,refused]=blenderBuild(wk,[file,bad],out,geo,{paintMode:'plan'});
+  assert.equal(g!.error,undefined,JSON.stringify(g));
+  assert.match(refused!.error!,/large-front.*does not fit.*small-front.*keeps the scale/);
+  const plan=paintPlanSchema.parse(g!.paintPlan);
+  assert.equal(plan.surfaces.length,1,'sharers add no region');
+  const s=plan.surfaces[0]!;
+  assert.deepEqual(s.metres.map(v=>+v.toFixed(3)),[1,1],'the 2 m slab folds to 1 m');assert.deepEqual(s.pixels,[40,40]);
+  assert.deepEqual(s.shared,['slab-back','tile-front']);assert.equal(s.faces,3);
+  assert.deepEqual(s.mirror,['x',0]);
+  const layout=planPainting(wk,'share-fixture',plan);importPainting(wk,'share-fixture',artwork(paintDir(wk,'share-fixture')));
+  const [built]=blenderBuild(wk,[file],out,geo);assert.equal(built!.error,undefined,JSON.stringify(built));
+  assert.ok(built!.paint!.surfaces[0]!.texel!>=39&&built!.paint!.surfaces[0]!.texel!<=41,'shared and folded faces keep 40 tx/m');
+  const gltf=readGltf(path.join(out,'share-fixture.glb')),prim=gltf.doc.meshes[0].primitives[0],pos=accessorArray(gltf,prim.attributes.POSITION),normal=accessorArray(gltf,prim.attributes.NORMAL),uv=accessorArray(gltf,prim.attributes.TEXCOORD_0),r=layout.surfaces['slab-front']!;
+  // GLB is Y-up, +Z front, origin at the bottom centre of the bounds (x -1..4 -> shift 1.5).
+  const at=(u:number,v:number)=>[(r.x+u*r.w)/layout.size,(r.y+(1-v)*r.h)/layout.size];
+  let checked=0;
+  for(let i=0;i<pos.length/3;i++){
+   const x=pos[i*3]!+1.5,y=pos[i*3+1]!,front=normal[i*3+2]!>.9,back=normal[i*3+2]!<-.9;if(!front&&!back)continue;
+   let u:number;
+   if(x>2.5)u=1-(x-3);                               // tile: shares with flip, so u runs right to left
+   else if(front)u=x<=0?x+1:1-x;                     // slab front folded about x=0: both halves land on 0..1
+   else u=Math.abs(x);                               // slab back: read from behind, folded the same way
+   const [eu,ev]=at(u,y);assert.ok(Math.abs(uv[i*2]!-eu!)<1e-5&&Math.abs(uv[i*2+1]!-ev!)<1e-5,JSON.stringify({x,y,front,uv:[uv[i*2],uv[i*2+1]],expect:[eu,ev]}));checked++;
+  }
+  assert.ok(checked>=12,'front, back and tile vertices all checked');
+ }finally{clean(wk);}
+});
+
+// Synthetic fixtures only. Nothing is installed into world-kit or the visible Blender scene.
+test('Blender end-to-end: panel, back, disc and wrap guides -> artwork -> one embedded material/page; stale paint blocks export', {skip:!fs.existsSync(BLENDER)}, async()=>{
+ const wk=fixture();try{
+  blenderHelpers(wk);
   const designs=path.join(wk,'authoring/codex-craft/designs');fs.mkdirSync(designs,{recursive:true});
   const panel=path.join(designs,'paint-fixture.py'),wrap=path.join(designs,'wrap-fixture.py');
   fs.writeFileSync(panel,`m=Mesh('paint-fixture')
@@ -173,4 +230,11 @@ emit(m,'Synthetic wrap test fixture',category='decor',cultures=['civic'])
   const catalogFile=path.join(wk,'authoring/codex-craft/catalog.json'),catalogBefore=fs.readFileSync(catalogFile),runtimeFile=path.join(wk,'assets/models/codex-craft/paint-fixture.gltf'),runtimeBefore=fs.readFileSync(runtimeFile);
   assert.throws(()=>install(wk,{cards:[]}),/stale/);assert.deepEqual(fs.readFileSync(catalogFile),catalogBefore);assert.deepEqual(fs.readFileSync(runtimeFile),runtimeBefore);
  }finally{clean(wk);}
+});
+
+test('paint grain: a smooth (airbrushed) surface reads finer than 40 tx/m rock; per-texel grain does not',()=>{
+  const W=16,data=new Uint8Array(W*W*4);
+  for(let y=0;y<W;y++)for(let x=0;x<W;x++){const i=(y*W+x)*4;data[i]=x<8?120:((x*37+y*11)%9)*16+40;data[i+1]=60;data[i+2]=40;data[i+3]=255;}
+  const g=paintGrain({width:W,data},{surfaces:{smooth:{x:0,y:0,w:8,h:W},grain:{x:8,y:0,w:8,h:W}}});
+  assert.ok(g.smooth!>SMOOTH_RUN&&g.grain!<=SMOOTH_RUN,JSON.stringify(g));
 });

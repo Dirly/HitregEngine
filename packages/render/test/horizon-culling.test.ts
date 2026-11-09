@@ -287,14 +287,16 @@ describe("CullingSystem", () => {
     expect(ungated.layers.mask).toBe(1);
     expect(culling.stats().ungrounded).toBe(1);
     // no chunk event, no re-judging: the gate costs nothing per frame
+    const judged = calls;
+    expect(judged).toBeGreaterThan(0);
     for (let n = 0; n < 5; n++) culling.update(camera, 480);
-    expect(calls).toBe(1);
+    expect(calls).toBe(judged);
     // its cell streams in
     loaded.add(`${Math.floor(1500 / 48)}_0`);
     ground.groundVersion++;
     culling.update(camera, 480);
     expect(town.layers.mask).toBe(1);
-    expect(calls).toBe(2);
+    expect(calls).toBeGreaterThan(judged);
     // and out again
     loaded.clear();
     ground.groundVersion++;
@@ -308,6 +310,26 @@ describe("CullingSystem", () => {
     culling.groundGate = true;
     culling.update(camera, 480);
     expect(town.layers.mask).toBe(0);
+  });
+  it("judges a grounded unit by its whole footprint, not its centre (a wide batch group past the far ring)", () => {
+    const culling = new CullingSystem();
+    const loaded = new Set<string>();
+    const ground = { groundVersion: 0, coversGround: (x: number, z: number) => loaded.has(`${Math.floor(x / 48)}_${Math.floor(z / 48)}`) };
+    culling.ground = ground;
+    // a batch cell group: two pieces 200 m apart, its centre in a loaded cell, its far piece over unloaded ground
+    const near = box("near", 1410, 0, 10, 10);
+    const far = box("far", 1610, 0, 10, 10);
+    for (let cx = 29; cx <= 31; cx++) loaded.add(`${cx}_0`);
+    culling.register({ name: "group", objects: [near, far], grounded: true, occlusion: false });
+    const camera = perspective(1300, 50, 10, 1500, 10);
+    culling.update(camera, 480);
+    expect(near.layers.mask).toBe(0);
+    expect(culling.stats().ungrounded).toBe(1);
+    for (let cx = 32; cx <= 33; cx++) loaded.add(`${cx}_0`);
+    ground.groundVersion++;
+    culling.update(camera, 480);
+    expect(near.layers.mask).toBe(1);
+    expect(far.layers.mask).toBe(1);
   });
   it("restores every layer when a unit is unregistered or culling is switched off", () => {
     const culling = new CullingSystem();

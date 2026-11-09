@@ -4,7 +4,7 @@ import { createWorldField, defaultWorldRecipe, worldRecipeSchema, type WorldReci
 import { townDesignSchema, type TownDesign } from "../tools/town-design-schema.mts";
 import { checkDesign, footprintOf, polyEdges, stackedBands, terraceBands } from "../tools/town-design-check.mts";
 import { climbingTown, draftBands, hill, hillSite as site, rowTown, rowTownDoc } from "./fixtures/town-designs.mts";
-import { measurePlatforms, planEarthworks } from "../tools/worldgen-terrace-from-plan.mts";
+import { clipForeignRoads, measurePlatforms, planEarthworks } from "../tools/worldgen-terrace-from-plan.mts";
 
 /** The design round's two-shelf fixture (test/fixtures/town-designs.mts rowTown) with a lane that follows the ramp
  *  between the shelves (so each shelf carries a linked cross street and the town is no longer rows on shelves). */
@@ -158,4 +158,79 @@ test("bands: a town that climbs (gate square, street across the slope through a 
   // the climb crosses the low level well off its long axis, and the stair lane crosses the high one
   assert.ok(bands.find((b) => b.id === "low")!.streets.some((s) => s.id === "climb" && s.offAxis > 35));
   assert.ok(bands.find((b) => b.id === "high")!.streets.some((s) => s.id === "stair-lane" && s.offAxis > 60 && s.linked));
+});
+
+test("rows: neighbours of one row need the exact pitch, one front line and a pair the kit's row-fit proof measured", async () => {
+  const { rowPairFault } = await import("../tools/town-design-check.mts");
+  const req = { system: "stone", size: [3, 4], storeys: 2, roof: "gable", party: ["-x", "+x"] };
+  const house = (id: string, x: number, prefab = "kit/house-a", over: Record<string, unknown> = {}) =>
+    ({ id, name: id, district: "d", at: [x, 0], facing: [0, 1], street: "s", row: "r", prefab, request: req, ...over }) as any;
+  const fp = (b: any) => ({ centre: b.at, facing: b.facing, size: [3, 4] }) as any;
+  const proof = (p: string) => (p.startsWith("kit/") ? new Set(["house-a | house-b", "house-a | house-a"]) : null);
+  const judge = (a: any, b: any) => rowPairFault({ buildings: [a, b] }, a, b, fp(a), fp(b), proof);
+  // 3 cells x 3.2 m: the pitch is 9.6 m
+  assert.equal(judge(house("a", 0), house("b", 9.6, "kit/house-b")), null);
+  assert.match(judge(house("a", 0), house("b", 9.7, "kit/house-b"))!, /row pitch is 9\.60/);
+  assert.match(judge(house("b", 0, "kit/house-b"), house("a", 9.6))!, /not in the kit's row-fit proof/);
+  assert.match(judge(house("a", 0, "other/house-a"), house("b", 9.6, "other/house-b"))!, /has no row-fit proof/);
+  assert.match(judge(house("a", 0), house("b", 9.6, "kit/house-b", { request: { ...req, party: [] } }))!, /party-wall/);
+  assert.match(judge(house("a", 0), house("b", 9.6, "kit/house-b", { at: [9.6, 0.3] }))!, /out of line/);
+  assert.equal(judge(house("a", 0), house("b", 30, "kit/house-b")), "apart");
+});
+
+test("from-plan: a design's own stone (design.paving) lays its intramural paving streets too, not the zone's paving", () => {
+  // e-paving 2026-11-02: as role "paving" the streets took the zone's red flag and painted it over the pale terraces
+  const bare = createWorldField(fixtureWorld());
+  const site2 = { height: (x: number, z: number) => bare.heightfield(x, z), sea: 0 };
+  const plain = planEarthworks(design((d) => { for (const s of d.streets) s.surface = "paving"; }), site2);
+  const own = planEarthworks(design((d) => {
+    for (const s of d.streets) s.surface = "paving";
+    d.paving = { surface: "pale-flag", map: "built/pale.png", color: "#ffffff", uvScale: 3.2 };
+  }), site2);
+  const streets = (p: typeof own) => p.roads.filter((r) => r.id.startsWith("t-street-"));
+  assert.ok(streets(plain).length > 0);
+  assert.ok(streets(plain).every((r) => r.role === "paving" && r.surface === "gravel"));
+  assert.ok(streets(own).every((r) => r.role === "none" && r.surface === "pale-flag"), JSON.stringify(streets(own).map((r) => [r.id, r.role, r.surface])));
+});
+
+test("clipForeignRoads: a world path routed to the town centre ends at the intramural paving's edge (i-town 2026-11-02)", () => {
+  const design = { town: "t", terraces: [{ id: "in", polygon: [[0, 0], [40, 0], [40, 40], [0, 40]] }, { id: "yard", extramural: true, polygon: [[40, 0], [80, 0], [80, 40], [40, 40]] }] } as unknown as TownDesign;
+  const road = { id: "path-t-site", points: [[20, 20], [100, 20], [140, 20]], surfaceY: [10, 18, 22], leftY: [10, 18, 22], width: 4, surfaceEdge: 1 };
+  const own = { id: "t-street-main", points: [[5, 5], [35, 5]], surfaceY: [10, 10], width: 4, surfaceEdge: 1 };
+  const recipe = { features: { roads: [road, own] } } as unknown as WorldRecipe;
+  const log = clipForeignRoads(recipe, design);
+  assert.equal(log.length, 1);
+  assert.equal(road.points.length, 3);
+  const end = road.points[0]!;
+  assert.ok(end[0] >= 40 + 3 - 0.01 && end[0] <= 40 + 3 + 0.05, `end pulled back off the paving by half the tread + verge: ${end}`);
+  assert.ok(Math.abs(road.surfaceY[0]! - (10 + (end[0] - 20) / 80 * 8)) < 0.02 && road.leftY.length === 3, "profiles interpolated with the cut");
+  assert.deepEqual(own.points, [[5, 5], [35, 5]], "the town's own streets are left alone");
+});
+
+test("rows packed by plan type: a corner ends the row on its +x, proven pairs only, the pitch from the proof's lots (k-town9)", async () => {
+  const { rowPairFault } = await import("../tools/town-design-check.mts");
+  const { packRow } = await import("../tools/town-row-pack.mts");
+  const types = {
+    row: { id: "row", lot: 6.4, party: ["-x", "+x"], depth: 9.6, storeys: 1 },
+    wide: { id: "wide", lot: 9.6, party: ["-x", "+x"], depth: 6.4, storeys: 1 },
+    corner: { id: "corner", lot: 10.4, party: ["-x"], depth: 9.6, storeys: 1 },
+  };
+  const all = ["row", "wide", "corner"];
+  const pairs = new Set(all.flatMap((a) => all.map((b) => `${a} | ${b}`)).filter((p) => p !== "wide | wide" && !p.startsWith("corner")));
+  const seq = packRow(33.0, types, { pool: ["row", "wide", "corner"], pairs });
+  assert.ok(Math.abs(seq.reduce((s, id) => s + types[id as keyof typeof types].lot, 0) - 32.8) < 1e-6, seq.join(","));
+  assert.equal(seq[seq.length - 1], "corner");
+  for (let i = 1; i < seq.length; i++) assert.ok(pairs.has(`${seq[i - 1]} | ${seq[i]}`), seq.join(","));
+  // a shallow row (backed on the curtain) takes only the shallow type; never wide beside wide
+  const shallow = packRow(30, types, { pool: all, pairs, maxDepth: 7, corner: false });
+  assert.deepEqual(shallow, ["wide"]);
+  // the town check: the pitch is half the two proven lots; a corner meets its neighbour on its -x only
+  const req = (party: string[], size: number[]) => ({ system: "common", size, storeys: 1, roof: "steep", party });
+  const h = (id: string, x: number, prefab: string, party: string[], size: number[]) => ({ id, name: id, district: "d", at: [x, 0], facing: [0, 1], street: "s", row: "r", prefab, request: req(party, size) }) as any;
+  const fp = (b: any) => ({ centre: b.at, facing: b.facing, size: b.request.size }) as any;
+  const proof = (() => { const s = new Set(["row | corner"]) as Set<string> & { lots?: Record<string, number> }; s.lots = { row: 6.4, corner: 10.4 }; return s; });
+  const judge = (a: any, b: any) => rowPairFault({ buildings: [a, b] }, a, b, fp(a), fp(b), proof);
+  const row = h("a", 0, "kit/row", ["-x", "+x"], [2, 3]);
+  assert.equal(judge(row, h("b", 8.4, "kit/corner", ["-x"], [3, 3])), null); // (6.4 + 10.4) / 2: facing +z, the corner on the row house's +x
+  assert.match(judge(row, h("b", 8.0, "kit/corner", ["-x"], [3, 3]))!, /row pitch is 8\.40/);
 });

@@ -109,3 +109,53 @@ describe("standing effects play without smoke by default (owner ruling 2026-10-3
     expect(withoutSmoke(column).modules).toHaveLength(0);
   });
 });
+
+describe("a fire prefab tunes or drops its flame's standing light (o-gates 2026-10-30, the wash gate)", () => {
+  const run = (data: Record<string, unknown>) => {
+    const sys = new VfxSystem();
+    const scene = new THREE.Scene();
+    sys.attach(scene);
+    const cam = new THREE.PerspectiveCamera();
+    const lights: THREE.PointLight[] = [];
+    const ambient = new AmbientVfx(sys, { resolveEffect: (id) => (id === "env/torch" ? TORCH : undefined), onLight: (light) => lights.push(light) });
+    const g = new THREE.Group();
+    scene.add(g);
+    ambient.register("t", g, { effect: "env/torch", playing: true, cullDistance: 20, ...data });
+    tick(ambient, sys, cam, scene, 5);
+    const playing = ambient.stats().playing;
+    sys.dispose();
+    return { lights, playing };
+  };
+  it("lightGlow lands on the standing light; unset keeps the default halo", () => {
+    expect(run({ lightGlow: 0 }).lights[0]!.userData["lightGlow"]).toBe(0);
+    expect(run({}).lights[0]!.userData["lightGlow"]).toBeUndefined();
+  });
+  it("standingLight: false plays the flame with no light at all", () => {
+    const r = run({ standingLight: false });
+    expect(r.playing).toBe(1);
+    expect(r.lights).toHaveLength(0);
+  });
+});
+
+describe("vfx.farDraw keeps a landmark beacon's flame awake past the particle sleep (o-gates 2026-10-30)", () => {
+  const asleepAt = (data: Record<string, unknown>) => {
+    const sys = new VfxSystem();
+    const scene = new THREE.Scene();
+    sys.attach(scene);
+    const cam = new THREE.PerspectiveCamera();
+    const ambient = new AmbientVfx(sys, { resolveEffect: (id) => (id === "env/torch" ? TORCH : undefined) });
+    const g = new THREE.Group();
+    g.position.set(330, 0, 0);
+    scene.add(g);
+    scene.updateMatrixWorld(true);
+    ambient.register("b", g, { effect: "env/torch", playing: true, cullDistance: 1200, ...data });
+    tick(ambient, sys, cam, scene, 20);
+    const s = (sys as any).particleSystem.stats() as { emitters: number; asleep: number };
+    sys.dispose();
+    return s;
+  };
+  it("a farDraw play's emitters burn at 330 m; the default sleeps there", () => {
+    expect(asleepAt({ farDraw: true })).toMatchObject({ emitters: 1, asleep: 0 });
+    expect(asleepAt({})).toMatchObject({ emitters: 1, asleep: 1 });
+  });
+});

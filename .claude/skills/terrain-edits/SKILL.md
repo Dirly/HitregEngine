@@ -53,6 +53,12 @@ pnpm -F playground exec tsx tools/voxel-blades.mts <recipe.json> --sites --caves
 - A road never fills across a lake's edge it could go round: `worldgen road-water` (re-route with `worldgen road --route`,
   or `--stage-piece` for one path piece). Roads written since 2026-10-30 carry `seam: pooled` + `capBand: taper`; an older
   road with steps or a rim in its band gets them (op `update-feature`).
+- Roads form ONE network (status row `roads`, `worldgen road-net <world> --png <out>`): no two roads side by side
+  (15 m for 40 m), no crossing under 35 deg or with treads 0.5 m apart, no second route under 1.3x, no stub. `paths`,
+  `trails`, `road` and place tracks fold into what exists (a doubled stretch is dropped, the piece ends ON the road it
+  meets); a track that must reach the network: `road --route --join start`; places get trails with `trails --places`;
+  an old doubled road: `road-net --fold <id>` (slices the doc, the kept ground does not move). `--keep-parallel` only for
+  a place's own designed avenue.
 
 ## Gates: failure -> fix
 - `lips` `alias` (sawtooth), `step` (wall), `lip` (rim/slot) -> widen feather, set `filter`, `maxSlope` on low risers,
@@ -78,6 +84,8 @@ pnpm -F playground exec tsx tools/voxel-blades.mts <recipe.json> --sites --caves
 - `allow` only filters what the biome grows: swap species with `replace`. Coastal zones set `margin` (~80 m) so the beach
   is governed. A place cannot re-allow what its zone denies.
 - Towns keep vegetation off each plot, street and door path (clearings owned by the town id, `excludeScatter: false`).
+- Crops (wheat) grow only in declared fields: a farm writes `<job>/fields.json` (place-build installs it; `worldgen vegetation --fields`).
+- Species, cover kinds and cover COLOUR are `worldgen flora` (row `flora`): grass matches its ground tile; never hand-tint a layer.
 
 ## Judgment
 - Land is shaped in the terrain; docks, walls, stairs and quays are built geometry.

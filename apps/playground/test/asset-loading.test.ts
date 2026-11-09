@@ -60,3 +60,24 @@ test("a save burst invalidates the scene once, and subsequent edits still arrive
   await new Promise((resolve) => setTimeout(resolve, 70));
   assert.equal(calls, 2);
 });
+
+test("a burst of recipe writes applies once, the last one, after the writes go quiet (or at the max wait)", async () => {
+  const { settleBurst } = await import("../src/asset-changes.js");
+  const applied: number[] = [];
+  const burst = settleBurst<number>((v) => applied.push(v), 40, 1000);
+  for (let i = 0; i < 5; i++) { burst.push(i); await new Promise((r) => setTimeout(r, 10)); }
+  assert.deepEqual(applied, []);
+  await new Promise((r) => setTimeout(r, 80));
+  assert.deepEqual(applied, [4]);
+  // a writer that never goes quiet still lands at the max wait
+  const steady: number[] = [];
+  const capped = settleBurst<number>((v) => steady.push(v), 40, 100);
+  const t0 = Date.now();
+  while (Date.now() - t0 < 200) { capped.push(Date.now() - t0); await new Promise((r) => setTimeout(r, 15)); }
+  assert.ok(steady.length >= 1, "applied at least once while writes never stopped");
+  // flush applies what is held at once
+  capped.push(-1);
+  capped.flush();
+  assert.equal(steady.at(-1), -1);
+  assert.equal(capped.pending(), false);
+});

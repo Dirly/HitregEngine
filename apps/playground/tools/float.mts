@@ -51,6 +51,8 @@ import {
 import { prefabFile, readJson, sceneGeometry, type SceneEntityGeometry } from "./_prop-geometry.mts";
 import { findAsset, PROJECTS } from "./_closure.mjs";
 import { applyOpsToSceneFile, removalsOf, updateJsonFile } from "./_scene-write.mts";
+import { walkGround } from "./_ground.mts";
+import { baseOutline } from "./_place-quality.mts";
 
 export interface FloatRow {
   kind: "scene" | "scatter";
@@ -73,7 +75,7 @@ export interface FloatReport {
   target: string;
   area: string;
   tol: number;
-  checked: { scene: number; scatter: number; unsized: number };
+  checked: { scene: number; scatter: number; unsized: number; /** founded pieces (`<id>--foundation`) handed to place-build's seated gate */ deferred?: number };
   counts: { off: number; unsupported: number; byKind: Record<string, number>; byContact: Record<string, number> };
   ms: { scene: number; scatter: number; perObjectMs: number };
   rows: FloatRow[];
@@ -253,14 +255,21 @@ export function undersideOf(world: ArrayLike<number>): (x: number, z: number) =>
  * between `base + max(0.3 m, 15 % of its height)` and 90 % of its height. `built` = the landmark bakes only (closed
  * meshes). Returns the reason, or null when it stands clear.
  */
-export function buriedReason(built: { crossings(x: number, z: number, above: number): number[] } | null, field: SolidProbe | null, fp: { x: number; z: number; y: number; halfX: number; halfZ: number; yaw?: number; height: number }): string | null {
+export function buriedReason(built: { crossings(x: number, z: number, above: number): number[] } | null, field: SolidProbe | null, fp: { x: number; z: number; y: number; halfX: number; halfZ: number; yaw?: number; height: number }, under?: (x: number, z: number) => number | null): string | null {
   const c = Math.cos(fp.yaw ?? 0), s = Math.sin(fp.yaw ?? 0);
   const w = (lx: number, lz: number): [number, number] => [fp.x + lx * c + lz * s, fp.z - lx * s + lz * c];
   const hx = fp.halfX * 0.45, hz = fp.halfZ * 0.45;
   const pts: [number, number][] = [[fp.x, fp.z], w(-hx, -hz), w(hx, -hz), w(hx, hz), w(-hx, hz)];
-  const lo = fp.y + Math.max(0.3, fp.height * 0.15), hi = fp.y + fp.height * 0.9;
+  // L (o-wild3 2026-11-02: a 0.33 m bone pile and a 0.59 m bone heap sat 69-70 % under flat ground and passed): under 0.6 m
+  // tall the body line was 0.3 m up, at or over 90 % of the piece, so nothing short was ever read. It is at most HALF the
+  // piece's height: a short prop with the ground over its middle is buried too
+  const lo0 = fp.y + Math.min(Math.max(0.3, fp.height * 0.15), fp.height * 0.5), hi = fp.y + fp.height * 0.9;
   let inside = 0, through = 0;
   for (const [x, z] of pts) {
+    // L (o-coast2 ant-picked-wreck 2026-10-31: a hull LEANED to lie along a 20 deg beach read "buried" because its tilted box
+    // holds the slope): a leaned piece passes its own underside (`under`), and each sample's body line starts from the mesh above it
+    const u = under?.(x, z), lo = u == null ? lo0 : Math.max(lo0, u + Math.max(0.3, fp.height * 0.15));
+    if (lo >= hi) continue;
     // sunk less than the lower body line is seating, not burial: parity is read from that line up
     const above = built ? built.crossings(x, z, lo) : [];
     if (above.length % 2 === 1) inside++;
@@ -268,10 +277,14 @@ export function buriedReason(built: { crossings(x: number, z: number, above: num
   }
   const need = Math.ceil(pts.length / 2);
   if (inside >= need) return `buried: inside built mass at ${inside}/${pts.length} footprint samples (base ${r2(fp.y)})`;
-  if (inside + through >= need) return `buried: a solid surface crosses its body (${r2(lo)}..${r2(hi)}) at ${inside + through}/${pts.length} samples`;
+  if (inside + through >= need) return `buried: a solid surface crosses its body (${r2(lo0)}..${r2(hi)}) at ${inside + through}/${pts.length} samples`;
   return null;
 }
 
+/** The body the buried test reads: from the seat, or from the foot of a declared catalogue FOOTING (metres, scaled) up. Pure. */
+export function bodyAboveFooting<T extends { y: number; height: number }>(fp: T, seatY: number, footing: number): T {
+  return footing > 0 && fp.height - footing > 0.3 ? { ...fp, y: seatY + footing, height: fp.height - footing } : { ...fp, y: seatY };
+}
 /** Vertical crossings of a triangle soup above a height, bucketed on a 1 m plan grid. */
 export function crossingColumns(tris: ArrayLike<number>): { crossings(x: number, z: number, above: number): number[] } {
   const buckets = new Map<string, number[]>();
@@ -300,8 +313,23 @@ export function crossingColumns(tris: ArrayLike<number>): { crossings(x: number,
   };
 }
 
+/** The lowest ground under a footprint (its centre and 8 rim points at 0.9 of the half extents), or null off the world. */
+/** A boat afloat (tags `slot:boat` + `wet`) whose hull crosses sea level: base below the sea, top above it. */
+export function afloat(tags: readonly string[], fp: { y: number; height: number }, seaLevel: number): boolean {
+  return tags.includes("slot:boat") && tags.includes("wet") && fp.y < seaLevel && fp.y + fp.height > seaLevel;
+}
+
+export function beddedGround(field: Pick<WorldField, "height">, fp: { x: number; z: number; halfX: number; halfZ: number; yaw: number }): number | null {
+  const c = Math.cos(fp.yaw), s = Math.sin(fp.yaw); let lo = Infinity;
+  for (const [a, b] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]] as const) {
+    const lx = a * fp.halfX * 0.9, lz = b * fp.halfZ * 0.9, h = field.height(fp.x + lx * c + lz * s, fp.z - lx * s + lz * c);
+    if (Number.isFinite(h)) lo = Math.min(lo, h);
+  }
+  return Number.isFinite(lo) ? lo : null;
+}
+
 /** Seat every prefab instance of a scene. `field` adds the voxel world's solid under it. */
-export function floatScene(assets: string, doc: SceneDoc, field: WorldField | null, area: Area, tol: number, only?: ReadonlySet<string>, seatOpts: SeatOptions = {}): { rows: FloatRow[]; checked: number; unsized: number; ms: number } {
+export function floatScene(assets: string, doc: SceneDoc, field: WorldField | null, area: Area, tol: number, only?: ReadonlySet<string>, seatOpts: SeatOptions = {}): { rows: FloatRow[]; checked: number; unsized: number; ms: number; deferred: string[]; unsizedIds: string[] } {
   const t0 = performance.now();
   // only what can hold up an object in the area: geometry whose world points come within 30 m of it
   const box = area.near ? [area.near[0] - area.near[2] - 30, area.near[1] - area.near[2] - 30, area.near[0] + area.near[2] + 30, area.near[1] + area.near[2] + 30] : area.rect ? [area.rect[0] - 30, area.rect[1] - 30, area.rect[2] + 30, area.rect[3] + 30] : null;
@@ -324,6 +352,8 @@ export function floatScene(assets: string, doc: SceneDoc, field: WorldField | nu
   const fieldProbe = field ? fieldSolidProbe(field) : null;
   const rows: FloatRow[] = [];
   let checked = 0, unsized = 0;
+  // L (t-ground 2026-10-31, NO SILENT SKIPS): what the scene check hands to another gate, or cannot measure, is listed by id
+  const deferred: string[] = [], unsizedIds: string[] = [];
   const contactCache = new Map<string, SeatContact>();
   const dressCache = new Map<string, ReturnType<typeof dressingOf>>();
   const dressing = (id: string): ReturnType<typeof dressingOf> => { if (!dressCache.has(id)) dressCache.set(id, dressingOf(assets, id)); return dressCache.get(id); };
@@ -332,9 +362,17 @@ export function floatScene(assets: string, doc: SceneDoc, field: WorldField | nu
   for (const g of geo) if (g.prefabId) { const c = (dressing(g.prefabId) as { chain?: string } | undefined)?.chain; if (c) chains.add(c); }
   geo.forEach((g, i) => {
     if (!g.prefabId || SKIP_PREFAB.test(g.prefabId) || g.id.startsWith(LANDMARK_SUPPORT) || (only && !only.has(g.id))) return;
+    // a piece the PLACEMENT SOLVER founded (`<id>--foundation`, t-place 2026-10-30) stands on its skirt: the seated gate
+    // measures it along its whole base outline with that skirt; its own mesh bottom is not its contact
     const fp = footprintOf(g);
     if (!inArea(area, fp.x, fp.z)) return;
-    if (!(fp.height > 0.01) || !(fp.halfX > 0) || !(fp.halfZ > 0)) { unsized++; return; }
+    if ((doc as { entities?: Record<string, unknown> }).entities?.[`${g.id}--foundation`]) { deferred.push(g.id); return; }
+    // L (o-sunwine3 2026-10-31): a WET piece HELD at its layout `y` (tags held + wet: a pier deck run, a T-head, a jetty on its own
+    // driven posts) has its post feet in the bed by design; the seated gate judges its base outline against the bed (a foot above it fails)
+    { const tg = ((doc as { entities?: Record<string, any> }).entities?.[g.id]?.tags ?? []) as string[]; if (tg.includes("held") && tg.includes("wet") && !tg.includes("slot:boat")) { deferred.push(g.id); return; } }
+    // a FLAT piece (a decal, a mat: no height) is judged as a 2 cm slab; a piece with no footprint at all cannot be judged: a fault
+    if (fp.halfX > 0 && fp.halfZ > 0 && !(fp.height > 0.01) && Number.isFinite(fp.y)) fp.height = 0.02;
+    if (!(fp.height > 0.01) || !(fp.halfX > 0) || !(fp.halfZ > 0)) { unsized++; unsizedIds.push(`${g.id} (${g.prefabId})`); rows.push({ kind: "scene", id: g.id, what: g.prefabId, contact: "base", x: r3(fp.x), y: r3(fp.y), z: r3(fp.z), status: "off", gap: Infinity, support: null as never, reason: "no geometry to measure (no triangles or no footprint): not measured, so not passed", fix: { y: null } }); return; }
     let contact: SeatContact | undefined = CHAIN_LINK.test(g.id) || CHAIN_LINK.test(g.name ?? "") ? "hang" : contactCache.get(g.prefabId);
     if (!contact) contactCache.set(g.prefabId, (contact = contactOf(dressing(g.prefabId), g.prefabId, "", "", chains)));
     const own = tris.excluding(i);
@@ -357,12 +395,42 @@ export function floatScene(assets: string, doc: SceneDoc, field: WorldField | nu
     // a base keeps its own low faces (inner floor, barrel bottom) off the floor's plane: flats
     const r = seatObject(probe, contact === "seated" ? { ...fp, underside: undersideOf(g.world) } : contact === "base" ? { ...fp, flats: flatsOf(g.world, fp.y, fp.height) } : fp, contact, { tol, reachDown: big ? 8 : 4, ...seatOpts });
     checked++;
+    // L (o-coast sunwine-hold 2026-10-31, coordinator ruling): a BOAT afloat (a layout piece of role boat marked `wet`:
+    // tags slot:boat + wet) whose hull crosses sea level (its base below the sea, its top above) rides the water: floating,
+    // never "unsupported" or "off". A boat wholly under the sea or wholly above it is still judged.
+    if (r.status !== "ok" && afloat(((doc.entities as Record<string, any>)[g.id]?.tags ?? []) as string[], fp, Number((field?.recipe as { seaLevel?: number } | undefined)?.seaLevel ?? 0))) return;
+    // L (o-gates 2026-10-30, coordinator): a layout piece BEDDED on purpose (tag `bedded`: backing rock sunk into a cliff
+    // face, a ruin cut into a slope) is held when its base is BELOW the ground under it (sunk, never hovering): its mesh
+    // bottom at or under the lowest ground of its footprint. Its sides in the rock are the point, not a fault.
+    if (((doc.entities as Record<string, any>)[g.id]?.tags ?? []).includes("bedded") && fieldProbe) {
+      const lowGround = beddedGround(field!, fp);
+      // L (f-ground 2026-10-31, Weeping Sun back-b8 0.07 m over a dip only the seated gate saw): ALSO its base OUTLINE (the
+      // seated gate's rule: _place-quality baseOutline of its world triangles) at or under the WALKED ground (tools/_ground.mts)
+      // at every outline point; a fix sinks it by the larger shortfall, never more
+      // (relative to the piece's origin, as the seated gate cuts it: its band is read under the origin)
+      // and in its UNSCALED size, the seated gate's outline being cut on the prefab before its scale)
+      const walk = walkGround(field!), tri: Parameters<typeof baseOutline>[0] = [], o = [g.m[12]!, g.m[13]!, g.m[14]!], ks = Math.hypot(g.m[0]!, g.m[1]!, g.m[2]!) || 1;
+      const v = (k: number): number[] => [(g.world[k]! - o[0]!) / ks, (g.world[k + 1]! - o[1]!) / ks, (g.world[k + 2]! - o[2]!) / ks];
+      for (let k = 0; k + 8 < g.world.length; k += 9) tri.push({ a: v(k), b: v(k + 3), c: v(k + 6) });
+      let rim = -Infinity; for (const [x, z, y] of baseOutline(tri)?.perimeter ?? []) rim = Math.max(rim, y * ks + o[1]! - walk(x * ks + o[0]!, z * ks + o[2]!));
+      // a bedded rim is IN the ground (<= 0): this outline is cut on world cells, the seated gate's on the piece's own, so
+      // a rim "within tolerance" here can read a few cm over it there
+      const short = Math.max(lowGround === null ? 0 : fp.y - lowGround, rim);
+      if (lowGround !== null && fp.y - lowGround <= tol && rim <= 0) return;
+      rows.push({ kind: "scene", id: g.id, what: g.prefabId, contact, x: r3(fp.x), y: r3(fp.y), z: r3(fp.z), status: "off", gap: lowGround === null ? Infinity : r2(short), support: null as never, reason: `bedded piece hovers: its base ${r2(fp.y)} m is above the lowest ground under it (${lowGround === null ? "none" : r2(lowGround)} m) or its rim stands ${r2(rim)} m over the walked ground`, fix: { y: lowGround === null ? null : fp.y - short - 0.02 } });
+      return;
+    }
     if (r.status === "ok") {
       if (contact !== "base" && contact !== "legs") return;
       // L (o-small 2026-10-29): a piece placed INTO a face on purpose (layout `sink`, tag `set-in`: an opened niche whose back
       // is in the rock) has its front seated on the flat; the rock through its back is the point, not a burial
       if (((doc.entities as Record<string, any>)[g.id]?.tags ?? []).includes("set-in")) return;
-      const why = buriedReason(built, fieldProbe, { ...fp, y: r.y ?? fp.y });
+      // L (Red Dial 2026-10-30, o-city3): a kit piece's declared FOOTING (catalogue dressing.footing: a ruin house's 3.2 m
+      // footing, a wall's 0.6 m) is meant to be in the ground: the body is read from its foot (the origin), never from the
+      // footing's bottom (49 city walls, houses and yards read "buried" by the ground round their own footings)
+      const foot = (Number((dressing(g.prefabId) as { footing?: number } | undefined)?.footing) || 0) * Math.hypot(g.m[4]!, g.m[5]!, g.m[6]!);
+      const leaned = (((doc.entities as Record<string, any>)[g.id]?.tags ?? []) as string[]).some((t) => t.startsWith("lean:"));
+      const why = buriedReason(built, fieldProbe, bodyAboveFooting(fp, r.y ?? fp.y, foot), leaned ? undersideOf(g.world) : undefined);
       if (!why) return;
       rows.push({ kind: "scene", id: g.id, what: g.prefabId, contact, x: r3(fp.x), y: r3(fp.y), z: r3(fp.z), status: "off", gap: Infinity, support: null as never, reason: `${why}: move it in its plan (never re-seat)`, fix: { y: null } });
       return;
@@ -373,7 +441,18 @@ export function floatScene(assets: string, doc: SceneDoc, field: WorldField | nu
       fix: { y: r.y, ...(r.x !== undefined ? { x: r.x, z: r.z } : {}) },
     });
   });
-  return { rows, checked, unsized, ms: performance.now() - t0 };
+  // a placed prefab that produced NO geometry at all (its prefab missing, empty, or every mesh unresolved) never reached the
+  // loop above: it is a fault by id, never a silent gap in the count (t-ground 2026-10-31)
+  const seen = new Set(geo.map((g) => g.id)), ents = (doc as { entities?: Record<string, any> }).entities ?? {};
+  const approx = (id: string): [number, number] => { let x = 0, z = 0; for (let e = ents[id], n = 0; e && n < 32; e = e.parent ? ents[e.parent] : undefined, n++) { const p = e.components?.transform?.position; if (p) { x += p[0]; z += p[2]; } } return [x, z]; };
+  for (const [id, e] of Object.entries(ents)) {
+    const pid = e?.components?.prefab?.prefabId as string | undefined;
+    if (!pid || seen.has(id) || SKIP_PREFAB.test(pid) || (only && !only.has(id)) || ents[`${id}--foundation`]) continue;
+    const [x, z] = approx(id); if (!inArea(area, x, z)) continue;
+    unsized++; unsizedIds.push(`${id} (${pid})`);
+    rows.push({ kind: "scene", id, what: pid, contact: "base", x: r3(x), y: r3(e.components?.transform?.position?.[1] ?? 0), z: r3(z), status: "off", gap: Infinity, support: null as never, reason: "its prefab produced no geometry (missing, empty or unresolved meshes): not measured, so not passed", fix: { y: null } });
+  }
+  return { rows, checked, unsized, ms: performance.now() - t0, deferred, unsizedIds };
 }
 
 /** Seat every scatter rock (`contact: embed`) the runtime places in the area's cells. */
@@ -436,7 +515,7 @@ function summarize(target: string, areaText: string, tol: number, scene: ReturnT
   const n = (scene?.checked ?? 0) + (scatter?.checked ?? 0);
   return {
     ok: rows.length === 0, passed: rows.length === 0, target, area: areaText, tol,
-    checked: { scene: scene?.checked ?? 0, scatter: scatter?.checked ?? 0, unsized: scene?.unsized ?? 0 },
+    checked: { scene: scene?.checked ?? 0, scatter: scatter?.checked ?? 0, unsized: scene?.unsized ?? 0, deferred: scene?.deferred?.length ?? 0 },
     counts: { off: rows.filter((r) => r.status === "off").length, unsupported: rows.filter((r) => r.status === "unsupported").length, byKind, byContact },
     ms: { scene: Math.round(scene?.ms ?? 0), scatter: Math.round(scatter?.ms ?? 0), perObjectMs: n ? Math.round((((scene?.ms ?? 0) + (scatter?.ms ?? 0)) / n) * 100) / 100 : 0 },
     rows,
@@ -444,7 +523,7 @@ function summarize(target: string, areaText: string, tol: number, scene: ReturnT
 }
 
 function print(rep: FloatReport, list: boolean): void {
-  console.log(`float ${rep.target} [${rep.area}]: ${rep.checked.scene} scene objects + ${rep.checked.scatter} scatter rocks checked (${rep.checked.unsized} without geometry) in ${((rep.ms.scene + rep.ms.scatter) / 1000).toFixed(1)} s (${rep.ms.perObjectMs} ms/object)`);
+  console.log(`float ${rep.target} [${rep.area}]: ${rep.checked.scene} scene objects + ${rep.checked.scatter} scatter rocks checked (${rep.checked.unsized} without geometry: FAULTS; ${rep.checked.deferred ?? 0} founded piece(s) judged by place-build seated) in ${((rep.ms.scene + rep.ms.scatter) / 1000).toFixed(1)} s (${rep.ms.perObjectMs} ms/object)`);
   if (rep.ok) { console.log(`  OK: every contact within ${rep.tol} m`); return; }
   console.log(`  FAIL: ${rep.counts.off} off by > ${rep.tol} m, ${rep.counts.unsupported} with no support   by contact ${JSON.stringify(rep.counts.byContact)}`);
   for (const r of list ? rep.rows : rep.rows.slice(0, 25))

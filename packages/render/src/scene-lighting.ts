@@ -36,6 +36,7 @@ const WHITE = new THREE.Color(1, 1, 1);
 /** How much direct sun a full cloud takes away (cloud-shadow.ts). */
 const CLOUD_SHADOW_STRENGTH = 0.55;
 import { setRimLight, type RimSettings } from "./rim-light.js";
+import { setModelFill } from "./model-fill.js";
 
 /**
  * The per-scene half of the lighting/atmosphere stack: everything `csm.ts`,
@@ -81,6 +82,7 @@ export interface SkyData extends SkyEnvironmentSource {
     | undefined;
   horizon?: { texture: string; height: number; repeat: number; offset: number; opacity: number; depth: number } | undefined;
   rim?: RimSettings | undefined;
+  modelFill?: number | undefined;
 }
 
 /** `userData` key under which the gradient dome carries its uniforms. */
@@ -798,6 +800,7 @@ export class SceneLighting {
     this.ambientLights = null;
     this.fog.apply(this.scene, sky?.fog ?? null);
     setRimLight(sky?.rim ?? null);
+    setModelFill(sky?.modelFill);
     this.volumetricAuthored = sky?.volumetric ?? DEFAULT_VOLUMETRIC_SETTINGS;
     this.volumetric = { ...this.volumetricAuthored };
     // Re-query on the next frame rather than keeping a set that was chosen for
@@ -822,6 +825,9 @@ export class SceneLighting {
    * when volumetrics are enabled and only every `VOLUMETRIC_POLL_FRAMES`.
    */
   frame(camera: THREE.Camera): void {
+    // Portrait/preview scenes share model materials. Reclaim this scalar for
+    // the scene being drawn, rather than whichever scene was built last.
+    setModelFill(this.baseSky?.modelFill);
     this.cascades.update(camera);
     this.claimMaterialEnvironment();
     this.syncSun();

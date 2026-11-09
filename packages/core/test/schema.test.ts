@@ -192,8 +192,11 @@ describe("ComponentRegistry", () => {
       "loadingScreen",
       "mesh",
       "netObject",
+      "npcRespawn",
       "particles",
       "pathScatter",
+      "placeRule",
+      "placeStream",
       "placement",
       "portalAnchor",
       "postfx",
@@ -214,6 +217,29 @@ describe("ComponentRegistry", () => {
 });
 
 describe("validateScene", () => {
+  it("keeps structural and component diagnostics together for every entity", () => {
+    const registry = setup();
+    const doc = createScene("mixed issues");
+    doc.entities["a"] = {
+      name: "A", parent: "b", tags: [], components: { unknown: {} },
+    };
+    doc.entities["b"] = {
+      name: "B", parent: "a", tags: [], components: { transform: { scale: "bad" } },
+    };
+    doc.entities["c"] = {
+      name: "C", parent: "missing", tags: [], components: { light: { kind: "nope" } },
+    };
+
+    const issues = validateScene(doc, registry);
+
+    expect(issues.map(({ entity }) => entity)).toEqual(["a", "a", "b", "b", "c", "c"]);
+    expect(issues[0]!.message).toBe("parent chain forms a cycle");
+    expect(issues[1]!.message).toContain("unknown component");
+    expect(issues[3]!.message).toContain("component transform");
+    expect(issues[4]!.message).toBe("parent missing does not exist");
+    expect(issues[5]!.message).toContain("component light");
+  });
+
   it("reports missing parents and bad components without throwing", () => {
     const registry = setup();
     const doc = createScene("bad");

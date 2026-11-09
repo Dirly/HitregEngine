@@ -2,6 +2,9 @@
 // contact sheet out. The town pipeline takes one after every stage so the work can be looked at, not just linted.
 //   node tools/town-shots.mjs --base http://localhost:5288/ --scene mmo --views <views.json> --out <dir>
 // views.json: [{ "name": "gate-approach", "cam": [x, y, z], "target": [x, y, z] }, ...]  (north is -Z)
+// --override <asset path>=<local json>[,...]: the page reads that local file in place of that asset (e.g.
+//   materials/terrain/redstrand.json=/tmp/derived.json) to preview a derived asset in a lab another session owns,
+//   without writing it (e-paving 2026-11-02).
 // Needs Playwright (the apps/playground devDependency; PLAYWRIGHT_MODULE / HITREG_PLAYWRIGHT override) and a dev server of the playground on --base.
 import fs from "node:fs";
 import path from "node:path";
@@ -31,8 +34,27 @@ await ctx.addInitScript(() => {
   } catch {}
 });
 // review pictures never write: every dev-server write (scene autosave, player data) is answered here, never reaches disk
-await ctx.route(/\/__hitreg\//, (route) => {
+const overrides = new Map(
+  opt("override", "").split(",").filter(Boolean).map((kv) => {
+    const i = kv.indexOf("=");
+    return [kv.slice(0, i), JSON.parse(fs.readFileSync(kv.slice(i + 1), "utf8"))];
+  }),
+);
+await ctx.route(/\/__hitreg\//, async (route) => {
   const r = route.request();
+  if (overrides.size && /\/__hitreg\/asset-json\b/.test(r.url())) {
+    const files = JSON.parse(r.postData() || "{}").files ?? [];
+    if (files.some((f) => overrides.has(f))) {
+      const real = await (await route.fetch()).json();
+      const body = files.map((f, i) => (overrides.has(f) ? { data: overrides.get(f) } : real[i]));
+      for (const f of files.filter((x) => overrides.has(x))) console.log("override", f);
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    }
+  }
+  if (overrides.size && /\/__hitreg\/asset-file\b/.test(r.url())) {
+    const f = new URL(r.url()).searchParams.get("file") ?? "";
+    if (overrides.has(f)) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(overrides.get(f)) });
+  }
   if (r.method() !== "GET" && !READ_ONLY_POSTS.test(r.url())) return route.fulfill({ status: 200, contentType: "application/json", body: "{\"ok\":true}" });
   return route.continue();
 });

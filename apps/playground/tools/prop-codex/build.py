@@ -10,6 +10,22 @@ the same code), the role sheet is town-craft's materials.png. Writes one GLB per
 import bpy, bmesh, math, json, copy, sys, traceback, hashlib
 from pathlib import Path
 from mathutils import Vector
+from mathutils.bvhtree import BVHTree
+
+
+def inverted_top_faces(ob):
+    """Horizontal faces that point DOWN with nothing of the mesh above them: a walkable top (a tread, a podium, a sill)
+    wound upside down, which the character controller reads as a ceiling. Count only (check.mts gates it)."""
+    me = ob.data
+    tree = BVHTree.FromPolygons([v.co.copy() for v in me.vertices], [tuple(p.vertices) for p in me.polygons])
+    n = 0
+    for p in me.polygons:
+        if p.normal.z > -0.99 or p.area < 2.0:  # a walkable top: a tread (10 x 0.5 m), a landing, a deck; trim and ornament undersides are smaller
+            continue
+        hit = tree.ray_cast(p.center + Vector((0, 0, 0.02)), Vector((0, 0, 1)), 1000.0)
+        if hit[0] is None:
+            n += 1
+    return n
 
 argv = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
 def opt(name, default=None):
@@ -83,6 +99,11 @@ def emit(m, design, category='tool', mount='floor', solid=True, setting='both', 
         texture_size=layout['size'];ob=painted_object(m,paint_plan,face_map,layout,paint_material,wall=mount=='wall')
     else:ob=m.object(wall=mount=='wall')
     clean = clean_coplanar(ob.data)
+    if paint_plan['surfaces'] and len(ob.data.materials)>1:  # cleanup may rebuild faces: the glow material follows the glow regions' UVs
+        rects=[layout['surfaces'][s['name']] for s in paint_plan['surfaces'] if s.get('glow')];uvg=ob.data.uv_layers.active
+        for p in ob.data.polygons:
+            u=sum(uvg.data[li].uv.x for li in p.loop_indices)/p.loop_total*texture_size;v=(1-sum(uvg.data[li].uv.y for li in p.loop_indices)/p.loop_total)*texture_size
+            p.material_index=1 if any(r['x']<=u<=r['x']+r['w'] and r['y']<=v<=r['y']+r['h'] for r in rects) else 0
     drop = 0.0
     if mount == 'ceiling':  # origin at the top centre: the suspension point
         drop = max(v.co.z for v in ob.data.vertices)
@@ -91,7 +112,17 @@ def emit(m, design, category='tool', mount='floor', solid=True, setting='both', 
     if water:
         c = water['centre']; sx, sy, sz = m.shift
         wrec = {'centre': [round(c[0] - sx, 4), round(c[2] - sz - drop, 4), round(-(c[1] - sy), 4)], 'radius': float(water['radius']), 'depth': float(water['depth'])}
-    bm = bmesh.new(); bm.from_mesh(ob.data); bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-6); bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces)); bm.to_mesh(ob.data); bm.free(); ob.data.update()
+    # normals are made consistent on each design box BEFORE the weld: welded boxes that share faces (a stair's 16 steps) are
+    # non-manifold, and a recalc after the weld flipped every tread to face down, a ceiling the character cannot step onto
+    # (o-gates 2026-10-30: the Weeping Sun and Moon stairs blocked the walk)
+    bm = bmesh.new(); bm.from_mesh(ob.data); bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces)); bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-6)
+    # a WALKABLE top still wound upside down (a design whose own box winding is wrong: a sledge bed, a stele cap) is turned
+    # up here, after the paint guide's geometry hash, so the registered art stays valid: winding only, never a vertex or a UV
+    bm.normal_update(); tree = BVHTree.FromBMesh(bm)
+    flip = [f for f in bm.faces if f.normal.z < -0.99 and f.calc_area() >= 2.0 and tree.ray_cast(f.calc_center_median() + Vector((0, 0, 0.02)), Vector((0, 0, 1)), 1000.0)[0] is None]
+    if flip: bmesh.ops.reverse_faces(bm, faces=flip, flip_multires=True)
+    bm.to_mesh(ob.data); bm.free(); ob.data.update()
+    inverted_tops = inverted_top_faces(ob)
     for o in bpy.context.selected_objects: o.select_set(False)
     ob.select_set(True); bpy.context.view_layer.objects.active = ob; bpy.context.view_layer.update()
     if not PAINT_PLAN:bpy.ops.export_scene.gltf(filepath=str(SOURCE / (m.name + '.glb')), export_format='GLB', use_selection=True, use_active_scene=True, export_yup=True, export_apply=True, export_materials='EXPORT')
@@ -110,7 +141,7 @@ def emit(m, design, category='tool', mount='floor', solid=True, setting='both', 
         if acc >= total / 2: median = d; break
     current['record'] = {'name': m.name, 'design': design, 'category': category, 'mount': mount, 'solid': bool(solid), 'setting': setting,
         'cultures': list(cultures or []), 'centrepiece': bool(centrepiece), 'rooms': rooms, 'use': use, 'against': against,
-        'size': [round(hi[0] - lo[0], 4), round(hi[2] - lo[2], 4), round(hi[1] - lo[1], 4)], 'triangles': len(me.polygons),
+        'size': [round(hi[0] - lo[0], 4), round(hi[2] - lo[2], 4), round(hi[1] - lo[1], 4)], 'triangles': len(me.polygons), 'invertedTops': inverted_tops,
         'parts': m.parts, 'roles': sorted(set(m.roles)), 'shift': list(m.shift), 'cleanup': clean, 'texel': round(median, 2), 'water': wrec,
         'paintPlan': paint_plan if paint_plan['surfaces'] else None, 'paint': paint_record}
     if paint_record:

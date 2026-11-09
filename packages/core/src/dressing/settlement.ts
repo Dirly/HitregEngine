@@ -5,7 +5,7 @@
  * The grammar (the Totem Isles, the best place so far): households on the best ground the culture wants, spaced by the
  * terrain, ALL facing one gathering place, each household a small area holding its dwelling + its kit (storage, light,
  * work, sleeping), work where the work belongs (the water's edge, downwind, at the resource), one connected way of
- * travelling between them (ribbons, fords, walkways), cover cleared under every dwelling / fire / yard, and creature
+ * travelling between them (carved tracks, fords, walkways), cover cleared under every dwelling / fire / yard, and creature
  * groups where the people are.
  *
  * Steps (`planSettlement`): survey the ground (dry pads, water at kit depth, slope) → the gathering spot → cluster
@@ -18,6 +18,7 @@
  */
 import { z } from "zod";
 import { defaultLooseBudget, defaultMinItems } from "./resolve.js";
+import { RIBBONS_REMOVED } from "../voxel/operator-registry.js";
 
 type V2 = [number, number];
 
@@ -102,7 +103,8 @@ export const settlementCultureSchema = z.object({
     creature: z.boolean().default(true).describe("A creature group works here."),
   }).strict()).default([]),
   paths: z.object({
-    kind: z.enum(["ribbon", "walkway", "ford"]).describe("How the culture travels between homes: trodden ribbons (path operator), deck walkways, or wading fords (water between isles)."),
+    kind: z.string().refine((k) => k !== "ribbon", `paths.kind "ribbon": ${RIBBONS_REMOVED}`).pipe(z.enum(["track", "walkway", "ford"]))
+      .describe("How the culture travels between homes: trodden TRACKS (carved + painted through `worldgen road` by `settle apply`), deck walkways, or wading fords (water between isles)."),
     width: z.number().positive().default(2.4).describe("Metres; walkways are never narrower than 2.4 (the capsule rule)."),
     style: z.string().default("dirt"),
     maxGrade: z.number().positive().default(0.18),
@@ -165,7 +167,7 @@ export interface SettleHousehold {
 const CREATURE_KEEP = 0.9;
 const ROLES = ["camp", "shore", "yard", "ruin", "path"] as const;
 export interface SettleArea { id: string; role: (typeof ROLES)[number]; also?: string[]; centre: V2; radius: number; kind: "household" | "gathering" | "work" | "defence"; ref: string; surface?: "built"; floorY?: number; items: SettleItem[]; required: string[] }
-export interface SettlePath { id: string; kind: "ribbon" | "ford" | "walkway" | "raft"; from: string; to: string; points: V2[]; width: number; maxDepth: number }
+export interface SettlePath { id: string; kind: "track" | "ford" | "walkway" | "raft"; from: string; to: string; points: V2[]; width: number; maxDepth: number }
 export interface SettleClearing { id: string; center: V2; radius: number; why: string }
 export interface SettleCreatureSpot { id: string; at: V2; radius: number; why: string }
 export interface SettleFinding { code: string; message: string; ref?: string }
@@ -1777,7 +1779,7 @@ export function planSettlement(input: SettleInput, ground: SettleGround): Settle
   const leg = (id: string, from: string, to: string, a: V2, b: V2): void => {
     if (d2(a, b) < 3) return;
     const maxDepth = depthAlong(a, b);
-    const kind: SettlePath["kind"] = culture.paths.kind === "walkway" ? "walkway" : maxDepth > 0.05 ? (maxDepth <= culture.paths.maxWade ? "ford" : "raft") : "ribbon";
+    const kind: SettlePath["kind"] = culture.paths.kind === "walkway" ? "walkway" : maxDepth > 0.05 ? (maxDepth <= culture.paths.maxWade ? "ford" : "raft") : "track";
     // a lane never runs through a dwelling: where it would pass one, it bends round it on the near side
     const width = laneW, pts: V2[] = [a, b];
     for (let pass = 0; pass < 16; pass++) {
@@ -1819,9 +1821,9 @@ export function planSettlement(input: SettleInput, ground: SettleGround): Settle
       const from = d2(c.centre, gather) < 0.5 ? "gathering" : c.id;
       for (const hid of c.households) {
         const h = households.find((x) => x.id === hid)!;
-        if (c.households.length === 1 && from !== "gathering") paths.push({ id: `${from}-${hid}`, kind: "ribbon", from, to: hid, points: [], width: Math.max(culture.paths.width, 2.4), maxDepth: 0 });
+        if (c.households.length === 1 && from !== "gathering") paths.push({ id: `${from}-${hid}`, kind: "track", from, to: hid, points: [], width: Math.max(culture.paths.width, 2.4), maxDepth: 0 });
         else if (d2(h.dwelling.at, c.centre) > 3) leg(`${from}-${hid}`, from, hid, c.centre, front(h));
-        else paths.push({ id: `${from}-${hid}`, kind: "ribbon", from, to: hid, points: [], width: Math.max(culture.paths.width, 2.4), maxDepth: 0 });
+        else paths.push({ id: `${from}-${hid}`, kind: "track", from, to: hid, points: [], width: Math.max(culture.paths.width, 2.4), maxDepth: 0 });
       }
     }
     for (const w of work) {
@@ -2281,7 +2283,7 @@ export function discCleared(p: V2, r: number, clearings: { center?: V2 | [number
 
 /**
  * The gate. `installed` (optional) is what the world/scene actually holds: the clearings written (cover flag included)
- * and the ribbon paths. Without it the plan's own clearings are judged (they are written cover-cleared by `settle apply`).
+ * and the track paths. Without it the plan's own clearings are judged (they are written cover-cleared by `settle apply`).
  */
 export function checkSettlement(plan: SettlementPlan, cultureIn: SettlementCultureIn, opts: { tier?: SettleTier; clearings?: { center?: [number, number]; radius?: number; cover?: boolean }[]; households?: number } = {}): { ok: boolean; findings: SettleFinding[]; summary: Record<string, number | string> } {
   const culture = settlementCultureSchema.parse(cultureIn);
@@ -2408,13 +2410,15 @@ export function settlementSiteDressing(plan: SettlementPlan, cultureIn: Settleme
   return { lights: culture.lights, areas, anchors, keepClear };
 }
 
-/** World ops: vegetation clearings (cover cleared) + path operators for the dry legs. */
-export function settlementWorldOps(plan: SettlementPlan, cultureIn: SettlementCultureIn, poi: string): { clearings: { id: string; center: V2; radius: number; feather: number; keep: number; scatter: boolean; cover: boolean; owner: string }[]; operators: Record<string, unknown>[] } {
+/** A dry leg carved + painted as a narrow track by the world's road machinery (`settle apply` runs `worldgen road`). */
+export interface SettleTrack { id: string; points: V2[]; width: number; maxGrade: number }
+/** World ops: vegetation clearings (cover cleared) + carved + painted tracks for the dry legs (never ribbons). */
+export function settlementWorldOps(plan: SettlementPlan, cultureIn: SettlementCultureIn, poi: string): { clearings: { id: string; center: V2; radius: number; feather: number; keep: number; scatter: boolean; cover: boolean; owner: string }[]; tracks: SettleTrack[] } {
   const culture = settlementCultureSchema.parse(cultureIn);
   const owner = `settle-${poi}`;
   const clearings = plan.clearings.map((c) => ({ id: `${owner}-${c.id}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-"), center: c.center, radius: c.radius, feather: 2, keep: 0, scatter: true, cover: true, owner }));
-  const operators = culture.paths.kind === "ribbon" ? plan.paths.filter((p) => p.kind === "ribbon" && p.points.length >= 2 && d2(p.points[0]!, p.points[1]!) >= 12).map((p) => ({ id: `${owner}-${p.id}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-"), op: "path", points: p.points, width: Math.max(2.4, culture.paths.width), style: culture.paths.style, maxGrade: culture.paths.maxGrade, walls: "none", maxCutFill: 1, shoulder: 3 })) : [];
-  return { clearings, operators };
+  const tracks = culture.paths.kind === "track" ? plan.paths.filter((p) => p.kind === "track" && p.points.length >= 2 && d2(p.points[0]!, p.points[1]!) >= 12).map((p) => ({ id: `road-${owner}-${p.id}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-"), points: p.points, width: Math.min(3, Math.max(2.4, culture.paths.width)), maxGrade: culture.paths.maxGrade })) : [];
+  return { clearings, tracks };
 }
 
 export interface StiltFootprint {
@@ -2515,7 +2519,7 @@ export function settlementSvg(plan: SettlementPlan, title = plan.id): string {
     for (const b of G.blocks) s += `<rect x="${X(G.origin[0] + b.i0 * G.cell - half)}" y="${Y(G.origin[1] + (b.j0 + b.d) * G.cell - half)}" width="${r2(b.w * G.cell * px)}" height="${r2(b.d * G.cell * px)}" fill="none" stroke="#e57373" stroke-dasharray="4 3"/>` + txt(b.centre, b.id);
     for (const c of G.cells) s += `<rect x="${X(c.at[0] - half)}" y="${Y(c.at[1] + half)}" width="${r2(G.cell * px)}" height="${r2(G.cell * px)}" fill="${col[c.kind] ?? "#999"}" stroke="#222" stroke-width="0.5"/>`;
   }
-  for (const p of plan.paths) if (p.points.length >= 2) s += `<polyline fill="none" points="${p.points.map((q) => `${X(q[0])},${Y(q[1])}`).join(" ")}" stroke="${p.kind === "ribbon" ? "#e0c080" : p.kind === "ford" ? "#80d8ff" : p.kind === "raft" ? "#ff8a80" : "#c8a46e"}" stroke-width="${p.kind === "walkway" ? r2(Math.max(2, p.width * px)) : p.kind === "ribbon" ? 3 : 2}" ${p.kind === "ribbon" || p.kind === "walkway" ? "" : 'stroke-dasharray="6 4"'}/>`;
+  for (const p of plan.paths) if (p.points.length >= 2) s += `<polyline fill="none" points="${p.points.map((q) => `${X(q[0])},${Y(q[1])}`).join(" ")}" stroke="${p.kind === "track" ? "#e0c080" : p.kind === "ford" ? "#80d8ff" : p.kind === "raft" ? "#ff8a80" : "#c8a46e"}" stroke-width="${p.kind === "walkway" ? r2(Math.max(2, p.width * px)) : p.kind === "track" ? 3 : 2}" ${p.kind === "track" || p.kind === "walkway" ? "" : 'stroke-dasharray="6 4"'}/>`;
   for (const c of plan.creatures) s += circ(c.at, c.radius, `fill="none" stroke="#ff5252" stroke-width="1.5" stroke-dasharray="2 3"`);
   s += circ(plan.gathering.at, plan.gathering.radius, `fill="none" stroke="#ffd54f" stroke-width="2.5"`) + txt(plan.gathering.at, "gathering");
   for (const it of plan.gathering.items) s += circ(it.at, 0.8, `fill="#ffd54f"`);
@@ -2533,7 +2537,7 @@ export function settlementSvg(plan: SettlementPlan, title = plan.id): string {
   const bar = 50 * px;
   s += `<line x1="20" y1="${Hh + 20}" x2="${20 + bar}" y2="${Hh + 20}" stroke="#fff" stroke-width="3"/><text x="20" y="${Hh + 40}" font-size="12" fill="#fff">50 m</text>`;
   s += `<text x="150" y="${Hh + 24}" font-size="14" fill="#fff">${title} — ${plan.culture}: ${plan.households.length} households in ${plan.clusters.length} clusters, ${plan.work.length} work areas, ${plan.paths.length} path legs, ${plan.clearings.length} clearings, ${plan.creatures.length} creature spots</text>`;
-  s += `<text x="150" y="${Hh + 46}" font-size="12" fill="#bbb">+z up; white = dwelling (line = door), yellow = gathering, green = work, tan = cleared cover, red dashed = creature spot, path: tan ribbon / blue ford / red raft-only${plan.stilt ? " / decks: gold communal, tan walkways (wide spine, narrow branches), blue landing, green work, red dashed = cluster WFC block" : ""}</text>`;
+  s += `<text x="150" y="${Hh + 46}" font-size="12" fill="#bbb">+z up; white = dwelling (line = door), yellow = gathering, green = work, tan = cleared cover, red dashed = creature spot, path: tan track / blue ford / red raft-only${plan.stilt ? " / decks: gold communal, tan walkways (wide spine, narrow branches), blue landing, green work, red dashed = cluster WFC block" : ""}</text>`;
   return s + "</svg>";
 }
 

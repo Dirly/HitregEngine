@@ -18,6 +18,8 @@ import {
   AssetLibrary,
   ComponentRegistry,
   EventRegistry,
+  NetStateStore,
+  registerEncounterNetState,
   ToolRegistry,
   buildEngineSpec,
   registerChunkComponents,
@@ -48,7 +50,9 @@ tools.register(JSON.parse(readFileSync(statueManifest, "utf8")));
 const poiReviewManifest = fileURLToPath(new URL("../../../tools/poi-review/tool.json", import.meta.url));
 tools.register(JSON.parse(readFileSync(poiReviewManifest, "utf8")));
 
-const spec = buildEngineSpec({ registry, events, assets, tools });
+const netState = new NetStateStore();
+registerEncounterNetState(netState);
+const spec = buildEngineSpec({ registry, events, assets, tools, netState });
 const target = fileURLToPath(new URL("../../../spec.json", import.meta.url));
 writeFileSync(target, JSON.stringify(spec, null, 2) + "\n", "utf8");
 

@@ -27,7 +27,8 @@
     "props": "tsx tools/props.mts",
     "zonegen": "tsx tools/zonegen.mts",
     "settle": "tsx tools/settle.mts",
-    "armor": "tsx tools/armor.mts"
+    "armor": "tsx tools/armor.mts",
+    "names": "tsx tools/names.mts"
   },
   "dependencies": {
     "@hitreg/comms": "workspace:*",

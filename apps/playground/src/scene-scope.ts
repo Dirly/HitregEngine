@@ -41,3 +41,27 @@ export function scopeStreamer<T extends ChunkStreamerData | null>(streamer: T, r
     ...(streamer.rings ? { rings: { simulation: c(streamer.rings.simulation), fullRender: c(streamer.rings.fullRender), hlod: c(streamer.rings.hlod), farTerrain: c(streamer.rings.farTerrain) } } : {}),
   };
 }
+
+/** Metres behind and above the player the editor camera opens at (`playerFraming`). */
+export const FRAME_BEHIND_M = 8;
+export const FRAME_UP_M = 4;
+
+/**
+ * Where the editor camera opens on a scene with no `?at`: behind its player-tagged root entity, looking along the
+ * player's facing (+Z forward, the convention the play host reads a body's heading with), so the first view of a world
+ * or a lab is its spawn (Derek 2026-10-31) and entering play (the rig adopts the editor camera's orbit) does not spin.
+ * Null when the scene has no positioned player root (the host then keeps its origin framing).
+ */
+export function playerFraming(doc: { entities: Record<string, { parent?: string | null; tags?: string[]; components?: Record<string, unknown> }> }): { eye: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } } | null {
+  const root = Object.values(doc.entities).find((e) => !e.parent && (e.tags ?? []).includes("player"));
+  const t = root?.components?.["transform"] as { position?: number[]; rotation?: number[] } | undefined;
+  const p = t?.position;
+  if (!p || p.length < 3 || !p.slice(0, 3).every(Number.isFinite)) return null;
+  const [qx, qy, qz, qw] = t?.rotation?.length === 4 && t.rotation.every(Number.isFinite) ? t.rotation : [0, 0, 0, 1];
+  // (0, 0, 1) rotated by the quaternion, flattened to the ground plane
+  let fx = 2 * (qx! * qz! + qw! * qy!), fz = 1 - 2 * (qx! * qx! + qy! * qy!);
+  const l = Math.hypot(fx, fz);
+  if (l < 1e-6) { fx = 0; fz = 1; } else { fx /= l; fz /= l; }
+  const [x, y, z] = p as [number, number, number];
+  return { eye: { x: x - fx * FRAME_BEHIND_M, y: y + FRAME_UP_M, z: z - fz * FRAME_BEHIND_M }, target: { x, y: y + 1, z } };
+}

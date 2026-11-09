@@ -332,6 +332,12 @@ export class VoiceService {
     this.notify();
   }
 
+  /** Received-audio master gain: the player's voice volume. */
+  setOutputGain(gain: number): void {
+    this.config.outputGain = gain;
+    if (this.ctx) this.master?.gain.setTargetAtTime(gain, this.ctx.currentTime, 0.01);
+  }
+
   setMode(mode: VoiceMode): void {
     this.mode = mode;
     this.pttHeld = false;

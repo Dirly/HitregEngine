@@ -2300,3 +2300,340 @@ owner called it "the church isn't affected by the fog" — `MAX_DARKEN` 0.7 → 
 (`sprint-probe --line`, 700 m at 7.7 m/s) showed full detail ready 140 m ahead at worst, 0 cells entered without a
 collider, 0 LOD-late samples: the pop the owner sees is the proxy → full-detail swap at the 144 m ring edge or a
 first-use glTF landing late, not streaming lag.
+
+## Scratch labs: crop the world to a box, never copy and stream all of it
+
+**2026-10-30.** `place-build lab` and zonegen `concept` copied the whole world recipe, every terrain material and the
+whole scene into a scratch project, which then booted and streamed the entire world to judge one place (pb-red-dial had
+grown to 14 MB). Now a lab is a box: `voxelWorld.bounds` (core `components/voxel.ts`, one predicate
+`voxelCellInBounds` used by the client provider's `has`, the server's `TerrainStreamer.inWorld` and the terrain-cache
+bake) stops every ring, HLOD and far bake, and physics at its edge; the recipe keeps only features reaching the box and
+is proved identical to live inside it (`tools/_lab-crop.mts`). Measured on red-dial (box 794 x 951 m with its 450 m read
+cameras): the lab at creation 3.6 MB -> 1.2 MB (world 3.4 -> 1.1 MB; the rest of the old 14 MB was the place's own
+baked pieces and terrain undo files, which a remade lab now clears); headless light-shots of two views on a busy
+machine: play up 41 -> 37 s, first frame 122 -> 103 s, total 153 -> 127 s, renderer CPU 337 -> 141 s, renderer memory
+2.4 -> 2.0 GB. The proof costs ~10-40 s once per lab. A lab tool that wants the world must say `--whole-world`.
+
+
+- **Particle sleep vs landmark beacons (2026-10-30)**: every emitter sleeps past `PARTICLE_SLEEP_DISTANCE` (220 m), so no fire flame is drawn from a place's 300 m+ far views. `vfx.farDraw` keeps a standing play's emitters awake out to its own `cullDistance`, and is only for landmark beacons: city-fires sun-beacon, city-beacon-great and moon-beacon. Cost: a redstrand view holding the Weeping Sun and the Moon wakes 38 emitters (Sun 7 x 3 + 2 x 4, Moon 3 x 3; smoke layers are off). Red Dial's 25 city-beacons would add 75 if it adopts the flag, so check particle sim time before putting it on any repeated fire.
+- **farGrow (2026-10-31)**: `vfx.farGrow` costs nothing extra. It scales the instance matrices the emitter already writes (size and offset from the emitter, by distance / farGrow), and only on a farDraw emitter that is awake anyway.
+
+## Redstrand "load takes ages, the game freezes after a few seconds": installs writing live files, per-copy wind shaders, an unclassified component (2026-11-02)
+
+Owner: "load times take ages just to view the editor, the game freezes after a few seconds of moving, and it happens all
+over"; also "props and POIs from chunks that haven't loaded". Measured headless (own vite on the agent-test config, cold
+profile, 1600x900) on a machine shared with two installers and a town owner: timings are indicative, counts are exact.
+
+1. **Installers write the live world and scene while you look at it, and every write was a full reload.** A file
+   watcher over `worlds/redstrand.json` + `redstrand.scene.json` logged 7 recipe saves in 37 s (4 s apart, one a torn
+   5.3 MB half-file) and scene saves beside them. Each recipe save = `applyWorldRecipeEdit` + `reloadAll` + a whole
+   scene rebuild; each prefab/material save = a scene rebuild; both applied MID-PLAY (only the scene file was held).
+   In the probe page each burst was a 10-11 s main-thread task and a re-stream. Fix (`live-sync.ts`): recipe edits
+   settle (`settleBurst`: applied once, the last one, after 6 s quiet, at most 30 s after the first) and, with every
+   rebuild-triggering asset edit, are HELD while playing and applied on stop (`flushDeferred`). Test:
+   `test/asset-loading.test.ts`. Still open: a scene-file edit in EDIT mode is still a whole rebuild (~5 s on
+   redstrand) — the cure is incremental rebuild, or tools that write live files once per stage, not per step.
+2. **A foliage-wind model placed N times was N materials and N shaders.** `editMeshMaterials` converted the shared
+   glTF material to a NEW node material on every call, so each placed planter/potted shrub/wall palm (`mesh.source.wind`)
+   built its own WGSL: 93 "Leaves" builds, ~7 s of synchronous builds per boot and ~4.6 s on EVERY scene rebuild, and
+   none of them could merge. `editMeshMaterials(root, edit, cacheKey)` now memoizes per (source material, edit key);
+   wind keys on its settings + model height, fade on "fade". Leaves builds 93 -> 0 after the first; boot builds
+   306 -> 212, longest task 13.4 s -> 5.0 s. Test: `packages/render/test/foliage-wind.test.ts`.
+3. **`placeRule` (authoring-only, added to 119 world-kit prefab roots) was not in the host's still list**, so every
+   town building, wall and kit prop carrying it stopped counting as implicit-static: not frozen in play, not
+   ground-gated. `apps/playground/src/still-components.ts` now classifies EVERY registered component still or moving
+   and `test/still-components.test.ts` fails on a new unclassified one — the decision cannot be skipped again.
+4. **Placed content drew over unloaded ground** (`far-draw-probe --scene redstrand`, now with default spots): from the
+   Moon Gate, Bell Strand's building shells (the town root has no `poi` tag, so nothing under it was a culling unit)
+   and the Drinking Stone camp (its 256 m batch cell judged by its CENTRE, which sat inside the far ring) drew 1.7-1.9
+   km off over cells past `farTerrain`. The gate now judges a unit's whole footprint (`coversFootprint`: centre and
+   four corners) and the host gates every still child of a root no culling root covers (`ground-gate.ts`), skipping
+   the player, creatures, water and anything wider than two batch cells. Moon-to-town over unloaded ground with the
+   gate on: 16 -> 0 (the ocean, wider than any cell, still draws). Tests: `horizon-culling.test.ts`, `test/ground-gate.test.ts`. Base-scene
+   POIs are NOT streamed (they never were): they are built at load and gated; making installs stream would be a new
+   design, not a missing wire.
+
+Not the cause: `squareWallFeet` (bucketed per vertex, only in cells a face cut reaches, in the worker), the palette
+warning (once per rebuild), the dungeon closures (5 MB of JSON indexed, no dungeon scene built at boot).
+
+## Bell Strand furnishings escaping room culling (2026-11-03)
+
+A town-square report of ~866 draws included furniture hidden inside houses. Two integration errors bypassed
+the room's authored 12 m reveal: generic prop-distance batches won over room batches, and a later enclosing
+fallback ground gate could claim the room's unmerged meshes. Authored roots now win batch grouping and protect
+their subtrees during registration and late-mesh rescans. Particle simulation, ambient flames and light candidates
+also consult the source root's cull verdict; authored visibility and the fixed pooled light set remain intact.
+
+Same scene hash, pose and 1280x720 WebGPU probe, two six-second samples: draws 795 -> 747, shadow draws
+496 -> 471, median frame work 35.2 -> 30.5 ms, GPU ~9.4 ms in both. The boatmender's table/book disappeared
+from distant shadow attribution. Timing is indicative on a shared machine; town vegetation still dominates many
+shadow draws. Evidence: Redstrand `authoring/dressing/reports/town-square-perf.json` (includes baseline), tests
+`packages/render/test/interior-culling.test.ts` and `particles-sleep.test.ts`. This fixes room distance culling;
+it does not implement wall occlusion or unload individual rooms from a loaded town.
+
+## Bell Strand loading: independent rooms and late arrivals (2026-11-03)
+
+A hidden interior still cost a full render build when it belonged to the town's streamed place. Explicit nested
+room residency now defers those builds while keeping the authored/physics tree whole. Detached render boundaries
+must preserve world transforms and inherited visibility; parent or source edits must regenerate world-baked
+instance matrices. Bell Strand's town build fell from 4,406 to 1,184 entities, and resident place entities at the
+spawn sample from 5,167 to 3,136. In one same-source/content cold-browser pair, Play request to local playable
+fell from 57.164 to 23.997 seconds. Evidence and limits: Redstrand `authoring/bell-strand/performance.md`.
+
+Layer masks on the meshes that exist today do not protect tomorrow's async children. The bounded culling rescan
+adopts only two units per frame; newly loaded furniture could draw and compile shaders before adoption, despite
+its room being hidden. A dedicated interior container now gates actual subtree visibility from the cull verdict,
+including the initial empty-bounds period. GONE hides the container; OCCLUDED retains the shadow-layer path;
+authored visibility remains independent and unregister restores it. Physics and scene attachment are untouched.
+
+Measure native-upload hypotheses before patching a dependency. A 28-layer terrain palette passes one large
+typed-array view with an offset per layer, but the copy extent already limits the pixels transferred. Submitting
+smaller views did not remove the native stall and was reverted. Similarly, halving the fixed light pool did not
+improve measured entry and was not adopted. Do not equate summed source-view lengths with GPU traffic.
+
+## Bell Strand draw calls: wind plants never merged, furniture cast sun shadows (2026-11-04)
+
+`town-perf --scene redstrand` at the town (689, 61, -381): **762 draws, 461 of them shadow**, render/draw ~49 ms of
+CPU against 7.7 ms GPU. `drawsByMaterial` (new in town-perf: pass, ATLAS/WIND/own, merged/single, owner) showed:
+1. **Wind plants skipped the static batcher.** Any `positionNode` material was skipped because a merge bakes the world
+   into `position`, and foliage wind reads "how far up the plant" from `positionGeometry`. Every fern, planter and
+   potted bush was its own draw in the main pass and in each of 3 cascades. Fix: a merge of a `foliageWind`
+   material carries the model-local vertex as `windLocal`, and the wind node reads it when present
+   (`hasGeometryAttribute`), so one material draws both the single plant and the merged bed.
+2. **Interior furnishings and small props cast sun shadows** (~110 shadow draws from four dressed houses). Fix:
+   docs/culling.md "Shadow casters".
+Result: **762 -> 572 draws, 461 -> 282 shadow**, frame p50 72 -> 64 ms headless.
+3. **Props sat on a dozen+ separate atlas pages** (house-furniture, house-interior, poi-props, strand-props, rural,
+   clay-pottery, apothecary, town-craft, culture-craft, per-prop "Painted prop atlas" pages): the batcher merges by
+   material, so a crate and a barrel never shared a draw. Fix: a runtime prop atlas, `PropSheets`
+   (packages/render/src/prop-sheet.ts) — each eligible page is drawn once onto a shared sheet (gutters; sheets keyed by
+   sampling only, side/cutout/vertex colours are materials over the same texture; height grows as pages land), the
+   batcher re-buckets the mesh under a sheet material and writes the page rect (texels) + tint per vertex. 25 pages ->
+   3 sheets in Bell Strand, ~170 MB GPU + 128 MB canvases. The first version keyed sheets by look at a fixed 4096²:
+   10 sheets a quarter full, ~850 MB GPU + 640 MB canvases. Check `stats.usage` in town-perf after touching this.
+   Screenshots A/B identical. The honest gain: -36 draws, ~1.3 ms of frame work. `?sheets=0` is
+   the A/B switch (`town-perf --query sheets=0`); `__hitreg.propSheets.stats.why` counts refusals by reason.
+4. Hide-bucket merge cells 32 -> 64 m: -20 draws, triangles unchanged.
+Result after all four: **~520 draws (from 762), ~250 shadow (from 461)**.
+**Tried and reverted:** drawing small `renderMode: "instanced"` props as plain static meshes so they could join the
+sheets. Worse (519 -> 546): many are tinted/glossy/custom-shaded, so off instancing they became per-cell singletons.
+
+### Same day, for browsers: staggered cascades and an adaptive render scale
+
+- **Far cascades no longer render every frame** (`cascadeDue`, csm.ts): cascade 0 every frame, 1 every 2nd, 2 every 4th,
+  staggered; a cascade whose fit slid past 8% of its extent renders at once. A skipped cascade keeps map and matrix
+  together, so nothing shifts. Shadow draws 246 -> 114 per frame; frame work about 2-3 ms lower; GPU time unchanged
+  (11.9 vs 12.4 ms, inside noise). `?shadowStagger=0` is the A/B.
+- **Adaptive render scale** (adaptive-resolution.ts, both hosts, play only): steps down 0.1 to a 0.6 floor when the
+  median frame is under 45 fps and the main thread is under 75% of it. A first version rode this CPU-bound machine to
+  0.6 during loading, so each step is now an experiment: no >=5% gain in the next window undoes it and holds. Hosts skip
+  sampling during loads. At 0.6 GPU time fell ~12 -> 3-5 ms. `?renderScale=0.75` pins it, `=1` disables it.
+
+**Measuring traps found here.** Weather changes between runs: a rain front adds ~3.4 ms of `update/particles` and
+changes the light, so compare frame work with particles subtracted and never judge shadows from two runs without
+checking the sky matches. Probe overhead counts: a node-graph walk per draw inflated frame work by ~10% until cached.
+Anything disk-heavy beside a timing run wrecks it (one run read 89 ms next to a `du`).
+
+What is left: instanced props, one draw per MODEL per pass; HLOD proxies ~66 and post ~40 main draws; rain particles
+~3.4 ms.
+
+### 2026-11-05: seeing far, and where a load really goes
+
+- **`HorizonTerrain`** (render/src/horizon-terrain.ts, core `buildHorizonMesh`): the island as one heightfield mesh, one
+  draw, ~20k triangles, built in the voxel worker (no disk cache yet), `?horizon=0` is the A/B. `sky.fog.maxOpacity`
+  caps how much the fog hides, so far land stays a shape. **On Bell Strand the mesh barely changes the picture**: the
+  land is low (highest ~216 m; from the top peak all of it sits 1.5-2.7 degrees below eye level). Rendering reach does
+  not create a far destination; tall real terrain or landmarks must exist to be seen.
+- **Trap: a painted `sky.horizon` strip looks exactly like distant mountains.** Never judge far terrain from two runs.
+  `town-perf --vista --shot a --shot-no-horizon b` hides the mesh in the same session, and check the sight line against
+  `field.height`: anything above eye level that the heights do not explain is the sky.
+- **Measure a load with `town-perf --load-trace`**: `coverDownMs` is when the player gets in; `loadMs` includes the
+  probe's own waits (160 s against 42 s cold on the dev server). The 30 s after the cover lifts is the worst stretch:
+  ~20 s of long tasks, ~60% of it first-time draws (texture uploads, shader builds). Far cells then take until ~125 s.
+- **Tried, no gain, removed.** Thinning frames behind the cover: it is only up ~15 s, most load-time rendering happens
+  after it lifts. Passing `queue.writeTexture` a per-layer view instead of the whole array: total stayed ~6.5 s, because
+  the time is not the copy. Per-call logging shows ~1 ms writes and a few 1-4 s stalls: the main thread waiting on a busy
+  GPU process, so moving or shrinking the bytes does not touch it.
+
+### 2026-11-05: the player's Graphics settings
+
+Settings live in `apps/playground/src/graphics-settings.ts` (logic, no DOM) and `graphics-panel.ts` (controls); the game's
+HUD owns the window and asks for the controls with `hitreg:graphics-panel`. High is the game as authored and the
+default; Auto is opt-in, so it never quietly changes a headless shot. `?gfx=low` or `?gfx=high,shadows:off` sets one run
+without saving (`town-perf --query`), and `?renderScale=` still wins over the setting.
+
+Bell Strand, 1280x720, streaming settled, mean of 40 frames, live in one session (draws / triangles):
+
+| Setting | Draws | Triangles |
+| --- | --- | --- |
+| High | 351 | 1.00 M |
+| Shadows off / low / medium / ultra | 267 / 319 / 344 / 384 | 0.64 / 0.97 / 0.99 / 1.03 M |
+| LOD 50% / 125% | 346 / 356 | 0.98 / 1.02 M |
+| Draw distance 50% / 125% (from 382, 1.04 M) | 324 / 394 | 0.95 / 1.06 M |
+| Preset Low / Medium / High / Ultra | 304 / 336 / 366 / 450 | 0.92 / 0.95 / 1.00 / 1.10 M |
+
+The shadow passes are the biggest single lever in a town: off drops a quarter of the draws and over a third of the
+triangles. Draw distance mostly buys memory and load (896 resident cells at 50%, 2912 at 125%), not draws. Bell Strand
+has almost no grass (0 / 35 / 100%: 992.5k / 994.8k / 997.9k triangles); a storm drew 554 / 224 / 0 live particles at
+100 / 35 / 0% weather.
+
+**Trap: a shadow map cannot be resized live.** Setting `shadow.mapSize` on a running cascade destroys the old depth
+texture while bind groups still hold it: "Destroyed texture ShadowDepthTexture used in a submit", repeating, whether
+three resized it inside the pass or the host did before the frame. Each one is a rejected submit. So the map size is read
+when the cascades are built (next load; the panel says so), while on/off and reach stay live. Off is a uniform plus
+stopped passes, because `castShadow = false` changes the lights' cache key and recompiles every lit material.
+
+**Trap: "settled" streaming.** A resident-cell count still climbing moved draws by more than most settings did. Wait for
+nothing loading and the count still for 8 s, and do not compare across a ring change: `keepPadding` holds cells, so
+going down to High from Ultra keeps 2732 cells against 1876 going up from Medium.
+
+## Far trees: a dark rim, and a swap you could see from anywhere (2026-11-05)
+
+Owner report on Redstrand: an impostor tree is obvious at once, with a dark edge round it, and it pops into the real
+tree. Three faults stacked; the hard swap only showed them.
+
+- **The atlas is premultiplied and the shader read it straight.** Bake clears to (0,0,0,0) with hard cut-outs (read
+  back: alpha only ever 0 or 255, RGB exactly 0 at alpha 0), so a bilinear tap across an edge, and the three-frame
+  blend wherever neighbouring views disagree, is colour x coverage. The 0.4 alpha test kept samples up to 60% black.
+  The rim is several texels wide because of the frame blend, so it survives any amount of atlas resolution. Dividing
+  by coverage in the shader gives the exact colour, with no dilation pass; the normal target's RGB and role alpha need
+  the same division (a half-covered leaf's role 0.5 read as bark).
+- **The bake ran on whichever consumer loaded the model first.** `brightness` and `foliageNormals` are written onto
+  the shared cached glTF, the impostor is cached for the session, and in a streamed world the first consumer is an
+  HLOD supercell, which skipped both. Evidence in the page: atlas mean = raw texture mean (no 1.35-1.4 lift), baked
+  normals with no upward lean (y -0.07 against 0.70 after). Same camera, mesh against impostor over one region: impostor
+  at 0.54x the mesh's luminance. `prepareSharedModel` is now called by both builders. Any new per-model look field
+  belongs in it.
+- **A mesh shades its own inner boughs through the shadow map; an impostor cannot.** With the two above fixed it came
+  out 1.28x too bright at noon. Cutout models bake at `FOLIAGE_SELF_SHADE` (0.78). A constant: right at noon, not
+  measured at dusk.
+
+The swap: `lodDistance` is 110 m on a 48 m grid (the ring cap in main.ts), not ~270 m; the tier dump never showed a
+tree mesh past 105 m. Near and far tiers were exclusive, so every pixel changed in one frame. Now the far tier
+overlaps the mesh across a band (88-110 m) and a screen-pixel dither gives each pixel to exactly one tier
+(`lod-fade.ts`). Both shaders work out the amount from the instance's distance, so there is no per-frame CPU write and
+no new draw: the tiers already draw. Two things to keep: membership must COVER the band (a mesh leaving early is a
+hole), so `FADE_SLACK` replaces hysteresis on these batches; and only alpha-tested materials can take part, so opaque
+rocks keep the hard swap. Impostor pages (HLOD) never fade, they meet no mesh.
+
+Also: a frame is about 3x magnified at the switch (96 px over a tree 170 px tall), and a linear filter turned it into a
+soft blob beside crisp meshes. Impostor pages are NEAREST on magnification, linear on minification. That needed the
+alpha cut at 0.2: with nearest taps a leaf speck in one blended frame never reached 0.4 and canopies went to confetti.
+
+`FoliageLodSystem.setLodScale(n)` scales every swap distance. Above about 1.3 it buys nothing unless `fullRender` grows
+too: past that ring a cell has only impostors, so the swap would happen at the cell load instead, unfaded.
+
+How it was found: `foliageLod.setLodDistance(8)` against `400` in one session is a same-camera mesh/impostor A/B, and
+`__hitregImpostorRead(block, "albedo"|"normal")` reads the atlas back. The forced-close impostor shot showed all of the
+above at once; at real distance they are a few pixels.
+
+### 2026-11-05: what a published load downloads
+
+- **Most model bytes were duplicate images.** 945 MB of embedded images in the closure's models were 109 MB distinct.
+  `publish-compress` moves shared ones to one file each; see docs/hosting.md, "What publish compresses".
+- **Two loaders fetch every collidable model.** `collision-geometry` has its own GLTFLoader and counts on the HTTP cache.
+  In a headless incognito probe the same models were sent twice, one after the other (692 MB for 440 MB of files; 14.5 MB
+  extra after dedupe). Sharing in-flight fetches changed nothing, so they are not concurrent. Whether a normal profile's
+  disk cache serves them is unmeasured.
+- **`modelScope` returned `http:/` for a published URL**, so every model in a bundle was one texture and material
+  family, unlike dev. Check dev-only URL parsing whenever a published build looks different.
+- **Measure byte savings after the host's compression.** Bit-exact meshopt halves raw geometry, but brotli of the plain
+  bytes beat meshopt + brotli (1.53 vs 2.34 MB on a 421-file sample).
+
+### 2026-11-05: steady-state frame in Bell Strand, and four costs that were not where they looked
+
+- **Rain cost ground queries, not matrices.** In a storm `update/particles` was 44 ms, 37% of the CPU: `groundAt` took 32.5%
+  (terrain and water field noise), the instance writes 1%. Births outside the view wedge are now rejected before the
+  ground is asked, and a landing column is remembered for 20 s (`GroundColumns`). 44 ms became 11 ms on the same machine.
+  Profile before making a particle system "GPU-side": moving the writes would have saved 1%.
+- **A shadow pass ignores materials, so merge for it separately.** Every caster is drawn with the same override
+  material, so per-material batches are pure overhead there. `batchStaticMeshes` adds one position-only mesh per culling
+  unit on `OCCLUDED_LAYER` (`?shadowMerge=0`). This is the safe version of the flattening that made things worse
+  before: main-pass batching and instancing stay as they were.
+- **The probe double-counts post.** `drawsBy` "post" counted each quad twice (~40); the true count is the
+  `drawsByMaterial` sum, 21. It is now 9 to 13: an unconditional underwater RTT, FXAA's copy of the sharpen pass, and bloom
+  run every second frame (`?bloomEvery=1`).
+- **Moving world uniforms out of the OBJECT group did not pay; tried and removed.** Module-level `uniform()`s are re-walked
+  every draw (~30 a material, median 6 once moved to `renderGroup`), but RENDER groups were already walking ~14,000
+  uniforms a frame (about 110 group updates of ~130), and the moved ones join that: ~4% fewer in total once the draw
+  drop is taken out. `frameGroup` walked far fewer (~8,800) in a run that had not finished loading, and was not re-measured. The real target is
+  why so many distinct render groups exist.
+- **Check the shot before trusting a low draw count.** Under load, town-perf can sample before the town has landed: flat
+  cream ground, no buildings, and draws of 86 to 190 against a real 270 to 310.
+- **Still water was simulated.** `WaterWake` rendered every frame in a town nobody swam in; it now stops 8 s after the last
+  stamp. The pooled, hidden VFX were 460 matrix-walk visits a frame: the VFX root now walks only what is showing.
+
+### 2026-11-06: a skipped draw is a vanished mesh
+
+Async pipelines turn every new pipeline into frames with no draw. Anything that makes a new shader in play now blinks instead of hitching: a creature's tell wrote a new `emissiveNode` each step, and the body was undrawn for a whole wind-up (0 of 44 frames). Runtime looks must write uniforms, never nodes, and a mesh given a new material keeps its old one until the new pipeline is ready (`spreadShaderBuilds`). A change to the SAME material has no old one to fall back on, so a shader change goes on a copy, and nor does a change of scene pass settings: toggling AO recompiles everything for several seconds. To find a 1-2 frame fault, fly the same camera path several laps and compare each frame with its own repeats.
+
+### 2026-11-07: an empty test scene hides what only moving bodies show
+
+Two faults survived a 905-frame lap test because nothing in it moved or got hit. Staggered cascades left walking units 20-46 m out with a shadow redrawn every second frame, so the shadow stepped while the body moved smoothly. A cascade whose slice starts inside the reach of animated shadows now renders every frame (+44 draws at the Bell Strand spawn; the far cascade stays staggered, 528 draws against 652 with the stagger off). The first hit flash on a rim-lit body put a new shader on the material being drawn: 0 of 22 frames drawn. The blend now goes on a fresh copy, so the old material draws until it is ready (26 of 26). Count real draws by wrapping `renderer.backend.draw`, and test with units walking and fighting.
+
+### 2026-11-07: armor that blinks is armor a frame behind its body
+
+Check what goes together. Gear and the contact patch copy a body's root when they run; a skinned body reads it at the draw, so a network sample taken after them put all gear one frame behind (641 of 641 frames, up to 78 degrees). The error was the size of the step, and the steps were large because the client clock counted 20 ticks a second against a server numbering 60: it snapped every 0.25 s, for every remote body. Sample the network before anything reads a body, and take the tick rate from the server (`setTickRate`). A frame diff never found this. Crops tracked on one unit did, and per-frame world positions gave the proof. Full notes: `docs/shadow-blink-investigation.md`.
+
+### 2026-11-06: 15 fps, shaking shadows and a constant fire, four separate causes
+
+Reported together, and none was the last change made. Measured from an alley at first (21 to ~47 fps), which flatters every
+number: **measure from the real spawn too** (`town-perf` without `--at`). There: 45 fps standing, 427 draws; walking p50 27 ms,
+p95 48 ms, worst 151 ms.
+
+- **A dev server was the biggest single cost.** `vite build` / a publish deletes `dist-game/game`; chokidar's watcher on the
+  deleted folder then fires ~2,000 `rename` events a second, forever, at ~200% CPU per server, on every server running at
+  the time. `dist` and `dist-game` are now unwatched. If a dev server idles hot, attach an inspector
+  (`process._debugProcess(pid)`) and count events at chokidar's `handleEvent`: the path says it at once.
+- **A shadow pass re-showed what was hidden.** The shadowless skip list is last frame's walk, and it restored everything
+  to `visible = true`. Anything hidden between walks came back and joined the next list, forever: ~205 spell warm-up meshes
+  at y = -1000, culling off, every frame, in most sessions. A borrow of `visible` restores only what it hid (`hideVisible`).
+  The race made clean runs look like proof: repeat, and catch the writer with a `visible` accessor trap (`town-perf --init`).
+- **Warm-up kept its sampler on screen for the whole compile (29 s).** compileAsync takes its draw list synchronously, so
+  `precompileGroup(..., collected)` hides it as soon as that is done.
+- **Shadows crawl when the SUN moves, not the camera.** Texel snapping holds the grid against the camera; a rotating sun
+  turns the grid every frame. The cascades aim along a held direction moved in 0.1 degree steps (`stepHeldSun`). Film grain
+  hides this in any frame diff, and `--vista` freezes the clock: test with grain off and the clock running.
+- **Positional audio never fell silent.** The default inverse model is still 3% at 100 m, and 66 hearth references summed
+  into one crackle. Linear falloff, silent at 8x `refDistance`.
+- **First-draw shader builds are the hitches left when walking** (60-140 ms each; 12 in one turn was a 470 ms frame). Most
+  of the town streams in AFTER the cover lifts (127 meshes exist when it does), so `FirstDrawWarm` also trickles one mesh
+  every 4 frames during play. Walk p95 53 -> 29 ms, worst frame 472 -> 223 ms, spikes over 60 ms 55 -> 14. The cost: ~2.7 s more
+  stalls in the first 30 s after entry, and steady 30 fps ~12 s later.
+
+- **Terrain and rock arrays uploaded on first draw**, one task, 2-5 s, ~20 s into play. `startScatterMaterials` starts the
+  world's scatter materials (`material`, `smallMaterial`, `largeMaterial`) at load and the renderer uploads packed arrays on
+  the next frame: nothing left to upload after the cover.
+- **The published host had no batching, atlas, culling, place streaming or frozen subtrees.** `play.ts` built all 184 places and
+  drew every house alone: 2,255 draws, 14 fps, 2.1 M triangles at spawn, while the editor's play mode was fine. Both hosts now
+  share `placed-batch.ts` and `place-runtime.ts`: 262 draws, ~55 fps, 0.63 M triangles. **Run the published bundle, not just
+  the editor**: to run a server project offline, set `multiplayer: {enabled: false}` in a scratch copy's manifest.
+- **A draw's new pipeline was created synchronously, blocking the GPU process.** Three calls `device.createRenderPipeline` on
+  first draw: the main thread sits idle, nothing presents, and no JS timing sees it. `async-pipelines.ts` sends the frame's
+  draws down three's async path; it already skips a draw until its pipeline is ready. Published: cover 68 s to 36-54 s, worst
+  frame behind it 18 s to 2-3 s, walk worst 1.5 s to 0.5-0.9 s (ranges: other work on the machine). The price is a mesh up to ~0.6 s late, at most 3 at once.
+  Fullscreen passes and one-shot renders (impostor bakes) stay synchronous; `?asyncPipelines=0` is the A/B.
+- **Shaders came in bursts: 5-7 in one frame as a place came into view, ~95 ms each.** With the pipelines async, those were all
+  that was left of the walk's hitches (572 of a 749 ms frame). `spreadShaderBuilds` stops generating once a frame has spent
+  `SHADER_BUILD_BUDGET_MS`: a mesh with no shader sits out that frame, a mesh sharing a cached one still draws. Worst walking
+  frame 749 ms to 190-251 ms. Off behind the load cover and in edit mode.
+- **Precompile in the published host** (`?precompile=0` is the A/B) logged 0, 3 or 2,140 pipeline errors a load before batching,
+  streaming and async pipelines landed, cause not found; clean in every run since. Watch for it coming back.
+- **Queued render objects do not yet own binding references.** Three r185's `Bindings.deleteForRender` releases shared
+  groups even when the disposed object never initialized them. An async compile or material change can therefore free a
+  live object's GPU uniform buffer; the next upload throws and post-processing may wrongly blame AO. The engine's
+  `binding-lifetime.ts` guard skips that unowned release. Its regression uses the actual Three binding manager and a shared
+  group, proving the premature destruction without needing a timing-sensitive GPU failure.
+- **The load cover waits for the near world** (`finishing`, capped at `MAX_FINISH_SECONDS`): models, the static merge and
+  first draws, not the far ring, whose bakes run to ~105 s at ~28 ms a frame. Stalls in the 30 s after the cover: 11.9 s to
+  0.3 s. Price: a later cover on a cold load (published ~40 s with async pipelines, editor 63-72 s, against ~30 s before). `FIRST_DRAWS_PER_FRAME` is 6: at 64 one frame held 64
+  shader builds, and the bar froze for 15 s.
+- **A probe can cause what it measures.** Heavy per-frame reads dropped the fps, AdaptiveResolution ran a 90-frame trial, and half
+  the screen changed twice. `?renderScale=1` when diffing frames.
+
+Still open: a shader's code generation is one synchronous ~100 ms block on the main thread, so a first walk still has ~100-250 ms
+frames. Going lower means fewer distinct shaders, or generating them off the main thread.
+
+How the cause was found, for next time: place build, re-merge, textures, light flips and the disk cache were each timed and
+cleared, and a CPU profile showed the slow frames `(idle)`. **An idle main thread in a slow frame means a blocked GPU process:
+list every synchronous call that reaches it.** A timer on shader code generation does not cover pipeline creation.

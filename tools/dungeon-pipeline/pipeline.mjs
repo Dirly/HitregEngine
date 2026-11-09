@@ -113,6 +113,12 @@ export function standardStages({ id, blender = BLENDER, exportInputs = [], overr
   const big = "NODE_OPTIONS=--max-old-space-size=8192";
   let stages = [
     { name: "plan", out: "reports/plan-check.json", inputs: ["authoring/plan.json", "authoring/plan-check.mts"], report: "reports/plan-check.json", run: `(pg) npx tsx ${pj}/plan-check.mts`, note: "plan.json (hand-written: spaces, doors, water, portal anchors, route, packs) -> gate + authoring/views/plan.png" },
+    // the painted sizes (concept-scale.mjs): rooms sized from a written sheet came out a third of the painting (Moon-Deep
+    // 2026-11-01, Red Dial 2026-10-30); the build is held to the painting BEFORE the expensive export
+    { name: "scale", gate: true, out: "reports/scale.json", report: "reports/scale.json",
+      inputs: ["authoring/concept", "authoring/built-sizes.mjs", "authoring/plan.json", "../../../../tools/dungeon-pipeline/concept-scale.mjs", "../../../../tools/dungeon-pipeline/thresholds.json"],
+      run: "node ../../../../tools/dungeon-pipeline/concept-scale.mjs measure && node ../../../../tools/dungeon-pipeline/concept-scale.mjs gate",
+      note: "each painting measured with its figure as a 1.8 m ruler (authoring/concept/<painting>.marks.json -> authoring/concept-sizes.json, overlays in reports/concept-scale/); every built size within +-15% (authoring/built-sizes.mjs). A dungeon with no paintings drops it (override scale: null)" },
     { name: "export", out: stamp, inputs: ["authoring/.plan-geometry.json", "authoring/build.py", "authoring/lib", "authoring/noise.json", ...exportInputs], report: "reports/assemble.json",
       run: `${blender} --background --python authoring/build.py -- --export`, note: "every stone a closed solid, one dc_group; closure + cell budget gate; the role-noise table embedded (export_mesh_stamp(noise=...))" },
     gateStage("noise"),

@@ -26,7 +26,8 @@
  *   8. No holes you can see through the map: a job that delivers BUILT structures (any added `mesh` component in its
  *      scene ops) needs `reports/see-through.json` from the see-through gate (`tools/see-through.mts scene <preview scene>
  *      --route <walk-route.json> --out ...`) saying ok — no sentinel (magenta) pixel where ground or built geometry must
- *      be, from eye height along the walk route — newer than every delivered ops file (docs/see-through.md).
+ *      be, from eye height along the walk route — newer than every delivered ops file (docs/see-through.md). Since
+ *      2026-10-31 a SHOT ROW (SHOT_ROWS): judged after the install from the batch render, never an install block.
  *   9. Flat art reads upright: a job delivering a model that wears an engine material (a slab + a generated picture:
  *      door relief, plaque, panel) needs `reports/flat-art.json` (`tools/flat-art.mts check <project> --scene <preview>
  *      --out ...`) saying ok — no picture upside down or mirrored — newer than every delivered ops file.
@@ -79,6 +80,9 @@
  *
  *   node tools/poi-review/job.mjs design <jobDir>                          check design.json (gate 16); prints the design hash
  *   node tools/poi-review/job.mjs design-review <jobDir> --file <review>   record the design review (verdict read from the file)
+ *      (its sample frames are FROZEN under reviews/<place>/: later shots never re-open it; a design.json edit does)
+ *   node tools/poi-review/job.mjs design-backfill <jobDir> --ruling "YYYY-MM-DD ..."   freeze the current sample frames under a
+ *      review recorded before freezing, only when design.json was last written before that review (backfillDesignSample)
  *   node tools/poi-review/job.mjs hash   <jobDir>                          the delivered-ops hash a reviewer records
  *   node tools/poi-review/job.mjs review <jobDir> --file <review>          record the FINAL review (verdict read from the file)
  *   node tools/poi-review/job.mjs stage  <jobDir> <stage>                  move the job's stage (gate 2)
@@ -219,7 +223,7 @@ export function reviewIdentityBlock(dir, said, file = "the review", { codes = ru
   return null;
 }
 
-/** A hand-written owner override: progress.json ownerApproval { by: "derek", note[, opsHash] }. No tool writes it. */
+/** A hand-written owner override: progress.json ownerApproval { by: "derek", note[, opsHash][, designHash] }. No tool writes it. designHash, when it names the current design, also passes gate 16 (designBlock). */
 export function ownerApproval(p, now) {
   const a = p?.ownerApproval;
   if (!a || typeof a !== "object" || String(a.by).toLowerCase() !== "derek" || typeof a.note !== "string" || a.note.trim().length < 3) return null;
@@ -227,13 +231,22 @@ export function ownerApproval(p, now) {
   return a;
 }
 
-/** Why an install may not run, or null when it may. Pure apart from reading the job directory. */
-export function installBlock(dir, { fineExceptions = true } = {}) {
+/**
+ * The SHOT-DEPENDENT rows (Derek 2026-10-31, memory batch-renders-after-install: no per-place shot runs while building;
+ * install in batches, then ONE batch render over the live world): gate 8 see-through (a browser render along the walk
+ * route) and gate 16's sample frames. They are judged AFTER the install from the latest batch evidence
+ * (`place-build render-batch`, apps/playground/tools/_render-batch.mts) and a fault there is a fix round; they never block
+ * the install. `installBlock(dir, { shots: true })` still asks for them (a caller that wants the old full set).
+ */
+export const SHOT_ROWS = ["see-through", "design-sample"];
+/** Why an install may not run, or null when it may. Pure apart from reading the job directory. Geometry gates only
+ *  unless `shots: true` (SHOT_ROWS). */
+export function installBlock(dir, { fineExceptions = true, shots = false } = {}) {
   if (!fs.existsSync(progressFile(dir))) return `no progress.json in ${dir}`;
   const p = loadProgress(dir);
   const now = opsHash(dir);
   if (!now) return "the job delivers no ops files";
-  return (ownerApproval(p, now) ? null : finalReviewBlock(dir, p, now) ?? designBlock(dir, p)) ?? sizeBlock(dir) ?? floatBlock(dir) ?? rockSkinsBlock(dir) ?? waterEdgesBlock(dir) ?? walkBlock(dir) ?? artBlock(dir) ?? scaleBlock(dir) ?? seeThroughBlock(dir) ?? flatArtBlock(dir) ?? monumentApproachBlock(dir) ?? terrainFineBlock(dir, { exceptions: fineExceptions });
+  return (ownerApproval(p, now) ? null : finalReviewBlock(dir, p, now) ?? designBlock(dir, p, { sample: shots })) ?? sizeBlock(dir) ?? floatBlock(dir) ?? rockSkinsBlock(dir) ?? waterEdgesBlock(dir) ?? walkBlock(dir) ?? artBlock(dir) ?? scaleBlock(dir) ?? (shots ? seeThroughBlock(dir) : null) ?? flatArtBlock(dir) ?? monumentApproachBlock(dir) ?? terrainFineBlock(dir, { exceptions: fineExceptions });
 }
 
 /** Gates 1 + 13: the recorded final review passes for these ops and is a fresh reviewer's, answering the rubric. */
@@ -280,14 +293,38 @@ export const DESIGN_RULING_KEY = (k) => k === "size" || /Ruling$/.test(k);
 export function designBody(design) {
   return JSON.stringify(Object.fromEntries(Object.entries(design).filter(([k]) => !DESIGN_RULING_KEY(k))));
 }
-export function designHash(dir, design = readDesign(dir), { legacy = false } = {}) {
+/** Where `design-review` FREEZES a sample frame: reviews/<place>/<file> (overwritten in place). r-found 2026-10-31
+ *  (coordinator ruling): the sample frames are the place's ordinary shots (evidence/<lab>/avenue-12.png), so every later
+ *  `place-build shots` rewrote them and re-opened a design nobody had changed (Red Dial failed gate 16 for 12 rounds). */
+export const frozenSample = (dir, shot) => path.join(dir, "reviews", path.basename(path.resolve(dir)), path.basename(shot));
+/**
+ * Gate 16's design hash: design.json's body + each sample frame. A frame is read from its FROZEN copy (frozenSample) when
+ * a review froze one, else from the live shot; the key stays the shot's own path, so a frozen copy of the same picture
+ * hashes the same. `live: true` reads the live shots (what a reviewer is shown: `job.mjs design` prints it, and
+ * `design-review` checks the review against it before freezing). A changed design.json always re-opens the review.
+ */
+export function designHash(dir, design = readDesign(dir), { legacy = false, live = false } = {}) {
   const f = path.join(dir, DESIGN_FILE);
   if (!design || design.__error || !fs.existsSync(f)) return null;
   const shots = Array.isArray(design.sample?.shots) ? design.sample.shots.filter((s) => typeof s === "string") : [];
   // legacy: the raw file bytes (reviews recorded before the ruling fields were left out still match their design)
   const parts = [`${DESIGN_FILE}\0${legacy ? sha(fs.readFileSync(f)) : sha(designBody(design))}`];
-  for (const s of shots) { const p = path.resolve(dir, s); parts.push(`${s}\0${fs.existsSync(p) ? sha(fs.readFileSync(p)) : "missing"}`); }
+  for (const s of shots) {
+    const fz = frozenSample(dir, s), p = !live && fs.existsSync(fz) ? fz : path.resolve(dir, s);
+    parts.push(`${s}\0${fs.existsSync(p) ? sha(fs.readFileSync(p)) : "missing"}`);
+  }
   return sha(parts.join("\n"));
+}
+/** Freeze the design's sample frames under reviews/<place>/ (overwritten in place; no numbered copies). Returns their paths. */
+export function freezeDesignSample(dir, design = readDesign(dir)) {
+  const shots = Array.isArray(design?.sample?.shots) ? design.sample.shots.filter((s) => typeof s === "string") : [];
+  const out = [];
+  for (const s of shots) {
+    const p = path.resolve(dir, s); if (!fs.existsSync(p)) continue;
+    const fz = frozenSample(dir, s); fs.mkdirSync(path.dirname(fz), { recursive: true }); fs.copyFileSync(p, fz);
+    out.push(path.relative(dir, fz).split(path.sep).join("/"));
+  }
+  return out;
 }
 
 /** The playground folder (the one holding projects/) and the project a job dir lives in, or nulls. */
@@ -428,7 +465,8 @@ export function designFaults(dir, design = readDesign(dir), { sample = true } = 
   // a catalogue place (world order art mode) has no concept painting and no sample-before-repeat stage: it is built
   // from catalogue props in one go and the grey-box / final review judge the built frames (L o-small 2026-10-29: the
   // design gate demanded a concept frame the world order had ruled out)
-  const catalogue = jobArt(dir) === "catalogue";
+  // a job dir outside a project (a --job copy in a scratch lab) has no stages ledger: its design.json `art` says it
+  const catalogue = (jobArt(dir) ?? design.art) === "catalogue";
   const s = design.sample;
   if (!sample || (catalogue && !s)) { /* before the build, or a catalogue place: no sample frames asked for */ }
   else if (!s || typeof s !== "object" || !str(s.area, 2)) out.push("sample: { area, shots[] } — the ONE area finished to the bar before anything repeats, with its player-height frames");
@@ -467,13 +505,19 @@ export function designFaults(dir, design = readDesign(dir), { sample = true } = 
   return out;
 }
 
-/** Gate 16: why the place may not expand or install — no design, a faulty one, no fresh reviewer's PASS on its sample, or a design edited since. */
-export function designBlock(dir, p) {
+/** Gate 16: why the place may not expand or install — no design, a faulty one, no fresh reviewer's PASS on its sample, or a
+ *  design edited since. `sample: false` (the install path, SHOT_ROWS): the sample frames are not asked for (they come from
+ *  the batch render after the install); a recorded review still has to name this design. */
+export function designBlock(dir, p, { sample = true } = {}) {
   const design = readDesign(dir);
-  const faults = designFaults(dir, design);
+  const faults = designFaults(dir, design, { sample });
   if (faults.length) return `the design gate failed (gate 16): ${faults.slice(0, 4).join("; ")}${faults.length > 4 ? `; +${faults.length - 4} more (job.mjs design ${dir})` : ""}`;
   if (p === undefined) p = fs.existsSync(progressFile(dir)) ? loadProgress(dir) : {};
   const now = designHash(dir, design);
+  // the owner's hand-written override (progress.json ownerApproval, as for the install) passes gate 16 when it names THIS
+  // design: { by: "derek", note, designHash }. L (o-smalls 2026-10-30, coordinator: Derek approves the redstrand places himself, no reviewer)
+  const oa = p?.ownerApproval;
+  if (oa && typeof oa === "object" && String(oa.by).toLowerCase() === "derek" && typeof oa.note === "string" && oa.note.trim().length >= 3 && oa.designHash === now) return null;
   const r = p?.designReview;
   if (!r || typeof r !== "object") return `no design review recorded (gate 16): a fresh reviewer answers the Place lines ${designCodes().join(", ")} on the sample area's frames (Design hash: ${now}) and job.mjs design-review ${dir} --file <review> records it`;
   if (String(r.verdict).toUpperCase() !== "PASS") return `the design review's verdict is ${r.verdict}, not PASS (gate 16): fix the design or the sample and review again`;
@@ -481,7 +525,8 @@ export function designBlock(dir, p) {
   if (!r.file || !fs.existsSync(file)) return `the design review file ${r.file} does not exist (gate 16)`;
   const said = readReview(file);
   if (said.verdict !== "PASS") return `${r.file} does not say Verdict: PASS (it says ${said.verdict || "nothing"}) (gate 16)`;
-  if (said.designHash !== r.designHash) return `${r.file} names design hash ${said.designHash ?? "(none)"}, progress.json ${r.designHash} (gate 16)`;
+  // a back-filled review keeps the hash its reviewer named as reviewedHash (backfillDesignSample)
+  if (said.designHash !== (r.reviewedHash ?? r.designHash)) return `${r.file} names design hash ${said.designHash ?? "(none)"}, progress.json ${r.reviewedHash ?? r.designHash} (gate 16)`;
   if (r.designHash !== now && r.designHash !== designHash(dir, design, { legacy: true })) return `the design or its sample frames changed after the design review (reviewed ${String(r.designHash).slice(0, 12)}, now ${String(now).slice(0, 12)}): review again (gate 16)`;
   return reviewIdentityBlock(dir, said, r.file, { codes: designCodes(), gate: 16, sections: "Place" });
 }
@@ -492,13 +537,37 @@ export function recordDesignReview(dir, file) {
   const faults = designFaults(dir);
   if (faults.length) throw new Error(`${DESIGN_FILE} is not reviewable yet (gate 16): ${faults.slice(0, 4).join("; ")}`);
   const said = readReview(path.resolve(file));
-  const now = designHash(dir);
+  // the reviewer judged the LIVE frames (job.mjs design prints that hash); they are frozen below once the review is recorded
+  const now = designHash(dir, undefined, { live: true });
   if (!said.designHash) throw new Error(`${rel} names no design hash: the reviewer writes "Design hash: ${now}" (job.mjs design) in it`);
-  if (said.designHash !== now && said.designHash !== designHash(dir, undefined, { legacy: true })) throw new Error(`${rel} reviewed design ${said.designHash.slice(0, 12)}, the job's design is ${String(now).slice(0, 12)} now`);
+  if (said.designHash !== now && said.designHash !== designHash(dir, undefined, { legacy: true, live: true })) throw new Error(`${rel} reviewed design ${said.designHash.slice(0, 12)}, the job's design is ${String(now).slice(0, 12)} now`);
   const who = reviewIdentityBlock(dir, said, rel, { codes: designCodes(), gate: 16, sections: "Place" });
   if (who) throw new Error(who);
   const p = loadProgress(dir);
-  p.designReview = { file: rel, verdict: said.verdict, designHash: said.designHash, reviewer: said.reviewer, answered: Object.keys(said.answers).length, at: new Date().toISOString() };
+  const frozen = freezeDesignSample(dir);
+  p.designReview = { file: rel, verdict: said.verdict, designHash: said.designHash, reviewer: said.reviewer, answered: Object.keys(said.answers).length, at: new Date().toISOString(), ...(frozen.length ? { frozen } : {}) };
+  saveProgress(dir, p);
+  return p.designReview;
+}
+
+/**
+ * BACK-FILL the frozen sample for a review recorded before reviews froze their frames (r-found 2026-10-31, coordinator
+ * ruling): the frames that review saw were overwritten by later shots, so its hash can never be met again. Allowed only
+ * when design.json ALONE proves the design body is the reviewed one: the file was last written no later than the review
+ * was recorded (recordDesignReview checked the review against exactly that body; a copy or checkout only makes the time
+ * newer, which refuses). Freezes the CURRENT sample frames, keeps the reviewer's named hash as `reviewedHash`, and binds
+ * `designHash` to design.json + the frozen frames. Needs a dated ruling. A later design.json edit re-opens it as usual.
+ */
+export function backfillDesignSample(dir, ruling) {
+  if (typeof ruling !== "string" || !DATED_RULING.test(ruling) || ruling.replace(DATED_RULING, "").replace(/[\s,:;-]/g, "").length < 8) throw new Error(`design-backfill needs --ruling "YYYY-MM-DD who: why" (a dated ruling)`);
+  const p = loadProgress(dir), r = p.designReview;
+  if (!r || typeof r !== "object" || String(r.verdict).toUpperCase() !== "PASS") throw new Error("design-backfill: no PASS design review recorded to back-fill");
+  if (r.frozen?.length) throw new Error(`design-backfill: the review already froze its frames (${r.frozen.join(", ")})`);
+  const reviewedAt = Date.parse(r.at ?? ""), written = fs.statSync(path.join(dir, DESIGN_FILE)).mtimeMs;
+  if (!Number.isFinite(reviewedAt)) throw new Error("design-backfill: the review has no time recorded (progress.json designReview.at)");
+  if (written > reviewedAt) throw new Error(`design-backfill refused: ${DESIGN_FILE} was written ${new Date(written).toISOString()}, after the review (${r.at}): the reviewed body is not proven; review again`);
+  const frozen = freezeDesignSample(dir);
+  p.designReview = { ...r, reviewedHash: r.reviewedHash ?? r.designHash, designHash: designHash(dir), frozen, backfill: { at: new Date().toISOString(), ruling, proof: `${DESIGN_FILE} last written ${new Date(written).toISOString()}, review recorded ${r.at}` } };
   saveProgress(dir, p);
   return p.designReview;
 }
@@ -547,9 +616,11 @@ export function jobTier(dir) {
 const isXZ = (v) => Array.isArray(v) && (v.length === 2 || v.length === 3) && v.every((n) => typeof n === "number" && Number.isFinite(n));
 const xz = (v) => (v.length === 3 ? [v[0], v[2]] : [v[0], v[1]]);
 const SKIP_KEYS = new Set(["heights", "parts", "source", "materials", "roles", "colors", "weights", "center", "at", "origin", "blend", "size"]);
+/** The approach track's plain tread: up to this width it is arrival, not footprint (gate 12). */
+export const APPROACH_TREAD_M = 4;
 /** World-space [x, z] points of everything a job delivers (scene root entities, clearings, patches, paths, landmarks). */
 export function footprintPoints(dir) {
-  const pts = [];
+  const pts = [], built = [];
   const entities = new Map();
   const ring = (c, r) => { const [x, z] = xz(c); pts.push([x, z]); if (r > 0) pts.push([x + r, z], [x - r, z], [x, z + r], [x, z - r]); };
   const walk = (v) => {
@@ -567,18 +638,40 @@ export function footprintPoints(dir) {
     }
     if (isXZ(v.center)) ring(v.center, Number(v.radius ?? v.r ?? 0) || 0);
     if (isXZ(v.at)) pts.push(xz(v.at));
-    if (isXZ(v.origin) && Array.isArray(v.size) && v.size.length === 2) { const [ox, oz] = xz(v.origin); pts.push([ox, oz], [ox + v.size[0], oz + v.size[1]]); }
+    if (isXZ(v.origin) && Array.isArray(v.size) && v.size.length === 2) {
+      const [ox, oz] = xz(v.origin), cols = Number(v.columns), rows = Number(v.rows);
+      // L (o-wild3 2026-11-02): a MASKED height patch (per-sample `weights`) edits only where its weight is above zero.
+      // Its rectangle's corners put a round 42 m camp pad in a 46 x 46 m box, 65 m corner to corner, over the pinpoint
+      // maximum. Measure the samples it really moves, widened by the tent filter that spreads the mask (packages/core height-patch)
+      if (Array.isArray(v.weights) && cols >= 2 && rows >= 2 && v.weights.length === cols * rows) {
+        const cx = v.size[0] / (cols - 1), cz = v.size[1] / (rows - 1), f = Number(v.filter ?? 0) || 0;
+        for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+          if (!(Number(v.weights[j * cols + i]) > 0)) continue;
+          const x = ox + i * cx, z = oz + j * cz;
+          pts.push([x, z]);
+          if (f > 0) pts.push([x + f, z], [x - f, z], [x, z + f], [x, z - f]);
+        }
+      } else pts.push([ox, oz], [ox + v.size[0], oz + v.size[1]]);
+    }
     for (const [k, x] of Object.entries(v)) if (!SKIP_KEYS.has(k)) walk(x);
   };
   // L (Wristgate 2026-10-29, coordinator ruling): a vegetation clearing wholly OUTSIDE the job's reservation (sight-line
   // tree cuts on the moor 40-160 m past the rim) is vegetation, not built footprint: it never stretches the hull
   const res = jobTier(dir).reservation;
+  const approachHeld = [], isApproachId = (id) => typeof id === "string" && (/^road-pb-.+-approach$/.test(id) || /-lane-(cover-)?approach$/.test(id));
   const outside = (c) => !!res && Array.isArray(res.center) && isXZ(c?.center) && Math.hypot(xz(c.center)[0] - res.center[0], xz(c.center)[1] - res.center[1]) - (Number(c.radius) || 0) > (Number(res.radius) || 0);
   for (const f of deliveredOps(dir)) {
     if (/\.landmark\.json$/i.test(f)) continue; // a landmark's own parts are in its local frame
     let j = tryJson(path.join(dir, f));
     if (!j) continue;
     if (f === "clearings.json" && Array.isArray(j)) j = j.filter((c) => !outside(c));
+    // L (o-coast drowned-mole 2026-10-31): a place-build VIEW CUT (layout clearing `sightline: true`, id `<poi>-sightline-<id>`)
+    // clears trees on the line the player sees the landmark along; like the approach, it is not ground of the place
+    if (f === "clearings.json" && Array.isArray(j)) j = j.filter((c) => !(typeof c?.id === "string" && /-sightline-[a-z0-9-]+$/.test(c.id)));
+    // L (o-coast drowned-mole 2026-10-31, coordinator ruling): the APPROACH is ARRIVAL, not the place: the place-build
+    // approach track (`road-pb-<id>-approach`) and its lane clearings (`<id>-lane-(cover-)approach`) are held out of the
+    // hull, inside the reservation disc or not; whether they stay out is decided below (a 4 m tread, nothing built on it)
+    if (Array.isArray(j)) j = j.filter((o) => { const id = o?.feature?.id ?? o?.id; if (!isApproachId(id)) return true; approachHeld.push(o); return false; });
     const ops = Array.isArray(j) ? j : j.ops;
     if (Array.isArray(ops) && ops.some((o) => o?.op === "add-entity")) {
       for (const o of ops) {
@@ -606,7 +699,15 @@ export function footprintPoints(dir) {
     }
     if (current != null || !p.every(Number.isFinite)) continue;
     const physical = Object.keys(entity.components ?? {}).some(k => !["transform", "culling", "landmark"].includes(k));
-    if (physical || p.some(n => n !== 0)) pts.push([p[0], p[2]]);
+    if (physical || p.some(n => n !== 0)) { pts.push([p[0], p[2]]); built.push([p[0], p[2]]); }
+  }
+  // the approach stays ARRIVAL only while it is a plain tread: at most APPROACH_TREAD_M wide and no built piece on it
+  // (a piece within half the tread of its line); a wider track or one built along counts in full, so it cannot hide sprawl
+  const track = approachHeld.map((o) => o?.feature ?? o).find((f) => /^road-pb-.+-approach$/.test(f?.id ?? "") && Array.isArray(f.points));
+  if (track) {
+    const w = Number(track.width ?? APPROACH_TREAD_M), line = track.points.filter(isXZ).map(xz);
+    const on = (q) => line.some((a, i) => { const b = line[i + 1]; if (!b) return Math.hypot(q[0] - a[0], q[1] - a[1]) <= w / 2; const dx = b[0] - a[0], dz = b[1] - a[1], L2 = dx * dx + dz * dz || 1, t = Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dz) / L2)); return Math.hypot(q[0] - a[0] - t * dx, q[1] - a[1] - t * dz) <= w / 2; });
+    if (w > APPROACH_TREAD_M || built.some(on)) for (const o of approachHeld) walk(o);
   }
   // a dressing-only job's footprint is its declared dressing areas (handoff.siteDressing.areas[] { centre, radius })
   const hand = tryJson(path.join(dir, "handoff.json")) ?? {};
@@ -709,7 +810,8 @@ function measureFamily(pdir) {
 
 /**
  * L (Wristgate 2026-10-29): a coordinator's size ruling is recorded where gate 12 reads it, never in the owner's prose:
- * `<zone>/size-rulings.json` `{ rulings: [{ job, by, date, ruling, usableAreaM2? }] }`. `usableAreaM2` excepts the
+ * `<zone>/size-rulings.json` `{ rulings: [{ job, by, date, ruling, usableAreaM2?, keepTier? }] }` (`keepTier`: place-build keeps the
+ * asked tier on ground that holds less, never downgrading it; o-gates 2026-10-30). `usableAreaM2` excepts the
  * usable-area fault only while the MEASURED area stays at or above the ruled figure (a shrunk place fails again); no
  * other fault is ever excepted. Each entry cites the dated coordinator decision it records (`ruling`).
  */
@@ -800,6 +902,36 @@ export function readFineExceptions(dir, file = fineExceptionsFile(dir)) {
   const all = Array.isArray(j?.exceptions) ? j.exceptions : [];
   const me = new Set([path.basename(path.resolve(dir)), jobTier(dir).id]);
   return all.filter((e) => e && me.has(e.job) && Array.isArray(e.carves));
+}
+
+/**
+ * A job's own dated quality exceptions (`<job>/quality-exceptions.json`, i-install 2026-10-30: Red Dial's coordinator
+ * ruling on its skirt stone was written there but no gate read it, so the art gate blocked the install on a ruled fault):
+ * `{ exceptions: [{ id, gates: ["art", ...], pieces: [], match: { rule, what? }, fault, why, ruling: "YYYY-MM-DD <who>..." }] }`.
+ * A row counts for `gate` only when it names the gate, carries a dated ruling with its author (isDatedRuling: the date plus
+ * >= 8 more characters) and a reason (`why` >= 8 chars), and states what it matches (`match.rule`) — a row without a
+ * matcher excepts nothing, so a ruling never widens into a blanket pass.
+ */
+export const EXCEPTIONS_FILE = "quality-exceptions.json";
+const DATED_RULING = /\b20\d\d-\d\d-\d\d\b/;
+export function jobExceptions(dir, gate) {
+  const j = tryJson(path.join(dir, EXCEPTIONS_FILE));
+  const rows = Array.isArray(j?.exceptions) ? j.exceptions : [];
+  return rows.filter((e) => e && Array.isArray(e.gates) && e.gates.includes(gate)
+    && typeof e.ruling === "string" && DATED_RULING.test(e.ruling) && e.ruling.replace(DATED_RULING, "").replace(/[\s,:;-]/g, "").length >= 8
+    && typeof e.why === "string" && e.why.trim().length >= 8
+    && e.match && typeof e.match.rule === "string" && e.match.rule.length > 0);
+}
+/** Split gate faults ({ rule, piece, what }) into kept and excepted by the job's rows: rule equal, `what` equal when the
+ *  row states it, and the piece containing one of the row's `pieces` when it lists any. */
+export function exceptFaults(faults, rows) {
+  const kept = [], excepted = [];
+  for (const f of faults) {
+    const row = rows.find((e) => e.match.rule === f.rule && (e.match.what === undefined || e.match.what === f.what)
+      && (!Array.isArray(e.pieces) || !e.pieces.length || e.pieces.some((p) => String(f.piece ?? "").includes(p))));
+    if (row) excepted.push({ ...f, exception: row.id, ruling: row.ruling }); else kept.push(f);
+  }
+  return { kept, excepted };
 }
 /** Gate 11 detail: carves finer than 6 m, split into counted faults and documented exceptions. */
 export function fineCarveReport(dir, { exceptions = true } = {}) {
@@ -1054,6 +1186,7 @@ export function monumentApproachBlock(dir) {
 export function requireFinalReview(dir, argv = process.argv) {
   const fire = fireFaults(dir);
   if (fire.length && !argv.includes("--force-dogfood")) throw new Error(`home-made fire in the delivered ops (gate 4):\n  ${fire.join("\n  ")}`);
+  if (argv.includes("--draft") && !argv.includes("--uninstall")) return requireDraftGeometry(dir, argv);
   const block = installBlock(dir);
   if (argv.includes("--uninstall")) return true;
   if (argv.includes("--dry-run") || argv.includes("--dry")) { if (block) console.warn(`[install guard] a real install would be refused: ${block}`); return true; }
@@ -1070,6 +1203,51 @@ export function requireFinalReview(dir, argv = process.argv) {
   }
   console.error(`STOP (install guard): ${block}`);
   process.exit(1);
+}
+
+/**
+ * The GEOMETRY rows of the lab's `reports/gates.json` a DRAFT install needs ok (Derek 2026-11-03, i-drafts: half-finished
+ * places brought into the live world as they are). Ground, seat, float, lips, support, water, walk, z-fight, the 6 m rule
+ * and the operators: a draft never skips one of these. Not here (they stay open on a draft): design, size, art, scale,
+ * rock-skins, wash, dress, place, heroes, features, camp — the review and finish rows.
+ */
+export const DRAFT_GEOMETRY_GATES = ["fine", "roads", "lips", "scatter-float", "float", "seated", "shelters", "abut", "water-edges", "zfight", "op-check", "support", "walk"];
+
+/**
+ * A DRAFT install's block (null = may install): no review stage is asked for (final review, design, size, art, scale stay
+ * open), but every geometry report must say ok and be newer than the delivered ops — float, water edges, walk, flat art,
+ * monument approach, the 6 m rule — and the lab's gates table must hold every DRAFT_GEOMETRY_GATES row it ran ok, newer
+ * than the ops. The overlap with other places, roads and reservations is place-build's own check (install --draft).
+ */
+export function draftInstallBlock(dir) {
+  if (!opsHash(dir)) return "the job delivers no ops files";
+  const geo = floatBlock(dir) ?? waterEdgesBlock(dir) ?? walkBlock(dir) ?? flatArtBlock(dir) ?? monumentApproachBlock(dir) ?? terrainFineBlock(dir);
+  if (geo) return geo;
+  const gf = path.join(dir, "reports", "gates.json");
+  if (!fs.existsSync(gf)) return `no reports/gates.json: run place-build gates on the lab first`;
+  let g; try { g = readJson(gf); } catch { return `${gf} is not a gates table`; }
+  const at = fs.statSync(gf).mtimeMs, newer = deliveredOps(dir).filter((f) => fs.statSync(path.join(dir, f)).mtimeMs > at);
+  if (newer.length) return `reports/gates.json is older than ${newer.join(", ")}: run place-build gates on the lab again`;
+  const rows = Array.isArray(g.rows) ? g.rows : [];
+  const missing = DRAFT_GEOMETRY_GATES.filter((n) => ["lips", "float", "seated", "walk"].includes(n) && !rows.some((r) => r.gate === n));
+  if (missing.length) return `reports/gates.json has no ${missing.join(", ")} row(s) (a partial --only run?): run place-build gates on the lab`;
+  const bad = rows.filter((r) => DRAFT_GEOMETRY_GATES.includes(r.gate) && r.ok !== true);
+  if (bad.length) return `geometry gate(s) failed on the lab (a draft never skips one): ${bad.map((r) => `${r.gate}: ${String(r.detail ?? "").slice(0, 160)}`).join("; ")}`;
+  return null;
+}
+
+/** The draft install guard (requireFinalReview with --draft): geometry only, recorded in progress.json `draftInstalls`. */
+function requireDraftGeometry(dir, argv) {
+  const block = draftInstallBlock(dir);
+  if (argv.includes("--dry-run") || argv.includes("--dry")) { if (block) console.warn(`[draft install guard] a real draft install would be refused: ${block}`); return true; }
+  if (block) { console.error(`STOP (draft install guard): ${block}`); process.exit(1); }
+  ownerApplyLast(dir);
+  if (fs.existsSync(progressFile(dir))) {
+    const p = loadProgress(dir), i = argv.indexOf("--draft-note");
+    (p.draftInstalls ??= []).push({ at: new Date().toISOString(), opsHash: opsHash(dir), note: i >= 0 && argv[i + 1] ? argv[i + 1] : "draft install", open: installBlock(dir) ?? null });
+    saveProgress(dir, p);
+  }
+  return true;
 }
 
 /**
@@ -1193,11 +1371,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (cmd === "hash") console.log(`${opsHash(dir)}  (${deliveredOps(dir).join(", ")})`);
     else if (cmd === "review") console.log(JSON.stringify(recordReview(dir, opt("file"))));
     else if (cmd === "design") {
-      const faults = designFaults(dir);
-      if (faults.length) { console.error(`design (gate 16) FAIL:\n  ${faults.join("\n  ")}\nDesign hash: ${designHash(dir)} (art ${jobArt(dir) ?? "unknown"})`); process.exitCode = 1; }
-      else { console.log(`design ok (gate 16)\nDesign hash: ${designHash(dir)}`); const d = designBlock(dir); if (d) { console.log(`review: ${d}`); process.exitCode = 1; } else console.log("review: PASS recorded for this design"); }
+      // --no-sample (place-build's design gate, SHOT_ROWS): the sample frames are judged after the batch render
+      const sample = !rest.includes("--no-sample");
+      const faults = designFaults(dir, undefined, { sample });
+      if (faults.length) { console.error(`design (gate 16) FAIL:\n  ${faults.join("\n  ")}\nDesign hash: ${designHash(dir, undefined, { live: true })} (art ${jobArt(dir) ?? "unknown"})`); process.exitCode = 1; }
+      else { console.log(`design ok (gate 16)\nDesign hash: ${designHash(dir, undefined, { live: true })}`); const d = designBlock(dir, undefined, { sample }); if (d) { console.log(`review: ${d}`); process.exitCode = 1; } else console.log("review: PASS recorded for this design"); }
     }
     else if (cmd === "design-review") console.log(JSON.stringify(recordDesignReview(dir, opt("file"))));
+    else if (cmd === "design-backfill") console.log(JSON.stringify(backfillDesignSample(dir, opt("ruling"))));
     else if (cmd === "stage") console.log(`stage -> ${setStage(dir, rest[0]).stage}`);
     else if (cmd === "fix") console.log(`fix attempt ${recordFix(dir, opt("what") ?? "", { coordinator: rest.includes("--coordinator") })} recorded`);
     else if (cmd === "fire") { const fire = fireFaults(dir); console.log(fire.length ? fire.join("\n") : "ok: no home-made fire"); if (fire.length) process.exitCode = 1; }
@@ -1215,6 +1396,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       if (r.faults.length) process.exitCode = 1;
     }
     else if (cmd === "check-install") { const b = installBlock(dir, { fineExceptions: !rest.includes("--no-exceptions") }); if (b && !rest.includes("--force-dogfood")) { console.error(`REFUSED: ${b}`); process.exitCode = 1; } else console.log(b ? `ok (--force-dogfood over: ${b})` : "ok: the final review passed for these ops"); }
-    else { console.error("usage: job.mjs hash|review|design|design-review|stage|fix|fire|measure|fine|check-install <jobDir> ... (fine / check-install: --no-exceptions)"); process.exitCode = 2; }
+    else { console.error("usage: job.mjs hash|review|design|design-review|design-backfill|stage|fix|fire|measure|fine|check-install <jobDir> ... (fine / check-install: --no-exceptions)"); process.exitCode = 2; }
   } catch (e) { console.error(`REFUSED: ${e.message}`); process.exitCode = 1; }
 }

@@ -813,6 +813,21 @@ export interface SampleBlockExact {
   active?: Uint8Array;
 }
 
+/** A terrace / kit wall face cut in its own frame (see `WorldField.terraceFacesNear`). */
+export interface TerraceFaceCut {
+  readonly ox: number;
+  readonly oz: number;
+  /** Unit direction along the wall; n is (-dz, dx), the low side. */
+  readonly dx: number;
+  readonly dz: number;
+  readonly s0: number;
+  readonly s1: number;
+  readonly n0: number;
+  readonly n1: number;
+  readonly y0: number;
+  readonly y1: number;
+}
+
 export interface WorldField {
   readonly recipe: WorldRecipe;
   /** cellSize / resolution — the world units between voxel lattice samples. */
@@ -868,6 +883,15 @@ export interface WorldField {
    * Always false without planarCliffs. What `voxelWorld.mesher: "auto"` decides a cell's mesher by.
    */
   planarMaskIn(x0: number, z0: number, x1: number, z1: number): boolean;
+  /**
+   * The terrace / kit wall FACE cuts standing near (x, z) (`solved.cuts` / `kitWalls[].cuts`, kind "face"): the
+   * oriented box the field carves in front of each riser, in its own frame (s along the wall from `o` on `d`, n to
+   * the right of `d`: the low side; `n0` is the cut's back plane, `y0` its floor = the wall foot). Empty when the
+   * world has none. What the mesher squares each wall foot with (mesh.ts `squareWallFeet`).
+   */
+  terraceFacesNear(x: number, z: number): readonly TerraceFaceCut[];
+  /** Does any terrace / kit wall face cut (+ `margin` m) reach the rectangle? */
+  terraceFacesIn(x0: number, z0: number, x1: number, z1: number, margin?: number): boolean;
   /** Does a DC riser's influence (`features.dcRisers`, + `margin` m) reach the rectangle? The auto mesher builds those cells with DC. */
   dcRiserIn(x0: number, z0: number, x1: number, z1: number, margin?: number): boolean;
   /**
@@ -1887,6 +1911,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return [a - CUT_FALLOFF, b - CUT_FALLOFF, e + CUT_FALLOFF, f + CUT_FALLOFF];
   };
   const cutBuckets = makeBuckets(terraceCuts, cutBounds);
+  const faceCuts = terraceCuts.filter((c) => c.face);
+  const faceBuckets = makeBuckets(faceCuts, cutBounds);
   function terraceCutsAt(x: number, y: number, z: number, d: number): number {
     for (const c of bucketAt(cutBuckets, x, z) as readonly TerraceCut[]) {
       const rx = x - c.ox, rz = z - c.oz;
@@ -7018,6 +7044,15 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     surfaceCast,
     planarMaskIn: (x0, z0, x1, z1) => (planar ? planarAt().anyMask(x0, z0, x1, z1) : false),
     planarNear: (x, z) => (planar && !(globalThis as any).__NOPLANAR ? planarAt().touches(x, z) : false) || (risers !== null && risers.weight(x, z) > 0),
+    terraceFacesNear: (x, z) => (faceCuts.length ? (bucketAt(faceBuckets, x, z) as readonly TerraceFaceCut[]) : EMPTY_LIST),
+    terraceFacesIn: (x0, z0, x1, z1, margin = 0) => {
+      if (!faceCuts.length) return false;
+      for (const c of faceCuts) {
+        const [a, b, e, f] = cutBounds(c);
+        if (a - margin <= x1 && e + margin >= x0 && b - margin <= z1 && f + margin >= z0) return true;
+      }
+      return false;
+    },
     dcRiserIn: (x0, z0, x1, z1, margin) => (risers ? risers.reaches(x0, z0, x1, z1, margin) : false),
     surfaceSlope: (x, y, z) => {
       const n = surfaceNormalAt(x, y, z);

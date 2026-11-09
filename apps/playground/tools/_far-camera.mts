@@ -157,11 +157,13 @@ export function farCamera(c: FarCameraInput): FarCamera | null {
  * even a flat plain, measures 13-27; the groundless frames 4.4-5.4.
  */
 export const GROUNDLESS_STD = 8;
-export function groundSpread(img: { width: number; height: number; data: Uint8Array }): number {
+/** `from`: the top of the band measured, as a fraction of the height (0.6: the lower frame; a SEA view, whose lower frame is
+ *  water by design, measures from 0.3: the shore and cliff band). */
+export function groundSpread(img: { width: number; height: number; data: Uint8Array }, from = 0.6): number {
   const { width: w, height: h, data } = img;
   const ch = data.length / (w * h);
   let s = 0, q = 0, n = 0;
-  for (let y = Math.floor(h * 0.6); y < h; y += 2)
+  for (let y = Math.floor(h * from); y < h; y += 2)
     for (let x = 0; x < w; x += 2) {
       const o = (y * w + x) * ch;
       const v = data[o]! * 0.3 + data[o + 1]! * 0.59 + data[o + 2]! * 0.11;

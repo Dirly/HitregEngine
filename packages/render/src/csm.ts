@@ -1,8 +1,10 @@
 import * as THREE from "three/webgpu";
+import { uniform } from "three/tsl";
 import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
 import { cloudShadowFactor } from "./cloud-shadow.js";
 import { CSMFrustum } from "three/addons/csm/CSMFrustum.js";
 import { SHADOW_CAMERA_LAYERS } from "./horizon.js";
+import { skinnedShadowLimit } from "./skinned-shadows.js";
 
 /**
  * Cascaded shadow maps for directional lights, plus the one place that turns
@@ -329,11 +331,90 @@ interface CascadeEntry {
  * known, so overriding it is enough to have our bounds in place before the
  * first shadow render — no first-frame pop.
  */
+/**
+ * Far cascades do not re-render every frame. Every cascade redraws every caster it holds, the shadow pass was half of
+ * a town's draws, and a far cascade's picture barely changes between frames: a cascade that can hold a walking body's
+ * shadow renders every frame, the others every 2^i frames, capped at 4, staggered so two far cascades never land on one
+ * frame. A body's shadow on a skipped frame stands still while the body moves on, and a walking unit's shadow stuttered
+ * (Derek 2026-11-07), so the line is where animated bodies stop casting (skinned-shadows.ts), not a cascade number. A skipped cascade keeps its map AND its matrix (three writes `shadow.matrix` only
+ * when it renders), so the shadow stays exactly where it was drawn.
+ *
+ * A camera turn slides a far cascade's slice, and a stale map would leave new ground unshadowed at its edge, so a
+ * cascade whose fit has moved past CASCADE_STALE_SHARE of its extent renders at once. `?shadowStagger=0` turns it off.
+ */
+export const cascadeStagger = { enabled: true };
+
+/**
+ * The player's shadow setting, for every cascaded sun, present and future (a scene rebuild keeps it). `reach` and on/off
+ * apply live with no shader rebuild: `reach` moves the far edge of the last cascade, and off is one uniform that masks
+ * the cascades while their passes stop. `light.castShadow = false` would be the plain way, but it changes the lights'
+ * cache key, and that recompiles every lit material in the scene. The drifting cloud shade stays on when sun shadows
+ * are off.
+ *
+ * `mapScale` is read when a light's cascades are BUILT, so it takes effect on the next load. Resizing a live cascade's
+ * map destroys the old depth texture while bind groups still hold it: measured 2026-11-05, "Destroyed texture
+ * ShadowDepthTexture used in a submit", repeating, whether three resized it mid-pass or we did before the frame. Each
+ * one is a rejected submit.
+ */
+export interface SunShadowQuality {
+  enabled: boolean;
+  /** Times the authored `mapSize` (floor 256 px). Next load only, see above. */
+  mapScale: number;
+  /** Times the authored shadow distance. */
+  reach: number;
+}
+const sunShadowQuality: SunShadowQuality & { version: number } = { enabled: true, mapScale: 1, reach: 1, version: 0 };
+const sunShadowsOn = uniform(1, "float");
+
+export function setSunShadowQuality(quality: SunShadowQuality): void {
+  Object.assign(sunShadowQuality, quality);
+  sunShadowQuality.version++;
+  sunShadowsOn.value = quality.enabled ? 1 : 0;
+}
+
+/** The map size a cascade uses for an authored size under `mapScale`. */
+export function scaledShadowMapSize(authored: number, mapScale: number): number {
+  return Math.max(256, Math.round(authored * mapScale));
+}
+const CASCADE_MAX_PERIOD = 4;
+const CASCADE_STALE_SHARE = 0.08;
+
+/**
+ * Is cascade `index` due on frame `frame`, its fit having moved `movedShare` of its extent since it last rendered?
+ * `holdsBodies`: its slice starts inside the reach of animated bodies' shadows.
+ */
+export function cascadeDue(index: number, frame: number, movedShare: number, holdsBodies = false): boolean {
+  if (index <= 0 || holdsBodies || movedShare > CASCADE_STALE_SHARE) return true;
+  const period = Math.min(CASCADE_MAX_PERIOD, 2 ** index);
+  return frame % period === index % period;
+}
+
+/**
+ * The sun moves a sliver every frame, and that turns every cascade's texel grid with it: texel snapping holds the grid
+ * still against the camera, not against a rotation, so each shadow edge re-rasterises onto a new grid every frame and
+ * crawls (measured 2026-11-06: edges changed per frame with the clock running, not with it frozen). The cascades aim at
+ * a held direction instead, moved in steps; lighting keeps the true sun. A step is under 3 cm for a 10 m caster at noon.
+ */
+export const SHADOW_SUN_STEP_DEGREES = 0.1;
+const SHADOW_SUN_STEP_COS = Math.cos((SHADOW_SUN_STEP_DEGREES * Math.PI) / 180);
+
+/** `?sunStep=0` is the A/B: the cascades follow the true sun every frame. */
+export const shadowSunStep = { enabled: true };
+
+/** Bring `held` to `sun` if the sun has left it by a step; true when it moved. Both are unit vectors. */
+export function stepHeldSun(held: THREE.Vector3, sun: THREE.Vector3): boolean {
+  if (shadowSunStep.enabled && held.lengthSq() > 0 && held.dot(sun) >= SHADOW_SUN_STEP_COS) return false;
+  held.copy(sun);
+  return true;
+}
+
 /** Reused per-frame scratch for updateBefore(); never allocate in a frame loop. */
 const CASCADE_UP = new THREE.Vector3(0, 1, 0);
 const lightWorld = new THREE.Vector3();
 const targetWorld = new THREE.Vector3();
 const lightDirection = new THREE.Vector3();
+const ORIGIN = new THREE.Vector3();
+const heldEye = new THREE.Vector3();
 const cascadeCenter = new THREE.Vector3();
 const cascadeAim = new THREE.Vector3();
 const cascadeBox = new THREE.Box3();
@@ -348,6 +429,14 @@ class EngineCascadeShadowNode extends CSMShadowNode {
   baseNormalBias = DEFAULT_SHADOW_SETTINGS.normalBias;
   /** Filled by `updateFrustums()`; read by `stats()` and by tests. */
   readonly cascadeExtents: number[] = [];
+  /** Where each cascade's fit stood when it last rendered (world), for the stagger's staleness test. */
+  private readonly renderedAt: THREE.Vector3[] = [];
+  private staggerFrame = 0;
+  /** The sun direction the cascades aim along; see SHADOW_SUN_STEP_DEGREES. */
+  private readonly heldSun = new THREE.Vector3();
+  /** The far edge as authored; `maxFar` is this times the player's `reach`. */
+  private authoredFar: number | null = null;
+  private qualityVersion = 0;
 
   /**
    * Three's cascade term, times the drifting cloud shadow (cloud-shadow.ts):
@@ -357,7 +446,18 @@ class EngineCascadeShadowNode extends CSMShadowNode {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   override setup(builder: any): any {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (super.setup(builder) as any).mul(cloudShadowFactor());
+    return (super.setup(builder) as any).sub(1).mul(sunShadowsOn).add(1).mul(cloudShadowFactor());
+  }
+
+  /** Bring this light up to the player's reach; every cascade renders once at it. */
+  applyQuality(): void {
+    if (this.qualityVersion === sunShadowQuality.version) return;
+    this.qualityVersion = sunShadowQuality.version;
+    this.authoredFar ??= this.maxFar;
+    this.maxFar = this.authoredFar * sunShadowQuality.reach;
+    this.updateFrustums();
+    for (const at of this.renderedAt) at.set(Infinity, 0, 0);
+    for (const cascadeLight of this.lights) if (cascadeLight?.shadow) cascadeLight.shadow.needsUpdate = sunShadowQuality.enabled;
   }
 
   override updateFrustums(): void {
@@ -397,6 +497,14 @@ class EngineCascadeShadowNode extends CSMShadowNode {
     const light = this.light as THREE.DirectionalLight;
     const parent = light.parent;
     if (!camera || !parent || this.frustums.length === 0) return;
+    if (!sunShadowQuality.enabled) {
+      for (const cascadeLight of this.lights) {
+        if (!cascadeLight?.shadow) continue;
+        cascadeLight.shadow.autoUpdate = false;
+        cascadeLight.shadow.needsUpdate = false;
+      }
+      return;
+    }
 
     // three does this in its own updateBefore, which we are replacing: the
     // placeholder lights only reach the scene graph when someone adds them.
@@ -413,12 +521,16 @@ class EngineCascadeShadowNode extends CSMShadowNode {
     targetWorld.setFromMatrixPosition(light.target.matrixWorld);
     if (lightWorld.distanceToSquared(targetWorld) < 1e-12) return; // degenerate aim
     lightDirection.subVectors(targetWorld, lightWorld).normalize();
+    // every cascade moves together on a step, or their seams would disagree about where the shadow falls
+    if (stepHeldSun(this.heldSun, lightDirection)) for (const at of this.renderedAt) at.set(Infinity, 0, 0);
+    lightDirection.copy(this.heldSun);
     // Matrix4.lookAt builds rotation only, so only the DIRECTION between these
     // two points matters — which is the whole point of using world ones.
-    lightOrientation.lookAt(lightWorld, targetWorld, CASCADE_UP);
+    lightOrientation.lookAt(heldEye.copy(lightDirection).negate(), ORIGIN, CASCADE_UP);
     lightOrientationInverse.copy(lightOrientation).invert();
     parent.updateWorldMatrix(true, false);
     parentInverse.copy(parent.matrixWorld).invert();
+    this.staggerFrame++;
 
     for (let i = 0; i < this.frustums.length; i++) {
       const cascadeLight = this.lights[i];
@@ -452,6 +564,15 @@ class EngineCascadeShadowNode extends CSMShadowNode {
       cascadeAim.copy(cascadeCenter).add(lightDirection);
       cascadeLight.position.copy(cascadeCenter).applyMatrix4(parentInverse);
       cascadeLight.target.position.copy(cascadeAim).applyMatrix4(parentInverse);
+
+      const at = (this.renderedAt[i] ??= new THREE.Vector3(Infinity, 0, 0));
+      const extent = this.cascadeExtents[i] ?? 0;
+      const moved = extent > 0 ? at.distanceTo(cascadeCenter) / extent : Infinity;
+      const sliceNear = i === 0 ? 0 : (this.breaks[i - 1] ?? 0) * Math.min((camera as THREE.PerspectiveCamera).far, this.maxFar);
+      const due = !cascadeStagger.enabled || cascadeDue(i, this.staggerFrame, moved, sliceNear < skinnedShadowLimit());
+      shadow.autoUpdate = false;
+      shadow.needsUpdate = due;
+      if (due) at.copy(cascadeCenter);
     }
   }
 
@@ -462,7 +583,7 @@ class EngineCascadeShadowNode extends CSMShadowNode {
   refit(): void {
     const camera = this.camera as THREE.PerspectiveCamera | THREE.OrthographicCamera | null;
     if (!camera || this.lights.length === 0) return;
-    const far = Math.min(camera.far, this.maxFar);
+    const far = Math.min((camera as THREE.PerspectiveCamera).far, this.maxFar);
     const near = camera.near;
     const breaks = this.breaks;
 
@@ -557,9 +678,10 @@ export class CascadeShadowSystem {
     settings: ShadowSettings,
     shadowSize: number,
   ): boolean {
-    const enabled = applyShadowSettings(light, castShadow, settings, shadowSize);
-    this.release(light);
     const cascades = Math.max(1, Math.min(4, Math.floor(settings.cascades)));
+    const mapSize = cascades < 2 ? settings.mapSize : scaledShadowMapSize(settings.mapSize, sunShadowQuality.mapScale);
+    const enabled = applyShadowSettings(light, castShadow, { ...settings, mapSize }, shadowSize);
+    this.release(light);
     if (!enabled || cascades < 2) {
       if (enabled) this.passesByLight.set(light, 1);
       return false;
@@ -611,6 +733,7 @@ export class CascadeShadowSystem {
       // cascade frustums yet, and `updateFrustums()` would dereference a null
       // `mainFrustum`.
       if (entry.node.mainFrustum === null) continue;
+      entry.node.applyQuality();
       if (entry.node.camera === camera && entry.fitKey === key) continue;
       entry.node.camera = camera;
       entry.node.updateFrustums();

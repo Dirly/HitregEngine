@@ -9,7 +9,8 @@
  *   creation   the creation asset whose appearance options the look is picked from (hash of the template id)
  *   weaponRig  a prefab with one bone-socket per (weapon model, slot): the grip for the weapon item's model
  *   families   bestiary families this applies to (default ["human"])
- *   outfits    { <set>: { wear: [item ids], standIn?, why? } }
+ *   outfits    { <set>: { wear: [item ids], creation?, standIn?, why? } }
+ *              creation optionally selects an outfit-specific body and attachment profile; the default stays shared
  *   weapons    { <word>: { item, standIn? } }   an item tagged `placeholder` is a stand-in too
  *   looks      { <creature id>: { <slot>: <option> } }  pinned choices (a named rare's sex); the rest is hashed
  *
@@ -35,7 +36,7 @@ export interface HumanConfig {
   creation: string;
   weaponRig: string;
   families?: string[];
-  outfits: Record<string, { wear: string[]; standIn?: string; why?: string }>;
+  outfits: Record<string, { wear: string[]; creation?: string; standIn?: string; why?: string }>;
   weapons: Record<string, { item: string; standIn?: string }>;
   looks?: Record<string, Record<string, string>>;
 }
@@ -47,6 +48,8 @@ export interface HumanKit {
   pattern: Array<[string, EntityDoc]>;
   rootId: string;
   creation: CreationDoc;
+  /** Default and outfit-specific profiles, resolved through the project dependency closure. */
+  creations: Map<string, CreationDoc>;
   rig: Record<string, EntityDoc>;
   items: Map<string, ItemDoc>;
 }
@@ -114,8 +117,12 @@ export function loadHumanKit(projectDir: string, f: Finding[]): HumanKit | null 
   const scripts = new Set(pattern.map(([, e]) => scriptOf(e)?.name));
   const lacks = ["mob-brain", "combat-caster", "combat-actor", "character-look", "character-sheet", "bone-socket", "equipment-look"].filter((n) => !scripts.has(n));
   if (lacks.length) return bad(`pattern ${rootId} has no ${lacks.join(", ")} script`);
-  const creationFile = assetPath(projectDir, `creation/${cfg.creation}.json`);
-  if (!fs.existsSync(creationFile)) return bad(`creation ${cfg.creation} not found`);
+  const creations = new Map<string, CreationDoc>();
+  for (const id of new Set([cfg.creation, ...Object.values(cfg.outfits).flatMap((o) => o.creation ? [o.creation] : [])])) {
+    const creationFile = assetPath(projectDir, `creation/${id}.json`);
+    if (!fs.existsSync(creationFile)) return bad(`creation ${id} not found`);
+    creations.set(id, read(creationFile) as CreationDoc);
+  }
   const rigFile = assetPath(projectDir, `prefabs/${cfg.weaponRig}.json`);
   if (!fs.existsSync(rigFile)) return bad(`weaponRig prefab ${cfg.weaponRig} not found`);
   const items = new Map<string, ItemDoc>();
@@ -124,7 +131,7 @@ export function loadHumanKit(projectDir: string, f: Finding[]): HumanKit | null 
   for (const [w, o] of Object.entries(cfg.weapons)) if (!items.has(o.item)) return bad(`weapon ${w} names unknown item ${o.item}`);
   return {
     file, cfg, families: new Set(cfg.families ?? ["human"]), pattern, rootId,
-    creation: read(creationFile) as CreationDoc,
+    creation: creations.get(cfg.creation)!, creations,
     rig: (read(rigFile) as { entities: Record<string, EntityDoc> }).entities,
     items,
   };
@@ -145,10 +152,10 @@ export function dressFor(kit: HumanKit, theme: string): HumanDress | { error: st
 }
 
 /** A look from the creation options, picked by hashing the template id (sex first, then options it allows). */
-export function lookFor(kit: HumanKit, id: string, pin: Record<string, string> = {}): Record<string, string> {
+export function lookFor(kit: HumanKit, id: string, pin: Record<string, string> = {}, creation: CreationDoc = kit.creation): Record<string, string> {
   const look: Record<string, string> = {};
   const allowed = (o: { requires?: Record<string, string[]> }): boolean => Object.entries(o.requires ?? {}).every(([k, v]) => v.includes(look[k] ?? ""));
-  const slots = kit.creation.appearance.filter((s) => !s.preview);
+  const slots = creation.appearance.filter((s) => !s.preview);
   for (const s of [...slots.filter((x) => x.body), ...slots.filter((x) => !x.body)]) {
     const opts = s.options.filter(allowed);
     if (!opts.length) continue;
@@ -177,17 +184,26 @@ export function humanTemplateOps(kit: HumanKit, s: HumanSpec): { ops: Op[]; enti
   const out = new Map<string, EntityDoc>();
   for (const [old, e] of kit.pattern)
     out.set(map.get(old)!, { name: e.name, parent: e.parent === null ? null : map.get(e.parent)!, tags: [], components: rewrite(structuredClone(e.components), map) as Json });
-  const appearance = lookFor(kit, s.id, s.pin);
+  const creationId = kit.cfg.outfits[s.dress.outfit]?.creation ?? kit.cfg.creation;
+  const creation = creationId === kit.cfg.creation ? kit.creation : kit.creations.get(creationId);
+  if (!creation) throw new Error(`human-template: creation ${creationId} for outfit ${s.dress.outfit} was not loaded`);
+  const appearance = lookFor(kit, s.id, s.pin, creation);
   const wear = s.dress.wear;
   const visual = [...out].find(([, e]) => e.components["animator"])?.[0] ?? s.id;
+  if (creationId !== kit.cfg.creation) {
+    const bodyModel = creation.appearance.filter((slot) => slot.body && !slot.preview)
+      .flatMap((slot) => slot.options.filter((o) => o.id === appearance[slot.id])).find((o) => o.model)?.model;
+    const mesh = out.get(visual)?.components["mesh"] as { source?: Json } | undefined;
+    if (bodyModel && mesh?.source) mesh.source.assetId = bodyModel;
+  }
 
   // character-look mounts: one per creation mount model the build shows (face, hair) or the worn items draw on
-  const buildModels = new Set(kit.creation.appearance.filter((x) => !x.preview && !x.body).flatMap((x) => x.options.map((o) => o.model ?? "")).filter(Boolean));
+  const buildModels = new Set(creation.appearance.filter((x) => !x.preview && !x.body).flatMap((x) => x.options.map((o) => o.model ?? "")).filter(Boolean));
   const worn = new Set(wear.map((id) => kit.items.get(id)?.appearance?.model ?? ""));
-  const mirrored = new Set(kit.creation.mounts.filter((m) => m.mirrorTo).map((m) => m.model));
+  const mirrored = new Set(creation.mounts.filter((m) => m.mirrorTo).map((m) => m.model));
   const mountTpl = [...out.values()].find((e) => scriptOf(e)?.name === "character-look" && meshModel(e));
   for (const [id, e] of [...out]) if (scriptOf(e)?.name === "character-look" && meshModel(e)) out.delete(id);
-  for (const model of [...new Set(kit.creation.mounts.map((m) => m.model))]) {
+  for (const model of [...new Set(creation.mounts.map((m) => m.model))]) {
     if (!mountTpl || (!buildModels.has(model) && !worn.has(model))) continue;
     const name = shortName(model);
     const copies: Array<[string, boolean]> = mirrored.has(model) ? [[`${name}-l`, false], [`${name}-r`, true]] : [[name, false]];
@@ -219,6 +235,7 @@ export function humanTemplateOps(kit: HumanKit, s: HumanSpec): { ops: Op[]; enti
     const p = (sc.params ??= {});
     switch (sc.name) {
       case "character-look":
+        p["creation"] = creationId;
         p["appearance"] = appearance;
         p["wear"] = wear;
         break;

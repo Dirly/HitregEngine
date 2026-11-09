@@ -24,7 +24,7 @@
  * shows enemies blinking.
  */
 
-import { polygonEdgeDistance, regionAt, spawnAreaSchema, WORLD_HOUR_KEY, type EntityDoc, type MobTemperament, type SpawnAreaData, type SpawnRare } from "@hitreg/core";
+import { polygonEdgeDistance, regionAt, spawnAreaSchema, mobBehaviorOverride, WORLD_HOUR_KEY, type EntityDoc, type MobBehaviorInput, type MobBehaviorArchetype, type MobTemperament, type SpawnAreaData, type SpawnRare } from "@hitreg/core";
 import type { GameServer } from "./server.js";
 import { nearestOnRoute } from "@hitreg/scripting";
 import { SOLID_WORLD } from "@hitreg/physics";
@@ -90,6 +90,7 @@ export interface MixRow {
   weight: number;
   count: [number, number];
   temperament?: MobTemperament;
+  behaviorArchetype?: MobBehaviorArchetype;
   near: number;
   /** Companion templates spawned in the same roll (a band). */
   with?: string[];
@@ -126,8 +127,8 @@ export function resolveSpawnArea(raw: unknown): SpawnAreaData {
 
 /** What one roll draws from: `mix`, else the `spawns` read as rows weighted by their counts (one creature a roll). */
 export function spawnTable(data: SpawnAreaData): MixRow[] {
-  if (data.mix?.length) return data.mix.map((m) => ({ template: m.template, weight: m.weight ?? 1, count: [Math.min(m.count[0], m.count[1]), Math.max(m.count[0], m.count[1])] as [number, number], ...(m.temperament ? { temperament: m.temperament } : {}), near: m.near ?? 4, ...(m.with?.length ? { with: [...m.with] } : {}) }));
-  return (data.spawns ?? []).map((sp) => ({ template: sp.template, weight: sp.count ?? 1, count: [1, 1] as [number, number], near: 4 }));
+  if (data.mix?.length) return data.mix.map((m) => ({ template: m.template, weight: m.weight ?? 1, count: [Math.min(m.count[0], m.count[1]), Math.max(m.count[0], m.count[1])] as [number, number], ...mobBehaviorOverride(m), near: m.near ?? 4, ...(m.with?.length ? { with: [...m.with] } : {}) }));
+  return (data.spawns ?? []).map((sp) => ({ template: sp.template, weight: sp.count ?? 1, count: [1, 1] as [number, number], near: 4, ...mobBehaviorOverride(sp) }));
 }
 
 /** Creatures alive at once: `unique` 1; else `population`, else the default the schema states for the placement. */
@@ -264,23 +265,22 @@ export function pickRoutePoint(
   return null;
 }
 
-/** The params a temperament adds: passive creatures never shout (alertRadius 0). */
-function temperamentParams(t: MobTemperament | undefined, territory: number | undefined): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  if (t) out["temperament"] = t;
-  if (t === "passive") out["alertRadius"] = 0;
+/** Pass policy overrides without baking alert tuning: the brain resolves the shared preset against its template. */
+function behaviorParams(scope: MobBehaviorInput, territory: number | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...scope };
   if (territory !== undefined) out["territory"] = territory;
   return out;
 }
 
-/** A slot's params with the rare's own temperament / territory over the slot's. */
+/** A rare's explicit policy outranks its placeholder slot; its own atlas/template still supplies social tuning. */
 function rareParams(slot: Record<string, unknown>, rare: SpawnRare, territory: number | undefined): Record<string, unknown> {
   const rest: Record<string, unknown> = { ...slot };
-  const temperament = rest["temperament"] as MobTemperament | undefined;
+  const mood = mobBehaviorOverride(rare, rest as MobBehaviorInput);
   delete rest["temperament"];
+  delete rest["behaviorArchetype"];
   delete rest["alertRadius"];
   delete rest["territory"];
-  return { ...rest, ...temperamentParams(rare.temperament ?? temperament, rare.territory ?? territory) };
+  return { ...rest, ...behaviorParams(mood, rare.territory ?? territory) };
 }
 
 export interface SpawnAreaManagerOptions {
@@ -519,19 +519,19 @@ export class SpawnAreaManager {
     let n = 0;
     const route = SpawnAreaManager.route(area);
     // a `mix` in a pack adds its rolls to the authored spawns, scattered like a default spawn (6 m)
-    const rolled: Array<{ template: string; count: number; spread: number; temperament?: MobTemperament }> = [];
+    const rolled: Array<{ template: string; count: number; spread: number; temperament?: MobTemperament; behaviorArchetype?: MobBehaviorArchetype }> = [];
     if (area.data.mix?.length) {
       const table = spawnTable(area.data);
       let left = populationOf(area.data) - area.data.spawns.reduce((m, s) => m + s.count, 0);
       while (left > 0) {
         const roll = rollMix(table, this.rand, left);
         if (!roll) break;
-        rolled.push({ template: roll.row.template, count: roll.count, spread: 6, ...(roll.row.temperament ? { temperament: roll.row.temperament } : {}) });
+        rolled.push({ template: roll.row.template, count: roll.count, spread: 6, ...mobBehaviorOverride(roll.row) });
         left -= roll.count;
       }
     }
     for (const spawn of [...area.data.spawns, ...rolled]) {
-      const mood = temperamentParams((spawn as { temperament?: MobTemperament }).temperament ?? area.data.temperament, area.data.territory);
+      const mood = behaviorParams(mobBehaviorOverride(spawn, area.data), area.data.territory);
       for (let i = 0; i < spawn.count; i++) {
         // the area's own height says which floor it is on: an area in a cave spawns on the cave floor, not on the
         // mountain above it. Without voxel terrain (a dungeon) the floor is the physics world's, within 2 m of the
@@ -709,7 +709,7 @@ export class SpawnAreaManager {
     const st = area.roaming!;
     const route = (area.data.placement ?? "pack") === "route" ? SpawnAreaManager.route(area) : [];
     const [rlo, rhi] = area.data.roamRange ?? [40, 80];
-    const mood = temperamentParams(row.temperament ?? area.data.temperament, area.data.territory);
+    const mood = behaviorParams(mobBehaviorOverride(row, area.data), area.data.territory);
     // one roll is one group: on a route every member sets off the same way (a pack walks together, never splits at birth)
     const patrolDir = this.rand() < 0.5 ? -1 : 1;
     const members = [...Array.from({ length: count }, () => row.template), ...(row.with ?? []).slice(0, companions)];

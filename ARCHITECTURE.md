@@ -24,7 +24,7 @@ this engine serves.
 | Editor camera | `camera-controls` (yomotsu) | OrbitControls (no damping/dolly-to-cursor/fit) |
 | Scripting | TS component classes + JSON-exposed params | JSON behavior graphs, eval'd script strings |
 | Multiplayer | **Day one.** Server-authoritative, client prediction, lag compensation | single-player-first retrofit |
-| Models | glTF only, KTX2 textures, meshopt compression | multi-format import chaos |
+| Models | glTF only, lossless PNG textures (KTX2 rejected 2026-11-05, docs/hosting.md), meshopt compression | multi-format import chaos |
 | Animation | AnimationMixer + JSON animator state machine component | — |
 | Audio | Three positional audio as a component | howler (redundant) |
 
@@ -385,6 +385,13 @@ the file I/O). The overlay is tree-shaken out of production builds.
   (materials: PBR params with live scene updates; prefabs: definition edits
   propagate to instances). Script assets arrive with the scripting runtime;
   rendered thumbnails with the asset viewer.
+  *Amended 2026-11-03 (stale autosaves erased agent installs):* a write to
+  an existing scene file carries `base`, the `contentTag` of the text the
+  client last loaded, merged or wrote. The server checks it under the tools'
+  `<file>.lock` and refuses a stale write (409 with the current text); the
+  client rebases its own edits onto that text (`rebaseSceneEdits`, three-way)
+  and saves again. Live-sync merges a file change under unsaved edits the
+  same way, so neither the human's nor a tool's edits are dropped.
 - **Graybox kit** (ProBuilder-lite): one-click floor/wall/platform/pillar/ramp
   (wedge primitive)/stairs — plain entities, so they rescale, snap, and prefab
   like anything else. *Amended 2026-08-26 (ProBuilder-class mesh editing):*

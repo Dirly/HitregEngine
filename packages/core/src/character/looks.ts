@@ -39,7 +39,7 @@ export interface ComposedLook {
 
 export interface ComposeOptions {
   /**
-   * Map every piece onto the wearer's body first (a woman wearing an item
+   * Map every piece onto the wearer's fit first (a woman wearing an item
    * written with the man's part names: creation `remap` on her body option).
    */
   remap?: LookRemap | null | undefined;
@@ -212,10 +212,9 @@ export function dressCharacter(input: DressInput): DressResult {
   const models = new Map<string, ComposedLook>();
   const modelIds = new Set<string>([body, ...pieces.map((p) => p.model), ...creation.mounts.map((m) => m.model)]);
   for (const model of modelIds) {
-    const composed =
-      model === body
-        ? composeModelLook(pieces, model, { remap: bodyOption?.remap, sheets: input.sheets?.(model) })
-        : composeModelLook(pieces, model);
+    // Mounted gear can have sex-specific fits too (for example a fitted mask).
+    // Resolve its sheet against its OWN page, preserving shared helmet themes.
+    const composed = composeModelLook(pieces, model, { remap: bodyOption?.remap, sheets: input.sheets?.(model) });
     models.set(model, composed ?? { parts: [], groups: [] });
   }
   // what each model's shown parts cover on the others

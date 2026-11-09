@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { defaultWorldRecipe, worldRecipeSchema } from "@hitreg/core";
 import {
-  artOf, catalogueDesignFaults, evaluate, groundRecord, localGround, parseRecipe, rehashGround, guardWorldWrite, stagesOf, loadStages, nextOf, recordPlaceStage, requirePlaceStage, reviewVerdict, saveStages, worldHash, worldStagesSchema, type WorldStages,
+  artOf, catalogueDesignFaults, coveringRulings, evaluate, recordRoadTrim, groundRecord, localGround, parseRecipe, rehashGround, guardWorldWrite, stagesOf, loadStages, nextOf, recordPlaceStage, requirePlaceStage, reviewVerdict, saveStages, worldHash, worldStagesSchema, type WorldStages,
 } from "../tools/world-order.mts";
 import { run as stagesRun } from "../tools/zonegen/commands/stages.mts";
 import { run as approveRun } from "../tools/zonegen/commands/approve.mts";
@@ -199,6 +199,56 @@ describe("world order", () => {
     assert.equal(state("town-1", "sited").state, "ok", "the town 300 m away is untouched");
   });
 
+  // 2026-10-31 redstrand: road-net --fold cut a doubled stretch out of a path under the Red Dial (no regrade) and every stage
+  // from bare-renders to design-review went STALE, asking for a Codex repaint of an approved place.
+  it("a road TRIM re-checks sited only (gates, then --recheck); the concept stages stay ok; any other change still stales", async () => {
+    frozenWorld();
+    const r = JSON.parse(fs.readFileSync(recipeFile(), "utf8"));
+    r.features.roads.push({ id: "path-dial", points: [[200, 0], [300, 0], [400, 0]] });
+    fs.writeFileSync(recipeFile(), JSON.stringify(worldRecipeSchema.parse(r)));
+    const doc0 = loadStages(projectDir, W)!;
+    delete doc0.stages["world-frozen"];
+    doc0.places[0]!.stages["sited"]!.ground = groundRecord(projectDir, doc0, doc0.places[0]!);
+    saveStages(projectDir, doc0);
+    painted();
+    assert.equal(state("dial", "concept-painted").state, "ok");
+    // the fold: the path loses its east half, nothing regraded
+    r.features.roads.find((x: { id: string }) => x.id === "path-dial").points = [[200, 0], [300, 0]];
+    fs.writeFileSync(recipeFile(), JSON.stringify(worldRecipeSchema.parse(r)));
+    assert.equal(state("dial", "concept-painted").state, "STALE", "untreated, a trim stales the painting (the fault)");
+    const doc = loadStages(projectDir, W)!;
+    const parts = recordRoadTrim(doc, parseRecipe(JSON.parse(fs.readFileSync(recipeFile(), "utf8"))), ["path-dial"], "test fold", "test");
+    assert.deepEqual(Object.keys(parts), ["roads/path-dial"]);
+    saveStages(projectDir, doc);
+    const sited = state("dial", "sited");
+    assert.equal(sited.state, "STALE");
+    assert.match(sited.why, /road-trim.*--recheck/);
+    assert.equal(state("dial", "bare-renders").state, "ok", "a trim re-check does not stale the work after it");
+    assert.equal(state("dial", "concept-painted").state, "ok", "the painting stands");
+    // the gates passed: --recheck re-hashes the covered records and keeps their times
+    const at = loadStages(projectDir, W)!.places[0]!.stages["sited"]!.at;
+    assert.equal(await quiet(() => stagesRun(ctx({ recheck: "dial", by: "test" }) as never)), 0);
+    assert.equal(state("dial", "sited").state, "ok");
+    assert.equal(loadStages(projectDir, W)!.places[0]!.stages["sited"]!.at, at, "the record time is kept");
+    // a later regrade of the same road is not a trim
+    r.features.roads.find((x: { id: string }) => x.id === "path-dial").points = [[200, 0], [300, 10]];
+    fs.writeFileSync(recipeFile(), JSON.stringify(worldRecipeSchema.parse(r)));
+    assert.equal(state("dial", "concept-painted").state, "STALE", "a different road shape is not covered");
+    // a dated coordinator ruling covers it for that place, every stage ok without a re-check
+    assert.equal(await quiet(() => stagesRun(ctx({ "ground-ruling": "2026-10-31 coordinator: shoulder only", place: "dial", by: "test" }) as never)), 0);
+    assert.equal(state("dial", "concept-painted").state, "ok");
+    assert.equal(state("dial", "sited").state, "ok");
+    assert.equal(coveringRulings({ groundRulings: [] }, "dial", { a: "1" }, { a: "2" }), null);
+    // an owner re-sites at the SAME site after the change: not a redo, the painting stands; a moved site is a redo
+    const d2 = loadStages(projectDir, W)!;
+    d2.places[0]!.stages["sited"]!.at = new Date(Date.now() + 1000).toISOString();
+    saveStages(projectDir, d2);
+    assert.equal(state("dial", "bare-renders").state, "ok", "same-site re-site");
+    d2.places[0]!.stages["sited"]!.site = { center: [320, 0], radius: 60 };
+    saveStages(projectDir, d2);
+    assert.equal(state("dial", "bare-renders").state, "STALE", "a moved site is a redo");
+  });
+
   it("local ground: mood, scatter, cover and surfaces never stale a place", () => {
     frozenWorld();
     painted();
@@ -270,5 +320,86 @@ describe("localGround: roads count by the segments that reach the place", () => 
     const res = rehashGround(doc, was);
     assert.deepEqual(res.rehashed, ["p:sited"]);
     assert.equal((doc.places[0]!.stages as Record<string, { ground: { hash: string } }>).sited!.ground.hash, localGround(with_(road(line.slice(1))), fp).hash);
+  });
+});
+
+// 2026-10-30 redstrand w15: a scree fan by Rustgut (an operator doc keyed by `from`/`to`, and its rock set keyed by
+// `rocks[].at`) had no coordinates the hash knew, so it counted everywhere and staled every place in the world.
+describe("localGround: an operator and its rock set count only where they reach", () => {
+  const base = worldRecipeSchema.parse(defaultWorldRecipe());
+  const fp = { center: [0, 0] as [number, number], radius: 100, views: [] as [number, number][], corridor: 30 };
+  const op = (at: [number, number]) => ({ id: "talus-x", op: "scree", from: [[at[0], at[1]], [at[0] + 20, at[1]]], to: [at[0], at[1] - 30], angle: 33 });
+  const rocks = (at: [number, number]) => ({ id: "op:talus-x:rocks", rocks: [{ rule: "rock-small", at, yaw: 0, scale: 1 }] });
+  const with_ = (o: unknown, r: unknown) => parseRecipe({ ...base, features: { ...base.features, operators: [o], rockSets: [r] } });
+  const none = parseRecipe({ ...base, features: { ...base.features, operators: [], rockSets: [] } });
+  it("a fan 800 m off leaves the place alone", () => {
+    assert.equal(localGround(with_(op([800, 0]), rocks([800, -20])), fp).hash, localGround(none, fp).hash);
+  });
+  it("a fan beside the place stales it", () => {
+    assert.notEqual(localGround(with_(op([60, 0]), rocks([60, -20])), fp).hash, localGround(none, fp).hash);
+  });
+});
+
+it("place-build --sample builds the design's sample area on `design` alone, lab only (the design-review deadlock)", async () => {
+  const { placeBuildGate } = await import("../tools/world-order.mts");
+  // normal order: the grey box needs design-review, the install final-review
+  assert.equal(placeBuildGate("build").stage, "design-review");
+  assert.equal(placeBuildGate("install").stage, "final-review");
+  assert.equal(placeBuildGate("install", { dryRun: true }).stage, "");
+  // the sample: plan / all / build / shots on `design`, so the review's sample shots can exist before the review
+  for (const c of ["plan", "all", "build", "shots"]) assert.equal(placeBuildGate(c, { sample: true }).stage, "design");
+  // ... never installed, never live
+  assert.match(placeBuildGate("install", { sample: true }).refuse ?? "", /never installs/);
+  assert.match(placeBuildGate("gates", { sample: true, live: true }).refuse ?? "", /lab only/);
+});
+
+it("place-build --draft builds and installs a place as it is with no review stage; plan / all are refused (i-drafts 2026-11-03)", async () => {
+  const { placeBuildGate } = await import("../tools/world-order.mts");
+  assert.equal(placeBuildGate("build", { draft: true }).stage, "");
+  assert.equal(placeBuildGate("install", { draft: true }).stage, "");
+  for (const c of ["plan", "all"]) assert.match(placeBuildGate(c, { draft: true }).refuse ?? "", /AS IT IS/);
+  // w-temple5 2026-11-03: plan --draft expands an owner's layout.json as it is; `all` still refused
+  assert.deepEqual(placeBuildGate("plan", { draft: true, layout: true }), { stage: "" });
+  assert.match(placeBuildGate("all", { draft: true, layout: true }).refuse ?? "", /AS IT IS/);
+  assert.match(placeBuildGate("build", { draft: true, sample: true }).refuse ?? "", /do not combine/);
+});
+
+it("only a live install moves the job to `installed`; a lab build, a --job copy and an uninstall never do (i-drafts2 2026-11-03)", async () => {
+  const { stampsInstalled } = await import("../tools/world-order.mts");
+  assert.equal(stampsInstalled({ target: "redstrand", lab: "pb-noon-stone" }), true);
+  assert.equal(stampsInstalled({ target: "pb-noon-stone", lab: "pb-noon-stone" }), false); // build / all into the lab
+  assert.equal(stampsInstalled({ target: "redstrand", lab: "pb-noon-stone", remove: true }), false);
+  assert.equal(stampsInstalled({ target: "redstrand", lab: "pb-noon-stone", dry: true }), false);
+  assert.equal(stampsInstalled({ target: "tplace-x", lab: "tplace-x", jobCopy: true }), false);
+});
+
+// r-found 2026-10-31: a bare re-render after a road trim re-composed Red Dial's sheet (the concept-painted evidence) and
+// STALEd Derek's approved paintings with no way back short of a Codex repaint. `--renders-only` now carries the record
+// when the PAINTINGS are the recorded ones: content hashes (a copy or checkout rewrites mtimes), never file times.
+describe("paintedCarry: a bare re-render keeps concept-painted only for the recorded paintings", async () => {
+  const { paintedCarry } = await import("../tools/world-order.mts");
+  const rec = (frames?: Record<string, string>) => ({ at: "2026-10-30T01:18:59.859Z", worldHash: "w", by: "zonegen concept", ...(frames ? { frames } : {}) });
+  const now = { "c/dial-approach.png": "aa", "c/dial-far.png": "bb" };
+  it("carries when every frame hash matches the record", () => {
+    assert.equal(paintedCarry(rec({ ...now }), now).carry, true);
+  });
+  it("refuses a repainted frame and names it", () => {
+    const c = paintedCarry(rec({ ...now, "c/dial-far.png": "old" }), now);
+    assert.equal(c.carry, false);
+    assert.match(c.why, /dial-far\.png/);
+  });
+  it("refuses a missing frame, and with no record at all", () => {
+    assert.equal(paintedCarry(rec({ ...now }), { ...now, "c/dial-far.png": null }).carry, false);
+    assert.equal(paintedCarry(undefined, now).carry, false);
+  });
+  it("a record from before the hashes carries only on a dated ruling", () => {
+    assert.equal(paintedCarry(rec(), now).carry, false);
+    assert.match(paintedCarry(rec(), now).why, /--paint-ruling/);
+    assert.equal(paintedCarry(rec(), now, "trust me").carry, false);
+    assert.equal(paintedCarry(rec(), now, "2026-10-31 coordinator: road trim only, paintings unchanged").carry, true);
+  });
+  it("the record keeps the frame hashes through the stages schema", () => {
+    const doc = worldStagesSchema.parse({ version: 1, world: "fx", project: "p", places: [{ id: "dial", kind: "poi", role: "large-place", stages: { "concept-painted": rec({ ...now }) } }] });
+    assert.deepEqual(doc.places[0]!.stages["concept-painted"]!.frames, now);
   });
 });

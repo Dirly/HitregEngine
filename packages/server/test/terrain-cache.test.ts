@@ -183,3 +183,37 @@ describe("terrain cache bake + read", () => {
     expect(left.filter((n) => ["aaa", "bbb", "ccc"].includes(n)).length).toBe(1);
   });
 });
+
+describe("voxelWorld streaming bounds (a cropped lab)", () => {
+  it("crops the bake set, makes an unbounded world finite, and hashes only when set", () => {
+    const r = recipe();
+    const cells = bakeCells(r, { min: [0, 0], max: [40, 40] })!;
+    expect(cells).toEqual([[0, 0]]);
+    const open = { ...r, bounds: { ...r.bounds, limit: undefined } } as unknown as WorldRecipe;
+    expect(bakeCells(open)).toBeNull();
+    expect(bakeCells(open, voxelWorldSchema.parse({ world: WORLD, bounds: { min: [-50, -50], max: [50, 50] } }).bounds)!.length).toBe(16); // cells -2..1 on both axes (-96..96 overlaps -50..50)
+    // an unbounded component keeps the cache key it had before bounds existed; a box moves it
+    const boxed = voxelWorldSchema.parse({ world: WORLD, bounds: { min: [0, 0], max: [40, 40] } });
+    expect(terrainCacheKey(inputs(r, { data: boxed }), "code")).not.toBe(terrainCacheKey(inputs(r), "code"));
+  });
+
+  it("the server never loads or simulates a cell outside the box", async () => {
+    const r = recipe();
+    registerVoxelWorld(WORLD, r);
+    const doc: SceneDoc = {
+      version: 1,
+      name: "terrain-bounds-test",
+      entities: { world: { name: "world", parent: null, tags: [], components: { voxelWorld: { world: WORLD, bounds: { min: [0, 0], max: [40, 40] } } } } },
+    };
+    const world = await HeadlessWorld.create({ doc, assets: new AssetLibrary(), registry: defaultRegistry(), events: defaultEvents(), scripts: defaultScripts() });
+    const terrain = new TerrainStreamer(world, resolveServerVoxelWorld(world.base, 2)!, { pool: false });
+    terrain.ensureAround(10, 10, 2);
+    for (let i = 0; i < 20; i++) terrain.update([[10, 0, 10]]);
+    expect(terrain.cells()).toEqual(["0_0"]);
+    expect(terrain.inWorld(-1, 0)).toBe(false);
+    expect(world.sim.raycast([10, 400, 10], [0, -1, 0], 1000)).not.toBeNull();
+    expect(world.sim.raycast([-30, 400, 10], [0, -1, 0], 1000)).toBeNull();
+    terrain.dispose();
+    world.dispose();
+  }, 60_000);
+});

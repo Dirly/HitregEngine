@@ -423,3 +423,38 @@ describe("outdoor LAYOUT: vignettes spread over the site, not a square of stuff 
     expect(laid.placements.length).toBe(2);
   });
 });
+
+describe("camp rules (Derek 2026-10-31): tents face the fire, gear kept under cover", () => {
+  const flat = { ground: () => 10, water: () => null };
+  const camp = () => buildSiteSocketMap({ id: "camp", areas: [{ id: "core", role: "camp", centre: [0, 0], radius: 18 }], anchors: [], keep: [], blockers: [] }, flat).map;
+  const PROPS: Record<string, DressingData> = {
+    fire: dressingSchema.parse({ mount: "floor", size: [1.2, 0.6, 1.2], against: "free", setting: "outdoor", fire: true, rooms: ["camp"] }) as DressingData,
+    // a tent whose way in is its local +x side
+    tent: dressingSchema.parse({ mount: "floor", size: [4, 3, 4], against: "free", setting: "outdoor", rooms: ["camp"], facesCentre: "+x", shelter: true }) as DressingData,
+    jar: dressingSchema.parse({ mount: "floor", size: [0.5, 0.8, 0.5], against: "free", setting: "outdoor", rooms: ["camp"], underCover: true }) as DressingData,
+  };
+  const go = (items: { id: string; prop: string; place: Record<string, unknown> }[]) =>
+    resolveDressing({ map: camp(), plan: { id: "c", map: "camp", rooms: { core: { role: "camp", also: [], owner: "" } }, items: items.map((i) => ({ set: "", note: "", ...i })) }, prop: (id: string) => PROPS[id], set: () => undefined, options: { minItems: () => 0 } } as never);
+  const codes = (r: { violations: { code: string; item: string }[] }, code: string) => r.violations.filter((v) => v.code === code).map((v) => v.item);
+
+  it("faces-centre: a tent whose entrance turns from the fire is refused with the yaw to use; one facing it passes", () => {
+    // tent 8 m west of the fire: +x must point east (+x world) -> yaw 0 passes; yaw 90 turns +x to -z (90 deg off)
+    const ok = go([{ id: "f", prop: "fire", place: { kind: "floor", level: 0, at: [0, 0], yaw: 0 } }, { id: "t", prop: "tent", place: { kind: "floor", level: 0, at: [-8, 0], yaw: 0 } }]);
+    expect(codes(ok, "faces-centre")).toEqual([]);
+    const bad = go([{ id: "f", prop: "fire", place: { kind: "floor", level: 0, at: [0, 0], yaw: 0 } }, { id: "t", prop: "tent", place: { kind: "floor", level: 0, at: [-8, 0], yaw: 90 } }]);
+    expect(codes(bad, "faces-centre")).toEqual(["t"]);
+    expect(bad.violations.find((v) => v.code === "faces-centre")!.message).toMatch(/"yaw": 0\b/);
+  });
+
+  it("under-cover: a jar in the open is refused; one at the tent's mouth or inside it passes", () => {
+    const base = [{ id: "f", prop: "fire", place: { kind: "floor", level: 0, at: [0, 0], yaw: 0 } }, { id: "t", prop: "tent", place: { kind: "floor", level: 0, at: [-8, 0], yaw: 0 } }];
+    expect(codes(go([...base, { id: "j", prop: "jar", place: { kind: "floor", level: 0, at: [6, 6], yaw: 0 } }]), "under-cover")).toEqual(["j"]);
+    // the mouth: the tent's +x side middle is (-6, 0); 0.5 m outside it is (-5.5, 0); the jar 1.5 m south of that
+    expect(codes(go([...base, { id: "j", prop: "jar", place: { kind: "floor", level: 0, at: [-5.5, 1.5], yaw: 0 } }]), "under-cover")).toEqual([]);
+    expect(codes(go([{ id: "j", prop: "jar", place: { kind: "floor", level: 0, at: [6, 6], yaw: 0 } }]), "under-cover")).toEqual(["j"]); // no shelter at all
+    // in the open ON PURPOSE, with its reason: accepted and warned (in-open)
+    const off = go([...base, { id: "j", prop: "jar", inOpen: "an offering at the captive feet", place: { kind: "floor", level: 0, at: [6, 6], yaw: 0 } } as never]);
+    expect(codes(off, "under-cover")).toEqual([]);
+    expect((off as never as { warnings: { code: string }[] }).warnings.map((w) => w.code)).toContain("in-open");
+  });
+});

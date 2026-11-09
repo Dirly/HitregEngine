@@ -38,6 +38,57 @@ function shaderAt(mesh: THREE.InstancedMesh, i: number): [number, number, number
   return [a[i * 4]!, a[i * 4 + 1]!, a[i * 4 + 2]!];
 }
 
+describe("ParticleSystem simulation space", () => {
+  /** One live particle, born at the emitter; `at()` is its drawn world position. */
+  function setup(space: "local" | "world", gravity = 0) {
+    const particles = new ParticleSystem();
+    const group = new THREE.Group();
+    new THREE.Scene().add(group);
+    particles.register("fx", group, { ...data, lifetime: [10, 10], space, gravity });
+    const mesh = particles.drawOf("fx")!.mesh as unknown as THREE.InstancedMesh;
+    const camera = new THREE.PerspectiveCamera();
+    particles.setValue("fx", { emitting: false, burst: 1 });
+    particles.update(0.1, camera);
+    const at = (): THREE.Vector3 => new THREE.Vector3().fromArray(mesh.instanceMatrix.array as Float32Array, 12);
+    return { group, at, step: () => particles.update(0.1, camera) };
+  }
+
+  it("a local particle rides a moving emitter; a world one stays where it was born", () => {
+    for (const [space, x] of [["local", 5], ["world", 0]] as const) {
+      const { group, at, step } = setup(space);
+      group.position.x = 5;
+      step();
+      expect(at().x).toBeCloseTo(x, 3);
+    }
+  });
+
+  it("gravity pulls a local particle world-down however its emitter is turned", () => {
+    const { group, at, step } = setup("local", 10);
+    group.rotation.z = Math.PI; // the blade held point-down
+    for (let n = 0; n < 5; n++) step();
+    expect(at().y).toBeLessThan(-0.5);
+    expect(Math.abs(at().x)).toBeLessThan(1e-3);
+  });
+});
+
+describe("ParticleSystem light and AO", () => {
+  const material = (blending: "additive" | "normal") => {
+    const particles = new ParticleSystem();
+    particles.register("fx", new THREE.Group(), { ...data, blending });
+    return particles.drawOf("fx")!.mesh.material as unknown as { colorNode: unknown; emissiveNode?: unknown };
+  };
+
+  it("draws an additive particle as emission, so AO never darkens a flame with the wall behind it", () => {
+    expect(material("additive").emissiveNode).toBeTruthy();
+  });
+
+  it("leaves a normal-blended particle lit colour, so smoke still takes AO", () => {
+    const smoke = material("normal");
+    expect(smoke.emissiveNode).toBeFalsy();
+    expect(smoke.colorNode).toBeTruthy();
+  });
+});
+
 describe("ParticleSystem runtime control", () => {
   it("sleeps authored-hidden emitters and supports a bounded one-shot burst", () => {
     const particles = new ParticleSystem();

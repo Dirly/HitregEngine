@@ -5,6 +5,18 @@
  *
  *   pnpm -F playground weapon-page --recipe longsword --project foundation \
  *     --themes iron-common iron-rusted steel [--model weapons/longsword-uber.glb]
+ *     [--atlas-root <compiled-root>] [--texture-dir <relative-asset-directory>]
+ * The optional routes read <compiled-root>/<recipe>/<theme>/atlas.png and
+ * install new texture IDs under texture-dir, preserving older compiled sheets.
+ * `--gutter <px>` controls packing gutters (default8). A project may declare
+ * authoring/atlas-extensions/<recipe>.json to append stable native parts/tiles;
+ * `--native-parts <file>` selects another descriptor. Its sharedRefinement may
+ * preserve coarse base pixels while refreshing selected master-painted islands
+ * on ordinary shared-page bakes; explicit compiled atlas roots bypass that step.
+ * A descriptor may also supply paintCompiler:{module,export}. Its project module
+ * (relative to assets) receives (image,theme,recipe) after refinement and returns
+ * {image,mask,regions}; dimensions and every pixel outside its binary mask must
+ * remain exact. This finishing step also runs for explicit compiled atlas roots.
  *
  * Why a page: every held weapon of one type is ONE draw call (a `mesh.moving`
  * instanced batch, see packages/render/src/moving-instances.ts). A draw is one
@@ -41,9 +53,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { decodePng, encodePng } from "./_png.mjs";
 import { assertSquarePage, squareGrid } from "./_page.mjs";
+import { weaponPagePaths } from "./_weapon-page-paths.mjs";
+import { appendNativeParts, readUber } from './_uber-native-parts.mjs';
+import { selectiveAtlasDetail } from './_atlas-detail.mjs';
+import { compileProjectPaint } from './_paint-compiler.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PLAYGROUND = path.resolve(here, "..");
@@ -63,7 +80,7 @@ const recipe = typeof args.recipe === "string" ? args.recipe : null;
 const project = typeof args.project === "string" ? args.project : null;
 const themes = args.themes === undefined || args.themes === true ? [] : [].concat(args.themes);
 if (!recipe || !project || themes.length === 0) {
-  console.error("usage: weapon-page --recipe <name> --project <project> --themes <a> <b> … [--model weapons/<recipe>-uber.glb]");
+  console.error("usage: weapon-page --recipe <name> --project <project> --themes <a> <b> … [--model weapons/<recipe>-uber.glb] [--atlas-root <compiled-root>] [--texture-dir <relative-asset-directory>]");
   process.exit(1);
 }
 const withRecipe = typeof args.with === "string" ? args.with : null;
@@ -75,15 +92,18 @@ if (withRecipe && withThemes.length === 0) {
 // --no-seam-blend: pack the painted sheets as they are (the blend rewrites texels along every island edge)
 const seamBlend = args["no-seam-blend"] !== true;
 const modelId = typeof args.model === "string" ? args.model : `weapons/${recipe}-uber.glb`;
-const textureDir = path.posix.dirname(modelId);
+const { atlasRoot, outDir, textureDir } = weaponPagePaths(ENGINE, recipe, modelId, args);
 const assets = path.join(PLAYGROUND, "projects", project, "assets");
 if (!fs.existsSync(assets)) {
   console.error(`! no project assets at ${assets}`);
   process.exit(1);
 }
-const outDir = path.join(ENGINE, "tools", "atlas", "out", recipe);
 const setDir = path.join(ENGINE, "tools", "atlas", "sets", recipe);
 const work = fs.mkdtempSync(path.join(os.tmpdir(), `weapon-page-${recipe}-`));
+const extensionFile=typeof args['native-parts']==='string'?path.resolve(PLAYGROUND,args['native-parts']):path.join(assets,'../authoring/atlas-extensions',`${recipe}.json`);
+const extension=fs.existsSync(extensionFile)?JSON.parse(fs.readFileSync(extensionFile,'utf8')):null;
+// The project may retain coarse base pixels while refining selected islands on its shared page.
+const refinement=!args['atlas-root']&&extension?.sharedRefinement?.model===modelId?extension.sharedRefinement:null;
 const unwrapOf = (name, extra) =>
   execFileSync(process.execPath, [path.join(here, "unwrap-weapon.mjs"), "--recipe", name, "--no-check", ...extra], {
     cwd: PLAYGROUND,
@@ -101,7 +121,7 @@ for (const dir of [setDir, ...(withRecipe ? [path.join(ENGINE, "tools", "atlas",
 
 try {
   // 1. blend each theme against the key it was painted over
-  const sheets = themes.map((theme) => {
+  let sheets = themes.map((theme) => {
     const atlas = path.join(outDir, theme, "atlas.png");
     if (!fs.existsSync(atlas)) throw new Error(`no atlas for theme "${theme}" at ${path.relative(ENGINE, atlas)} — import-atlas it first`);
     if (!seamBlend) return { theme, id: `${textureDir}/${recipe}-${theme}.png`, file: atlas };
@@ -110,7 +130,7 @@ try {
     return { theme, id: `${textureDir}/${recipe}-${theme}.png`, file: fs.existsSync(blended) ? blended : atlas };
   });
   for (const theme of withThemes) {
-    const dir = path.join(ENGINE, "tools", "atlas", "out", withRecipe, theme);
+    const dir = path.join(atlasRoot, withRecipe, theme);
     const atlas = path.join(dir, "atlas.png");
     if (!fs.existsSync(atlas)) throw new Error(`no atlas for ${withRecipe} theme "${theme}" at ${path.relative(ENGINE, atlas)}`);
     unwrapOf(withRecipe, ["--atlas", atlas, "--out-mesh", path.join(work, `blend-with-${theme}`)]);
@@ -118,8 +138,27 @@ try {
     sheets.push({ theme, id: `${textureDir}/${withRecipe}-${theme}.png`, file: fs.existsSync(blended) ? blended : atlas });
   }
 
+  if(refinement){
+    const key=decodePng(fs.readFileSync(path.join(setDir,'key.png')));
+    sheets=sheets.map(s=>{
+      const protectedBase=refinement.protectedBaseRoot?path.resolve(assets,refinement.protectedBaseRoot,s.theme+'.png'):null,base=decodePng(fs.readFileSync(protectedBase&&fs.existsSync(protectedBase)?protectedBase:s.file));if(base.width!==refinement.baseSize)throw Error(`Expected ${refinement.baseSize}px base for selective detail: ${s.theme}`);
+      const imported=refinement.cacheRoot?path.resolve(assets,refinement.cacheRoot,s.theme):path.join(work,'detail',s.theme),stamp=path.join(imported,'source.json'),digest=b=>createHash('sha256').update(b).digest('hex'),artHash=digest(fs.readFileSync(path.join(ENGINE,'tools/atlas/art',recipe,s.theme+'.png'))),keyHash=digest(fs.readFileSync(path.join(setDir,'key.png'))),cached=fs.existsSync(stamp)?JSON.parse(fs.readFileSync(stamp,'utf8')):{};
+      if(!fs.existsSync(path.join(imported,'atlas.png'))||cached.artHash!==artHash||cached.keyHash!==keyHash||cached.size!==refinement.size){execFileSync(process.execPath,[path.join(ENGINE,'tools/atlas/import-atlas.mjs'),'--set',recipe,'--theme',s.theme,'--out',imported,'--size',String(refinement.size),'--filter','nearest','--no-match'],{cwd:PLAYGROUND,stdio:'pipe'});fs.writeFileSync(stamp,JSON.stringify({artHash,keyHash,size:refinement.size})+'\n');}
+      const out=selectiveAtlasDetail(base,decodePng(fs.readFileSync(path.join(imported,'atlas.png'))),key,refinement),file=path.join(work,`detail-${s.theme}.png`);fs.writeFileSync(file,encodePng(out.width,out.height,out.data));return{...s,file};
+    });
+  }
+
+  // Project paint finishing is data-owned and also applies to custom atlas roots.
+  // Each compiler declares its changed pixels; all other RGBA must remain exact.
+  if(extension?.paintCompiler){
+    const compiled=[];
+    for(const s of sheets){const result=await compileProjectPaint(decodePng(fs.readFileSync(s.file)),s.theme,recipe,extension.paintCompiler,assets),file=path.join(work,`paint-${s.theme}.png`);fs.writeFileSync(file,encodePng(result.image.width,result.image.height,result.image.data));compiled.push({...s,file});}
+    sheets=compiled;
+  }
+
   // 2. pack
-  const PAD = 8;
+  const PAD = Number(args.gutter??refinement?.gutter??8);
+  if(!Number.isInteger(PAD)||PAD<1||PAD>64)throw new Error('--gutter must be an integer from1 to64');
   const decoded = sheets.map((s) => ({ ...s, png: decodePng(fs.readFileSync(s.file)) }));
   const size = decoded[0].png.width;
   for (const d of decoded) {
@@ -163,6 +202,7 @@ try {
   const node = json.nodes.find((n) => n.mesh !== undefined);
   if (!node?.extras?.parts) throw new Error("the baked ubermesh has no part table — is unwrap-weapon older than the extras change?");
   node.extras.tiles = tiles;
+  node.extras.pageGutter=PAD;
   let js = Buffer.from(JSON.stringify(json));
   js = Buffer.concat([js, Buffer.alloc((4 - (js.length % 4)) % 4, 0x20)]);
   const header = Buffer.alloc(20);
@@ -175,7 +215,12 @@ try {
   // 5. install
   const modelPath = path.join(assets, "models", ...modelId.split("/"));
   fs.mkdirSync(path.dirname(modelPath), { recursive: true });
-  fs.writeFileSync(modelPath, Buffer.concat([header, js, rest]));
+  let installed=Buffer.concat([header,js,rest]);
+  if(extension){
+    const result=appendNativeParts(installed,extension,assets);
+    installed=result.bytes;console.log(`  native-part extension ${path.relative(PLAYGROUND,extensionFile)}: ${JSON.stringify(result.report)}`);
+  }
+  fs.writeFileSync(modelPath,installed);
   for (const s of sheets) {
     const dest = path.join(assets, "textures", ...s.id.split("/"));
     fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -184,7 +229,7 @@ try {
 
   console.log(`weapon-page: ${recipe} — ${sheets.length} themes on a ${W}x${H} page (${size}px tiles)`);
   for (const [id, t] of Object.entries(tiles)) console.log(`  ${id.padEnd(40)} [${t.join(", ")}]`);
-  console.log(`  parts: ${Object.keys(node.extras.parts).join(", ")}`);
+  console.log(`  parts: ${Object.keys(readUber(installed).node.extras.parts).join(", ")}`);
   console.log(`  wrote ${path.relative(ENGINE, modelPath)}`);
   console.log(`  items name a theme by its sheet id, e.g. "texture": "${sheets[0].id}"`);
 

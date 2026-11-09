@@ -215,6 +215,23 @@ export class MovingInstanceSystem {
     return this.slotOf.has(entityId);
   }
 
+  /** Drop reimported model batches before the host rebuilds their holders.
+   * Shared geometry/materials may still be used by another scene and are not disposed here.
+   */
+  invalidateModels(assetIds: readonly string[]): void {
+    for (const assetId of assetIds) {
+      const batch = this.batches.get(assetId);
+      if (!batch) continue;
+      this.batches.delete(assetId); // also rejects an older asynchronous load
+      for (const slot of batch.slots) this.slotOf.delete(slot.id);
+      for (const mesh of batch.meshes) {
+        mesh.removeFromParent();
+        mesh.dispose();
+      }
+      this.warned.delete(`url:${assetId}`);
+    }
+  }
+
   remove(entityId: string): void {
     const found = this.slotOf.get(entityId);
     if (!found) return;

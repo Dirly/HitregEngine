@@ -22,6 +22,7 @@ import { zoneBriefSchema } from "../schemas.mts";
 import { rel, townNames } from "./_shared.mts";
 import { questObjectsText } from "./quest-objects.mts";
 import { questDecls } from "../../_dress-quest.mts";
+import { resolveNameDatabase } from "../../_names.mts";
 
 /** The quest objects a dresser of `location` must include (zonegen quest-objects), for the {questObjects} brief var. */
 function questObjectsFor(projectDir: string, world: string, location: string): string {
@@ -167,6 +168,8 @@ export async function run(ctx: Ctx): Promise<number> {
   };
   const text = fs.readFileSync(path.join(briefsDir, `${stage}.md`), "utf8").replace(/\{(\w+)\}/g, (m, k: string) => vars[k] ?? m);
   const visualStage = ["zone-brief", "zone-bestiary", "town", "dress-building", "dress-site"].includes(stage);
-  console.log([...(visualStage ? ["Read docs/art-direction.md for the shared texture-led PSX direction across this whole layout and its assets. Plan surface artwork with the structural forms and review a representative textured sample before repetition. Honour this job's scope; a planning brief does not authorize building."] : []), text.trimEnd()].join("\n\n"));
+  const namesFile = ["cast", "zone-brief", "zone-bestiary", "town", "quests"].includes(stage) ? resolveNameDatabase(ctx.project) : null;
+  const namesInstruction = namesFile ? [`Read docs/name-registry.md and ${r(namesFile)} before naming characters, deities or rare creatures. Use npx tsx tools/names.mts lookup --project ${ctx.project} --name "<name>" to verify identity; reserve a new identity before authoring it. Name reservations are shared coordination data in addition to this brief's output. Do not merge unrelated identities, reuse a chosen name with a different title, or change stable gameplay IDs to rename a character.`] : [];
+  console.log([...(visualStage ? ["Read docs/art-direction.md for the shared texture-led PSX direction across this whole layout and its assets. Plan surface artwork with the structural forms and review a representative textured sample before repetition. Honour this job's scope; a planning brief does not authorize building."] : []), ...namesInstruction, text.trimEnd()].join("\n\n"));
   return 0;
 }

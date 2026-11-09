@@ -145,6 +145,41 @@ describe("InterpolationClock", () => {
     // servo pulls back toward target 98 even as frame time pushes forward
     expect(tick).toBeLessThan(100.5);
   });
+
+  /** A dedicated server: tick numbers run at 60/s, a snapshot every 3rd tick; the largest step of the render tick over 10 s of frames. */
+  const worstStep = (rate: number | null, fps: number): number => {
+    const clock = new InterpolationClock({ hz: 20, delayTicks: 2 });
+    let worst = 0;
+    let last: number | null = null;
+    for (let frame = 0; frame < fps * 10; frame++) {
+      const serverTick = Math.floor(1000 + (frame / fps) * 60);
+      if (rate !== null) clock.setTickRate(rate);
+      clock.onSnapshot(serverTick - (serverTick % 3));
+      const tick = clock.advance(1 / fps)!;
+      if (last !== null && frame > fps) worst = Math.max(worst, tick - last);
+      last = tick;
+    }
+    return worst;
+  };
+
+  it("snaps over and over when its rate is slower than the tick numbers (the fault setTickRate removes)", () => {
+    expect(worstStep(null, 30)).toBeGreaterThan(8);
+    expect(worstStep(null, 60)).toBeGreaterThan(8);
+  });
+
+  it("plays a 60 Hz tick stream evenly once it knows the rate", () => {
+    expect(worstStep(60, 30)).toBeLessThan(2.5); // 2 ticks a frame, plus the servo's small pull
+    expect(worstStep(60, 60)).toBeLessThan(1.5);
+  });
+
+  it("keeps the delay and snap line in time, not ticks", () => {
+    const clock = new InterpolationClock({ hz: 20, delayTicks: 2, snapThresholdTicks: 8 });
+    clock.setTickRate(60);
+    clock.onSnapshot(600);
+    expect(clock.advance(0)).toBe(594); // 100 ms, as 2 ticks were at 20 Hz
+    clock.onSnapshot(620); // 20 ticks late: 333 ms, inside the 400 ms line
+    expect(clock.advance(0)).toBeLessThan(614);
+  });
 });
 
 describe("TransformInterpolator holds", () => {

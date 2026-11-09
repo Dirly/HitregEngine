@@ -16,6 +16,27 @@ function effect(modules: Parameters<typeof completeModule>[0][]): VfxEffect {
 }
 
 describe("VfxSystem", () => {
+  it("hides the warm-up sampler once its draw list is taken, not when the compile ends", async () => {
+    const sys = new VfxSystem();
+    sys.attach(new THREE.Scene());
+    const shown = (): number => {
+      let n = 0;
+      sys.root.traverse((o) => {
+        if (o.userData["vfx"] && (o as THREE.Mesh).isMesh && o.visible) n++;
+      });
+      return n;
+    };
+    let atCollect = 0, whileCompiling = -1;
+    await sys.warmup(async (_group, collected) => {
+      atCollect = shown();
+      collected?.();
+      whileCompiling = shown();
+    });
+    expect(atCollect).toBeGreaterThan(0);
+    expect(whileCompiling).toBe(0);
+    expect(shown()).toBe(0);
+  });
+
   it("expands a repeat into stepped copies that each play whole", () => {
     const sys = new VfxSystem();
     const scene = new THREE.Scene();

@@ -3,6 +3,16 @@ import { type AssetLibrary } from "@hitreg/core";
 import { loadVolumes, loadWorldRecipes } from "./voxel-world.js";
 import { batchedAssetReader } from "./asset-reads.js";
 import { subscribeAssetScope } from "./asset-changes.js";
+import { applyBinaryAssetIndex, binaryAssetIndex, flushBinaryAssetIndex, type BinaryAssetChanges } from "./binary-assets.js";
+export type { BinaryAssetChanges } from "./binary-assets.js";
+export const flushBinaryAssets = flushBinaryAssetIndex;
+
+export async function refreshBinaryAssets(assets: AssetLibrary, preferredScene: string, options: { stage: boolean | (() => boolean) }): Promise<BinaryAssetChanges> {
+  const response = await fetch(`/__hitreg/assets-index?scene=${encodeURIComponent(preferredScene)}&kinds=models,textures&revisions=1`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Asset index refresh failed: ${response.status}`);
+  const snapshot = binaryAssetIndex(await response.json());
+  return applyBinaryAssetIndex(assets, snapshot, { stage: typeof options.stage === "function" ? options.stage() : options.stage });
+}
 
 /**
  * assets/ is the project content folder. In dev everything is fetched FRESH
@@ -28,7 +38,7 @@ export async function loadAssets(
   preferredScene?: string | null,
 ): Promise<{ id: string; content: string } | null> {
   const response = await fetch(
-    `/__hitreg/assets-index${preferredScene ? `?scene=${encodeURIComponent(preferredScene)}` : ""}`,
+    `/__hitreg/assets-index?revisions=1${preferredScene ? `&scene=${encodeURIComponent(preferredScene)}` : ""}`,
   );
   const scopeHeader = response.headers.get("x-hitreg-scope");
   projectScope = scopeHeader && scopeHeader !== "*" ? new Set(scopeHeader.split(",")) : null;
@@ -36,12 +46,26 @@ export async function loadAssets(
   // the header lists the owning project first; every later read resolves in its closure
   setAssetScopeOwner(projectScope ? scopeHeader!.split(",")[0]! : null);
   if (projectScope) console.info(`[assets] loading projects: ${[...projectScope].join(", ")}`);
-  const index = (await response.json()) as Record<string, string[]>;
+  const snapshot = binaryAssetIndex(await response.json()), index = snapshot.index;
   const fileUrl = (kind: string, file: string) => assetFileUrl(`${kind}/${file}`);
   // A merged project library can contain thousands of prefabs. Starting all
   // fetches together exhausts browser request resources and silently drops
   // later kinds (including materials). Share one bounded queue across kinds.
   const readJson = batchedAssetReader();
+
+  const scenes = (index["scenes"] ?? []).filter((f) => f.endsWith(".scene.json"));
+  const sceneFile =
+    (preferredScene && scenes.find((f) => f === `${preferredScene}.scene.json`)) ||
+    scenes[0];
+  const sceneContent = sceneFile
+    ? fetch(fileUrl("scenes", sceneFile)).then((r) => r.text())
+    : Promise.resolve(null);
+  // These registries have no dependency on the asset library. Queue them first
+  // in its SAME bounded reader, so their parse/validation and the scene fetch
+  // overlap the large prefab queue instead of adding serial stages at its end.
+  // Redstrand's startup trace recorded about half a second in that serial tail.
+  const worlds = loadWorldRecipes(index, readJson);
+  const volumes = loadVolumes(index, readJson);
 
   // Every JSON asset fetch is independent, so issue them all at once instead of
   // one blocking round-trip at a time — on a large project this is the
@@ -68,7 +92,7 @@ export async function loadAssets(
     // a project's extra perform actions (/dance-style), read by the quest-log
     { kind: "perform-actions", type: "performActions", onlyJson: true },
   ];
-  await Promise.all(
+  const library = Promise.all(
     jsonKinds.map(async ({ kind, type, onlyJson }) => {
       const files = (index[kind] ?? []).filter((f) => !onlyJson || f.endsWith(".json"));
       // One bad file must never take the scene with it. Before this guard a
@@ -100,11 +124,9 @@ export async function loadAssets(
     }),
   );
 
-  // World recipes register into the voxel world registry rather than the asset
-  // library: render, physics and placement each resolve a generated cell by
-  // world id, the same way they resolve a glTF by asset id.
-  await loadWorldRecipes(index, readJson);
-  await loadVolumes(index, readJson);
+  // Return only once every library asset and both registries are available:
+  // scene switching, editor browsing and dynamic spawns still see the full scope.
+  const [content] = await Promise.all([sceneContent, worlds, volumes, library]);
 
   // Every project's assets/ merges into ONE id namespace, so two projects that
   // both ship "textures/mmo/Grass.png" collide. That must not be fatal: the
@@ -124,18 +146,7 @@ export async function loadAssets(
     }
   };
 
-  for (const file of index["models"] ?? []) {
-    if (!/.(glb|gltf)$/.test(file)) continue;
-    addOrWarn("models", file, () =>
-      assets.addModel({ id: file, name: file.split("/").pop()!, url: fileUrl("models", file) }),
-    );
-  }
-  for (const file of index["textures"] ?? []) {
-    if (!/.(png|jpe?g|webp)$/i.test(file)) continue;
-    addOrWarn("textures", file, () =>
-      assets.addTexture({ id: file, name: file.split("/").pop()!, url: fileUrl("textures", file) }),
-    );
-  }
+  applyBinaryAssetIndex(assets, snapshot, { seed: true });
   for (const file of index["audio"] ?? []) {
     if (!/.(wav|mp3|ogg)$/i.test(file)) continue;
     addOrWarn("audio", file, () =>
@@ -143,11 +154,6 @@ export async function loadAssets(
     );
   }
 
-  const scenes = (index["scenes"] ?? []).filter((f) => f.endsWith(".scene.json"));
-  const sceneFile =
-    (preferredScene && scenes.find((f) => f === `${preferredScene}.scene.json`)) ||
-    scenes[0];
-  if (!sceneFile) return null;
-  const content = await fetch(fileUrl("scenes", sceneFile)).then((r) => r.text());
+  if (!sceneFile || content === null) return null;
   return { id: sceneFile.replace(/\.scene\.json$/, ""), content };
 }

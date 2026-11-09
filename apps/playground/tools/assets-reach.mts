@@ -93,7 +93,8 @@ const scanned = new Set<string>();
 const prefixes = new Set<string>();
 
 function normalize(s: string): string[] {
-  let t = s.trim().replace(/\\/g, "/").replace(/^\.?\//, "").replace(/[?#].*$/, "");
+  // NPC template references use the server's prefab:<asset id> convention.
+  let t = s.trim().replace(/^prefab:/, "").replace(/\\/g, "/").replace(/^\.?\//, "").replace(/[?#].*$/, "");
   const out = [t];
   t = t.replace(/^.*?\/?assets\//, "");
   out.push(t);

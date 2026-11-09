@@ -67,7 +67,9 @@ import {
   dFdy,
 } from "three/tsl";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { applyFoliageNormals } from "./foliage-normals.js";
+import { applyLodFade } from "./lod-fade.js";
 import { waterWakeUniforms } from "./water-wake.js";
 import { seaAbyss, seaBreakers, seaGlint, seaSkyReflection, seaSwell, seaWhitecaps, type SeaParams } from "./water-sea.js";
 import { applyModelBrightness } from "./model-brightness.js";
@@ -104,7 +106,7 @@ import { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
 import { horizonTint } from "./atmosphere.js";
 import { buildTerrainSplatMaterial, SPLAT_ATTRIBUTES, type MacroNoiseData } from "./terrain-splat.js";
 import { mergeModelSubmeshes, prepareStaticModel } from "./static-batch.js";
-import { applyModelPartMask } from "./ubermesh.js";
+import { applyModelPartMask, applyModelEmissive } from "./ubermesh.js";
 import type { MovingInstanceEntry } from "./moving-instances.js";
 import { voxelGeometry, csgGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
 import type { ParticlesData } from "./particles.js";
@@ -158,7 +160,7 @@ export function loadGltf(url: string): Promise<LoadedModel> {
   let pending = gltfCache.get(url);
   if (!pending) {
     gltfPending.add(url);
-    pending = gltfLoads.run(() => (gltfLoader ??= new GLTFLoader().register(shareDecodedImages))
+    pending = gltfLoads.run(() => (gltfLoader ??= new GLTFLoader().setMeshoptDecoder(MeshoptDecoder).register(shareDecodedImages))
       .loadAsync(url)
       .then(async (gltf) => {
         // name embedded kit textures by content first, so the sharing below
@@ -382,6 +384,12 @@ export interface BuildOptions {
    * rigidbody, animator, effects…). Unset = only authored `static` counts.
    */
   autoStatic?(entityId: string): boolean;
+  /**
+   * The host's ruling that this entity's meshes cast no shadow whatever `mesh.castShadow` says (core
+   * `shadowlessEntities`: interior furnishings, small props). Read where the mesh data is, so instanced and
+   * pooled copies obey it as well as plain meshes: every caster is a draw in each shadow cascade.
+   */
+  shadowless?(entityId: string): boolean;
   /** Resolve a mesh asset id to a fetchable glTF/GLB URL (from the AssetLibrary). */
   resolveModel?(assetId: string): string | undefined;
   /**
@@ -535,6 +543,8 @@ export interface MaterialData {
   alphaMap?: string;
   alphaTest?: number;
   alphaHash?: boolean;
+  edgeFade?: import("./edge-fade.js").EdgeFadeData;
+  depthWrite?: boolean;
   envMapIntensity?: number;
   side?: "front" | "back" | "double";
   vertexColors?: boolean;
@@ -586,6 +596,8 @@ export interface MaterialData {
     fresnelMax?: number;
     /** Sun glint, 0..1 (0 = matte, 1 = the old glassy look). */
     specular?: number;
+    /** Roughness override (still indoor water ~0.1: point lights mirror as tight spots); default from specular. */
+    roughness?: number;
     edgeFadeStart: number;
     edgeFadeEnd: number;
     /** Scrolling surface texture added over the procedural water. */
@@ -756,6 +768,7 @@ function normalizeSky(sky: SkyData): SkyData {
         near: rawFog.near ?? 40,
         far: rawFog.far ?? 180,
         density: rawFog.density ?? 0.015,
+        maxOpacity: rawFog.maxOpacity ?? 1,
         heightFalloff: rawFog.heightFalloff ?? 0.15,
         baseHeight: rawFog.baseHeight ?? 0,
         // optional terms pass straight through (absent = off, not in the shader)
@@ -1990,7 +2003,8 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // reads; a curtain has none (Derek: the sheen "looks a little strange")
   if (material instanceof THREE.MeshStandardNodeMaterial) {
     const specular = Math.min(1, Math.max(0, w.specular ?? 0.3));
-    material.roughnessNode = mix(float(1 - 0.65 * specular), float(1), curtainRoll);
+    const rough = w.roughness !== undefined ? Math.min(1, Math.max(0.04, w.roughness)) : 1 - 0.65 * specular;
+    material.roughnessNode = mix(float(rough), float(1), curtainRoll);
   }
   return material;
 }
@@ -2195,6 +2209,11 @@ export function patchMaterial(existing: THREE.Material, data: MaterialData): boo
   };
   target.color?.set(data.color);
   target.opacity = data.opacity;
+  const depthWrite = data.depthWrite ?? true;
+  if (target.depthWrite !== depthWrite) {
+    target.depthWrite = depthWrite;
+    target.needsUpdate = true;
+  }
   target.side = data.side === "double" ? THREE.DoubleSide : data.side === "back" ? THREE.BackSide : THREE.FrontSide;
   if (target.emissive) target.emissive.set(data.emissive);
   if ("emissiveIntensity" in target) target.emissiveIntensity = data.emissiveIntensity;
@@ -2453,7 +2472,8 @@ function populateEntityGroup(
   group.visible = visibility?.visible ?? true;
   let createdCamera: THREE.PerspectiveCamera | null = null;
   {
-    const meshData = entity.components["mesh"] as MeshData | undefined;
+    const authoredMesh = entity.components["mesh"] as MeshData | undefined;
+    const meshData = authoredMesh?.castShadow && options.shadowless?.(id) ? { ...authoredMesh, castShadow: false } : authoredMesh;
     // authored `static`, or a host ruling that nothing can move this entity
     const staticMesh = meshData?.static === true || options.autoStatic?.(id) === true;
     if (meshData && meshData.source.kind === "primitive") {
@@ -2742,6 +2762,12 @@ function populateEntityGroup(
               instance.traverse((node) => {
                 if ((node as THREE.Mesh).isMesh) (node as THREE.Mesh).material = override;
               });
+              // An arbitrary named monster material bypassed the cached glTF
+              // skin hook. Prepare its owned fill even without a model-look
+              // script; the glow helper already waits for asynchronous maps.
+              instance.traverse((node) => {
+                if ((node as THREE.SkinnedMesh).isSkinnedMesh) applyModelEmissive(node, null);
+              });
             }
             const wind = meshData.source.kind === "asset" ? meshData.source.wind : undefined;
             if (wind) applyFoliageWind(instance, wind);
@@ -2976,6 +3002,31 @@ function clusterizeModel(
   });
 }
 
+/** The per-placement fields that change the MODEL itself rather than one instance of it. */
+export interface AssetLookSource {
+  foliageNormals?: number;
+  foliageUp?: number;
+  brightness?: number;
+  textureFilter?: TextureFilter;
+}
+
+/**
+ * Settle the shared cached model's look (leaf normals, brightness lift, texture filter) before anything
+ * derives from it. Both builders call this: the mid tier and the impostor bake are cached by (asset, node)
+ * for the session, so whichever consumer gets there first pins what it saw. In a streamed world that is
+ * usually an HLOD supercell, which used to skip this step: far trees were baked at their raw texture colour
+ * with authored card normals, darker than the near tree and lit sideways (2026-11-05: the atlas mean equalled
+ * the unlifted texture mean, and the baked normals had no upward lean).
+ */
+export function prepareSharedModel(scene: THREE.Object3D, sources: readonly AssetLookSource[]): void {
+  const asked = sources.find((s) => s.foliageNormals !== undefined);
+  if (asked) applyFoliageNormals(scene, { blend: asked.foliageNormals, up: asked.foliageUp });
+  const lift = sources.find((s) => s.brightness !== undefined)?.brightness;
+  if (lift !== undefined) applyModelBrightness(scene, lift);
+  const textureFilter = sources.find((s) => s.textureFilter !== undefined)?.textureFilter;
+  if (textureFilter) applyModelTextureFilter(scene, textureFilter);
+}
+
 /**
  * Turn every `renderMode: "instanced"` asset request collected this build
  * into real `THREE.InstancedMesh`es — one per (assetId, node, submesh)
@@ -3006,12 +3057,7 @@ function flushInstancedPending(pending: Map<string, PendingInstance[]>, options:
         // batch built from the authored normals would pin the bad ones for the
         // whole session. Foliage normals are a property of the MODEL, so any
         // entry that asks for them settles it for the asset.
-        const asked = entries.find((e) => e.foliageNormals !== undefined);
-        if (asked) applyFoliageNormals(gltf.scene, { blend: asked.foliageNormals, up: asked.foliageUp });
-        const lift = entries.find((e) => e.brightness !== undefined)?.brightness;
-        if (lift !== undefined) applyModelBrightness(gltf.scene, lift);
-        const textureFilter = entries.find((e) => e.textureFilter !== undefined)?.textureFilter;
-        if (textureFilter) applyModelTextureFilter(gltf.scene, textureFilter);
+        prepareSharedModel(gltf.scene, entries);
         // Wind and camera-fade both swap the material for a node material, so
         // they must land BEFORE instanceGltfInto clones and caches it — a
         // clone taken first would pin the plain material for the session.
@@ -3244,7 +3290,8 @@ export function impostorPageBatchFor(
     batch.instanceCount = total;
     batch.instanceMatrix.needsUpdate = true;
     batch.castShadow = false;
-    batch.receiveShadow = false;
+    // cloud shadows ride the sun's shadow term (cloud-shadow.ts): past the cascades it is fully lit, so receiving costs a depth test and keeps the clouds' shade from stopping at a ring around the player
+    batch.receiveShadow = true;
     batches.push(batch);
   }
   return { batches, unpaged };
@@ -3277,7 +3324,8 @@ export function impostorBatchFor(
   far.instanceMatrix.needsUpdate = true;
   far.computeBoundingSphere();
   far.castShadow = false;
-  far.receiveShadow = false;
+  // cloud shadows ride the sun's shadow term (cloud-shadow.ts): past the cascades it is fully lit, so receiving costs a depth test and keeps the clouds' shade from stopping at a ring around the player
+  far.receiveShadow = true;
   return far;
 }
 // near/mid-tier instanced materials, keyed like midTierGeometryCache — CPU
@@ -3305,6 +3353,17 @@ const instancedMaterialCache = new Map<string, THREE.Material | THREE.Material[]
  * so an HLOD bake can strip wind from its clone without touching the batch's.
  */
 const mergedMaterialCache = new Map<string, THREE.Material | THREE.Material[]>();
+
+/** Forget derived resources for a reimported model before rebuilding its consumers.
+ * Do not dispose shared resources: loaded scenes can still reference the old version.
+ * The host resolves the replacement glTF through its newly versioned asset URL.
+ */
+export function invalidateModelRenderCaches(assetIds: readonly string[]): void {
+  const matches = (key: string): boolean => assetIds.some((id) => key === id || key.startsWith(`${id}#`));
+  for (const cache of [instancedMaterialCache, mergedMaterialCache, midTierGeometryCache, clusterDagCache, impostorCache, impostorMaterialCache]) {
+    for (const key of cache.keys()) if (matches(key)) cache.delete(key);
+  }
+}
 
 /**
  * `make(source)`, kept in step with a source whose texture maps are still
@@ -3374,6 +3433,8 @@ export function cachedInstancedMaterial(
     if (options.glow) applyInstanceGlow(clone);
     // per-part tiles and skin tint, replacing the colour node the uber hook set
     if (options.appearance && options.uber) applyInstanceAppearance(clone, options.appearance.tiles, { skin: options.appearance.skin });
+    // near and mid tiers of a cutout LOD prop stipple into its impostor (lod-fade.ts); solid until a batch sets a band
+    if (options.vegetationTint) applyLodFade(clone);
     // the rock-cap shader reads the same per-instance slot with rock semantics (layer, amount, base, tint)
     if (options.vegetationTint) {
       if (isRockCapMaterial(clone)) applyInstanceRockCap(clone);
@@ -3444,15 +3505,28 @@ export function submeshBounds(submeshes: Array<{ geometry: THREE.BufferGeometry;
   return bbox;
 }
 
+/**
+ * Does this material cut its texture out (glTF alphaMode MASK -> alphaTest, BLEND -> transparent)? A squat cutout
+ * model (a dead bush, a fern) must never fall back to an OPAQUE textured box: the box shows the whole texture, its
+ * cut-away texels black — the "little charcoal cubes" on redstrand's hillsides (owner walk 2026-10-30). It gets the
+ * cross cards, masked by the texture's own alpha, like a tree.
+ */
+export function isCutoutMaterial(material: THREE.Material | THREE.Material[]): boolean {
+  const m = (Array.isArray(material) ? material[0] : material) as (THREE.Material & { map?: THREE.Texture | null }) | undefined;
+  return !!m && !!m.map && (m.alphaTest > 0 || m.transparent);
+}
+
 export function buildLodProxyGeometry(
   submeshes: Array<{ geometry: THREE.BufferGeometry; localMatrix: THREE.Matrix4 }>,
+  /** the model's look is a cutout texture: cross cards whatever its shape (see isCutoutMaterial) */
+  cutout = false,
 ): { geometry: THREE.BufferGeometry; isTall: boolean; width?: number; height?: number } {
   const bbox = submeshBounds(submeshes);
   const size = new THREE.Vector3();
   const center = new THREE.Vector3();
   bbox.getSize(size);
   bbox.getCenter(center);
-  const isTall = size.y > Math.max(size.x, size.z) * 1.2;
+  const isTall = cutout || size.y > Math.max(size.x, size.z) * 1.2;
   if (!isTall) {
     const geometry = new THREE.BoxGeometry(
       Math.max(size.x, 0.1),
@@ -3815,13 +3889,13 @@ function instanceGltfInto(
     far = new InstancedProps(impostorGeometry(bounds, entries.length), impostor.material, entries.length);
     impostorData = impostorInstanceData(matrices);
   } else {
-    const { geometry: farGeometry, isTall } = buildLodProxyGeometry(submeshes);
     // the fallback's look comes from the LARGEST submesh by vertex count, not
     // the first — a tree's bark is typically submesh 0 but a thin sliver next
     // to the leaf canopy, which is what actually reads as "this is a tree"
     const dominantSubmesh = submeshes.reduce((a, b) =>
       b.geometry.attributes["position"]!.count > a.geometry.attributes["position"]!.count ? b : a,
     );
+    const { geometry: farGeometry, isTall } = buildLodProxyGeometry(submeshes, isCutoutMaterial(dominantSubmesh.material));
     far = new InstancedProps(farGeometry, instancedFarProxyMaterial(isTall, materialLook(dominantSubmesh.material)), entries.length);
   }
   far.castShadow = false; // a rough blob casting a shadow reads worse than no shadow

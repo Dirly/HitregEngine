@@ -87,6 +87,7 @@ function harness(seed = 1) {
 
 const camp = (rares: unknown[], extra: Record<string, unknown> = {}) => ({ radius: 30, spawns: [{ template: "ph", count: 3, spread: 4 }], temperament: "passive", rares, ...extra });
 
+
 describe("rollRare", () => {
   const r = (x: Partial<SpawnRare>): SpawnRare => ({ template: "rare", chance: 1, placeholders: [], lockout: [0, 0], ...x });
   const free: RareState = { alive: null, lockedUntil: 0, lockout: [0, 0] };
@@ -126,7 +127,7 @@ describe("placeholder rares in a camp (pack)", () => {
     expect(a.npcIds.length).toBe(3);
     expect(h.tpl(a.npcIds).sort()).toEqual(["ph", "ph", "rare"]);
     const rare = h.npcMap.get(a.npcIds.find((id) => h.npcMap.get(id)!.template === "rare")!)!;
-    // the slot's home/leash/roam, its own temperament (the passive slot's alertRadius 0 dropped)
+    // the slot's home/leash/roam, its own temperament, and no area override of the template's social behavior
     expect(rare.params["home"]).toEqual([0, 0, 0]);
     expect(rare.params["spawnArea"]).toBe("camp");
     expect(rare.params["temperament"]).toBe("hostile");
@@ -253,6 +254,28 @@ describe("placeholder rares in a camp (pack)", () => {
 });
 
 describe("placeholder rares among roamers and on a route", () => {
+  it.each(["pack", "anywhere"])("%s: member policy outranks area, legacy mood clears lower presets, rare policy wins", placement => {
+    const h = harness();
+    const a = h.add("policies", { radius: 60, placement, hiddenFrom: 0, population: 4, behaviorArchetype: "aggressive", spawns: placement === "pack" ? [
+      { template: "ph", count: 1, behaviorArchetype: "protective" }, { template: "ph2", count: 1, temperament: "passive" },
+    ] : [], mix: placement === "anywhere" ? [{ template: "ph", temperament: "passive" }] : [], rares: [{ template: "rare", chance: 1, placeholders: ["ph"], behaviorArchetype: "territorial" }] });
+    h.step(3);
+    const records = a.npcIds.map(id => h.npcMap.get(id)!);
+    expect(records.find(r => r.template === "rare")!.params["behaviorArchetype"]).toBe("territorial");
+    const ordinary = records.filter(r => r.template !== "rare");
+    expect(ordinary.length).toBeGreaterThan(0);
+    for (const rec of ordinary) { expect(rec.params["behaviorArchetype"]).toBe("inherit");expect(rec.params["temperament"]).toBe("passive"); }
+  });
+
+  it("a legacy rare temperament cancels a protective placeholder preset", () => {
+    const h = harness();const a = h.add("rare-policy", { radius: 30, behaviorArchetype: "protective", spawns: [{ template: "ph", count: 1 }], rares: [{ template: "rare", chance: 1, temperament: "hostile" }] });
+    h.step();const rec = h.npcMap.get(a.npcIds[0]!)!;
+    expect(rec.template).toBe("rare");expect(rec.params["behaviorArchetype"]).toBe("inherit");expect(rec.params["temperament"]).toBe("hostile");
+  });
+  it("roaming fixed-spawn fallback keeps member policies instead of replacing them with area policy", () => {
+    const h = harness();const a = h.add("fixed-fallback", { radius: 60, placement: "anywhere", hiddenFrom: 0, population: 1, behaviorArchetype: "aggressive", spawns: [{ template: "ph", count: 1, behaviorArchetype: "protective" }] });
+    h.step(3);expect(h.npcMap.get(a.npcIds[0]!)!.params["behaviorArchetype"]).toBe("protective");
+  });
   it("anywhere: one roamer is the rare (its own home and roam); killed, the refill rolls again", () => {
     const h = harness();
     const a = h.add("meadow", { radius: 60, placement: "anywhere", hiddenFrom: 0, population: 4, respawn: [0, 0], roamRange: [20, 30], mix: [{ template: "ph", count: [1, 1], temperament: "passive" }], rares: [{ template: "rare", chance: 1, temperament: "territorial", territory: 12 }] });

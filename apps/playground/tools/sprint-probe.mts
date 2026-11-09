@@ -44,6 +44,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { killTree } from "./_kill-tree.mts";
 import { fileURLToPath } from "node:url";
 // @ts-expect-error plain JS module
 import { loadPlaywright } from "./_playwright.mjs";
@@ -110,7 +111,7 @@ fs.mkdirSync(OUT, { recursive: true });
 // -- dev server ------------------------------------------------------------------------------------
 let vite: ReturnType<typeof spawn> | null = null;
 let base = arg("--url").replace(/\/$/, "");
-const stopVite = () => { if (vite?.pid) { try { process.platform === "win32" ? spawn("taskkill", ["/pid", String(vite.pid), "/t", "/f"]) : process.kill(vite.pid); } catch { /* gone */ } } };
+const stopVite = () => killTree(vite?.pid); // synchronous: an async taskkill raced process.exit and leaked vite
 if (!base) {
   const port = arg("--port", "5287");
   vite = spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["vite", "--config", "vite.agent-test.config.ts", "--port", port, "--strictPort"], { cwd: PG, shell: process.platform === "win32", stdio: ["ignore", "pipe", "pipe"] });
@@ -399,6 +400,8 @@ const RUN = `async ({ points, sampleMs, maxMs, drive, speed, breakdown }) => {
 const { chromium } = await loadPlaywright();
 const browser = await chromium.launch({ channel: "chrome", headless: !argv.includes("--headed"), args: ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--enable-precise-memory-info"] });
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+// a test client never writes authoring files (its scene autosave erased other tools' installs, 2026-11-03)
+await page.route(/\/__hitreg\//, (await import("./_readonly-posts.mjs")).dropAuthoringWrites);
 const logs: string[] = [];
 page.on("console", (m: { text(): string; type(): string }) => { const t = m.text(); if (m.type() === "error" || /infringes|Invalid RenderPipeline|fell/i.test(t)) logs.push(t.slice(0, 240)); });
 page.on("pageerror", (e: Error) => logs.push("pageerror: " + e.message));

@@ -40,8 +40,10 @@ export interface SiteFit {
   water: { atCentre: number | null; nearest: { at: V2; y: number; from: number } | null };
 }
 
-/** The tallest steep rise along 32 rays from the centre, out to `reach` (2 m steps). */
-function tallestFace(g: Ground, c: V2, reach: number): Face | null {
+/** The tallest steep rise along 32 rays from the centre, out to `reach` (2 m steps). `rising`: only faces that climb
+ *  AWAY from the centre (the face a place at its foot stands under), never a drop off the far side (2026-10-30 w15: the
+ *  Moon's sheet reported the 128 m sea cliff behind the block instead of the 73 m face over its door). */
+function tallestFace(g: Ground, c: V2, reach: number, rising = false): Face | null {
   let best: Face | null = null;
   for (let k = 0; k < 32; k++) {
     const a = (k / 32) * Math.PI * 2, dx = Math.sin(a), dz = -Math.cos(a); // bearing 0 = north (-Z), 90 = east (+X)
@@ -49,7 +51,7 @@ function tallestFace(g: Ground, c: V2, reach: number): Face | null {
     let prev = g.height(c[0], c[1]);
     for (let s = 2; s <= reach; s += 2) {
       const p: V2 = [c[0] + dx * s, c[1] + dz * s], h = g.height(p[0], p[1]), dh = h - prev, sign = Math.sign(dh);
-      if (Math.abs(dh) / 2 > FACE_SLOPE && (!run || run.sign === sign)) {
+      if (Math.abs(dh) / 2 > FACE_SLOPE && (!rising || sign > 0) && (!run || run.sign === sign)) {
         run ??= { foot: [c[0] + dx * (s - 2), c[1] + dz * (s - 2)], footY: prev, from: s - 2, sign };
         const height = Math.abs(h - run.footY);
         if (!best || height > best.height) {
@@ -63,7 +65,7 @@ function tallestFace(g: Ground, c: V2, reach: number): Face | null {
   return best;
 }
 
-export function measureSite(g: Ground, c: V2, radius: number, terrainRadius: number): SiteFit {
+export function measureSite(g: Ground, c: V2, radius: number, terrainRadius: number, opts: { rising?: boolean } = {}): SiteFit {
   const groundY = g.height(c[0], c[1]);
   let lo = Infinity, hi = -Infinity;
   const step = Math.max(2, Math.round(radius / 60));
@@ -99,7 +101,7 @@ export function measureSite(g: Ground, c: V2, radius: number, terrainRadius: num
   }
   const atCentre = g.waterY?.(c[0], c[1]) ?? null;
   return {
-    groundY: r1(groundY), relief: r1(hi - lo), face: tallestFace(g, c, terrainRadius), faceAtPlace: tallestFace(g, c, radius),
+    groundY: r1(groundY), relief: r1(hi - lo), face: tallestFace(g, c, terrainRadius, opts.rising), faceAtPlace: tallestFace(g, c, radius, opts.rising),
     apronM2: cells * G * G, water: { atCentre: atCentre === null ? null : r1(atCentre), nearest },
   };
 }
@@ -150,10 +152,76 @@ export function nearClutter(eye: V3, target: V3, clutter?: (x: number, z: number
   return n;
 }
 
+/**
+ * How much of the frame a SLOPE OR WALL beside the eye fills: 12 rays across +-45 deg of the sight line (the frame's
+ * width), each walked 4-60 m out; a ray is blocked where the ground stands more than ~8.5 deg over the line to the
+ * target (it fills the frame above the place). 0 = open frame, 1 = boxed in. (2026-10-30 w15: the Sun's far camera stood
+ * at the foot of a hillside that filled the left half of the frame; the mark itself was in sight, so readPixels passed it.)
+ */
+export const NEAR_WALL_MAX = 0.25;
+export function nearWall(g: Ground, eye: V3, target: V3): number {
+  const a0 = Math.atan2(target[0] - eye[0], target[2] - eye[2]);
+  const toT = Math.hypot(target[0] - eye[0], target[2] - eye[2]) || 1, rise = (target[1] - eye[1]) / toT + 0.15;
+  let blocked = 0, n = 0;
+  for (let k = -6; k <= 6; k++) {
+    if (k === 0) continue;
+    n++;
+    const a = a0 + (k / 6) * (Math.PI / 4), dx = Math.sin(a), dz = Math.cos(a);
+    for (let s = 4; s <= 60; s += 4) if ((g.height(eye[0] + dx * s, eye[2] + dz * s) - eye[1]) / s > rise) { blocked++; break; }
+  }
+  return blocked / n;
+}
+
+/** A tall scatter object (hoodoo, buttress, big rock) a camera must not stand against: base x/y/z, radius, height. */
+export interface Obstacle { x: number; y: number; z: number; r: number; h: number }
+/**
+ * Does a tall object stand in the frame right beside the eye: within 40 m, inside +-45 deg of the sight line, its top
+ * more than ~11 deg over the line to the target? (2026-10-30 w15: the Sun's far camera stood 10 m from a 32 m hoodoo
+ * that filled half the frame; the ground-only checks never saw it.)
+ */
+export function nearObstacle(eye: V3, target: V3, obstacles?: readonly Obstacle[]): boolean {
+  if (!obstacles?.length) return false;
+  const a0 = Math.atan2(target[0] - eye[0], target[2] - eye[2]);
+  const toT = Math.hypot(target[0] - eye[0], target[2] - eye[2]) || 1, rise = (target[1] - eye[1]) / toT + 0.2;
+  for (const o of obstacles) {
+    const dx = o.x - eye[0], dz = o.z - eye[2], d = Math.hypot(dx, dz);
+    if (d > 40 + o.r) continue;
+    let da = Math.atan2(dx, dz) - a0;
+    da = Math.atan2(Math.sin(da), Math.cos(da));
+    if (Math.abs(da) > Math.PI / 4 + Math.atan2(o.r, Math.max(d, 1))) continue;
+    if ((o.y + o.h - eye[1]) / Math.max(d - o.r, 1) > rise) return true;
+  }
+  return false;
+}
+
 /** The concept cameras: approach + far for every painted place; a town adds the NEAR set (gate, street, square). */
-export type ViewName = "approach" | "far" | "gate" | "street" | "square";
+export type ViewName = "approach" | "far" | "gate" | "street" | "square" | "sea" | "shelf";
+/** Extra views a POI repaint may add from saved cameras (`--keep-cameras` + `--views`), never computed: o-sunwine5
+ *  2026-11-02, the coordinator ordered a door repaint "from the sea and from the beach shelf". */
+export const EXTRA_VIEWS = ["sea", "shelf"] as const;
 export const NEAR_VIEWS = ["gate", "street", "square"] as const;
 export interface View { name: ViewName; eye: V3; target: V3; from: number; px: number; visible: number; note: string }
+
+/**
+ * A PAINTED view re-renders from the painting's OWN camera, never a recomputed one (r-found 2026-10-31: a re-render
+ * after a road trim recomputed "first sight", moved Red Dial's approach 42 m and its far camera to another bearing, and
+ * the bare frames no longer matched the paintings). `src` is a concept manifest (<id>.site.json, `renders.<view>`) or a
+ * place-build views.json (`concept-<view>`); `painted` = the view's painting exists. Returns the view moved onto the
+ * painting's camera (a new object), or the view unchanged when there is no painting or no recorded camera.
+ */
+export function paintingCamera(v: View, src: unknown, painted: boolean, center: readonly [number, number]): View {
+  if (!painted || !src) return v;
+  const r = (Array.isArray(src) ? src.find((x) => x?.name === `concept-${v.name}`) : (src as { renders?: Record<string, unknown> }).renders?.[v.name]) as
+    { camera?: unknown; target?: unknown; px?: unknown; note?: unknown } | undefined;
+  const ok3 = (a: unknown): a is V3 => Array.isArray(a) && a.length === 3 && a.every((n) => typeof n === "number");
+  if (!r || !ok3(r.camera) || !ok3(r.target)) return v;
+  return {
+    ...v, eye: [r.camera[0], r.camera[1], r.camera[2]], target: [r.target[0], r.target[1], r.target[2]],
+    from: Math.round(Math.hypot(r.camera[0] - center[0], r.camera[2] - center[1])),
+    px: typeof r.px === "number" ? r.px : v.px,
+    note: `the painting's own camera${typeof r.note === "string" ? ` (${r.note})` : ""}`,
+  };
+}
 
 /**
  * The approach view: walking IN along the road(s) the reservation is reached from (each road walked both ways from
@@ -162,30 +230,50 @@ export interface View { name: ViewName; eye: V3; target: V3; from: number; px: n
  * distance. When none does, the best-seen point (note says so).
  */
 /** `minFrom`: the nearest an approach eye may stand (a town passes its radius: an eye inside the walls is a street view, not an approach; redstrand 2026-10-29 town-1 picked 36 m inside r 45). */
-export function approachView(g: Ground, c: V2, height: number, read: number, roads: V2[][], approach: V2[], canopy?: (x: number, z: number) => number, clutter?: (x: number, z: number) => number, minFrom = 10): View {
+/** An entrance's approach FRAMES its front: the mark at least this many px, the eye inside FRONT_ARC of the front.
+ *  (2026-10-30 w15: the Moon's first sight was a 16 px glimpse from 252 m, round the side of the block.) */
+export const FRAME_PX = 48, FRONT_ARC = 70;
+/** `front`: unit vector the place's front looks along (an entrance): the farthest framing point wins, first sight is
+ *  only the fallback. */
+export function approachView(g: Ground, c: V2, height: number, read: number, roads: V2[][], approach: V2[], canopy?: (x: number, z: number) => number, clutter?: (x: number, z: number) => number, minFrom = 10, front?: V2, obstacles?: readonly Obstacle[]): View {
   const foot = g.height(c[0], c[1]), top = foot + height;
   const cand: V2[] = [];
   for (const r of roads) {
     if (r.length < 2) continue;
     let k = 0;
     r.forEach((p, i) => { if (dist(p, c) < dist(r[k]!, c)) k = i; });
-    for (const leg of [r.slice(0, k + 1).reverse(), r.slice(k)]) for (const { p, s } of along(leg, 5)) if (s <= read * 1.5) cand.push(p);
+    // first sight walks the road at most 1.5 x read from where it passes the site; a FRAMING point may lie anywhere on
+    // it within reach (the Moon's road reaches it round the lake: its frontal stretch is 600 m along the road but 250 m off)
+    for (const leg of [r.slice(0, k + 1).reverse(), r.slice(k)]) for (const { p, s } of along(leg, 5)) if (s <= read * 1.5 || front) cand.push(p);
   }
   for (const { p } of along(approach.length ? approach : [], 5)) cand.push(p);
   const target: V3 = [c[0], foot + height * 0.4, c[1]];
-  let first: View | null = null, best: View | null = null;
+  const legPts = new Set<string>();
+  for (const r of roads) {
+    if (r.length < 2) continue;
+    let k = 0;
+    r.forEach((p, i) => { if (dist(p, c) < dist(r[k]!, c)) k = i; });
+    for (const leg of [r.slice(0, k + 1).reverse(), r.slice(k)]) for (const { p, s } of along(leg, 5)) if (s <= read * 1.5) legPts.add(`${p[0]},${p[1]}`);
+  }
+  for (const { p } of along(approach.length ? approach : [], 5)) legPts.add(`${p[0]},${p[1]}`);
+  const onRoadLeg = (p: V2): boolean => legPts.has(`${p[0]},${p[1]}`);
+  let first: View | null = null, best: View | null = null, framed: View | null = null;
+  const cosArc = Math.cos((FRONT_ARC * Math.PI) / 180);
   for (const p of cand) {
     const d = dist(p, c);
     if (d > read * 1.25 || d < minFrom || wet(g, p[0], p[1])) continue;
     const eye: V3 = [p[0], g.height(p[0], p[1]) + EYE_M, p[1]];
     const r = readPixels(g, eye, { at: c, foot, top });
     if (canopyBlock(g, eye, target, canopy) > CANOPY_BLOCK) r.px = 0; // trees in the way: not seen from here
+    if (nearObstacle(eye, target, obstacles) || nearWall(g, eye, target) > NEAR_WALL_MAX) r.px *= 0.25; // a hoodoo or a hillside fills the frame
     if (nearClutter(eye, target, clutter) > NEAR_CLUTTER_MAX) r.px *= 0.5; // a boulder or trunk may fill the foreground: a clear eye wins, a cluttered one is still a view (a wood has no clear eye)
     const v: View = { name: "approach", eye, target, from: Math.round(d), px: r.px, visible: r.visible, note: "" };
-    if (r.px >= READ_PX_MIN && (!first || d > first.from)) first = v;
+    if (r.px >= READ_PX_MIN && (!first || d > first.from) && (!front || onRoadLeg(p))) first = v;
+    if (front && r.px >= FRAME_PX && ((p[0] - c[0]) * front[0] + (p[1] - c[1]) * front[1]) / d >= cosArc && (!framed || d > framed.from)) framed = v;
     if (!best || r.px > best.px) best = v;
   }
-  if (first) return { ...first, note: `first sight on the approach (${first.px} px of a ${height} m mark)` };
+  if (framed) return { ...framed, note: `frames the front from the approach (${framed.px} px of a ${height} m mark, within ${FRONT_ARC} deg of the front)` };
+  if (first) return { ...first, note: `${front ? `NO FRAMING POINT (>= ${FRAME_PX} px in front): ` : ""}first sight on the approach (${first.px} px of a ${height} m mark)` };
   if (best) return { ...best, note: `NEVER SEEN from the approach at ${READ_PX_MIN} px: best point ${best.px} px` };
   // no road at all: stand 0.75 x read out on the side the far view does not take (south)
   const p: V2 = [c[0], c[1] + read * 0.75];
@@ -196,7 +284,7 @@ export function approachView(g: Ground, c: V2, height: number, read: number, roa
  * The far view: from [read, 1.15 read] on 36 bearings, the dry spot that shows most of a `height` m mark at player
  * height, ties to the side nearest `prefer` (the approach). Raised 10 m at a time (to 60 m) when nothing shows 3 m.
  */
-export function farView(g: Ground, c: V2, height: number, read: number, prefer: V2 | null, canopy?: (x: number, z: number) => number, clutter?: (x: number, z: number) => number): View {
+export function farView(g: Ground, c: V2, height: number, read: number, prefer: V2 | null, canopy?: (x: number, z: number) => number, clutter?: (x: number, z: number) => number, obstacles?: readonly Obstacle[]): View {
   const foot = g.height(c[0], c[1]), top = foot + height, target: V3 = [c[0], foot + height * 0.4, c[1]];
   for (let lift = EYE_M; lift <= 60; lift = lift === EYE_M ? 10 : lift + 10) {
     let best: (View & { score: number }) | null = null;
@@ -206,6 +294,7 @@ export function farView(g: Ground, c: V2, height: number, read: number, prefer: 
       const eye: V3 = [p[0], g.height(p[0], p[1]) + lift, p[1]], r = readPixels(g, eye, { at: c, foot, top });
       if (canopyBlock(g, eye, target, canopy) > CANOPY_BLOCK) { r.px = 0; r.visible = 0; }
       else if (nearClutter(eye, target, clutter) > NEAR_CLUTTER_MAX) { r.px *= 0.5; r.visible *= 0.5; } // prefer a clear foreground, never refuse every eye in a wood
+      if (nearObstacle(eye, target, obstacles) || nearWall(g, eye, target) > NEAR_WALL_MAX) { r.px *= 0.25; r.visible *= 0.25; } // a rock flank filling the frame beside the eye
       const near = prefer ? 1 - dist(p, prefer) / (2 * d + 1) : 0;
       const score = r.visible + near * 2;
       if (!best || score > best.score) best = { name: "far", eye, target, from: Math.round(d), px: r.px, visible: r.visible, note: "", score };
@@ -226,6 +315,9 @@ export function conceptBrief(t: PromptText, fit: SiteFit, height: number): strin
   return [
     `Each attached image is an IN-GAME RENDER of the real, bare site where "${t.name}" will be built. The ground in it is FIXED and already built: keep the camera, the horizon line, every rock and cliff height, the water line and the slope of the land exactly as rendered. Do not raise, deepen, widen or add cliffs, hills, gorges, falls or water. Add ONLY the built place (structures, walls, paths, props, light, smoke) standing on this ground at a believable scale; vegetation may be thinned where the place clears it.`,
     `Measured ground (judge scale by it): the tallest rock face here is ${face}; the place's own ground has ${fit.relief} m of relief and ${fit.apronM2} m2 of standable apron; the tallest thing the place should show is about ${height} m. A structure taller than the face it stands on is wrong.`,
+    // L (o-coast 2026-10-31, coordinator: the Drowned Mole's tower painted ~37 m for an ~18 m brief, Sunwine's barque ~2.6x
+    // the largest catalogued ship; the scale gate then measures the build against the painting): keep catalogue scale
+    "Keep real scale: draw every structure, ship and prop at the size the place can actually build, never larger for drama. A tower is about the height given above, a ship about 30-35 m long, a tent about 4 m across, a person about 1.8 m. Show grandeur through placement and light, not by inflating sizes.",
     `The place: ${t.premise}`,
     t.read ? `What draws a passer-by: ${t.read}` : "",
     t.landmark ? `Landmark: ${t.landmark}` : "",

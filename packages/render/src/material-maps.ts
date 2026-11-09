@@ -28,6 +28,7 @@ import {
 import type { MaterialData } from "./scene-builder.js";
 import { nightLevel } from "./daylight.js";
 import { posterize, quantize } from "./vfx/shaders.js";
+import { edgeFadeNode } from "./edge-fade.js";
 
 /**
  * The PBR map pipeline: texture loading/sharing, colour-space discipline, the
@@ -162,6 +163,7 @@ export function materialMapKey(data: MaterialData): string {
     // the overlay adds a whole noise branch to the graph, and its mask decides
     // whether that branch samples the map; its numbers are uniforms
     data.overlay ? `overlay:${data.overlay.mask ?? "map"}` : "-",
+    data.edgeFade ? `edgeFade:${data.edgeFade.shape ?? "quad"}:${data.edgeFade.uvChannel ?? 1}` : "-",
   ].join("|");
 }
 
@@ -377,6 +379,9 @@ export interface MaterialUniforms {
   overlayMask: ScalarUniform;
   /** `overlay.maskCutoff` (0 = off). */
   overlayCutoff: ScalarUniform;
+  /** (coverage width.u, width.v, noise amount, noise frequency). */
+  edgeFadeSettings: Vec4Uniform;
+  edgeFadePower: ScalarUniform;
 }
 
 interface MaterialState {
@@ -455,6 +460,12 @@ export function onMaterialMapsWired(material: THREE.Material, listener: () => vo
 }
 
 /** The material-asset data object a cached material was built from. */
+/** The colour map a material asset's node graph samples (set when its maps are wired): prop-sheet.ts reads it. */
+const wiredColorMaps = new WeakMap<THREE.Material, THREE.Texture>();
+export function wiredColorMapOf(material: THREE.Material): THREE.Texture | undefined {
+  return wiredColorMaps.get(material);
+}
+
 export function materialSourceOf(material: THREE.Material): unknown {
   return materialSources.get(material);
 }
@@ -505,6 +516,8 @@ export function makeMaterialUniforms(material: THREE.Material, data: MaterialDat
     overlayB: uniform(new THREE.Vector4()) as Vec4Uniform,
     overlayMask: uniform(0.75) as ScalarUniform,
     overlayCutoff: uniform(0) as ScalarUniform,
+    edgeFadeSettings: uniform(new THREE.Vector4()) as Vec4Uniform,
+    edgeFadePower: uniform(1.2) as ScalarUniform,
   };
   writeOverlayUniforms(uniforms, data);
   materialState.set(material, { uniforms, mapKey: materialMapKey(data), generation: 0, loading: false });
@@ -538,6 +551,9 @@ function writeOverlayUniforms(uniforms: MaterialUniforms, data: MaterialData): v
   uniforms.overlayB.value.set(o?.speed[0] ?? 0, o?.speed[1] ?? 0, o?.frameRate ?? 0, o?.steps ?? 0);
   uniforms.overlayMask.value = o?.maskStrength ?? 0.75;
   uniforms.overlayCutoff.value = o?.maskCutoff ?? 0;
+  const f = data.edgeFade;
+  uniforms.edgeFadeSettings.value.set(f?.width?.[0] ?? 0.08, f?.width?.[1] ?? 0.15, f?.noise ?? 0.25, f?.noiseScale ?? 8);
+  uniforms.edgeFadePower.value = f?.power ?? 1.2;
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +594,7 @@ export function applyMaterialCommon(material: THREE.Material, data: MaterialData
   const { transparent, alphaTest } = resolveTransparency(data);
   material.side = SIDES[data.side ?? "front"];
   material.transparent = transparent;
+  material.depthWrite = data.depthWrite ?? true;
   // a LIVE material flipping between cutout and opaque changes the shadow
   // variant its casters need; the shadow-pass materials no longer notice on
   // their own (see shadow-pass-material.ts), so tell them. `version > 0`
@@ -605,6 +622,11 @@ export function applyMaterialCommon(material: THREE.Material, data: MaterialData
   if (data.overlay && (material as { isNodeMaterial?: boolean }).isNodeMaterial) {
     const uniforms = makeMaterialUniforms(material, data);
     (material as THREE.Material & { emissiveNode?: unknown }).emissiveNode = emissiveWithOverlay(uniforms, data, null);
+  }
+  if (data.edgeFade && (material as { isNodeMaterial?: boolean }).isNodeMaterial) {
+    const uniforms = makeMaterialUniforms(material, data);
+    (material as THREE.Material & { opacityNode?: unknown }).opacityNode = (uniforms.opacity as N)
+      .mul(edgeFadeNode(data.edgeFade, uniforms.edgeFadeSettings, uniforms.edgeFadePower));
   }
 }
 
@@ -1024,6 +1046,8 @@ export function wireMaterialMaps(
     basis ? triplanarSample(basis, texture) : (tslTexture(texture, baseUv) as N);
 
   // -- albedo -------------------------------------------------------------
+  if (textures.map && !triplanar) wiredColorMaps.set(material, textures.map);
+  else wiredColorMaps.delete(material);
   if (textures.map) {
     // color * vec4, mirroring three's own materialColor composition, so the
     // map's alpha still reaches diffuseColor.a the way it always did
@@ -1035,6 +1059,12 @@ export function wireMaterialMaps(
     // .g matches three's and glTF's greyscale-mask convention; a greyscale png
     // decodes to r == g == b, so the channel only matters for packed masks
     target.opacityNode = (uniforms.opacity as N).mul(sample(textures.alphaMap).g);
+  }
+  if (data.edgeFade) {
+    // Rebuild from the opacity uniform, not the earlier graph: async map wiring
+    // must neither erase the perimeter fade nor multiply it a second time.
+    const opacity: N = textures.alphaMap ? (uniforms.opacity as N).mul(sample(textures.alphaMap).g) : uniforms.opacity;
+    target.opacityNode = opacity.mul(edgeFadeNode(data.edgeFade, uniforms.edgeFadeSettings, uniforms.edgeFadePower));
   }
 
   // -- emissive -----------------------------------------------------------

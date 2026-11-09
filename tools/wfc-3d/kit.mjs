@@ -299,6 +299,8 @@ function materialKey(mat) {
     pbr.metallicFactor ?? 1,
     pbr.roughnessFactor ?? 1,
     (mat.emissiveFactor ?? [0, 0, 0]).join(","),
+    // a self-lit surface (emissive texture = its own base colour image) keeps its glow on the atlas page
+    ...(mat.emissiveTexture ? ["selfglow"] : []),
   ].join("|");
 }
 
@@ -386,6 +388,9 @@ function rewriteModule(source, g, atlas, islands, pages, warn) {
       if (src.alphaMode === "MASK") material.alphaCutoff = src.alphaCutoff ?? 0.5;
       if (src.doubleSided) material.doubleSided = true;
       if (src.emissiveFactor?.some((v) => v > 0)) material.emissiveFactor = src.emissiveFactor;
+      // self-lit art (prop-codex paint glow): the emissive texture was the base colour image, so it is the same atlas page
+      const same = (a, b) => a && b && g.doc.textures?.[a.index]?.source === g.doc.textures?.[b.index]?.source;
+      if (src.emissiveTexture && same(src.emissiveTexture, pbr.baseColorTexture)) material.emissiveTexture = { index: textureForPage.get(page) };
       materialFor.set(key, b.pushMaterial(material));
     }
     return materialFor.get(key);

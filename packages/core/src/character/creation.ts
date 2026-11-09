@@ -121,7 +121,7 @@ export const lookRemapSchema = z
           "when the model's page HAS that sheet; otherwise the item's own sheet is kept.",
       ),
   })
-  .describe("Maps looks written for one body onto this one (the female body wearing an item written for the male).");
+  .describe("Maps body and mounted equipment looks to this wearer's fit (the female body wearing an item written for the male). Sheets are resolved against each model's own page.");
 export type LookRemap = z.infer<typeof lookRemapSchema>;
 
 const attributeBonus = z
@@ -252,8 +252,8 @@ export const appearanceOptionSchema = z
     remap: lookRemapSchema
       .optional()
       .describe(
-        "BODY-slot options only: how items written for another body (their part names and sheets) map onto this one — " +
-          "the female body wearing an item that names the man's parts.",
+        "Declared on BODY-slot options: maps equipped body and mounted gear part names and sheets onto this wearer's fit — " +
+          "the female body wearing an item that names the man's parts. A shared accessory sheet stays unchanged unless its own model page has the suffixed sheet.",
       ),
     color: hexColor
       .optional()
@@ -381,6 +381,9 @@ export type CreationStage = z.infer<typeof creationStageSchema>;
 
 export const characterCreationSchema = z
   .object({
+    playerSelectable: z.boolean().optional().describe(
+      "Include this profile when automatically finding the game's player creation rules (default true). False keeps NPC-only appearance profiles out of player creation; an explicit creation id can still use them.",
+    ),
     ui: creationSkinSchema.optional(),
     stage: creationStageSchema.optional(),
     model: z

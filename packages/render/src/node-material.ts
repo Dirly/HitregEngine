@@ -46,9 +46,21 @@ export function asNodeMaterial(source: THREE.Material): THREE.NodeMaterial {
  * edit here is a property of the MODEL, not of one entity — the same
  * granularity `applyFoliageNormals` and `applyModelBrightness` already work at.
  */
+/** source material -> edit key -> the material an edit with that key produced (see `cacheKey`). */
+const editMemo = new WeakMap<THREE.Material, Map<string, THREE.Material>>();
+
 export function editMeshMaterials(
   root: THREE.Object3D,
   edit: (material: THREE.NodeMaterial, mesh: THREE.Mesh) => boolean,
+  /**
+   * The edit's identity: with a key, the result for each SOURCE material is remembered and every later clone of the
+   * model that still wears that source gets the same edited material back (no new node material, no new node graph).
+   * Without it every call converts afresh — and a plain glTF material is converted to a NEW node material on every
+   * call, so a model placed 90 times became 90 materials with 90 distinct shaders (p-perf 2026-11-02: Bell Strand's
+   * wind-swayed planters, ~6.5 s of synchronous shader builds at editor boot, and none of them could merge).
+   * Pass a key only when `edit` does not depend on the mesh.
+   */
+  cacheKey?: string,
 ): number {
   let touched = 0;
   root.traverse((node) => {
@@ -56,8 +68,21 @@ export function editMeshMaterials(
     if (!mesh.isMesh || !mesh.material) return;
     const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     const out = list.map((m) => {
+      if (cacheKey !== undefined) {
+        const hit = editMemo.get(m)?.get(cacheKey);
+        if (hit) {
+          if (hit !== m) touched += 1;
+          return hit;
+        }
+      }
       const node = asNodeMaterial(m);
-      if (edit(node, mesh)) {
+      const changed = edit(node, mesh);
+      if (cacheKey !== undefined) {
+        let byKey = editMemo.get(m);
+        if (!byKey) editMemo.set(m, (byKey = new Map()));
+        byKey.set(cacheKey, changed ? node : m);
+      }
+      if (changed) {
         touched += 1;
         return node;
       }

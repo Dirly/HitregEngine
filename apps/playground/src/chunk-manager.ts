@@ -708,6 +708,18 @@ export class ChunkManager {
   }
 
   /**
+   * Resize the rings of the running world (the player's draw distance). Same cells, same scene: the next `update` keeps
+   * what is still in reach, loads what is newly in reach and drops the rest through the usual path. A load in flight sees
+   * a new streamer and is dropped, exactly as for a reconfigure, and is asked for again if it is still wanted.
+   */
+  setRings(rings: NonNullable<ChunkStreamerData["rings"]>): void {
+    const s = this.streamer;
+    if (!s?.rings) return;
+    this.streamer = { ...s, rings };
+    this.lastFocus = null;
+  }
+
+  /**
    * Install (or clear) a procedural cell source. With a provider set, cells
    * are generated on demand and the on-disk chunk index is not consulted at
    * all — a generated world has no files and no bounded cell list.

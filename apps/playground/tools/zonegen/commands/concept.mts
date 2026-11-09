@@ -1,6 +1,8 @@
 /**
  * zonegen concept <world> --project <p> --zone <z> --poi <id>   (or --town <name> for a town, zone optional)
- *   [--height <m>] [--port 5317] [--spot-timeout 240] [--renders-only | --paint-only | --measure] [--views gate,street,square] [--dry-run] [--keep-bare] [--style "..."] [--timeout 1800]
+ *   [--height <m>] [--port 5317] [--spot-timeout 240] [--renders-only [--paint-ruling "YYYY-MM-DD ..."] [--keep-cameras <site.json | views.json>] | --paint-only | --measure] [--views gate,street,square] [--dry-run] [--keep-bare] [--style "..."] [--identity] [--change "..."] [--timeout 1800]
+ *   --identity (a POI): the approved approach painting rides along as the identity + layout reference; --change says the ONE
+ *   thing the repaint differs in. --views sea|shelf: extra views from saved cameras (--keep-cameras concept-<name>).
  *
  * CONCEPT ON SITE (Derek 2026-10-29: "do you take a snapshot of the area then feed those for the concept art?"). Every
  * firstshore concept frame was drawn from text; Codex invented a cliff tall enough for a 50 m gate and the owner built
@@ -30,6 +32,12 @@
  *       <id>-approach.png       <id>-far.png                            the concept frames (design.json concept[])
  *       <id>.site.json   manifest: reservation, ground fingerprint, cameras, fit numbers (gate 16 reads it)
  *       <id>-sheet.png   bare | painted per view with the fit numbers, and the plan crop: what the reviewer opens
+ *  6. records the world order: bare-renders; concept-painted on a painting run, with each painted frame's sha256
+ *     (`frames`). `--renders-only` re-composes the sheet around the SAME paintings and carries concept-painted forward
+ *     when every frame's hash matches the record (order.paintedCarry); a record from before the hashes needs
+ *     `--paint-ruling "YYYY-MM-DD ..."` (a dated ruling that the paintings are unchanged). The approval is re-given after.
+ *     A painted view is always re-rendered from the painting's own camera (the manifest's, or --keep-cameras), never a
+ *     recomputed one: a moved road moves "first sight", not the painting.
  *
  * Gate 16 (tools/poi-review/concept-site.mjs) counts a concept frame only when its request record names one of these
  * renders, for the same reservation, on unchanged ground. Walled towns also get the overlook verdict of
@@ -39,17 +47,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { AssetLibrary, ComponentRegistry, createWorldField, expandScene, PrefabError, registerChunkComponents, registerCoreComponents, worldRecipeSchema, type PrefabDoc, type SceneDoc } from "@hitreg/core";
+import { AssetLibrary, ComponentRegistry, createWorldField, expandScene, scatterCell, scatterSeatSize, PrefabError, registerChunkComponents, registerCoreComponents, worldRecipeSchema, type PrefabDoc, type SceneDoc } from "@hitreg/core";
 // @ts-ignore untyped helper module
 import { findAsset } from "../../_closure.mjs";
 import { runCapped } from "../../_run-capped.mts";
+import { cropRecipe, cropScene, labBox, labSpawn, viewPoints } from "../../_lab-crop.mts";
 import { tallScatterRules, treeSampler } from "../../worldgen-relief.mts";
 import { groundSpread, GROUNDLESS_STD } from "../../_far-camera.mts";
-import { approachView, conceptBrief, farView, GATEHOUSE_M, measureSite, NEAR_VIEWS, readDistance, seenOverGround, stakeLines, townNearViews, townStakePlan, WALL_M, type PromptText, type SiteFit, type TownPlan, type View, type ViewName } from "../../_concept-site.mts";
+import { approachView, conceptBrief, EXTRA_VIEWS, paintingCamera, farView, GATEHOUSE_M, measureSite, NEAR_VIEWS, readDistance, seenOverGround, stakeLines, townNearViews, townStakePlan, WALL_M, type Obstacle, type PromptText, type SiteFit, type TownPlan, type View, type ViewName } from "../../_concept-site.mts";
 import { extentSchema, groundAxes, groundHit, pixelRay, polyArea, projector, type ScaleCamera } from "../../_place-scale.mts";
 import { z } from "zod";
 // @ts-ignore plain JS engine tool module
-import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership, ownsFeature } from "../../../../../tools/poi-review/concept-site.mjs";
+import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership, ownsFeature, stampOf } from "../../../../../tools/poi-review/concept-site.mjs";
 import { decodePng, encodePng } from "../../_png.mjs";
 import * as order from "../../world-order.mts";
 // @ts-expect-error untyped helper module
@@ -74,6 +83,7 @@ const W = 1280, H = 720;
 const slug = (s: string) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const tryJson = (f: string): J | null => { try { return exists(f) ? (readJson(f) as J) : null; } catch { return null; } };
 const writeJson = (f: string, v: unknown) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(v, null, 1) + "\n"); };
+const prior0 = (outDir: string, id: string): J | null => tryJson(path.join(outDir, `${id}.site.json`));
 const rel = (f: string) => path.relative(PG, f).split(path.sep).join("/");
 const xz = (p: number[]): V2 => (p.length >= 3 ? [p[0]!, p[2]!] : [p[0]!, p[1]!]);
 
@@ -105,7 +115,9 @@ export async function run(ctx: Ctx): Promise<number> {
     const res = tryJson(P.reservations(ctx.zone));
     const r = (res?.reservations ?? []).find((x: J) => x.location === id);
     if (!r) { console.error(`zonegen concept: no reservation for ${id} in ${P.reservations(ctx.zone)} (zonegen reserve first)`); return 2; }
-    center = [r.center[0], r.center[1]]; radius = r.radius; terrainRadius = r.terrainRadius ?? r.radius;
+    center = [r.center[0], r.center[1]]; radius = r.radius; // a reservation's terrainRadius 0 means "no terrain of its own", not "measure nothing": the probe still reads the
+    // reservation (2026-10-30 w15: both entrance sheets said "tallest face: none" over a 73 m face)
+    terrainRadius = Math.max(r.radius, r.terrainRadius ?? 0);
     for (const a of [r.approach, ...(r.approaches ?? [])].filter(Boolean)) { if (a.from) fromIds.push(a.from); if (!approachPts.length && a.points?.length) approachPts = a.points.map(xz); }
     const loc = (quests?.locations ?? []).find((l: J) => l.id === id) ?? {};
     const place = (brief?.places ?? []).find((p: J) => p.id === id) ?? (loc.place ? (brief?.places ?? []).find((p: J) => p.id === loc.place) : null) ?? {};
@@ -152,16 +164,34 @@ export async function run(ctx: Ctx): Promise<number> {
   const t0 = Date.now();
   const field = createWorldField(worldRecipeSchema.parse(bareRaw));
   console.log(`field: ${((Date.now() - t0) / 1000).toFixed(1)} s (bare: ${ownedFeatures} feature(s) of ${id} left out)`);
-  const fit: SiteFit = measureSite(field, center, radius, terrainRadius);
-  const roads = fromIds.map((rid) => (raw.features?.roads ?? []).find((r: J) => r.id === rid)).filter(Boolean).map((r: J) => (r.points as number[][]).map(xz));
+  // an entrance stands at a face's foot: its face is the one rising from the door, not a drop behind the massif
+  const fit: SiteFit = measureSite(field, center, radius, terrainRadius, { rising: entrance });
+  // L (o-smalls 2026-10-30: a farm's approach and far eyes stood among town-1's houses on the road out of its gate): a
+  // place that is not the town is never framed from inside a town's site (radius + 15 m); the road stretch there is cut
+  const inTown = (p: V2): boolean => !townName && (raw.features?.towns ?? []).some((t: J) => Array.isArray(t.center) && Math.hypot(p[0] - t.center[0], p[1] - t.center[1]) < (Number(t.radius) || 0) + 15);
+  const roads = fromIds.map((rid) => (raw.features?.roads ?? []).find((r: J) => r.id === rid)).filter(Boolean).map((r: J) => (r.points as number[][]).map(xz).filter((p) => !inTown(p))).filter((r: V2[]) => r.length >= 2);
   // the trees the scatter rules stand on the ground: a sight line through a wood shows trunks, not the site
   const trees = treeSampler(worldRecipeSchema.parse(bareRaw), field);
   const canopy = (x: number, z: number): number => trees.density(x, z);
   const bareRecipe = worldRecipeSchema.parse(bareRaw), tall = treeSampler(bareRecipe, field, undefined, tallScatterRules(bareRecipe));
   const clutter = (x: number, z: number): number => tall.density(x, z);
   // a town is approached from OUTSIDE its walls (radius + 25 m); a POI from 10 m (its reservation is the whole site)
-  const approach = approachView(field, center, height, read, roads, approachPts, canopy, clutter, townName ? radius + 25 : 10);
-  const far = farView(field, center, height, read, [approach.eye[0], approach.eye[2]], canopy, clutter);
+  // an entrance's approach frames its FRONT: the face rises from the door along fit.face's bearing, the front looks back
+  const fb = entrance && fit.face ? (fit.face.bearing * Math.PI) / 180 : null;
+  const front: V2 | undefined = fb === null ? undefined : [-Math.sin(fb), Math.cos(fb)];
+  // tall scatter objects (hoodoos, buttresses, big rocks) a camera must not stand against, out to the far ring
+  const obstacles: Obstacle[] = [];
+  {
+    const cs = bareRecipe.cellSize, R = read * 1.3;
+    for (let cz = Math.floor((center[1] - R) / cs); cz <= Math.floor((center[1] + R) / cs); cz++)
+      for (let cx = Math.floor((center[0] - R) / cs); cx <= Math.floor((center[0] + R) / cs); cx++)
+        for (const inst of scatterCell(field, cx, cz)) {
+          const rule = bareRecipe.scatter[inst.ruleIndex]!, s = scatterSeatSize(rule, inst.scale);
+          if (s.height >= 4) obstacles.push({ x: inst.position[0] + cx * cs, y: inst.position[1], z: inst.position[2] + cz * cs, r: Math.max(s.halfX, s.halfZ), h: s.height });
+        }
+  }
+  const approach = approachView(field, center, height, read, roads, approachPts, canopy, clutter, townName ? radius + 25 : 10, front, obstacles);
+  const far = farView(field, center, height, read, [approach.eye[0], approach.eye[2]], canopy, clutter, obstacles);
   // a TOWN also gets the NEAR set (Derek 2026-10-30: "you only have far away views"): gate, street and square at player
   // height, on a plan staked from the site (wall ring, gatehouse on the main road, street, square, chapel, lots)
   let plan: TownPlan | null = null;
@@ -174,8 +204,33 @@ export async function run(ctx: Ctx): Promise<number> {
     allViews.push(...townNearViews(field, plan));
   }
   const want = ctx.opt("views") ? new Set(ctx.opt("views").split(",").map((s) => s.trim())) : null;
+  // an EXTRA view (sea, shelf) comes only from a saved camera (--keep-cameras: a views.json `concept-<name>` or a
+  // manifest's renders.<name>; later runs read the manifest), never computed: it is the owner's chosen frame
+  for (const n of EXTRA_VIEWS) {
+    const saved = prior0(outDir, id), src = (ctx.opt("keep-cameras") ? tryJson(ctx.opt("keep-cameras")) : null) ?? saved;
+    if (!want?.has(n) && !saved?.renders?.[n]) continue;
+    const r = (Array.isArray(src) ? src.find((x: J) => x?.name === `concept-${n}`) : src?.renders?.[n]) as J | undefined;
+    if (!r?.camera || !r?.target) { if (want?.has(n)) { console.error(`zonegen concept: --views ${n} needs its camera in --keep-cameras (concept-${n}: camera, target)`); return 2; } continue; }
+    allViews.push({ name: n, eye: r.camera, target: r.target, from: Math.round(Math.hypot(r.camera[0] - center[0], r.camera[2] - center[1])), px: 0, visible: 1, note: `the owner's ${n} camera${r.note ? ` (${r.note})` : ""}` });
+  }
   if (want) for (const v of want) if (!allViews.some((x) => x.name === v)) { console.error(`zonegen concept: --views ${v}: this place has ${allViews.map((x) => x.name).join(", ")}`); return 2; }
   const views = allViews.filter((v) => !want || want.has(v.name));
+  // A PAINTED view is re-rendered from the painting's OWN camera (r-found 2026-10-31: a --renders-only after a road trim
+  // recomputed "first sight" on the trimmed road, moved Red Dial's approach 42 m and its far camera to another bearing,
+  // and the bare frames no longer matched Derek's paintings; the scale gate then measured the paintings through the
+  // wrong cameras). --renders-only keeps the manifest's cameras; --keep-cameras <file> takes them from a saved manifest
+  // (renders.<view>) or a place-build views.json (concept-<view>), to recover a manifest a re-render already moved.
+  const camSrc = (ctx.opt("keep-cameras") ? tryJson(ctx.opt("keep-cameras")) : rendersOnly ? tryJson(path.join(outDir, `${id}.site.json`)) : null) as J | J[] | null;
+  if (ctx.opt("keep-cameras") && !camSrc) { console.error(`zonegen concept: --keep-cameras ${ctx.opt("keep-cameras")}: not a readable JSON file`); return 2; }
+  // every painted view (also one this run does not render: its fit numbers go into the manifest) keeps its camera
+  for (const [i, v] of allViews.entries()) {
+    if ((EXTRA_VIEWS as readonly string[]).includes(v.name)) continue;
+    const k = paintingCamera(v, camSrc, exists(path.join(outDir, `${id}-${v.name}.png`)), center);
+    if (k === v) continue;
+    if (Math.hypot(k.eye[0] - v.eye[0], k.eye[2] - v.eye[2]) > 1) console.log(`  ${v.name}: the painting's camera kept (${k.eye.join(",")}); this ground would pick ${v.eye.map((n) => Math.round(n)).join(",")}`);
+    allViews[i] = k; const j = views.indexOf(v); if (j >= 0) views[j] = k;
+  }
+
   let wall: string | null = null;
   if (townName) {
     const r = spawnSync(process.execPath, [...TSX, "tools/town-wall-line.mts", "check", "--project", ctx.project, "--town", townName], { encoding: "utf8", maxBuffer: 64 << 20 });
@@ -240,7 +295,7 @@ export async function run(ctx: Ctx): Promise<number> {
     const rec = (v: View) => ({ file: path.basename(renders[v.name]!), sha256: fileSha(renders[v.name]!), ...cam(v), ...(plan && (NEAR_VIEWS as readonly string[]).includes(v.name) ? { staked: true } : {}) });
     writeJson(manifestFile, {
       tool: CONCEPT_TOOL, version: 1, poi: id, project: ctx.project, world: ctx.world, zone: ctx.zone || null, town: townName,
-      reservation: fpRes, worldFile: rel(P.recipe), ownership: own, fingerprint: fingerprint.hash, featuresUnder: fingerprint.features,
+      reservation: fpRes, worldFile: rel(P.recipe), ownership: own, ...stampOf(fingerprint),
       renderedAt: new Date().toISOString(), bare: shot.bare,
       renders: { ...keep, ...Object.fromEntries(views.map((v) => [v.name, rec(v)])), plan: { file: path.basename(renders.plan!), sha256: fileSha(renders.plan!) } },
       fit: { ...fit, read, height, ...Object.fromEntries(allViews.map((v) => [v.name, fitRec(v)])), wall },
@@ -256,7 +311,8 @@ export async function run(ctx: Ctx): Promise<number> {
     try {
       // a town's frames are the SAME place: its current approach painting rides along as the identity reference (copied
       // out first: a repainted approach overwrites it); one Codex session, refs attached once each in first-seen order
-      const identity = plan && exists(frames.approach!) ? path.join(tmp, "identity-approach.png") : null;
+      // a POI gets the same with --identity (o-sunwine5 2026-11-02: repaint ONE piece of an approved place, keep the rest)
+      const identity = (plan || ctx.flag("identity")) && exists(frames.approach!) ? path.join(tmp, "identity-approach.png") : null;
       if (identity) fs.copyFileSync(frames.approach!, identity);
       const refOrder: string[] = [], at = (f: string) => { if (!refOrder.includes(f)) refOrder.push(f); return refOrder.indexOf(f) + 1; };
       const set = {
@@ -269,7 +325,9 @@ export async function run(ctx: Ctx): Promise<number> {
             prompt: [
               `This frame repaints attached image ${n} only (its COMPOSITION: keep its camera, horizon and ground): ${viewText(v)}. Same camera, same horizon, same ground.`,
               near ? `The coloured lines in image ${n} are survey STAKES of the town's plan, standing on the real ground at true scale: RED = the town wall line with its ${WALL_M} m top line and posts; ORANGE = the gatehouse footprint and its ${GATEHOUSE_M} m top; YELLOW = the main street's edges (6 m wide); CYAN = the market square; MAGENTA = the chapel lot and its tower (${plan!.chapel.tower} m top); WHITE = building lots (8 m frontage, 11 m deep, 3 m posts). Build the town ON them: walls on the red line at that height, the gatehouse on the orange box, houses filling the white lots fronting the street, the square open, the chapel on the magenta lot with its tower where the small box is. Then REMOVE every stake line: none may show in the painting.` : "",
-              identity ? `Attached image ${idN} is the current APPROACH painting of this same town (from ${approach.from} m): it is the town's identity. Match it exactly — the same red rubble wall and stone, the same roofs, the same gatehouse and chapel tower, the same light and air — so this frame reads as that town seen up close. Do not repaint image ${idN}.` : "",
+              identity && plan ? `Attached image ${idN} is the current APPROACH painting of this same town (from ${approach.from} m): it is the town's identity. Match it exactly — the same red rubble wall and stone, the same roofs, the same gatehouse and chapel tower, the same light and air — so this frame reads as that town seen up close. Do not repaint image ${idN}.` : "",
+              identity && !plan ? `Attached image ${idN} is the current APPROVED approach painting of this same place: it is the place's identity and its LAYOUT. Paint the same place: the same pieces where it puts them, the same stone, timber, light and air${ctx.opt("change") ? ", EXCEPT what THE CHANGE below says" : ""}. Do not repaint image ${idN}.` : "",
+              ctx.opt("change") ? `THE CHANGE (the only thing that differs from the approved painting): ${ctx.opt("change")}` : "",
             ].filter(Boolean).join("\n"),
           };
         }),
@@ -287,7 +345,22 @@ export async function run(ctx: Ctx): Promise<number> {
   const painted = allViews.map((v) => frames[v.name]!).filter(exists);
   if (painted.length) console.log(`  design.json: "concept": [${painted.map((f) => `"${rel(f)}"`).join(", ")}]`);
   if (!ctx.flag("paint-only")) { const r = order.recordPlaceStage(P.projectDir, orderKey, "bare-renders", { by: "zonegen concept", evidenceFile: manifestFile }, ctx.world); if (r) console.log(`  ${r}`); }
-  if (!rendersOnly) { const r = order.recordPlaceStage(P.projectDir, orderKey, "concept-painted", { by: "zonegen concept", evidenceFile: sheet }, ctx.world); if (r) console.log(`  ${r}`); }
+  // the painted frames' hashes ride on the concept-painted record, so a later bare re-render can prove them unchanged
+  const frameShas = Object.fromEntries(views.map((v) => [path.relative(P.projectDir, frames[v.name]!).split(path.sep).join("/"), exists(frames[v.name]!) ? fileSha(frames[v.name]!) as string : null]));
+  // a partial painting run (--views) keeps the hashes of the frames it did not paint when they are unchanged on disk
+  // (L o-sunwine5 2026-11-02: --views sea,shelf dropped the approved approach/far hashes, so no later run could carry them)
+  const kept = (() => { if (!want) return {}; const pr = order.loadStages(P.projectDir, ctx.world)?.places.find((x) => order.matchPlace(x, orderKey))?.stages["concept-painted"]?.frames ?? {}; return Object.fromEntries(Object.entries(pr).filter(([f, sha]) => !(f in frameShas) && exists(path.join(P.projectDir, f)) && fileSha(path.join(P.projectDir, f)) === sha)); })();
+  if (!rendersOnly) { const r = order.recordPlaceStage(P.projectDir, orderKey, "concept-painted", { by: "zonegen concept", evidenceFile: sheet, frames: { ...kept, ...frameShas } as Record<string, string> }, ctx.world); if (r) console.log(`  ${r}`); }
+  // --renders-only re-composes the sheet (the concept-painted evidence) around the SAME paintings: carry that record
+  // forward when the paintings are the recorded ones (order.paintedCarry: content hashes; a record without them needs a
+  // dated --paint-ruling). r-found 2026-10-31: a re-render after a road trim STALEd Red Dial's approved paintings with
+  // no way back short of a Codex repaint. The approval after it is still re-given (`zonegen approve`).
+  else if (!catalogue) {
+    const prior = order.loadStages(P.projectDir, ctx.world)?.places.find((x) => order.matchPlace(x, orderKey))?.stages["concept-painted"];
+    const c = order.paintedCarry(prior, frameShas, ctx.opt("paint-ruling", ""));
+    if (c.carry) { const r = order.recordPlaceStage(P.projectDir, orderKey, "concept-painted", { by: "zonegen concept --renders-only", note: c.why, evidenceFile: sheet, frames: frameShas as Record<string, string>, ...(prior?.frames ? {} : { ruling: ctx.opt("paint-ruling") }) }, ctx.world); if (r) console.log(`  ${r}`); }
+    else if (prior) console.log(`  concept-painted not carried: ${c.why}`);
+  }
   return 0;
 }
 
@@ -298,6 +371,8 @@ function viewText(v: View): string {
     case "gate": return `the GATE view, at player height on the main road ${v.from} m out from the gatehouse: the wall and the gatehouse close up, the road running into the gate passage`;
     case "street": return "the STREET view, at player height just inside the gate, looking down the main street: house fronts on both sides, the market square ahead and the chapel tower beyond";
     case "square": return "the SQUARE view, at player height on the near corner of the market square, looking across it at the chapel and its tower, houses round the square";
+    case "sea": return `the SEA view from ${v.from} m out on the water (a boat's deck), looking in at the place over the bay: it must read from here`;
+    case "shelf": return `the SHELF view, at player height on the place's own ground ${v.from} m from the centre, close to its hero piece`;
   }
 }
 
@@ -432,7 +507,14 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
   // prefab lost): an instance that does not expand would fail the whole bare render, so it is left out of the copy
   const broken = brokenInstances(scene, ctx.project, mine);
   let sceneId = ctx.world, scratch: string | null = null, bare = "live scene (the place has no features or entities yet)";
-  if (mine.size || ownedF || broken.size) {
+  // views whose eye stands over open water: their lower frame is water by design, so the groundless check reads the
+  // shore band, as for a sea view (w-temple3 2026-11-02: a swimmer's-eye front view of a drowned temple read "no ground")
+  const overWater = new Set<string>();
+  // L (Derek 2026-10-30 "take a few chunks and send it to do the work there"): the bare render is ALWAYS a cropped scratch
+  // (tools/_lab-crop.mts): the box round both cameras, a stretch past their target and the site's terrain radius; the
+  // recipe keeps only the features reaching it (ground proved identical to live), the scene only what stands in it, and
+  // voxelWorld.bounds stops the streamer at its edge
+  {
     for (const b of broken) mine.add(b);
     for (let grew = true; grew;) { grew = false; for (const [k, e] of Object.entries(scene.entities ?? {}) as [string, any][]) if (e.parent && mine.has(e.parent) && !mine.has(k)) { mine.add(k); grew = true; } }
     // a scratch copy like place-build's lab: the world minus the place's features, the scene minus its entities
@@ -441,16 +523,23 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
     const pj = readJson(path.join(P.projectDir, "project.json")) as J;
     writeJson(path.join(scratch, "project.json"), { version: 1, name: lab, title: `concept on site: ${id} (scratch)`, description: `Scratch bare copy of ${ctx.world} for zonegen concept ${id}; deleted after the run.`, group: "Worlds", menuOrder: 99,
       scenes: [{ id: labWorld, label: `concept ${id}`, variants: [] }], engine: pj.engine ?? "^0.1", multiplayer: pj.multiplayer ?? "server", tools: [], dependsOn: [...new Set([...(pj.dependsOn ?? []), ctx.project])] });
-    writeJson(path.join(scratch, "assets", "worlds", `${labWorld}.json`), { ...raw, features: Object.fromEntries(Object.entries(raw.features ?? {}).map(([k, v]) => [k, Array.isArray(v) ? v.filter((f) => !ownsFeature(own, f)) : v])) });
+    const box = labBox([...views.flatMap((v) => viewPoints({ camera: v.eye, target: v.target })), ...views.flatMap((v) => [[v.target[0] - terrainRadius, v.target[2] - terrainRadius], [v.target[0] + terrainRadius, v.target[2] + terrainRadius]] as V2[])]);
+    const crop = cropRecipe({ ...raw, features: Object.fromEntries(Object.entries(raw.features ?? {}).map(([k, v]) => [k, Array.isArray(v) ? v.filter((f) => !ownsFeature(own, f)) : v])) }, box, { log: (l) => console.log(l) });
+    writeJson(path.join(scratch, "assets", "worlds", `${labWorld}.json`), crop.recipe);
     const tdir = path.join(P.projectDir, "assets", "materials", "terrain"), tout = path.join(scratch, "assets", "materials", "terrain");
-    if (exists(tdir)) { fs.mkdirSync(tout, { recursive: true }); for (const f of fs.readdirSync(tdir).filter((f) => f === `${ctx.world}.json` || f.startsWith(`${ctx.world}-`))) fs.copyFileSync(path.join(tdir, f), path.join(tout, labWorld + f.slice(ctx.world.length))); }
-    const s = JSON.parse(JSON.stringify(scene));
+    const named = new Set(JSON.stringify(crop.recipe).match(new RegExp(`terrain/${ctx.world}[a-z0-9-]*`, "g")) ?? []);
+    if (exists(tdir)) { fs.mkdirSync(tout, { recursive: true }); for (const f of fs.readdirSync(tdir).filter((f) => f === `${ctx.world}.json` || (f.startsWith(`${ctx.world}-`) && named.has(`terrain/${f.replace(/.json$/, "")}`)))) fs.copyFileSync(path.join(tdir, f), path.join(tout, labWorld + f.slice(ctx.world.length))); }
+    const t0 = views[0]!.target, g0 = createWorldField(worldRecipeSchema.parse(crop.recipe));
+    for (const v of views) { const w = g0.waterY(v.eye[0], v.eye[2]); if (w !== null && w > g0.height(v.eye[0], v.eye[2]) + 0.5) overWater.add(v.name); }
+    // the scratch starts AT THE PLACE (Derek 2026-10-31): on walkable ground at the first view's eye, facing its target
+    const e0 = views[0]!.eye, st = labSpawn(g0, [e0[0], e0[2]], [t0[0], t0[2]], `${id}: the ${views[0]!.name} view's eye, facing its target`);
+    const s = cropScene(scene, box, { x: st.position[0], z: st.position[2], groundY: st.ground, target: st.target }).scene;
     for (const eid of mine) delete s.entities[eid];
     for (const e of Object.values(s.entities) as any[]) if (e.components?.voxelWorld) e.components.voxelWorld.world = labWorld;
     s.name = `concept ${id}`;
     writeJson(path.join(scratch, "assets", "scenes", `${labWorld}.scene.json`), s);
     sceneId = labWorld;
-    bare = `scratch copy: ${ownedF} feature(s) and ${mine.size - broken.size} entit(ies) of ${id} taken out${broken.size ? `; ${broken.size} instance(s) that do not expand left out (${[...broken].slice(0, 3).join(", ")})` : ""}`;
+    bare = `cropped scratch [${box.min}]..[${box.max}] (dropped ${Object.entries(crop.dropped).map(([k, n]) => `${n} ${k}`).join(", ") || "nothing"}; ground proved identical on ${crop.proof.samples} samples + ${crop.proof.cells} cells): ${ownedF} feature(s) and ${mine.size - broken.size} entit(ies) of ${id} taken out${broken.size ? `; ${broken.size} instance(s) that do not expand left out (${[...broken].slice(0, 3).join(", ")})` : ""}`;
     if (broken.size) console.log(`WARN: ${broken.size} prefab instance(s) of the live scene do not expand (left out of the bare copy): ${[...broken].slice(0, 5).join(", ")}`);
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "concept-shots-"));
@@ -473,7 +562,7 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
     // bare site on a busy machine); refuse it rather than overwrite the last good render
     for (const [k, f] of Object.entries(files)) if (blankFrame(f)) return { ok: false, why: `the ${k} frame is blank (one flat colour): the scene never drew — retry on a quieter machine or raise --spot-timeout` };
     // ... and one whose ground never streamed in (sky over the sea plane; 2026-10-29 w6, tools/_far-camera.mts groundSpread)
-    for (const [k, f] of Object.entries(files)) { const g = groundSpread(decodePng(fs.readFileSync(f)) as Img); if (g < GROUNDLESS_STD) return { ok: false, why: `the ${k} frame shows no ground (lower-frame luma spread ${g.toFixed(1)} < ${GROUNDLESS_STD}): the terrain never streamed — retry` }; }
+    for (const [k, f] of Object.entries(files)) { const g = groundSpread(decodePng(fs.readFileSync(f)) as Img, k === "sea" || overWater.has(k) ? 0.3 : 0.6); if (g < GROUNDLESS_STD) return { ok: false, why: `the ${k} frame shows no ground (lower-frame luma spread ${g.toFixed(1)} < ${GROUNDLESS_STD}): the terrain never streamed — retry` }; }
     // copy out before the temp folder goes
     const keep = fs.mkdtempSync(path.join(os.tmpdir(), "concept-frames-"));
     for (const [k, f] of Object.entries(files)) { const to = path.join(keep, `${k}.png`); fs.copyFileSync(f, to); files[k] = to; }
@@ -488,6 +577,7 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
 const VIEW_MARK: Record<ViewName, { letter: string; col: number[] }> = {
   approach: { letter: "A", col: [255, 230, 60] }, far: { letter: "F", col: [90, 220, 255] },
   gate: { letter: "G", col: [255, 150, 20] }, street: { letter: "S", col: [255, 255, 255] }, square: { letter: "Q", col: [40, 230, 255] },
+  sea: { letter: "W", col: [120, 160, 255] }, shelf: { letter: "B", col: [255, 120, 200] },
 };
 /** The plan-map crop: hillshaded bare ground, water, roads, the reservation (radius solid, terrain radius dashed), the
  *  approach points, a town's stakes, and every camera with its view line. North up. */

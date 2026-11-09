@@ -7,6 +7,11 @@ in **docs/mob-atlas.md** and **docs/weapon-atlas.md**; how an item's look is
 drawn is **docs/item-looks.md**; icons are **docs/item-icons.md**. This doc is
 the order those go in for armor, and the slot rules.
 
+For the current foundation-specific starting point, including fitted headwear,
+native masks, shoulder/tasset choices and the latest repair examples, read
+[`foundation/authoring/armor-sets/README.md`](../apps/playground/projects/foundation/authoring/armor-sets/README.md).
+It also names the source producers and Play checks a fresh agent must preserve.
+
 Worked example: the MMO project (voxel-demo) outfits vanguard, magus, ranger,
 cleric.
 
@@ -20,6 +25,77 @@ cleric.
 
 All three are at the body's density (109 texels/m, nearest-filtered). One model
 = one packed PAGE of every set's sheet = one draw for every character wearing it.
+
+Measure independent native UV layouts at their own tile size. A cloth cap or
+native face plate sharing the helmet page does not use the ordinary helmet
+key: including it in the key sheet's area average can fail otherwise valid art.
+
+Judge density on the worn character at its actual encounter scale. A larger page
+may retain coarse base paint while carrying finer selected ornaments; page size
+alone does not describe the visible pixel scale. Keep shoulder bases consistent
+with the outfit when increasing the detail of a small cutout.
+
+The foundation helm now supports reusable native facial masks, a closed rear cap,
+a separate crown fitted over a hood, and a soft peasant cap. Their source and
+rebuild guide is `apps/playground/projects/foundation/authoring/helm-system/README.md`.
+Native-layout masks and cloth caps select their own packed paint rather than an
+ordinary helm-key sheet. Separate wear pieces can still share one mounted ubermesh
+and use its per-part paint groups. The original crown retains its bare-head fit.
+
+## Kits and instance sets
+
+A brief is one of two kinds (`kind`):
+
+- **instance** — a DUNGEON's loot, and the default for any dungeon. One theme (the SUBJECT), 1-2 MIXED body sheets
+  whose regions each carry an armour weight (`bodies[].weights`: a plate chest, leather trousers, mail hands…), ONE
+  helm and ONE shoulder sheet whose parts are painted in several weights (`helmPaint`, `shoulderPaint`: Helm2 plate,
+  Helm1 mail, Helm3 leather, the hood cloth; the shoulder bases likewise), and NAMED pieces from a loot plan. One
+  instance drops all four weights across its slots without four uniform kits (owner rulings 2026-10-08 and
+  2026-10-29: "you are NOT making 5 full kits per dungeon"). The per-part weight split holds on every sheet (the
+  Gnawspur test, 2026-10-08).
+- **kit** — one uniform outfit of one weight, for a town, faction or vendor: one body sheet, one body item per slot
+  per tier, normally 2-4 named helm pieces and 2-4 named shoulder pieces. A single helm may span multiple tiers when they share the same authored look.
+
+### Loot plans (instance sets)
+
+`armor loot-plan <dungeon> --set <instance-id> --project <p>` plans from the dungeon, not from a fixed shape: its size
+class, difficulty, level band and SOURCES (trash packs of an area, named mobs, mini-bosses, the boss, each tied to its
+creatures and area). Give it `--input <sources.json>` (the facts as a file; a FIXTURE while the dungeon is not built)
+or `--bestiary <zone bestiary.json> --area <poi>` (groups standing there = trash, rares there = named, bosses whose
+`dungeon` is this one). It writes the plan skeleton to the brief's `loot` file: per source its share of pieces,
+slot / weight / rarity / sheet dealt so every slot drops in two weights, names and stories TODO. The author names each
+piece after its source, EverQuest style (a bloodstained tunic off the crypt ghouls, a different-looking piece off the
+warden), picks the helm / shoulder parts and the legs extras, and re-runs the command to lint it:
+
+- all four weights across the dungeon; every slot in 2+ weights (the dungeon pipeline's `loot` gate asks the same);
+- no two pieces with the same look (same sheet, slot, parts, legs extras and worn ornaments);
+- each piece's weight is what its sheet paints there; ornaments rare+; rarity within the level band (top level 10:
+  uncommon, the boss rare);
+- every source names real creatures and an area, and drops its share (`lootRules.piecesPerSource`).
+
+**Default: no set**, loose pieces that loosely match. A SET appears only when a rule fires and the plan names it
+(`set.rule`): `dungeon-set` for a large or hard dungeon (pieces on its boss and named mobs, never trash), or
+`zone-set` for 2-3 pieces in each of several dungeons of a zone. The thresholds are `lootRules` (loot.mts, every
+field described). `armor run` on an instance generates its sheets and emits the planned items (`<set>-<piece>`, the
+piece's own name, weight tag and rarity).
+
+### Helm and shoulder pieces (kits)
+
+Kits normally ship **2-4 helm pieces and 2-4 shoulder pieces** (`helms[]`, `shoulders[]`). One helm piece spanning multiple tiers is valid when those tiers intentionally share a look; it retains the normal item ID for each tier. Each piece is a full part pick (helm: base
++ extras such as a nose guard, the crown, a hood under a helm, a bandana; shoulder: base + rim + accent), its own item
+name, its tiers and its ornaments (worn on ornate tiers only). The sheets already paint every part of both models, so
+more pieces cost no art. Pick for the set's character (cloth: hoods, cowls, bandanas, light caps; leather: caps, hoods
+over coifs; mail: coifs, nasal helms; plate: closed and great helms; cult or rare: crowns and ornaments), spread
+bases across sets. Item ids: the first piece listing a tier keeps `<set>-helm-<rarity>`; a second piece at that tier
+is `<set>-helm-<key>-<rarity>`. Lint:
+
+- **distinct within the set**: the parts two pieces do not share cover at least 25% of their triangles (ornaments
+  not counted). Helm1 vs Helm1 + flared neck guard is 18%: the same piece; adding the face plate makes 28%.
+- every tier has a piece; pieces only name tiers of the set; the model rules hold with and without ornaments.
+- **across all sets** (`armor picks`, and every `brief lint`): an identical pick (same parts and worn ornaments) in
+  two sets fails; a base shared by several sets only warns. Practical civilian wardrobes may explicitly record why
+  they reuse fitted caps or shawls (see the brief schema); their distinct painted cuts and materials then require
+  visual review. Do not invent armour or ornaments just to differentiate ordinary clothing geometry.
 
 ## Making a set, in order
 
@@ -51,11 +127,18 @@ Every stage can also be run alone (`brief lint`, `gen [--dry-run] [--force]`, `i
   may cut), opaque texels on cut-out free edges (a few stray touches are cleared; more fail: regenerate), and
   texels/m on each model. A failure keeps the stage and installs nothing.
 - **bake** = `body-page` + `weapon-page` for helm and shoulder with every theme already on the page + icons.
-- **items** = one item per slot per tier (`<id>-<slot>-<rarity>`), man's parts, `Ornate*`/`ChestHalo` only on
-  ornate rare+ tiers, tagged with the set id; icon framing for gloves/boots goes into `item-icons.json`.
+- **items** = kit: one body item per slot per tier (`<id>-<slot>-<rarity>`) and one item per helm / shoulder piece per
+  tier; instance: one item per loot-plan piece. Man's parts, `Ornate*`/`ChestHalo` only on ornate rare+ items, tagged
+  with the set id and the item's weight; an item the brief no longer ships is removed; icon framing for gloves/boots
+  goes into `item-icons.json`.
 - **review** writes `authoring/armor-sets/review/<id>.png`: the dressed character in its bind pose (both sexes,
-  front and back, one row per tier, mounted with the creation asset's mounts) plus the icon strip. It is drawn
+  front and back, plus a 3/4 close-up of head and pads), one row per helm piece and one per shoulder piece (an
+  instance adds a row per body sheet), mounted with the creation asset's mounts, plus the icon strip. It is drawn
   in software, with no browser or dev server. Look at it; the creator (`/?creator`) is still the in-engine check.
+
+`armor retire <id> …` takes whole sets out: their tiles off the three pages (re-baked square with every remaining
+theme; `body-page --drop`), their items, icons, icon framing, sheets, brief, review and art; it prints the removed
+item ids.
 
 The steps below are the fallback when a stage needs doing by hand.
 
@@ -81,6 +164,7 @@ The steps below are the fallback when a stage needs doing by hand.
      (reads the sheets already on the page back out of it; geometry, skin and clips are kept byte for byte).
      Copy each new atlas to `assets/textures/mmo/human-body-<t>[-f].png` too: item-icon reads the sheets from there.
    - helm/shoulders: `weapon-page --recipe human-helm|human-shoulder --project foundation --model mmo/<model>.glb --themes <every set>`
+     For an isolated page, `--atlas-root <compiled-root>` reads `<compiled-root>/<recipe>/<theme>/atlas.png` and `--texture-dir <asset-directory>` assigns independent texture IDs. Both are optional; normal pages keep the existing atlas and texture routes. This supports a different ornament density without replacing old sheets or altering shared model pages.
 5. **Look at it** on both sexes, front and back, in the creator (`/?creator`,
    the Outfit / Headgear / Shoulders preview rows).
 
@@ -225,7 +309,8 @@ for the helm and shoulders automatically; `reskin` does not yet.
   where they differ). Creator options and items carry no socket numbers.
 - **Sex mapping:** the female body option's `remap` (parts by name and prefix,
   the sheet's `-f` copy when the page has it), applied by `composeModelLook`.
-  Items name the man's parts.
+  Items name the man's parts. The mapping also applies to mounted gear; each
+  accessory uses its own page to decide whether the suffixed sheet exists.
 - **Preview rows** (`preview: true` slots: outfit, chest, legs, headgear,
   shoulders) never enter a saved build and are never drawn in game.
 - **Starting sets:** `archetypes[].startingItems` in the creation asset, worn

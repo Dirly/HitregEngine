@@ -4,6 +4,7 @@ import type { SceneDoc } from "@hitreg/core";
 import type { InstancedPropPool } from "./prop-pool.js";
 import type { StaticBatchHandle } from "./static-batch.js";
 import { applyLandmarkFog, type LandmarkFog } from "./landmark-fog.js";
+import { setCullRootHidden } from "./cull-visibility.js";
 
 /**
  * Culling units: things that are shown or hidden WHOLE, by three tests that
@@ -15,16 +16,20 @@ import { applyLandmarkFog, type LandmarkFog } from "./landmark-fog.js";
  * - **Too small on screen** (`minScreenPx`): its bounds would stand fewer
  *   pixels tall than that. Gone from every pass.
  * - **An interior seen from outside** (`interior`): drawn only while the
- *   camera is within `reveal` metres of it. Gone from every pass.
+ *   camera is within `reveal` metres of it. Gone from every pass, unless
+ *   `shadowWhenHidden`: then it keeps casting inside `shadowDistance`.
  *
  * A unit is a list of object subtrees (a streamed cell's group, a POI's
  * entity root plus its slice of the cell's static batch) and optionally an
  * owner in the world prop pool, whose instances it hides with it. Units nest:
  * a POI unit's parent is its cell's unit, and a hidden cell hides its POIs.
  *
- * Hiding is by LAYER MASK on each renderable, never by `visible`: `visible`
- * already belongs to the `visibility` component, static batching and scripts,
- * and a second writer would un-hide what one of them hid.
+ * Ordinary units hide by LAYER MASK on each renderable: `visible` belongs
+ * to the `visibility` component, static batching and scripts, and a second
+ * writer would un-hide what one of them hid. A detached interior
+ * may explicitly give its dedicated container to `gateRootVisibility`: that
+ * container combines the authored visibility with GONE, so async descendants
+ * cannot draw before the incremental mesh rescan adopts them.
  */
 
 export interface CullUnitOptions {
@@ -48,12 +53,20 @@ export interface CullUnitOptions {
   landmark?: LandmarkFog;
   /**
    * Stands on streamed terrain (base-scene placed content in a chunk-streamed world): hidden from every pass while
-   * the system's `ground` says no terrain is drawn under the centre of its bounds — a town or a stair must not hang
+   * the system's `ground` says terrain is missing anywhere on its bounds' footprint (centre or a corner:
+   * `coversFootprint`) — a town or a stair must not hang
    * in the sky over cells that have not streamed in. Content that streams WITH its cell never needs it.
    */
   grounded?: boolean;
   /** Enclosing unit — hidden when it is. Register the parent first. */
   parent?: CullUnit;
+  /**
+   * Past `reveal` or below `minScreenPx`, keep casting while within `shadowDistance`: hidden from the camera only
+   * (OCCLUDED), not from every pass. For outdoor props merged per cell: gone from every pass, a whole cell's shadows
+   * vanished in one frame along its edge as the player crossed the distance (Derek 2026-11-07, "all the objects of
+   * that chunk do not cast"). Not for interiors: furniture inside a closed shell casts nothing anyone sees.
+   */
+  shadowWhenHidden?: boolean;
 }
 
 /**
@@ -63,6 +76,21 @@ export interface CullUnitOptions {
 export interface GroundCoverage {
   readonly groundVersion: number;
   coversGround(x: number, z: number): boolean;
+}
+
+/**
+ * Is terrain drawn under the whole XZ footprint of `box` — its centre AND its four corners? Judging the centre alone
+ * let a wide unit (a 256 m static-batch cell group, a spread-out POI) draw its far part over cells that had not
+ * streamed in whenever its centre sat inside the far ring (p-perf 2026-11-02: a camp 1.66 km off drawn from the Moon
+ * Gate while its own cell was past `farTerrain`). Five lookups, only on chunk events.
+ */
+export function coversFootprint(ground: GroundCoverage, box: THREE.Box3): boolean {
+  const cx = (box.min.x + box.max.x) / 2, cz = (box.min.z + box.max.z) / 2;
+  if (!ground.coversGround(cx, cz)) return false;
+  // corners pulled in 1 m: a box edge lying on a cell line belongs to the cell inside it
+  const x0 = Math.min(cx, box.min.x + 1), x1 = Math.max(cx, box.max.x - 1);
+  const z0 = Math.min(cz, box.min.z + 1), z1 = Math.max(cz, box.max.z - 1);
+  return ground.coversGround(x0, z0) && ground.coversGround(x1, z0) && ground.coversGround(x0, z1) && ground.coversGround(x1, z1);
 }
 
 const GONE = 2;
@@ -90,8 +118,27 @@ export class CullUnit {
   poolHidden = false;
   poolVersion = -1;
   registered = true;
+  private readonly visibilityGates = new Map<THREE.Object3D, () => boolean>();
 
   constructor(readonly options: CullUnitOptions) {}
+
+  /** A dedicated container, with authored visibility supplied independently of its culled value. */
+  gateRootVisibility(root: THREE.Object3D, authoredVisible: () => boolean): void {
+    this.visibilityGates.set(root, authoredVisible);
+    // Empty/asynchronously loading rooms have no bounds verdict yet.
+    root.visible = false;
+  }
+
+  /** @internal GONE alone skips the whole subtree; OCCLUDED keeps shadow-layer draws. */
+  applyRootVisibility(gone: boolean): void {
+    for (const [root, authoredVisible] of this.visibilityGates) root.visible = !gone && authoredVisible();
+  }
+
+  /** @internal Return the container to its authored visibility when its unit lets go. */
+  restoreRootVisibility(): void {
+    for (const [root, authoredVisible] of this.visibilityGates) root.visible = authoredVisible();
+    this.visibilityGates.clear();
+  }
 }
 
 export interface CullingStats {
@@ -129,11 +176,15 @@ function isRenderable(node: THREE.Object3D): boolean {
 }
 
 export class CullingSystem {
+  /** The player's LOD setting: every authored `minScreenPx` times this, so a higher value drops small clutter sooner. */
+  minScreenScale = 1;
   readonly occluders: HorizonOccluderMap;
   private readonly horizon: HorizonCuller;
   private readonly units = new Set<CullUnit>();
   /** Which unit owns a renderable (the innermost). */
   private readonly owner = new Map<THREE.Object3D, CullUnit>();
+  /** Root boundaries also protect late meshes from a subsequently registered enclosing gate. */
+  private readonly rootOwner = new Map<THREE.Object3D, CullUnit>();
   enabled = true;
   /**
    * Past this distance an occluded unit's pool instances are dropped too. The
@@ -164,6 +215,7 @@ export class CullingSystem {
 
   register(options: CullUnitOptions): CullUnit {
     const unit = new CullUnit(options);
+    for (const object of options.objects) this.rootOwner.set(object, unit);
     this.claim(unit, true);
     if (options.parent) options.parent.children.add(unit);
     this.units.add(unit);
@@ -184,6 +236,8 @@ export class CullingSystem {
       root.updateWorldMatrix(true, true);
       const visit = (node: THREE.Object3D): void => {
         if (skip.has(node)) return;
+        const nested = this.rootOwner.get(node);
+        if (nested && nested !== unit) return;
         if (isRenderable(node)) {
           const previous = this.owner.get(node);
           if (previous !== unit && (steal || !previous)) {
@@ -222,8 +276,13 @@ export class CullingSystem {
     if (!unit.registered) return;
     for (const child of unit.children) this.unregister(child);
     unit.registered = false;
+    unit.restoreRootVisibility();
     this.units.delete(unit);
     unit.options.parent?.children.delete(unit);
+    for (const object of unit.options.objects) {
+      if (this.rootOwner.get(object) === unit) this.rootOwner.delete(object);
+      setCullRootHidden(object, false);
+    }
     for (let i = 0; i < unit.renderables.length; i++) {
       const node = unit.renderables[i]!;
       node.layers.mask = unit.masks[i]!;
@@ -297,7 +356,7 @@ export class CullingSystem {
         unit.groundVersion = NaN; // judged afresh when the gate (or a ground source) comes back
       } else if (unit.groundVersion !== groundVersion) {
         unit.groundVersion = groundVersion;
-        unit.ungrounded = !ground.coversGround((box.min.x + box.max.x) / 2, (box.min.z + box.max.z) / 2);
+        unit.ungrounded = !coversFootprint(ground, box);
       }
 
       if (o.interior) {
@@ -308,7 +367,8 @@ export class CullingSystem {
       if (o.minScreenPx && o.minScreenPx > 0 && tanHalf > 0) {
         const d = Math.max(1e-3, sphere.center.distanceTo(eye) - sphere.radius);
         const px = (sphere.radius * viewportHeight) / (d * tanHalf);
-        unit.small = unit.small ? px < o.minScreenPx * SIZE_HYSTERESIS : px < o.minScreenPx;
+        const minPx = o.minScreenPx * this.minScreenScale;
+        unit.small = unit.small ? px < minPx * SIZE_HYSTERESIS : px < minPx;
       }
       // the horizon only for what could be on screen: off-screen, frustum
       // culling already skips it, and its old verdict is re-judged the frame
@@ -318,7 +378,11 @@ export class CullingSystem {
       }
 
       const parent = o.parent?.applied ?? SHOWN;
-      const own = unit.ungrounded || unit.small || unit.outside ? GONE : unit.occluded ? OCCLUDED : SHOWN;
+      let own = unit.ungrounded || unit.small || unit.outside ? GONE : unit.occluded ? OCCLUDED : SHOWN;
+      if (own === GONE && o.shadowWhenHidden && !unit.ungrounded) {
+        centre.copy(eye).clamp(box.min, box.max);
+        if (centre.distanceTo(eye) <= this.shadowDistance) own = OCCLUDED;
+      }
       const state = Math.max(parent, own);
       let poolHide = state === GONE;
       if (state === OCCLUDED) {
@@ -353,8 +417,11 @@ export class CullingSystem {
   }
 
   private apply(unit: CullUnit, state: number, poolHide: boolean): void {
+    // Run even when the verdict did not change: authored visibility may have.
+    unit.applyRootVisibility(state === GONE);
     if (unit.applied !== state) {
       unit.applied = state;
+      for (const object of unit.options.objects) setCullRootHidden(object, state !== SHOWN);
       for (let i = 0; i < unit.renderables.length; i++) unit.renderables[i]!.layers.mask = this.maskFor(state, unit.masks[i]!);
     }
     this.setPoolHidden(unit, poolHide);
@@ -372,6 +439,7 @@ export class CullingSystem {
     for (const unit of [...this.units]) if (!unit.options.parent) this.unregister(unit);
     this.units.clear();
     this.owner.clear();
+    this.rootOwner.clear();
     this.occluders.clear();
   }
 }

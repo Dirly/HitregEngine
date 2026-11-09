@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fireRead, oneLightPerFire, washMetrics, washRun, washVerdict, type FrameWash, type Raw } from "../tools/_light-wash.mts";
+import { fireRead, isFarFire, oneLightPerFire, washMetrics, washRun, washVerdict, type FrameWash, type Raw } from "../tools/_light-wash.mts";
 
 const W = 160, H = 90;
 const frame = (fill: [number, number, number]): Raw => {
@@ -57,4 +57,37 @@ test("no planner read target is a smoke column: every fire reads by its flame (o
   // the bonfire's flame (~4 m) is the tallest honest fire read; the pyre's 8 m column no longer counts
   for (const [prefab, top] of Object.entries(SMOKE_READ_M)) assert.ok(top <= SMOKE_READ_M["camp-props/bonfire"]!, `${prefab} reads ${top} m: a smoke column`);
   assert.equal(SMOKE_READ_M["giant-camp/landmark-pyre"], SMOKE_READ_M["camp-props/bonfire"]);
+});
+
+test("a light past the flame's cull distance is not a far fire (no flame is drawn there)", () => {
+  assert.equal(isFarFire({ d: 200 }), false);
+  assert.equal(isFarFire({ d: 450 }), true);
+  assert.equal(isFarFire({ d: 2100 }), false);
+});
+
+test("a cold (spirit) fire reads by its own blue flame, not by warmth", () => {
+  const r = frame([40, 30, 30]);
+  disc(r, 80, 45, 2, [150, 190, 235]);
+  assert.equal(fireRead(r, { x: 80, y: 45, d: 400 }).reads, false);
+  assert.equal(fireRead(r, { x: 80, y: 45, d: 400, cold: true }).reads, true);
+});
+
+test("a cold flame with a white-hot core still reads by its blue rim", () => {
+  const r = frame([50, 40, 40]);
+  disc(r, 80, 45, 2, [156, 181, 206]);
+  disc(r, 80, 45, 0, [214, 214, 214]);
+  assert.equal(fireRead(r, { x: 80, y: 45, d: 400, cold: true }).reads, true);
+});
+
+test("a cold flame's hue comes from its coloured rim, not its clipped white core (a farGrow flame, moon 2026-10-31)", () => {
+  // a 3x3-wide white core inside a 2 px blue rim: the old 3x3 mean read only the core and refused it
+  const r = frame([60, 40, 36]);
+  disc(r, 80, 45, 3, [120, 150, 175]);
+  disc(r, 80, 45, 1, [235, 240, 238]);
+  assert.equal(fireRead(r, { x: 80, y: 45, d: 310, cold: true }).reads, true);
+  // a white point over red ground, with no blue round it, is no spirit flame
+  const g = frame([60, 40, 36]);
+  disc(g, 80, 45, 2, [175, 160, 150]);
+  disc(g, 80, 45, 1, [235, 240, 238]);
+  assert.equal(fireRead(g, { x: 80, y: 45, d: 310, cold: true }).reads, false);
 });

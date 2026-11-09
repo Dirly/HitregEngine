@@ -313,3 +313,14 @@ function collectEmpty(
 export function restoreNonRenderingBranches(hidden: readonly THREE.Object3D[]): void {
   for (const object of hidden) object.visible = true;
 }
+
+/** Hide what is showing in `objects`; fills and returns `into` with exactly those, which are all a caller may put back. */
+export function hideVisible(objects: readonly THREE.Object3D[], into: THREE.Object3D[]): THREE.Object3D[] {
+  into.length = 0;
+  for (const object of objects) {
+    if (!object.visible) continue;
+    object.visible = false;
+    into.push(object);
+  }
+  return into;
+}

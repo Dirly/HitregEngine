@@ -50,6 +50,8 @@ Failures: `site-need` (reserve) -> re-site through propose/pick, or a dated `nee
 entry to the recipe `needs` (cliff-face / walled-neck), run `worldgen needs <world>`, then propose again.
 A solved face that must not move (a sited place, painted art) is re-shaped with `worldgen needs <world> --only <id>
 --keep-foot`; never a plain re-run (it re-searches the spot and re-solves every need).
+A solved cliff-face is checked by the concept sheet's "tallest face" (>= minHeight) and a skyline top; a sheet that
+says "none" over a solved need is a probe or solve fault to fix, never something to paint over.
 
 ## Gates: failure -> fix
 - `path-leads-nowhere` / `dead-end` (a path climbing >= 25 m to nothing; a hairpin run topping out at nothing) ->

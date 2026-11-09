@@ -1357,7 +1357,7 @@ export function findSites(input: FindInput): SiteReport {
   const paths: PathFinding[] = [];
   /** One route's pieces (`path-a-b`, `path-a-b.2`, `path-a-b.s3`): `paths --scramble` leaves a faulting stretch of tread as
    *  natural ground, walked, so a piece ending at a scramble gap continues in its sibling across it. */
-  const routeOf = (id: string): string => id.replace(/(\.s?\d+)+$/, "");
+  const routeOf = (id: string): string => id.replace(/(\.[sj]?\d+)+$/, "");
   // by the piece itself, not its id: two scrambled pieces of one route can share an id (path-town-2-site-crown.s2 x2)
   const connected = (x: number, z: number, piece: RoadLine): string | null => {
     const self = piece.id;

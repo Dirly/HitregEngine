@@ -26,8 +26,13 @@ import { fileURLToPath } from "node:url";
 
 export const CONCEPT_TOOL = "concept-on-site";
 export const CONCEPT_COMMAND = "node node_modules/tsx/dist/cli.mjs tools/zonegen.mts concept <world> --project <p> --zone <z> --poi <id> (from apps/playground)";
-/** Recipe keys that never shape or paint the ground (stage stamps, zone polygons and moods). */
-const NOT_GROUND = new Set(["features", "regions", "pipeline", "name", "version"]);
+/** Recipe keys that never SHAPE the ground: stage stamps, zone polygons and moods, plus plants and paint (a concept
+ *  painting replaces those; matches world-order's local-ground rule). L (Weeping Sun 2026-10-30: a world-wide flora
+ *  write staled every painted place's concept frames). */
+const NOT_GROUND = new Set(["features", "regions", "pipeline", "name", "version", "scatter", "cover", "surfaces", "splat",
+  "zoneGround", "rockSkins", "textureFilter", "material", "waterMaterial", "riverMaterial", "marshMaterial", "bridgeMaterial"]);
+/** Feature kinds that are plants / paint only. */
+const NOT_GROUND_KINDS = new Set(["clearings", "fields"]);
 /** Feature keys read as a position or a point list ([x, z] or [x, y, z]). */
 const COORD_KEYS = ["points", "polygon", "footprint", "center", "position", "origin", "start", "end", "at"];
 /** Feature keys read as a reach (metres) round its coordinates. */
@@ -93,11 +98,47 @@ export function groundFingerprint(recipe, { center, radius }, own) {
   const near = [];
   const r = radius + 20;
   for (const [kind, list] of Object.entries(recipe.features ?? {})) {
-    if (!Array.isArray(list)) continue;
+    if (!Array.isArray(list) || NOT_GROUND_KINDS.has(kind)) continue;
     for (const f of list) if (!ownsFeature(own, f) && reaches(f, center[0], center[1], r)) near.push([kind, String(f?.id ?? ""), stable(f)]);
   }
   near.sort((a, b) => (a[0] + "\0" + a[1] < b[0] + "\0" + b[1] ? -1 : 1));
-  return { hash: sha(stable(global) + "\n" + near.map((n) => n.join("\t")).join("\n")), features: near.length };
+  const g = stable(global), n = near.map((x) => x.join("\t")).join("\n");
+  // per-part hashes (stored as the manifest's `fingerprintParts`): a later mismatch names the part that moved, and a
+  // change of what counts as ground can be told from a moved ground (o-gates 2026-10-30)
+  return { hash: sha(g + "\n" + n), features: near.length, parts: { global: sha(g), near: sha(n) } };
+}
+
+/** A manifest's stamp: the fingerprint, its parts and the feature count. */
+export const stampOf = (fp) => ({ fingerprint: fp.hash, fingerprintParts: fp.parts, featuresUnder: fp.features });
+
+/** Which parts of a stamp moved, or [] when the stamp has no parts (made before 2026-10-30) or nothing moved. */
+export function movedParts(m, fp) {
+  const was = m?.fingerprintParts;
+  if (!was) return [];
+  return [...(was.global !== fp.parts.global ? ["the global ground fields"] : []), ...(was.near !== fp.parts.near ? ["the features under the reservation"] : [])];
+}
+
+const DATED_RULING = /^\d{4}-\d{2}-\d{2}\b.{8,}/;
+/**
+ * RESTAMP a site manifest: rewrite its fingerprint with the CURRENT groundFingerprint, never re-rendering. For when what
+ * counts as ground changed (L o-gates 2026-10-30: NOT_GROUND gained the plant/paint keys, so every stamp hashed with the
+ * old set could never match again), never for a moved ground: the CALLER proves the ground did not move (the
+ * `concept-site restamp` command, apps/playground/tools/concept-site.mts, refuses unless the place's bare-renders stage
+ * is ok on its local ground). Logs the dated ruling and the old and new hashes in the manifest's `restamps`.
+ * Returns { old, new, changed }; throws on an undated ruling or an unreadable manifest/world.
+ */
+export function restampManifest(file, ruling, playground = PLAYGROUND, now = new Date()) {
+  if (typeof ruling !== "string" || !DATED_RULING.test(ruling.trim())) throw Error(`restamp needs a dated ruling ("YYYY-MM-DD who: why"), got ${JSON.stringify(ruling)}`);
+  const m = tryJson(file);
+  if (m?.tool !== CONCEPT_TOOL) throw Error(`${file} is not a ${CONCEPT_TOOL} manifest`);
+  const recipe = tryJson(path.resolve(playground, m.worldFile ?? ""));
+  if (!recipe) throw Error(`${file}: its world ${m.worldFile} cannot be read`);
+  const fp = groundFingerprint(recipe, { center: m.reservation.center, radius: m.reservation.terrainRadius ?? m.reservation.radius }, m.ownership ?? ownership(m.poi));
+  const old = m.fingerprint;
+  if (old === fp.hash && m.fingerprintParts) return { old, new: fp.hash, changed: false };
+  const next = { ...m, ...stampOf(fp), restamps: [...(m.restamps ?? []), { at: now.toISOString(), ruling: ruling.trim(), old, new: fp.hash }] };
+  fs.writeFileSync(file, JSON.stringify(next, null, 2) + "\n");
+  return { old, new: fp.hash, changed: true };
 }
 
 const PLAYGROUND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "apps", "playground");
@@ -168,7 +209,7 @@ export function conceptSiteFault(file, site, playground = PLAYGROUND) {
     const recipe = tryJson(wf);
     if (!recipe) { faults.push(`its world ${m.worldFile} cannot be read`); continue; }
     const fp = groundFingerprint(recipe, { center: m.reservation.center, radius: m.reservation.terrainRadius ?? m.reservation.radius }, m.ownership ?? ownership(m.poi));
-    if (fp.hash !== m.fingerprint) { faults.push(`the world changed under the reservation since its site render (${m.renderedAt})`); continue; }
+    if (fp.hash !== m.fingerprint) { const moved = movedParts(m, fp); faults.push(`the world changed under the reservation since its site render (${m.renderedAt})${moved.length ? `: ${moved.join(" and ")} moved` : ""}`); continue; }
     return null;
   }
   return `concept frame ${name}: ${faults.join("; ")} — re-run ${CONCEPT_COMMAND}`;

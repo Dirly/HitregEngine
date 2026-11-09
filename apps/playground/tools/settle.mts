@@ -38,8 +38,10 @@ import {
 } from "@hitreg/core";
 import { closure, findAsset, PROJECTS } from "./_closure.mjs";
 import { applyOpsToSceneFile, updateJsonFile } from "./_scene-write.mts";
+import { repeatsInOps, solveLine, solveScenePieces } from "./_place-solve.mts";
 // @ts-expect-error untyped engine tool module
 import { tierFor } from "../../../tools/poi-review/size-tiers.mjs";
+import { walkField } from "./_ground.mts";
 
 type V2 = [number, number];
 const argv = process.argv.slice(2), cmd = argv[0];
@@ -343,7 +345,7 @@ function plan(): void {
   const scene = opt("scene") ? readJ<{ entities: Record<string, Ent> }>(sceneFileOf(opt("scene")!)) : null;
   const recipeFile = worldFileOf(scene as never);
   const recipe = worldRecipeSchema.parse(readJ(recipeFile)) as WorldRecipe;
-  const field = createWorldField(recipe) as unknown as { height(x: number, z: number): number; waterY(x: number, z: number): number | null };
+  const field = walkField(createWorldField(recipe)) as unknown as { height(x: number, z: number): number; waterY(x: number, z: number): number | null }; // the WALKED ground (tools/_ground.mts)
   const blockers = scene ? blockersOf(scene, centre, radius, poi) : [];
   const ground: SettleGround = { height: (x, z) => field.height(x, z), water: (x, z) => field.waterY(x, z), blocked: (x, z) => blockers.some((b) => Math.hypot(x - b.at[0], z - b.at[1]) < b.r) };
   const size = opt("size");
@@ -428,6 +430,17 @@ function apply(): void {
     const reg = new ComponentRegistry(); registerCoreComponents(reg);
     const ents = (scene as { entities: Record<string, { tags?: string[] }> }).entities;
     const removes = Object.entries(ents).filter(([, e]) => (e.tags ?? []).includes(`settle:${poi}`)).map(([id]) => ({ op: "remove-entity", id }));
+    // the PLACEMENT SOLVER judges the stilt structures where the compound composer put them (t-place 2026-10-30): stilts
+    // stand in water by design, so their height is kept (keepY) and only the plan rules run (keep-outs from the structures'
+    // own markers, no piece inside another's base); anything it would move or drop is reported, and repeated inline
+    // assemblies are reported by the repeat lint (tools emit prefab references)
+    {
+      const judged = applyOps(scene as never, [...removes, ...so.ops] as never, reg).doc;
+      const sv = solveScenePieces(project, judged, () => 0, so.ops.filter((o) => o.op === "add-entity").map((o) => o.id), { keepY: true, movable: false });
+      for (const r of sv.rows.filter((x) => x.status !== "ok")) console.log(`  solver: ${solveLine(r)}`);
+      const lint = repeatsInOps(so.ops);
+      for (const f of lint) console.log(`  REPEATS ${f.rule} ${f.key} x${f.ids.length}: ${f.fix}`);
+    }
     if (flag("dry")) applyOps(scene as never, [...removes, ...so.ops] as never, reg);
     else { const { inverse } = applyOpsToSceneFile(sceneFile, [...removes, ...so.ops], (d, o) => applyOps(d, o as never, reg), { label: `settle ${poi}`, trailer: "" }); writeJ(path.join(dir, "scene-ops.inverse.json"), { scene: rel(sceneFile), ops: inverse }); }
     console.log(`structures: removed ${removes.length}, added ${so.ops.length} settle:${poi} entities in ${rel(sceneFile)}${flag("dry") ? " — DRY" : ""}`);

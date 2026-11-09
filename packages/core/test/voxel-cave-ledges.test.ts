@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import {
   compileOperator, fringeShelves, LANDMARK_MIN_VOXELS, landmarkOptions, ledgeLandmarkVolume, ledgesOperatorSchema, operatorParams, rockCover, solveLedges,
   type OperatorFieldReader,
@@ -32,8 +33,41 @@ describe("cave operator", () => {
     expect(output.report.coverSource).toBe("heightfield");
   });
 
+  it("skins the chosen route: wall band over the floor band per bore step, plus the chamber; refuses an unknown surface", () => {
+    const skinned = { ...cave, wall: "hive-wall", floor: "hive-floor" };
+    const { pieces, output } = compileOperator(skinned, { ...cliff, surfaces: ["grass", "hive-wall", "hive-floor"] });
+    const paints = pieces.filter((p) => p.kind === "groundPaints").map((p) => p.feature as any);
+    expect(paints.some((p) => p.id === "op:den:skin-wall-chamber")).toBe(true);
+    const walls = paints.filter((p) => p.surface === "hive-wall"), floors = paints.filter((p) => p.surface === "hive-floor");
+    expect(walls.length).toBe(floors.length);
+    for (const w of walls) { expect(w.faces).toBe(true); expect(w.height[0]).toBeGreaterThan(floors.find((q) => q.id === w.id.replace("wall", "floor")).height[0]); }
+    // the ground over the bore (>= minCover over the roof) is above every band
+    for (const p of paints) expect(p.height[1]).toBeLessThan(100 + 2 * 3.5 + 6 + 2 * 7 + 30);
+    expect(output.report.minCover as number).toBeGreaterThanOrEqual(6);
+    expect(refusal(skinned, { ...cliff, surfaces: ["grass"] })).toMatch(/not in this world's palette/);
+  });
+
+  it("leaves the mouth's open steps unskinned: no band reaches the surface as a box", () => {
+    const { pieces } = compileOperator({ ...cave, wall: "hive-wall", floor: "hive-floor" }, { ...cliff, surfaces: ["hive-wall", "hive-floor"] });
+    const paints = pieces.filter((p) => p.kind === "groundPaints").map((p) => p.feature as any).filter((p) => p.polygon);
+    expect(paints.length).toBeGreaterThan(0);
+    // every skinned step's band top (+ its 1.5 m fade) is under the ground at all of its quad's corners
+    for (const p of paints) for (const [x] of p.polygon) expect(cliff.height(x, 0)).toBeGreaterThanOrEqual(p.height[1] + 1.5 - 1e-6);
+    // the first steps (the flared mouth, on the open approach) carry no skin
+    expect(paints.some((p) => p.id === "op:den:skin-wall-1")).toBe(false);
+  });
+
+  it("cave-link joins two points underground, cover-checked between its join ends; refuses thin rock and sub-6 m bores", () => {
+    const link = { id: "loop", op: "cave-link", points: [[40, 110, -10], [48, 110, 0], [40, 110, 10]], radius: 4, minCover: 6, join: 4 };
+    const { pieces, output } = compileOperator(link, cliff);
+    expect(pieces.map((p) => `${p.kind}/${p.feature.id}`)).toContain("tunnels/op:loop:link-bore");
+    expect(output.report.minCover as number).toBeGreaterThanOrEqual(6);
+    expect(refusal({ ...link, points: [[2, 100, -10], [2, 100, 10]] }, cliff)).toMatch(/thin rock/);
+    expect(refusal({ ...link, radius: 2 }, cliff)).toMatch(/6 m rule/);
+  });
+
   it("keeps every piece at least 6 m in its smallest dimension", () => {
-    for (const p of compileOperator(cave, cliff).pieces) {
+    for (const p of compileOperator(cave, cliff).pieces.filter((q) => q.kind !== "groundPaints")) {
       const f = p.feature as { radius: number; endRadius?: number };
       expect(Math.min(f.radius, f.endRadius ?? f.radius) * 2).toBeGreaterThanOrEqual(6);
     }
@@ -66,6 +100,51 @@ describe("cave operator", () => {
     // the cave reads density when the reader has it
     const withDensity: OperatorFieldReader = { ...cliff, density: (x, y) => y - cliff.height(x, 0) };
     expect(compileOperator(cave, withDensity).output.report.coverSource).toBe("density");
+  });
+
+  it("hall is optional and default-off: caves without it compile byte-identical to before it existed", () => {
+    const sha = (doc: Record<string, unknown>) => createHash("sha256").update(JSON.stringify(compileOperator(doc, { ...cliff, surfaces: ["hive-wall", "hive-floor"] }).pieces)).digest("hex");
+    // hashes taken from the operator source before `hall` was added (o-sunwine2 2026-10-31)
+    expect(sha(cave)).toBe("87132b18e82ad251a2d5a120e54bd32de7e5a240d2044f0401929e0461354aac");
+    expect(sha({ id: "bore", op: "cave", entry: [-1, 0], direction: [1, 0.1], length: 40, radius: 4, minCover: 6, wall: "hive-wall", floor: "hive-floor" })).toBe("5b1d0063649e3a7649ae8c76abe5da8873665ef5793733b540c6a1d85ca959d5");
+    // a chamber wins over a hall
+    expect(sha({ ...cave, hall: { width: 20, length: 24 } })).toBe(sha(cave));
+  });
+
+  it("hall compiles a flat-floored elliptical passage on the bore-end floor, cover-checked and skinned", () => {
+    const deep: OperatorFieldReader = { height: (x) => 100 + Math.min(90, Math.max(0, 1.2 * x)), voxelSize: 2, seaLevel: 0, seed: 7, surfaces: ["hive-wall", "hive-floor"] };
+    const doc = { ...cave, chamber: undefined, hall: { width: 22, length: 28, height: 9, roofRise: 5 }, wall: "hive-wall", floor: "hive-floor" };
+    const { pieces, output } = compileOperator(doc, deep);
+    const hall = pieces.find((q) => q.kind === "passages")!.feature as Record<string, unknown>;
+    expect(hall.id).toBe("op:den:hall");
+    expect(hall).toMatchObject({ footprint: "ellipse", axis: "x", direction: 1, width: 22, length: 28, height: 9, roofRise: 5 });
+    const end = output.report.end as number[], start = hall.start as number[];
+    expect(start[1]).toBeCloseTo(end[1]!, 1); // the hall floor IS the bore-end floor (flat, no bowl)
+    expect(end[0]! - start[0]!).toBeCloseTo(4, 0); // joins the bore 4 m before its end
+    expect(pieces.some((q) => q.kind === "blobs" && String((q.feature as { id: string }).id).endsWith(":chamber"))).toBe(false);
+    expect(pieces.some((q) => String((q.feature as { id: string }).id) === "op:den:skin-wall-hall")).toBe(true);
+    expect(output.report.hall).toBeTruthy();
+    // the cliff that roofs a plain bore is too thin for a 15.5 m vault: refused as thin rock, never cut through
+    expect(refusal({ ...doc, wall: undefined, floor: undefined }, { ...cliff, height: (x) => 100 + Math.min(18, Math.max(0, 1.2 * x)) })).toMatch(/thin rock/);
+  });
+
+  it("flatFloor: a level bore floored by box passages per step, the hall on the same datum (o-sunwine5)", () => {
+    const deep: OperatorFieldReader = { height: (x) => 100 + Math.min(90, Math.max(0, 1.2 * x)), voxelSize: 2, seaLevel: 0, seed: 7 };
+    const doc = { id: "hold", op: "cave", entry: [-1, 0], direction: [1, 0.15], length: 36, radius: 5, minCover: 6, grade: 0.1, bend: 6, hall: { width: 22, length: 28, height: 10, roofRise: 5 }, flatFloor: true };
+    const { pieces, output } = compileOperator(doc, deep);
+    const pass = pieces.filter((q) => q.kind === "passages").map((q) => q.feature as Record<string, any>);
+    const boxes = pass.filter((q) => String(q.id).startsWith("op:hold:bore-floor-")), hall = pass.find((q) => q.id === "op:hold:hall")!;
+    const y0 = (output.report.entry as number[])[1]!;
+    expect(output.report.grade).toBe(0); // the asked 0.1 climb is overridden: level
+    expect(boxes.length).toBe(Math.ceil(36 / 6));
+    for (const b of boxes) { expect(b.footprint).toBe("box"); expect(b.start[1]).toBeCloseTo(y0, 1); expect(b.width).toBeGreaterThanOrEqual(7); expect(b.height).toBe(6); }
+    expect(hall.start[1]).toBeCloseTo(y0, 1); // no step down into the hall
+    expect((output.report.end as number[])[1]).toBeCloseTo(y0, 1);
+    expect(output.report.flatFloor).toMatchObject({ boxes: boxes.length });
+    // the boxes cover the bore end to end along its axis
+    const xs = boxes.map((b) => [b.start[0], b.start[0] + b.direction * b.length]).flat();
+    expect(Math.min(...xs)).toBeLessThanOrEqual(-1 + 0.01);
+    expect(Math.max(...xs)).toBeGreaterThan(-1 + 36 * 0.95);
   });
 });
 
@@ -222,7 +301,8 @@ describe("ledges landmark", () => {
     return ledgeLandmarkVolume(solveLedges(p, band, { id: "crag" }).grid, landmarkOptions(p, band));
   };
 
-  it("compiles to one ground patch + one landmark piece, deterministically", { timeout: 60000 }, () => {
+  // four full ledge solves (~46 s alone on the dev box); 60 s timed out under a parallel full-suite run (t-triage 2026-11-03)
+  it("compiles to one ground patch + one landmark piece, deterministically", { timeout: 180000 }, () => {
     const a = compileOperator(doc, band), b = compileOperator(doc, band);
     expect(a.pieces.map((p) => p.kind).sort()).toEqual(["heightPatches", "landmarks"]);
     expect(JSON.stringify(a.pieces)).toBe(JSON.stringify(b.pieces));

@@ -21,6 +21,7 @@ import { RagdollScript } from "./ragdoll.js";
 import { NpcScript } from "./npc.js";
 import { PortalScript } from "./portal.js";
 import { EncounterWavesScript } from "./encounter-waves.js";
+import { EncounterChoiceScript } from "./encounter-choice.js";
 import { NpcUi } from "./npc-ui.js";
 import { LootUi } from "./loot-ui.js";
 import { Nameplates } from "./nameplates.js";
@@ -68,6 +69,7 @@ import {
 } from "./easing.js";
 import { FootfallTracker } from "./footfalls.js";
 import { LiftScript } from "./lift.js";
+import { BossGateScript } from "./boss-gate.js";
 import { AmbientParticles } from "./ambient-particles.js";
 import { advanceVelocity, isClipAdvance } from "./advance.js";
 
@@ -2377,7 +2379,7 @@ class ThirdPersonController extends Script {
     if (local && local !== this.entityId) return;
     const choices = raw.split(",").map((sound) => sound.trim()).filter(Boolean);
     const sound = choices[Math.floor(Math.random() * choices.length)];
-    if (sound) this.ctx.playSound?.(sound, { volume: this.param<number>("footstepVolume") * gain, playbackRate: pitch * (0.95 + Math.random() * 0.1), priority });
+    if (sound) this.ctx.playSound?.(sound, { volume: this.param<number>("footstepVolume") * gain, playbackRate: pitch * (0.95 + Math.random() * 0.1), priority, channel: "effects" });
   }
 
   private surfaceKey(raw: string): string {
@@ -2473,11 +2475,15 @@ class ThirdPersonController extends Script {
   private footPuff(): void {
     const vfx = this.ctx.vfx;
     if (!vfx) return;
-    const p = this.object.position;
+    const p = (this.scratch ??= this.object.position.clone());
+    this.object.getWorldPosition(p);
     const key = this.surfaceKey(this.ctx.surfaceAt?.(p.x, p.y, p.z) ?? "dirt");
     const look = FOOT_PUFFS[key];
     if (!look) return;
-    vfx.play(look, { origin: [p.x, p.y, p.z] });
+    // Ground anchors probe the physics world. Without a caster to exclude,
+    // that ray hits our own capsule's crown and puts the dust above our head.
+    // Start at foot height as well, so a missing ground hit still stays low.
+    vfx.play(look, { origin: [p.x, p.y - this.footDrop(), p.z], casterId: this.entityId });
   }
 
   private contactSound(priority: number, gain: number, pitch = 1): void {
@@ -4095,6 +4101,7 @@ class Weather extends Script {
             volume: this.param<number>("thunderVolume"),
             positional: false,
             playbackRate: 0.94 + Math.random() * 0.12,
+            channel: "ambience",
           });
       }
     }
@@ -4108,7 +4115,7 @@ class Weather extends Script {
   private syncSound(kind: WeatherKind, intensity: number, soundParam: string, volumeParam: string): void {
     const sound = String(this.param<string>(soundParam) ?? "").trim();
     const volume = this.soundSettle.ready ? Math.max(0, Math.min(1, intensity * this.param<number>(volumeParam))) : 0;
-    this.ctx.setSoundLoop?.(kind, volume > 0.003 ? sound : undefined, { volume, positional: false });
+    this.ctx.setSoundLoop?.(kind, volume > 0.003 ? sound : undefined, { volume, positional: false, channel: "ambience" });
   }
 
   /**
@@ -4280,9 +4287,14 @@ class Weather extends Script {
     const object = playerId ? this.ctx.getObject(playerId) : null;
     if (!object) return false;
     const head = object.position.y + this.param<number>("headHeight");
+    // asked every fixed step, and the answer costs a walk of the world field: only re-ask once the head has moved
+    const dx = object.position.x - this.headProbe.x, dz = object.position.z - this.headProbe.z, dy = head - this.headProbe.y;
+    if (dx * dx + dz * dz < 1 && dy * dy < 0.0625) return this.headProbe.under;
     const water = this.ctx.waterAt(object.position.x, head, object.position.z);
-    return !!water && water.depth > 0;
+    this.headProbe = { x: object.position.x, y: head, z: object.position.z, under: !!water && water.depth > 0 };
+    return this.headProbe.under;
   }
+  private headProbe = { x: Infinity, y: 0, z: 0, under: false };
 
   /**
    * Where am I, really: the biome blend AROUND the local player, turned into
@@ -4532,14 +4544,14 @@ class Weather extends Script {
         const fall = this.param<number>("rainSpeed") * (0.55 + 0.45 * Math.min(1, rain * 1.4));
         const blow = this.param<number>("rainWind") * (0.25 + 0.75 * gust);
         this.setAim(rainId, wx * blow, -fall, wz * blow, 0.92, 1.08);
-        setParticles(rainId, { emitting: rain > 0.02, rate: this.param<number>("rainRate") * rain, colorScale: lit });
+        setParticles(rainId, { emitting: rain > 0.02, rate: this.param<number>("rainRate") * rain, colorScale: lit, weather: true });
       }
       const snowId = this.emitters.snow;
       if (snowId) {
         const snow = this.local.snow;
         // Snow has no fall speed worth the name — it goes where the air goes.
         this.setAim(snowId, wx * (0.6 + 4 * gust), -1.1, wz * (0.6 + 4 * gust), 0.5, 1.4);
-        setParticles(snowId, { emitting: snow > 0.02, rate: this.param<number>("snowRate") * snow, colorScale: lit });
+        setParticles(snowId, { emitting: snow > 0.02, rate: this.param<number>("snowRate") * snow, colorScale: lit, weather: true });
       }
       const sandId = this.emitters.sand;
       if (sandId) {
@@ -4548,10 +4560,10 @@ class Weather extends Script {
         // and the gust is what makes that read as chaos rather than as drift.
         const blow = 8 + 16 * gust;
         this.setAim(sandId, wx * blow, 0.08 * blow, wz * blow, 0.7, 1.3);
-        setParticles(sandId, { emitting: sand > 0.02, rate: this.param<number>("sandRate") * sand * (0.5 + 0.9 * gust), colorScale: lit });
+        setParticles(sandId, { emitting: sand > 0.02, rate: this.param<number>("sandRate") * sand * (0.5 + 0.9 * gust), colorScale: lit, weather: true });
       }
       // Splashes: brightness only. Their rate belongs to the drops that land.
-      for (const id of this.splashes) setParticles(id, { colorScale: lit });
+      for (const id of this.splashes) setParticles(id, { colorScale: lit, weather: true });
       if (this.dust) {
         // The bank itself: slow, huge, low, and thickest at the height of the
         // storm. This is the part that takes your sightline — the grains are
@@ -4794,6 +4806,7 @@ export function registerBuiltinScripts(
   add(PlatformMover);
   // a winch lift down a cliff: a kinematic deck on the shared clock that carries its riders
   add(LiftScript);
+  add(BossGateScript);
   add(Door);
   add(FaceTarget);
   add(Tweener);
@@ -4822,6 +4835,7 @@ export function registerBuiltinScripts(
   add(PortalScript);
   // boss mechanics (docs/mob-ai.md "Boss mechanics"): add waves at the boss's health thresholds
   add(EncounterWavesScript);
+  add(EncounterChoiceScript);
   add(WeaponStance);
   // WoW-style background audio: biome/time beds, spot emitters, zone/town/combat music
   add(Soundscape);

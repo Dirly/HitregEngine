@@ -28,6 +28,12 @@ part generators: work before a run, never during one.
 - Window density (R58): solver-preferred window every second line of each open wall run (`window_density`); none on a
   corner, beside a stair, on a chimney face, next to another window, or on a side a neighbour covers (request `blind`).
 - Stairs: straight run on a clear 4 x 1 cell footprint (rule 28); every stair type must pass a real-body walk.
+- Row houses (R77, KIT-RULES 42): request `party: ["-x", "+x"]`, never `shell`; 3 x 5 cells is the smallest plan
+  that keeps a stair at 2-3 storeys; gate `town-kit-check row-fit a.glb:<lot m> ...` on every ordered pair (self too).
+- Small houses (KIT-RULES 44): no 2 x 2 house has a hearth (all corners); 2 x 5 is the smallest 2-storey plan; 2 x 3 / 3 x 2 / 3 x 3 are one storey. Build them SOLO (`world-kit/authoring/strand-town/small.sh try|install`); a corner's row lot width is its catalogue `plan.rowPitchMetres` (bounds width), and since R80 (KIT-RULES 45) the 2-storey narrow types take `ridge: "y"` and their hearth on the back gable (no `fire` pin).
+- Flat row houses: `party` with `roof: "flat"` (R77 flat, KIT-RULES 42 round 3); run `town-kit-check row-fit` on every flat/pitched pair.
+- Roofs end in their roof tile (k-town3, Derek 2026-10-31: "roofs end with the white rim"): party parapets carry a roof-tile coping above the tiles (make_roof2 `_coped`); gate `npx tsx tools/town-grey.mts roof-rim <glb...>` on every export (pale render on faces open to the sky above 2.5 m fails). An end wall over an open bay closes to the tiles (R78 `infill`, open_front sheds and the smithy).
+- A landmark leads by mass and detail, not height: broad crenellated tower top, projecting portal, rose, plinth, one dressed-stone style (KIT-RULES 42 round 5). Houses stay 3.2 m a storey; 3-storey shells are catalogued `frequency: rare`.
 
 ## Types (`MMO/WFC/styles/_types.json`, KIT-RULES 33)
 Defined once, reused in every style, recognisable from the street by massing: house-s (box), house-m (gable outshut),

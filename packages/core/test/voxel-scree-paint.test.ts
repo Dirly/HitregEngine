@@ -177,3 +177,24 @@ describe("ground paint: a `faces` paint re-skins walls (facesOnly pass)", () => 
     expect(at(1, false)).toEqual([0, 0, 1]); // the normal pass still paints both, the floor paint last
   });
 });
+
+describe("ground paint: a `fringe` fades out in splotches (a creep), not a smooth ring", () => {
+  it("is solid inside the fringe, gone past the feather, and patchy (islands) between", async () => {
+    const { createGroundPainter, groundPaintSchema, fringeWeight } = await import("../src/index.js");
+    expect(fringeWeight(-20, 12, 6, 0.02)).toBeGreaterThan(0.99); // the core: solid even where the noise is lowest
+    expect(fringeWeight(6.1, 12, 6, 0.98)).toBeLessThan(0.01); // past the feather: nothing even where it is highest
+    const docs = [groundPaintSchema.parse({ id: "creep", surface: "b", center: [0, 0], radius: 30, feather: 6, edgeNoise: 0, fringe: 14, blotch: 6 })];
+    const p = createGroundPainter(docs, (n) => ["a", "b"].indexOf(n), 3)!;
+    const at = (x: number, z: number) => { const out = new Float32Array([1, 0]); p.paint(x, 0, z, 0, 1, out, 0, 2); return out[1]!; };
+    // a ring in the fringe (r 24): some samples fully painted, some bare: islands, never one even grey
+    const ring = Array.from({ length: 180 }, (_, i) => at(24 * Math.cos(i / 28.6), 24 * Math.sin(i / 28.6)));
+    expect(ring.filter((w) => w > 0.9).length).toBeGreaterThan(10);
+    expect(ring.filter((w) => w < 0.1).length).toBeGreaterThan(10);
+    // coverage falls with distance: the inner fringe is mostly painted, the outer mostly bare
+    const share = (r: number) => Array.from({ length: 360 }, (_, i) => at(r * Math.cos(i / 57.3), r * Math.sin(i / 57.3))).reduce((s, w) => s + w, 0) / 360;
+    expect(share(10)).toBeGreaterThan(0.97);
+    expect(share(19)).toBeGreaterThan(share(27));
+    expect(share(27)).toBeGreaterThan(share(34));
+    expect(share(37)).toBeLessThan(0.01);
+  });
+});

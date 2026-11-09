@@ -27,6 +27,7 @@ import {
 import { instanceMatrixNode, instancedPositionLocal } from "./instancing.js";
 import { VEGETATION_TINT_ATTRIBUTES, vegetationMaskTintNode } from "./vegetation-tint.js";
 import { rockImpostorColor, type RockImpostorLook } from "./rock-cap.js";
+import { impostorKeep, markLodFadeable } from "./lod-fade.js";
 
 /**
  * Octahedral impostors for the instanced-prop far tier — the second piece of
@@ -65,6 +66,9 @@ export const DEFAULT_IMPOSTOR_GRID = 6;
  * model (albedo + normal ≈ 2.6 MB), sized for a tier that is by definition
  * far away. */
 export const DEFAULT_IMPOSTOR_FRAME_SIZE = 96;
+
+/** Smallest coverage a premultiplied atlas sample is divided by. Far under the alpha test, so never seen. */
+const COVERAGE_FLOOR = 1 / 255;
 
 /** Threshold past which a to-camera direction counts as "straight down the
  * pole", where the usual world-up reference for the quad's right vector
@@ -338,7 +342,11 @@ export function impostorMaterial(atlas: ImpostorAtlas, bounds: THREE.Box3, rock?
   const radius = bounds.getSize(new THREE.Vector3()).length() / 2;
   const instanceScale = float(attribute<"float">("impostorScale", "float"));
   const region = atlas.region ? vec3(atlas.region.u, atlas.region.v, atlas.region.scale) : null;
-  return buildImpostorMaterial(atlas, region, float(radius).mul(instanceScale), instancedPositionLocal(), rock ?? null);
+  const material = buildImpostorMaterial(atlas, region, float(radius).mul(instanceScale), instancedPositionLocal(), rock ?? null);
+  // the near ring's far tier is the only impostor that meets a mesh: a supercell's page never crossfades
+  material.opacityNode = (material.opacityNode as any).mul(impostorKeep());
+  markLodFadeable(material);
+  return material;
 }
 
 /**
@@ -448,28 +456,43 @@ function buildImpostorMaterial(
   const a0 = tslTexture(atlas.albedo, uv0);
   const a1 = tslTexture(atlas.albedo, uv1);
   const a2 = tslTexture(atlas.albedo, uv2);
+  // THE ATLAS IS PREMULTIPLIED. It is cleared to (0,0,0,0) and baked with hard cut-outs, so every bilinear
+  // tap across a silhouette edge, and the three-frame blend wherever two views disagree about a pixel, gives
+  // colour x coverage, and alpha is that coverage. Read as straight colour, everything the 0.4 alpha test
+  // kept from a half-covered sample was up to 60% black: the dark rim round every far tree (owner report
+  // 2026-11-05), wider than a texel because neighbouring views' silhouettes differ. Dividing by the coverage
+  // gives back the true colour and needs no dilation pass over the atlas. The normal target's RGB and role
+  // alpha were cleared to zero as well, so they carry the same factor.
   const albedo = a0.mul(fw0).add(a1.mul(fw1)).add(a2.mul(fw2));
+  const coverage = max(albedo.a, COVERAGE_FLOOR);
+  const color = albedo.rgb.div(coverage);
   const normal0 = tslTexture(atlas.normal, uv0);
   const normal1 = tslTexture(atlas.normal, uv1);
   const normal2 = tslTexture(atlas.normal, uv2);
-  const normalModel = normal0.xyz.mul(fw0).add(normal1.xyz.mul(fw1)).add(normal2.xyz.mul(fw2)).mul(2).sub(1);
+  const normalModel = normal0.xyz.mul(fw0).add(normal1.xyz.mul(fw1)).add(normal2.xyz.mul(fw2)).div(coverage).mul(2).sub(1);
   const normalLocal = normalize(rotateByQuat(normalModel, rotationF.xyz, rotationF.w));
 
   const material = new THREE.MeshLambertNodeMaterial({
     side: THREE.DoubleSide,
     transparent: false,
     depthWrite: true,
-    alphaTest: 0.4,
+    // Low because the three frames blend: a leaf speck present in one of them holds at most a third of the weight,
+    // and nearest taps give no soft edge to carry it, so 0.4 ate canopies down to sky-speckled twigs. A fat edge
+    // costs nothing now the colour is divided by coverage.
+    alphaTest: 0.2,
   });
   material.positionNode = quadPosition;
-  material.colorNode = albedo.rgb;
+  material.colorNode = color;
   if (atlas.vegetationMask) {
     const tints = { bark: barkF, leaves: leavesF };
-    material.colorNode = a0.rgb.mul(vegetationMaskTintNode(normal0.a, tints)).mul(fw0)
-      .add(a1.rgb.mul(vegetationMaskTintNode(normal1.a, tints)).mul(fw1))
-      .add(a2.rgb.mul(vegetationMaskTintNode(normal2.a, tints)).mul(fw2));
+    // the role is premultiplied too: undivided, a leaf texel at half coverage (role 1 -> 0.5) read as BARK
+    const role = (mask: any, tap: any) => vegetationMaskTintNode(mask.div(max(tap.a, COVERAGE_FLOOR)).clamp(0, 1), tints);
+    material.colorNode = a0.rgb.mul(role(normal0.a, a0)).mul(fw0)
+      .add(a1.rgb.mul(role(normal1.a, a1)).mul(fw1))
+      .add(a2.rgb.mul(role(normal2.a, a2)).mul(fw2))
+      .div(coverage);
   }
-  if (rock) material.colorNode = rockImpostorColor(rock, mixed ? material.colorNode : albedo.rgb, normalLocal.y, mixed, [barkF, leavesF]);
+  if (rock) material.colorNode = rockImpostorColor(rock, mixed ? material.colorNode : color, normalLocal.y, mixed, [barkF, leavesF]);
   material.opacityNode = albedo.a;
   material.normalNode = transformNormalToView(normalLocal);
   return material;

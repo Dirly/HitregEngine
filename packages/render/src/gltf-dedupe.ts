@@ -27,9 +27,18 @@ export function modelScope(url: string): string {
   let file = url;
   const query = url.indexOf("file=");
   if (query >= 0) file = decodeURIComponent(url.slice(query + 5).split("&")[0]!);
+  // a published model: <bundle>/content/models/... (the whole origin would otherwise be the "family")
+  const content = file.lastIndexOf("/content/");
+  if (query < 0 && content >= 0) file = file.slice(content + 9);
   const parts = file.replace(/^\/+/, "").split("/");
   return parts.slice(0, Math.min(2, parts.length - 1)).join("/") || "root";
 }
+
+/**
+ * The key of an external image. Publishing moves images shared by several models to content/shared/<content-hash>.png
+ * (tools/publish-compress.mjs), and each model reaches that one file by its own run of ../ .
+ */
+const externalImageKey = (uri: string): string => `uri:${uri.replace(/^(?:\.\.\/)+/, "")}`;
 
 /** 64-bit-ish content key: two independent 32-bit hashes and the length. */
 function hashBytes(bytes: Uint8Array): string {
@@ -75,7 +84,8 @@ export function shareDecodedImages(parser: GLTFParser): GLTFLoaderPlugin {
     else if (image.bufferView !== undefined) {
       const bytes = await parser.getDependency("bufferView", image.bufferView) as ArrayBuffer;
       content = hashBytes(new Uint8Array(bytes));
-    } else return original.call(this, index, loader);
+    } else if (image.uri) content = externalImageKey(image.uri);
+    else return original.call(this, index, loader);
     const options = bitmapLoader.options;
     const key = `${image.mimeType ?? ""}:${content}:${JSON.stringify([
       options.imageOrientation ?? "none", options.premultiplyAlpha ?? "none",
@@ -158,7 +168,7 @@ export async function nameEmbeddedTextures(gltf: GLTF, scope: string): Promise<n
         const buffer = (await parser.getDependency("bufferView", image.bufferView)) as ArrayBuffer;
         key = hashBytes(new Uint8Array(buffer));
       } else if (image.uri) {
-        key = image.uri.startsWith("data:") ? `data:${hashText(image.uri)}` : `uri:${image.uri}`;
+        key = image.uri.startsWith("data:") ? `data:${hashText(image.uri)}` : externalImageKey(image.uri);
       }
       if (!key) continue;
       const texture = (await parser.getDependency("texture", i)) as THREE.Texture | null;

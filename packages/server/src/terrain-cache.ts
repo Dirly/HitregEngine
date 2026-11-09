@@ -37,6 +37,7 @@ import {
   chunkKey,
   voxelChunkOptionsFrom,
   voxelRecipeAssetRefs,
+  voxelCellInBounds,
   voxelWorldSchema,
   type ChunkDoc,
   type VoxelChunkOptions,
@@ -126,6 +127,8 @@ export function terrainCacheKey(inputs: TerrainCacheInputs, code = voxelCodeFing
       code,
       world: inputs.world,
       options,
+      // only when set, so an unbounded world keeps the hash (and the cache) it already had
+      ...(data.bounds ? { bounds: data.bounds } : {}),
       present: presentAssetsFor(inputs.recipe, inputs.assetExists).sort(),
       recipe: inputs.recipe,
     }),
@@ -139,14 +142,23 @@ export function limitCellsOf(recipe: WorldRecipe): number {
   return limit === Infinity ? Infinity : (limit + (recipe.bounds?.limitFalloff ?? 600)) / recipe.cellSize + 2;
 }
 
-/** Every in-world cell, nearest the origin first; null for an unbounded world (nothing finite to bake). */
-export function bakeCells(recipe: WorldRecipe): Array<[number, number]> | null {
+/**
+ * Every in-world cell, nearest the origin first; null for an unbounded world (nothing finite to bake).
+ * A voxelWorld streaming box (`bounds`) crops the set, and makes an otherwise unbounded world finite.
+ */
+export function bakeCells(recipe: WorldRecipe, bounds?: VoxelWorldData["bounds"]): Array<[number, number]> | null {
   const r = limitCellsOf(recipe);
-  if (!Number.isFinite(r)) return null;
+  if (!Number.isFinite(r) && !bounds) return null;
   const out: Array<[number, number]> = [];
-  const n = Math.ceil(r);
-  for (let cz = -n - 1; cz <= n; cz++) {
-    for (let cx = -n - 1; cx <= n; cx++) if (Math.hypot(cx + 0.5, cz + 0.5) <= r) out.push([cx, cz]);
+  const s = recipe.cellSize;
+  const n = Math.ceil(Number.isFinite(r) ? r : 0);
+  const [x0, x1, z0, z1] = bounds
+    ? [Math.floor(bounds.min[0] / s), Math.ceil(bounds.max[0] / s), Math.floor(bounds.min[1] / s), Math.ceil(bounds.max[1] / s)]
+    : [-n - 1, n, -n - 1, n];
+  for (let cz = z0; cz <= z1; cz++) {
+    for (let cx = x0; cx <= x1; cx++) {
+      if (Math.hypot(cx + 0.5, cz + 0.5) <= r && voxelCellInBounds(bounds, s, cx, cz)) out.push([cx, cz]);
+    }
   }
   out.sort((a, b) => Math.hypot(a[0] + 0.5, a[1] + 0.5) - Math.hypot(b[0] + 0.5, b[1] + 0.5));
   return out;
@@ -399,7 +411,7 @@ export async function bakeTerrainCache(opts: BakeOptions): Promise<BakeResult> {
   const { inputs } = opts;
   const log = opts.log ?? ((line: string) => console.log(line));
   const hash = opts.hash ?? terrainCacheKey(inputs);
-  const cells = bakeCells(inputs.recipe);
+  const cells = bakeCells(inputs.recipe, voxelWorldSchema.parse(inputs.data).bounds);
   if (!cells) throw new Error(`world "${inputs.world}" has no bounds.limit — nothing finite to bake`);
   const worldDir = worldCacheDir(opts.root, inputs.world);
   const final = path.join(worldDir, hash);
@@ -576,7 +588,7 @@ export function prepareTerrainCache(opts: PrepareOptions): PreparedCache {
     },
   };
   if (opts.mode === "off") return handle;
-  if (!bakeCells(opts.inputs.recipe)) {
+  if (!bakeCells(opts.inputs.recipe, voxelWorldSchema.parse(opts.inputs.data).bounds)) {
     log(`[terrain-cache] "${opts.inputs.world}" is unbounded (no bounds.limit): no cache, cells cook on demand`);
     return handle;
   }

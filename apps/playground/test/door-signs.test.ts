@@ -53,6 +53,16 @@ test("window markers become window anchors with the opening's [w, h, depth]", ()
   assert.deepEqual(map.anchors[0], { id: "window-1", kind: "window", level: 0, position: [4.8, 1.8, 6.2], yaw: 0, mount: "wall", outdoor: true, size: [1, 1.4, 0.1] });
 });
 
+test("an open nave's high window belongs to its existing floor, while real upper-floor windows keep their level", () => {
+  const map = { id: "nave", levels: [{ level: 0, floorY: 0 }], anchors: [] } as unknown as Parameters<typeof applyMarkers>[0];
+  applyMarkers(map, [{ id: "lancet", kind: "window", level: 3, position: [6.2, 9.88, -2], yaw: 90, size: [1.4, 0, 4] }]);
+  assert.equal(map.anchors[0]!.level, 0);
+  assert.deepEqual(map.anchors[0]!.position, [6.2, 9.88, -2]);
+  map.levels.push({ level: 1, floorY: 3.2 } as typeof map.levels[number]);
+  applyMarkers(map, [{ id: "bedroom", kind: "window", level: 1, position: [3, 5, 4], yaw: 0 }]);
+  assert.equal(map.anchors[1]!.level, 1);
+});
+
 test("beside-the-door brackets ride along as door-sign-<lot>-l / -r with their preferred height and clear size", () => {
   const list = [
     { kind: "sign-bracket", position: [0, 2.6, 4] as [number, number, number], yaw: 0, mount: "wall", size: [1.2, 0.2, 1] as [number, number, number] },

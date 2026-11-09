@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   applyOps,
   AssetLibrary,
@@ -91,6 +91,60 @@ function sceneWithInstances(registry: ComponentRegistry): SceneDoc {
 }
 
 describe("expandScene", () => {
+  it("validates final components once and preserves normalization and input data", () => {
+    const { registry, assets } = setup();
+    assets.addPrefab("prefab-streetlight", streetlight);
+    const doc = sceneWithInstances(registry);
+    doc.entities["plain"] = {
+      name: "Plain", parent: null, tags: [], components: { transform: {} },
+    };
+    const source = structuredClone(doc);
+    const validate = vi.spyOn(registry, "validate");
+
+    const expanded = expandScene(doc, assets, registry);
+
+    const componentCount = Object.values(expanded.entities).reduce(
+      (count, entity) => count + Object.keys(entity.components).length, 0,
+    );
+    expect(validate).toHaveBeenCalledTimes(componentCount);
+    expect(expanded.entities["plain"]!.components["transform"]).toEqual({
+      position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1],
+    });
+    expect(expanded.entities["sl-2:lamp"]!.components["light"]).toMatchObject({
+      color: "#ff2200", intensity: 3,
+    });
+    expect(doc).toEqual(source);
+  });
+
+  it.each([
+    ["missing parent", { a: "missing" }, /parent missing does not exist/],
+    ["parent cycle", { a: "b", b: "a" }, /parent chain forms a cycle/],
+  ] as const)("rejects expanded structure with a %s", (_name, parents, message) => {
+    const { registry, assets } = setup();
+    const doc = createScene("invalid structure");
+    for (const [id, parent] of Object.entries(parents)) {
+      doc.entities[id] = { name: id, parent, tags: [], components: { transform: {} } };
+    }
+    expect(() => expandScene(doc, assets, registry)).toThrow(message);
+  });
+
+  it("rejects invalid components on ordinary entities and through prefab overrides", () => {
+    const { registry, assets } = setup();
+    const doc = createScene("invalid component");
+    doc.entities["plain"] = {
+      name: "Plain", parent: null, tags: [], components: { transform: { scale: "bad" } },
+    };
+    expect(() => expandScene(doc, assets, registry)).toThrow(/component transform/);
+
+    assets.addPrefab("prefab-streetlight", streetlight);
+    const instances = sceneWithInstances(registry);
+    instances.entities["sl-1"]!.components["prefab"] = {
+      prefabId: "prefab-streetlight",
+      overrides: [{ path: "lamp/components/light/intensity", value: "bad" }],
+    };
+    expect(() => expandScene(instances, assets, registry)).toThrow(/component light/);
+  });
+
   it("expands instances: props, defaults, overrides, namespaced children", () => {
     const { registry, assets } = setup();
     assets.addPrefab("prefab-streetlight", streetlight);

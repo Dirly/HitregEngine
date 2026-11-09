@@ -73,6 +73,13 @@ the `dressing` component and the `socket-map` / `dressing-set` /
 
 ## Creatures, game systems and the quest loop
 
+Human outfits in `authoring/zonegen/human-template.json` can select a dedicated
+creation profile with `outfits.<name>.creation`. Use this for isolated armor or
+body models: population takes its appearance choices, body model and attachment
+mounts from that profile, resolved through project dependencies. Outfits without
+an override keep the top-level creation profile. Keep each outfit's profile
+binding in its source builder so regeneration preserves the chosen models.
+
 - **A fresh world's scene has no game in it.** `worldgen scene` writes terrain, sky and a player. The project's own
   systems (HUD, inventory, combat effects, the bridge from a mob's attack request to a real hit, sound) are listed
   once in `authoring/zonegen/scene-systems.json` and copied in by `zonegen systems`; the world row `systems`
@@ -87,6 +94,15 @@ the `dressing` component and the `socket-map` / `dressing-set` /
   caster's ability volumes and telegraphs (`reach`), the clip speeds (so it lumbers instead of sliding). The
   server then sees it from further away (≈ 250 m × height / 2.6 m, up to 600 m) and places its pack beyond
   that, so players see it coming. Toughness is still its role and level: a team fight is `elite`/`boss`.
+- Common habitat wildlife, wilderness fill, roaming mix members and their companions
+  use that same size/reach/gait path. Put size in the population source rather than
+  enlarging only the visual child of its prefab.
+- Population capacity is not a visual density review. Inspect living animals at
+  player height: distant singles behind trees can leave a habitat feeling empty.
+  Use measured, concentrated habitat tables with independent homes and short
+  wandering ranges. Keep birth exclusion smaller than the clipped spawn disc,
+  preserve actual safe towns, and distinguish nested biome/place regions from towns.
+  An editor spawn icon represents an area, not one creature.
 - **A mob body needs three scripts:** `mob-brain` asks to attack, `combat-caster` resolves the request,
   `combat-actor` takes the hit. Populate refuses a prefab missing one (`mob-unarmed`), and its proof fails when a
   pack cannot hurt a player who stands still.

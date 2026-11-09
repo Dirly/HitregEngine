@@ -10,6 +10,7 @@ import {
   cascadeSplits,
   frustumSliceSphere,
   quantizeExtent,
+  stepHeldSun,
   shadowEnabled,
   shadowFarPlane,
   shadowPassCost,
@@ -312,5 +313,27 @@ describe("CascadeShadowSystem", () => {
     system.register(light, true, { ...DEFAULT_SHADOW_SETTINGS, cascades: 2 }, 40);
     expect(() => system.update(camera)).not.toThrow();
     system.dispose();
+  });
+});
+
+describe("stepHeldSun", () => {
+  const sunAt = (degrees: number): THREE.Vector3 => {
+    const a = (degrees * Math.PI) / 180;
+    return new THREE.Vector3(Math.sin(a), -Math.cos(a), 0);
+  };
+
+  it("takes the first direction, then holds it until the sun has moved a step", () => {
+    const held = new THREE.Vector3();
+    expect(stepHeldSun(held, sunAt(30))).toBe(true);
+    expect(stepHeldSun(held, sunAt(30.05))).toBe(false);
+    expect(held.distanceTo(sunAt(30))).toBeLessThan(1e-9);
+    expect(stepHeldSun(held, sunAt(30.2))).toBe(true);
+    expect(held.distanceTo(sunAt(30.2))).toBeLessThan(1e-9);
+  });
+
+  it("follows a jump at once, such as sun handing over to moon", () => {
+    const held = sunAt(30);
+    expect(stepHeldSun(held, sunAt(150))).toBe(true);
+    expect(held.distanceTo(sunAt(150))).toBeLessThan(1e-9);
   });
 });

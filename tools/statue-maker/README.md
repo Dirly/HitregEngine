@@ -93,6 +93,23 @@ does not copy or invent textures. Terrain-splat materials receive a constant
 second-layer weight (`[0,1,0,0]`); use that layer for the stone texture, or use a
 standard shared material. Texture density remains the material's responsibility.
 
+## Carved skin (atlas statues)
+
+`"skin": { "size": 2048, "texelsPerMetre": 32 }` (or `size: [w, h]`) makes a
+statue that looks carved instead of splat-tiled: the body keeps its own atlas
+UVs (TEXCOORD_0) and no splat weight is written, so `materialId` must be a
+standard textured material whose map is a carved-stone sheet painted over that
+body's atlas key (`tools/atlas` import-atlas, as for any skin). A skinned statue
+is the body alone: attachments and swords are refused (they have their own
+atlases). Project material maps load with `flipY`, unlike glTF's own textures, so the
+atlas V is written as `1 - v` and the sheet stays exactly as import-atlas wrote it. The report gains `skin: { size, texelsPerMetre, target,
+matchingSize }`: `texelsPerMetre` is the area-weighted median density at the
+baked height and `matchingSize` the sheet size that would hit `target` (the
+surrounding stone's density). Resize the sheet to `matchingSize`
+(nearest-neighbour) and rebuild with that `size` to confirm. The player
+ubermesh works as-is: pick its waist-up parts for a figure rising from rock,
+and replace the head with a separate kit piece.
+
 Each build reports source SHA-256 hashes, exact bounds, dimensions, triangle
 count, IK error and pedestal bearings when present. Keep the recipe beside the
 report. Rebakes require `--replace yes`; registered runs refuse existing output

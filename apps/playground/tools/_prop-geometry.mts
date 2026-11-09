@@ -47,8 +47,8 @@ export function locate(assets: string, kind: string, rel: string): string {
 
 export type V3 = [number, number, number];
 /** The texture a triangle samples: its texel size, the material's `repeat`, and a key naming it. */
-export interface TexInfo { key: string; size: [number, number]; repeat: [number, number]; /** image file (material assets); row = (1 - v) * H when flipY (TextureLoader), v * H otherwise (glTF) */ file?: string; flipY?: boolean }
-export interface Tri { a: V3; b: V3; c: V3; uv?: [number, number][]; material?: string; /** authored normal (mean of vertex normals), when the mesh has them */ n?: V3; /** base-colour texture it samples (texel density) */ tex?: TexInfo; /** which draw it belongs to: material name @ node.primitive (zfight) */ draw?: string; /** prefab sub-entity that drew it, pid:eid (zfight) */ part?: string; /** terrain-splat layer this triangle mostly draws (its _SPLATWEIGHT argmax), for splat texel density */ splat?: number }
+export interface TexInfo { key: string; size: [number, number]; repeat: [number, number]; /** image file (material assets); row = (1 - v) * H when flipY (TextureLoader), v * H otherwise (glTF) */ file?: string; flipY?: boolean; /** a glTF-embedded image's bytes (no file of its own), for tools that read its pixels */ bytes?: Buffer }
+export interface Tri { a: V3; b: V3; c: V3; uv?: [number, number][]; material?: string; /** authored normal (mean of vertex normals), when the mesh has them */ n?: V3; /** base-colour texture it samples (texel density) */ tex?: TexInfo; /** which draw it belongs to: material name @ node.primitive (zfight) */ draw?: string; /** prefab sub-entity that drew it, pid:eid (zfight) */ part?: string; /** terrain-splat layer this triangle mostly draws (its _SPLATWEIGHT argmax), for splat texel density */ splat?: number; /** town-atlas: the tile rect (u0, v0, du, dv) and the authored (repeating) UVs; the shader samples rect.xy + fract(atlasUv) * rect.zw (blank-uv check) */ atlas?: { rect: [number, number, number, number]; uv: [number, number][] } }
 export interface PropGeometry {
   tris: Tri[];
   min: V3;
@@ -152,9 +152,9 @@ function gltfTex(g: Gltf, file: string, matIndex: number | undefined): TexInfo |
     else { const f = path.resolve(path.dirname(file), decodeURIComponent(img.uri)); if (fs.existsSync(f)) bytes = fs.readFileSync(f); }
   }
   const size = bytes && imageSize(bytes);
-  return size ? { key: `${path.basename(file)}#image${g.json.textures[ti].source}`, size, repeat: [1, 1] } : undefined;
+  return size ? { key: `${path.basename(file)}#image${g.json.textures[ti].source}`, size, repeat: [1, 1], bytes: bytes! } : undefined;
 }
-export function gltfTris(file: string, m: M4, material: string | undefined, out: Tri[], tex?: TexInfo): void {
+export function gltfTris(file: string, m: M4, material: string | undefined, out: Tri[], tex?: TexInfo, node?: string): void {
   const g = loadGltf(file), json = g.json;
   const walk = (ni: number, parent: M4) => {
     const n = json.nodes[ni], local = n.matrix ?? trs(n.translation, n.rotation, n.scale), w = mul(parent, local);
@@ -191,16 +191,22 @@ export function gltfTris(file: string, m: M4, material: string | undefined, out:
         const P = (k: number) => apply(w, [pos[k * 3], pos[k * 3 + 1], pos[k * 3 + 2]]);
         for (let t = 0; t + 2 < idx.length; t += 3) {
           const [i0, i1, i2] = [idx[t], idx[t + 1], idx[t + 2]];
-          out.push({ a: P(i0), b: P(i1), c: P(i2), material, tex: ptex, draw: `${material ?? json.materials?.[p.material]?.name ?? "mat" + (p.material ?? "-")}@${ni}.${pi}`, n: N([i0, i1, i2]), ...(sw.length ? { splat: splatOf([i0, i1, i2]) } : {}), uv: uv ? [i0, i1, i2].map(sampledUv) : undefined });
+          const atlasOf = atlas ? { atlas: { rect: [atlas[i0 * 4], atlas[i0 * 4 + 1], atlas[i0 * 4 + 2], atlas[i0 * 4 + 3]] as [number, number, number, number], uv: [i0, i1, i2].map((k): [number, number] => [uv![k * 2], uv![k * 2 + 1]]) } } : {};
+          out.push({ ...atlasOf, a: P(i0), b: P(i1), c: P(i2), material, tex: ptex, draw: `${material ?? json.materials?.[p.material]?.name ?? "mat" + (p.material ?? "-")}@${ni}.${pi}`, n: N([i0, i1, i2]), ...(sw.length ? { splat: splatOf([i0, i1, i2]) } : {}), uv: uv ? [i0, i1, i2].map(sampledUv) : undefined });
         }
       }
     for (const c of n.children ?? []) walk(c, w);
   };
-  for (const r of json.scenes[json.scene ?? 0].nodes) walk(r, m);
+  // a mesh source's `node` (one named node of a model, as the renderer draws it: getObjectByName) walks that node only
+  const roots: number[] = node ? (json.nodes as any[]).flatMap((n, i) => (n.name === node ? [i] : [])).slice(0, 1) : json.scenes[json.scene ?? 0].nodes;
+  for (const r of roots) walk(r, m);
 }
 /** Primitive meshes: their `size` is the full bounding box on every shape; a box stands in for the shape. */
 /** UVs only on boxes (stretch = one tile per face; world = face metres / `scale`), for texel density. */
-export function boxTris(size: number[], m: M4, out: Tri[], look?: { material?: string; tex?: TexInfo; box?: boolean; uv?: { mode?: string; scale?: number[] } }): void {
+export function boxTris(size: number[], m: M4, out: Tri[], look?: { material?: string; tex?: TexInfo; box?: boolean; plane?: boolean; uv?: { mode?: string; scale?: number[] } }): void {
+  // a "plane" primitive is what the renderer draws: ONE up-facing x-z quad at the origin (size[1] ignored). It was a box of
+  // size[1] here, so a water plane's dark drain 0.5 m under it (size y 1) "fought" the surface (d-tombs6)
+  if (look?.plane) size = [size[0]!, 0, size[2]!];
   const [x, y, z] = size.map((s) => s / 2);
   const c = (sx: number, sy: number, sz: number) => apply(m, [sx * x, sy * y, sz * z]);
   const world = look?.uv?.mode === "world", sc = look?.uv?.scale ?? [1, 1];
@@ -212,6 +218,7 @@ export function boxTris(size: number[], m: M4, out: Tri[], look?: { material?: s
   };
   const [X, Y, Z] = size;
   quad([c(-1, 1, -1), c(-1, 1, 1), c(1, 1, 1), c(1, 1, -1)], Z, X); // top (CCW from above => +Y)
+  if (look?.plane) return;
   quad([c(-1, -1, -1), c(1, -1, -1), c(1, -1, 1), c(-1, -1, 1)], X, Z);
   quad([c(-1, -1, 1), c(1, -1, 1), c(1, 1, 1), c(-1, 1, 1)], X, Y);
   quad([c(1, -1, -1), c(-1, -1, -1), c(-1, 1, -1), c(1, 1, -1)], X, Y);
@@ -278,7 +285,7 @@ export function prefabGeometry(assets: string, id: string): PropGeometry {
         else { const mat = typeof c.mesh.material === "string" ? c.mesh.material : undefined; gltfTris(f, m, mat, geo.tris, materialTex(assets, mat)); }
       } else if (c.mesh?.source?.kind === "primitive") {
         const mat = typeof c.mesh.material === "string" ? c.mesh.material : undefined;
-        boxTris(c.mesh.source.size ?? [1, 1, 1], m, geo.tris, { material: mat, tex: materialTex(assets, mat), box: (c.mesh.source.shape ?? "box") === "box", uv: c.mesh.source.uv ?? c.mesh.uv });
+        boxTris(c.mesh.source.size ?? [1, 1, 1], m, geo.tris, { material: mat, tex: materialTex(assets, mat), box: (c.mesh.source.shape ?? "box") === "box", plane: c.mesh.source.shape === "plane", uv: c.mesh.source.uv ?? c.mesh.uv });
       }
       else if (c.mesh?.source) geo.warnings.push(`mesh source kind ${c.mesh.source.kind} not measured (${eid})`);
       if (c.prefab?.prefabId) {
@@ -743,9 +750,9 @@ export function sceneGeometry(assets: string, doc: { entities: Record<string, an
       for (const t of g.tris) tris.push(t); // a generated compound holds more triangles than a spread call takes
     } else if (c.mesh?.source?.kind === "asset") {
       const f = locate(assets, "models", c.mesh.source.assetId);
-      if (fs.existsSync(f)) gltfTris(f, I4, undefined, tris);
+      if (fs.existsSync(f)) gltfTris(f, I4, undefined, tris, undefined, c.mesh.source.node);
     } else if (c.mesh?.source?.kind === "primitive") {
-      boxTris(c.mesh.source.size ?? [1, 1, 1], I4, tris, { box: (c.mesh.source.shape ?? "box") === "box" });
+      boxTris(c.mesh.source.size ?? [1, 1, 1], I4, tris, { box: (c.mesh.source.shape ?? "box") === "box", plane: c.mesh.source.shape === "plane" });
     } else if (c.mesh?.source?.kind === "surface" && c.mesh.source.positions && c.mesh.source.indices) {
       const p: number[] = c.mesh.source.positions, ix: number[] = c.mesh.source.indices;
       const v = (i: number): V3 => [p[i * 3], p[i * 3 + 1], p[i * 3 + 2]];

@@ -20,6 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {propPolicy} from './_prop-curation.mts';
+import { contentTag } from "../../../packages/core/src/scene-rebase.ts";
 
 /** Gate newly added/swapped prefab references, without disturbing existing placements. */
 export function assertBuilderProps(file:string,ops:readonly any[]){
@@ -104,6 +105,65 @@ export function withFileLock<R>(file: string, fn: () => R, opts: WriteOptions = 
     held.delete(key);
     const info = readLock(lf);
     if (info?.pid === process.pid) fs.rmSync(lf, { force: true });
+  }
+}
+
+/**
+ * Take `file`'s lock WITHOUT waiting (the dev server must not block its event loop): breaks a stale lock, returns a
+ * release function, or the holder's record when another live writer holds it.
+ */
+export function tryFileLock(file: string, label: string): { release: () => void } | { heldBy: LockInfo | null } {
+  const lf = lockFileOf(file);
+  const me: LockInfo = { pid: process.pid, host: os.hostname(), label, at: new Date().toISOString() };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = fs.openSync(lf, "wx");
+      fs.writeSync(fd, JSON.stringify(me));
+      fs.closeSync(fd);
+      return { release: () => { if (readLock(lf)?.at === me.at) fs.rmSync(lf, { force: true }); } };
+    } catch (e: any) {
+      if (e?.code !== "EEXIST" && e?.code !== "EPERM") throw e;
+      const info = readLock(lf);
+      const age = Date.now() - (fs.statSync(lf, { throwIfNoEntry: false })?.mtimeMs ?? 0);
+      if (lockIsStale(info) && (info || age > 2000)) { try { fs.rmSync(lf, { force: true }); } catch { /* raced */ } continue; }
+      return { heldBy: info };
+    }
+  }
+  return { heldBy: readLock(lf) };
+}
+
+export interface GuardedWrite { status: number; body: Record<string, unknown> }
+
+/**
+ * The dev server's asset write (POST /__hitreg/write-asset), under the same lock the tools use. `base` is the
+ * contentTag of the text the client last loaded, merged or wrote; when the file on disk no longer has that tag, someone
+ * else wrote it meanwhile and the write is REFUSED (409 `stale`, with the current text and tag so the client can rebase
+ * its own edits onto it and save again). `requireBase` (scene files): an existing file is never overwritten blind.
+ * A tool holding the lock: 409 `locked` (retry).
+ */
+export function writeAssetGuarded(target: string, content: string, opts: { base?: string; requireBase?: boolean; label?: string }): GuardedWrite {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const lock = tryFileLock(target, opts.label ?? "dev-server write-asset");
+  if ("heldBy" in lock) {
+    const info = lock.heldBy;
+    return { status: 409, body: { ok: false, locked: true, error: `locked by ${info?.label ?? "a tool"} (pid ${info?.pid ?? "?"}): retry after it finishes` } };
+  }
+  try {
+    const exists = fs.existsSync(target);
+    if (exists && (opts.base !== undefined || opts.requireBase)) {
+      const current = fs.readFileSync(target, "utf8");
+      const tag = contentTag(current);
+      if (opts.base === undefined) {
+        return { status: 409, body: { ok: false, stale: true, tag, content: current, error: "this file exists: send `base` (contentTag of the text you last read) so a newer write by someone else is not erased" } };
+      }
+      if (tag !== opts.base) {
+        return { status: 409, body: { ok: false, stale: true, tag, content: current, error: "the file changed on disk since you read it (another writer): rebase your edits onto `content` and save again with base = `tag`" } };
+      }
+    }
+    writeAtomic(target, content);
+    return { status: 200, body: { ok: true, tag: contentTag(content) } };
+  } finally {
+    lock.release();
   }
 }
 

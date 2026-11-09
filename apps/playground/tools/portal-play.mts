@@ -1,7 +1,9 @@
 /**
  * portal-play --dungeon <instance scene> [--world <scene>]                 (the dungeon pipeline's last stage)
  * portal-play --scene <world scene> --portal <portal id> --exit <exit portal id>
- *   [--url http://localhost:<p>] [--port <p>] [--out <dir>] [--no-inside] [--headed] [--exit-from x,y,z]
+ *   [--url http://localhost:<p>] [--port <p>] [--out <dir>] [--no-inside] [--headed] [--exit-from x,y,z] [--walk-s <s>]
+ * --walk-s: seconds a walk-in may take before it fails (default 30). w-temple9 2026-11-03: live redstrand ran at 0-3 fps
+ *   in the client, so a 10 m walk from a causeway return anchor took longer than 30 s while the headless trip passed.
  *
  * --exit-from: an exit far from the arrival (a dungeon whose way out is at the end of its route) is walked into from this
  * point in the instance (dev fast travel there first, in the passage on the exit's approach side), as portal-trip does:
@@ -18,7 +20,7 @@
  * Screenshot of each arrival. Exit 1 on any failure, with what it saw (box distance, refusals, a stopped body).
  *
  * --dungeon finds the pair itself: the world portal whose destination is the instance (in --world, default the first
- * scene that has one, "proving" first) and the instance's return portal on the same `portal:<x>` tag as the entry
+ * scene that has one, "proving" first, scratch/lab projects never) and the instance's return portal on the same `portal:<x>` tag as the entry
  * anchor. Reports: projects/<instance project>/reports/portal-play.json (the dungeon pipeline's `portal play` stage)
  * and projects/<world project>/reports/portal-play/<world>.json, per portal with the digests of both doors as they
  * were tested (`zonegen status` row `portal play`; an edit to either door makes it STALE).
@@ -33,14 +35,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { killTree } from "./_kill-tree.mts";
 import { fileURLToPath } from "node:url";
 import type { SceneDoc } from "@hitreg/core";
 import { portalDigest, returnSceneFault, walkThroughPortals } from "./_portal-veil-ops.mts";
 // @ts-expect-error plain JS module
 import { loadPlaywright as loadPlaywrightModule } from "./_playwright.mjs";
+import { dropAuthoringWrites } from "./_readonly-posts.mjs";
+import { isScratchProject, readProjectManifest } from "./_asset-resolve.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const arg = (n: string) => { const i = process.argv.indexOf(n); return i >= 0 ? process.argv[i + 1]! : ""; };
+const WALK_MS = Math.max(10, Number(arg("--walk-s")) || 30) * 1000;
 type V3 = [number, number, number];
 type Params = Record<string, unknown>;
 
@@ -66,7 +72,11 @@ let SCENE = arg("--scene"), PORTAL = arg("--portal"), EXIT = arg("--exit");
 const DUNGEON = arg("--dungeon");
 if (DUNGEON) {
   const prefer = arg("--world");
-  const worlds = prefer ? [prefer] : ["proving", ...fs.readdirSync(path.join(PG, "projects")).flatMap((p) => {
+  // The default search skips scratch projects (place-build labs, concept copies; i-door 2026-11-03): a lab carries a copy
+  // of the world's door from before its fit and sorts ahead of the world (pb-weeping-stair < redstrand), so the
+  // undercistern pipeline's `portal play` walked the STALE lab door, stopped 1.8 m short and failed a door that passes live.
+  const projectsRoot = path.join(PG, "projects");
+  const worlds = prefer ? [prefer] : ["proving", ...fs.readdirSync(projectsRoot).filter((p) => !isScratchProject(p, readProjectManifest(projectsRoot, p))).flatMap((p) => {
     const dir = path.join(PG, "projects", p, "assets", "scenes");
     return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".scene.json")).map((f) => f.slice(0, -".scene.json".length)) : [];
   }).filter((s) => s !== DUNGEON && s !== "proving")];
@@ -116,18 +126,26 @@ async function loadPlaywright(): Promise<any> {
 }
 
 let vite: ReturnType<typeof spawn> | null = null;
+const viteTail: string[] = [];
+let viteDied = "", viteStopping = false;
 let base = arg("--url").replace(/\/$/, "");
-const stopVite = () => { if (vite?.pid) { try { process.platform === "win32" ? spawn("taskkill", ["/pid", String(vite.pid), "/t", "/f"]) : process.kill(vite.pid); } catch { /* gone */ } } };
+const stopVite = () => { viteStopping = true; killTree(vite?.pid); }; // synchronous: an async taskkill raced process.exit and leaked vite
 if (!base) {
   const port = arg("--port") || "5263";
   vite = spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["vite", "--config", "vite.agent-test.config.ts", "--port", port, "--strictPort"], { cwd: PG, shell: process.platform === "win32", stdio: ["ignore", "pipe", "pipe"] });
   base = `http://localhost:${port}`;
+  // keep vite's last lines: a dev server that dies mid-run otherwise shows only as the page's ERR_CONNECTION_REFUSED
+  vite.stdout!.on("data", (b: Buffer) => viteTail.push(...b.toString().split(/\r?\n/).filter(Boolean)) && viteTail.splice(0, Math.max(0, viteTail.length - 40)));
+  vite.stderr!.on("data", (b: Buffer) => viteTail.push(...b.toString().split(/\r?\n/).filter(Boolean)) && viteTail.splice(0, Math.max(0, viteTail.length - 40)));
   await new Promise<void>((res, rej) => {
     const t = setTimeout(() => rej(new Error("vite did not start in 60 s")), 60000);
     const on = (b: Buffer) => { if (/ready in|Local:/.test(b.toString())) { clearTimeout(t); res(); } };
     vite!.stdout!.on("data", on); vite!.stderr!.on("data", on);
-    vite!.on("exit", (c) => rej(new Error(`vite exited ${c} (port ${port} taken? pass --port)`)));
-  }).catch((e) => { console.error("STOP:", (e as Error).message); stopVite(); process.exit(2); });
+    vite!.on("exit", (c, sig) => {
+      if (!viteStopping) viteDied = `vite (pid ${vite!.pid}, port ${port}) exited mid-run: code ${c}${sig ? ` signal ${sig}` : ""}`;
+      rej(new Error(`vite exited ${c} (port ${port} taken? pass --port)`));
+    });
+  }).catch((e) => { console.error("STOP:", (e as Error).message); if (viteTail.length) console.error("  vite said:\n    " + viteTail.join("\n    ")); stopVite(); process.exit(2); });
 }
 
 const { chromium } = await loadPlaywright();
@@ -136,7 +154,8 @@ const browser = await chromium.launch({ channel: "chrome", headless: !process.ar
 let page: any;
 const logs: string[] = [];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const waitUntil = async (cond: () => Promise<boolean>, ms: number) => { const t = Date.now(); while (Date.now() - t < ms) { if (await cond()) return true; await sleep(250); } return false; };
+// a dead dev server fails the phase at once (it would otherwise sit out every 300 s settle budget on a refused page)
+const waitUntil = async (cond: () => Promise<boolean>, ms: number) => { const t = Date.now(); while (Date.now() - t < ms) { if (viteDied) throw new Fail(viteDied); if (await cond()) return true; await sleep(250); } return false; };
 class Fail extends Error {}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -183,6 +202,11 @@ async function walkInto(goal: V3, from: string, door: string, doorAt: V3, ms: nu
   await hookEvents();
   const trace: V3[] = [];
   const start = await seen();
+  // Aim before pressing W: a cold frame can otherwise walk off a narrow approach
+  // using the arrival heading while the first state/evaluation requests complete.
+  const initial = await me();
+  if (!initial) throw new Fail(`no player body before walking into ${door}`);
+  await H((h, y: number) => h.cameraRig.setOrbit(y + Math.PI, null), Math.atan2(goal[0] - initial[0], goal[2] - initial[2]));
   await page.keyboard.down("KeyW");
   const t = Date.now();
   try {
@@ -200,13 +224,22 @@ async function walkInto(goal: V3, from: string, door: string, doorAt: V3, ms: nu
   } finally { await page.keyboard.up("KeyW"); }
   const s = await seen();
   const last = trace.at(-1) ?? null;
-  throw new Fail(`walking into ${door} in ${from} for ${ms / 1000} s never started a trip (trips ${s.trips - start.trips}, refusals ${JSON.stringify(s.refusals.slice(start.refusals.length))}); body last at ${fmt(last)}, the door at ${fmt(doorAt)}, ${last ? flat(last, doorAt).toFixed(1) : "?"} m from it${stuckNote(trace)}`);
+  // evidence of the failed walk: the body's path (a fall shows as a y drop) and what the camera saw where it stopped
+  const tag = `${from}-walk-into-${door}`;
+  fs.mkdirSync(OUT, { recursive: true });
+  fs.writeFileSync(path.join(OUT, `${tag}.trace.json`), JSON.stringify({ door, doorAt, goal, trace: trace.map((p) => p.map((n) => +n.toFixed(2))) }) + "\n");
+  await page.screenshot({ path: path.join(OUT, `${tag}.png`), timeout: 120000 }).catch(() => {});
+  const drop = trace.findIndex((p, i) => i > 0 && trace[i - 1]![1] - p[1] > 0.6);
+  const fell = drop > 0 ? ` — the body FELL ${(trace[drop - 1]![1] - trace.at(-1)![1]).toFixed(1)} m at ${fmt(trace[drop - 1])} (${flat(trace[drop - 1]!, doorAt).toFixed(1)} m from the door)` : "";
+  throw new Fail(`walking into ${door} in ${from} for ${ms / 1000} s never started a trip (trips ${s.trips - start.trips}, refusals ${JSON.stringify(s.refusals.slice(start.refusals.length))}); body last at ${fmt(last)}, the door at ${fmt(doorAt)}, ${last ? flat(last, doorAt).toFixed(1) : "?"} m from it${fell}${stuckNote(trace)} (trace + shot: ${path.join(OUT, tag)}.*)`);
 }
 
 /** A fresh page on `scene`, in play, settled. */
 async function openInPlay(scene: string, travelNext = false): Promise<void> {
   if (page) await page.close().catch(() => {});
   page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  // a test client never writes authoring files: its autosave of the scene it booted with erased later installs
+  await page.route(/\/__hitreg\//, dropAuthoringWrites);
   // tsx keeps function names with an injected __name() helper: the functions evaluated in the page need it too
   await page.addInitScript(() => { (window as unknown as { __name: (f: unknown) => unknown }).__name = (f: unknown) => f; });
   page.on("console", (m: { text(): string }) => { const t = m.text(); if (/portal|refus|could not open/i.test(t)) logs.push(t); });
@@ -226,7 +259,7 @@ async function openInPlay(scene: string, travelNext = false): Promise<void> {
 async function goThrough(from: string, door: string, startAt: V3, to: string, shot: string): Promise<V3> {
   const doorAt = await where(door);
   if (!doorAt) throw new Fail(`no entity ${door} in ${from}`);
-  await walkInto(through(startAt, doorAt), from, door, doorAt, 30000);
+  await walkInto(through(startAt, doorAt), from, door, doorAt, WALK_MS);
   if (!(await settled(to, SETTLE_MS))) {
     const s = await state();
     const why = s.scene === from ? `started but never left ${from}` : s.scene !== to ? `went to ${s.scene}, not ${to}`
@@ -235,7 +268,13 @@ async function goThrough(from: string, door: string, startAt: V3, to: string, sh
   }
   await sleep(1500);
   const at = (await me())!;
-  await page.screenshot({ path: path.join(OUT, shot) });
+  // A swap back from a big instance (undercistern: ~51 MB of inline meshes) can hold the first frame of the world for
+  // more than Playwright's 30 s default; the trip itself had already landed. Wait up to 120 s and SAY how long the frame
+  // took (a stall a player would see), instead of failing the round trip on the camera.
+  const shotT = Date.now();
+  await page.screenshot({ path: path.join(OUT, shot), timeout: 120000 });
+  const shotS = (Date.now() - shotT) / 1000;
+  if (shotS > 10) console.log(`    slow frame: the ${to} arrival screenshot took ${shotS.toFixed(0)} s`);
   await sleep(3000);
   const s = await state();
   if (s.scene !== to) throw new Fail(`bounced out of ${to} into ${s.scene} within 3 s of arriving`);
@@ -249,9 +288,11 @@ const shots: string[] = [];
 async function phase(name: string, run: () => Promise<string>): Promise<void> {
   try { const note = await run(); phases.push({ name, ok: true, note }); console.log(`  ${name}: ok — ${note}`); }
   catch (e) {
-    const note = e instanceof Fail ? e.message : `error: ${(e as Error).stack ?? e}`;
+    const msg = e instanceof Fail ? e.message : `error: ${(e as Error).stack ?? e}`;
+    const note = viteDied && !msg.includes(viteDied) ? `${msg} [${viteDied}]` : msg;
     phases.push({ name, ok: false, note }); console.log(`  ${name}: FAILED — ${note}`);
     if (logs.length) console.log("    page log:\n      " + logs.slice(-10).join("\n      "));
+    if (viteDied && viteTail.length) console.log("    vite said (last lines):\n      " + viteTail.slice(-20).join("\n      "));
   }
   logs.length = 0;
 }

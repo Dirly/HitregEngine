@@ -188,4 +188,16 @@ describe("character creation rules", () => {
     expect(findCreation(assets, "nope")).toBeNull();
     expect(() => assets.addDataAsset({ id: "broken", type: "creation", name: "broken", data: { archetypes: [] } })).toThrow();
   });
+
+  it("NPC appearance profiles do not disable player creation and remain addressable explicitly", () => {
+    const assets = new AssetLibrary();
+    registerCoreAssetTypes(assets);
+    assets.addDataAsset({ id: "npc", type: "creation", name: "NPC appearance", data: { ...rules, playerSelectable: false } });
+    expect(findCreation(assets)).toBeNull();
+    expect(findCreation(assets, "npc")?.playerSelectable).toBe(false);
+    assets.addDataAsset({ id: "player", type: "creation", name: "Player creation", data: rules });
+    expect(findCreation(assets)).toEqual(findCreation(assets, "player"));
+    assets.addDataAsset({ id: "another-player", type: "creation", name: "Another player", data: rules });
+    expect(findCreation(assets)).toBeNull();
+  });
 });

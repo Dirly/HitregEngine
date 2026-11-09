@@ -277,7 +277,8 @@ export const itemGlowSchema = z
   })
   .describe(
     "Emissive glow on an item. Costs no draw call on a batched (`moving`) model: it is a per-instance value in the " +
-      "same batch as every other item of that model.",
+      "same batch as every other item of that model. Worn items on a shared model glow only their own visible, fit-remapped parts. " +
+      "One glow style is supported per model: the last relevant item in wear/equipment-slot order selects the style; identical styles union their parts.",
   );
 export type ItemGlow = z.infer<typeof itemGlowSchema>;
 

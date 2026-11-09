@@ -67,6 +67,8 @@ import {
   townGroundPoints,
   regionAt,
   recipeSplatIndexed,
+  terrainMaterialDoc,
+  terrainPaletteFaults,
   BORDER_CLASSES,
   COAST_TYPES,
   type RegionDoc,
@@ -99,13 +101,13 @@ import { decodePng } from "./_png.mjs";
 import { drawText } from "./_map-text.mts";
 import { commandDogfood } from "./worldgen-dogfood.mts";
 import { coastOutline, planCoastShape } from "./worldgen-coast-shape.mts";
-import { withEnvironment, type SceneEntityJson } from "./worldgen-scene-env.mts";
+import { gameShellStageCheck, shellSpawn, withEnvironment, withGameShell, type SceneEntityJson } from "./worldgen-scene-env.mts";
 import { COLD_COLOUR, DRY_COLOUR, RIPARIAN_COLOUR, TREE_KIND_COLOURS, harshness, landClassifier, treeKindOf, type TreeKind } from "./worldgen-biome-read.mts";
 import { CLIMATE_CELLS_HARSH, assignClimateSites, biomeFindings, climateCellSize, describeBiomes, zonesBiomeCheck } from "./worldgen-climate.mts";
 import { commandZoneTextures, zoneTexturesStageCheck } from "./worldgen-zone-textures.mts";
 import { stageStamp } from "./_stage-stamp.mts";
 import { commandScatterFloat } from "./worldgen-scatter-float.mts";
-import { commandLips, commandSeated, runLipsGate } from "./worldgen-lips.mts";
+import { commandLips, commandSeated, runLipsGate, readLipsExceptions } from "./worldgen-lips.mts";
 import { commandFloat } from "./float.mts";
 import { commandRockSkins, writeRockSkinTemplate } from "./rock-skins.mts";
 import { commandPalette, commandRockAudit } from "./worldgen-rock-audit.mts";
@@ -114,6 +116,7 @@ import { acceptWater, baselineFile, describeMoves, recordWaterRun, waterLevelsCh
 import { commandWaterLogic, lakeSettleLevels } from "./worldgen-water-logic.mts";
 import { describeFillPlates, describeFillWalls, fillPlates, fillWalls } from "./worldgen-fill-walls.mts";
 import { applyCoverFlora, applyFlora, applyWoodland, coverFloraFindings, describeFlora, floraClimate, floraFindings, woodlandContext, woodlandFindings } from "./worldgen-flora.mts";
+import { coverColourFindings, describeCoverColour, fileColourSources, fitCoverColours } from "./worldgen-cover-colour.mts";
 import { COAST_COLOURS, coastStageCheck, commandCoast, commandCoastTop } from "./worldgen-coast.mts";
 import { riverWaterDoc } from "./_river-water.mts";
 import { measureTownRisers, riserRule } from "./worldgen-riser-rule.mts";
@@ -126,6 +129,8 @@ import { COASTAL_TOWN, TERRACE_DEFAULTS, coastalTownFindings, findCoastalSites, 
 import { commandVegetation } from "./worldgen-vegetation.mts";
 import { commandNeeds, commandSitingMap, commandTownsPick, commandTownsPropose, needsStageCheck, townNeedsFindings, type SiteNeedsHost } from "./worldgen-site-needs.mts";
 import { commandRoad, commandRoadWater } from "./worldgen-road.mts";
+import { cellNetworkDistance, cellsAlong, connectedRoads, nearestOn, networkDistancesFrom, isNetworkRoad, loopWanted, mergeIntoNetwork, networkCost, nextToJoin, REDUNDANT_RATIO, treadAt, type NetPlace, type NetRoad } from "./_road-network.mts";
+import { commandRoadNet, roadsStageCheck, readNetExceptions } from "./worldgen-road-net.mts";
 import { commandFine, commandOp, commandOpPreview, fineStatusLine, stampGateStage } from "./worldgen-operators.mts";
 import { findAsset } from "./_closure.mjs";
 import { briefStories, zonegenPopulated, zoneStoriesMissing } from "./_zone-sources.mts";
@@ -216,7 +221,56 @@ function loadRecipe(name = worldName): { recipe: WorldRecipe; file: string } {
   return { recipe: parsed.data, file };
 }
 
+/** Cover pages and ground tiles from disk (the project closure first), for the cover colour and cover-kind rules. */
+let coverSourcesCache: ReturnType<typeof fileColourSources> | null = null;
+function coverSources(): ReturnType<typeof fileColourSources> {
+  return (coverSourcesCache ??= fileColourSources((rel) => (project ? findAsset(project, path.join("textures", rel)) : null) ?? path.join(assetsRoot(), "textures", rel)));
+}
+
+/**
+ * Where a world's terrain material resolves: the recipe's own project first, then its closure (a lab crop names the
+ * live world's `terrain/<live>`). `own` is the file the world's own project would hold.
+ */
+function terrainMaterialFile(recipe: WorldRecipe, recipeFile: string, id = recipe.material ?? `terrain/${recipe.name}`): { id: string; found: string | null; own: string } {
+  const assets = path.dirname(path.dirname(path.resolve(recipeFile)));
+  const rel = path.join("materials", `${id}.json`);
+  const projects = path.join(PLAYGROUND, "projects") + path.sep;
+  const owner = assets.startsWith(projects) ? path.relative(projects, assets).split(path.sep)[0]! : "";
+  const own = path.join(assets, rel);
+  const found = fs.existsSync(own) ? own : owner ? findAsset(owner, rel) : null;
+  return { id, found, own };
+}
+
+/**
+ * e-paving (2026-11-02): the terrain material is DERIVED from the palette, and a palette surface past the material's
+ * layers draws as its last layer (the renderer clamps the id). Bell Strand's pale flagstone (#26 on 26 layers) drew the
+ * old red flag that way while every field gate passed. So every recipe write re-derives a material the palette no longer
+ * matches. A material shared from ANOTHER project (a lab naming the live world's) is never rewritten: the world gets its
+ * own `terrain/<world file>` and the recipe points at it.
+ */
+function planTerrainMaterialSync(recipe: WorldRecipe, recipeFile: string): (() => void) | null {
+  const at = terrainMaterialFile(recipe, recipeFile);
+  if (!at.found) return null; // no material anywhere: status reports it, init writes one
+  let doc: unknown = null;
+  try { doc = JSON.parse(fs.readFileSync(at.found, "utf8")); } catch { /* unreadable: a fault, re-derive */ }
+  const faults = terrainPaletteFaults(recipe, doc);
+  if (faults.length === 0) return null;
+  const shared = path.resolve(at.found) !== path.resolve(at.own);
+  // named for the world FILE (a lab crop keeps the live recipe name, so terrain/<name> would be the live one's id)
+  const target = shared ? terrainMaterialFile(recipe, recipeFile, `terrain/${path.basename(recipeFile, ".json")}`) : at;
+  if (shared && target.id === at.id) return null; // never shadow another project's material under its own id
+  if (shared) recipe.material = target.id;
+  return () => {
+    fs.mkdirSync(path.dirname(target.own), { recursive: true });
+    fs.writeFileSync(target.own, `${JSON.stringify(terrainMaterialDoc(recipe), null, 2)}
+`);
+    console.log(`re-derived terrain material ${target.id} (${path.relative(process.cwd(), target.own)}) from the ${recipe.surfaces.length}-surface palette: ${faults.slice(0, 3).map((f) => f.why).join("; ")}${faults.length > 3 ? ` (+${faults.length - 3})` : ""}${shared ? ` — ${at.id} is another project's, so this world now owns its own` : ""}`);
+  };
+}
+
 function writeRecipe(recipe: WorldRecipe, file: string): void {
+  // before the stamp: pointing the world at its own material is a change to the recipe
+  const syncMaterial = planTerrainMaterialSync(recipe, file);
   // Stamp the stage that is writing. One place rather than fifteen: every
   // stage goes through here, so `worldgen status` can tell what has run and
   // what went stale underneath it without any stage having to remember to say so.
@@ -253,6 +307,7 @@ function writeRecipe(recipe: WorldRecipe, file: string): void {
   const allowRemovals = (currentStage === "init" && flag("force")) || flag("allow-removals");
   try { writeJsonFile(file, parsed.data, { label: `worldgen ${currentStage ?? "write"}`, ...(allowRemovals ? { allowRemovals: true } : {}) }); } catch (e) { fail((e as Error).message); }
   console.log(`wrote ${path.relative(process.cwd(), file)}`);
+  syncMaterial?.();
 }
 
 /**
@@ -424,6 +479,11 @@ const HELP = `worldgen — procedural world pipeline
                    erases it; a summit ON one gets no trail). The tread rides the ground (--tread-cut 1.5
                    --tread-fill 1) and must pass \`worldgen lips\`: over karst/DC steps it can't, the tread is cut
                    out (a scramble over natural rock, --scramble-margin 12; --no-lips skips the pass)
+                   --places <id,id|all>: trails to RESERVED places (the approach hand-over), Prim order, from the
+                   connected network; a place a road already reaches gets none (--to none --no-doors: places only)
+  road-net <world> the road NETWORK: crossings that are no crossroads, side-by-side runs, redundant links, stubs,
+                   spurs (--png <out> [--window x0,z0,x1,z1] draws them; the \`roads\` status row); --fold <id,..>
+                   [--write] cuts a road's doubled stretches out by slicing its doc (tools/worldgen-road-net.mts)
   road   <world>   ONE carved+painted road along a drawn line, graded/painted like paths (the approach to a landmark no
                    stage routes to): --id road-<name> --points "x,z;x,z;..." [--width 6 --max-grade 0.18 --max-cut 3
                    --max-fill 0.8 --tread-cut m --tread-fill m --pin-start y --pin-end y --keep-landforms --dry-run --inverse f.json];
@@ -466,7 +526,7 @@ const HELP = `worldgen — procedural world pipeline
   scatter-float <world>  do plants float over terrain EDITS? solves real scatter cells and samples cover over every
                    cell a passage/tunnel/blob/height patch touches (or --near x,z,r), measures each against the
                    drawn mesh; exit 1 on a base > --tol 0.35 m over it or a footing over a drop (--list for all)
-  op     <world>   LANDFORM OPERATORS (features.operators: terrace, path, ledges, cave, landmark, wall, scree, paint; --kinds lists every registered operator + its params): --apply <file|id> compiles a doc into its
+  op     <world>   LANDFORM OPERATORS (features.operators: terrace, ledges, cave, landmark, wall, scree, paint, island; --kinds lists every registered operator + its params): --apply <file|id> compiles a doc into its
                    op:<id>:* pieces (inverse kept: <project>/authoring/terrain/undo/), --remove <id>, --undo <inverse.json>, --list, --check
   op-preview <world> --near x,z,r [--op <file|id>] [--out dir]: map PNG (height, contours, too-steep mask, footprint,
                    before|after) + a standalone three.js page of the area (before/after toggle, orbit + walk), in seconds
@@ -804,31 +864,7 @@ function writeTerrainMaterial(recipe: WorldRecipe, id: string, force = false): v
     console.log(`kept existing material ${path.relative(process.cwd(), file)}`);
     return;
   }
-  const doc = {
-    shader: "terrain-splat",
-    color: "#ffffff",
-    roughness: 0.95,
-    metalness: 0,
-    filter: recipe.textureFilter,
-    splat: {
-      // the mesher and this ask the same question, so geometry and material agree
-      source: recipeSplatIndexed(recipe) ? "indexed" : "vertex",
-      tintByVertexColor: true,
-      layers: recipe.surfaces.map((surface) => ({
-        // A textured layer tints WHITE so the texture reads as painted; the
-        // surface's own colour stays in the recipe as the fallback (and as
-        // what `worldgen map` draws the overview with). Multiplying a green
-        // tint over an already-green grass texture is the usual reason
-        // textured terrain comes out oversaturated.
-        color: surface.map ? "#ffffff" : surface.color,
-        roughness: surface.roughness,
-        uvScale: surface.uvScale,
-        ...(surface.map ? { map: surface.map } : {}),
-        ...(surface.normalMap ? { normalMap: surface.normalMap } : {}),
-      })),
-      ...(recipe.macroNoise ? { macroNoise: recipe.macroNoise } : {}),
-    },
-  };
+  const doc = terrainMaterialDoc(recipe);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`);
   console.log(`wrote ${path.relative(process.cwd(), file)}  (layer order: ${recipe.surfaces.map((s) => s.name).join(", ")})`);
@@ -1211,8 +1247,12 @@ function writeScene(recipe: WorldRecipe, lookScene?: string): void {
     },
   };
   withEnvironment(doc.entities as Record<string, SceneEntityJson>, lookScene);
-  writeJsonFile(file, doc, { label: "worldgen scene", allowRemovals: true }); // a new scene, or --force over the old one
-  console.log(`wrote ${path.relative(process.cwd(), file)}`);
+  // the GAME SHELL (player prefab, camera rig, HUD/UI/fx/audio, pooled VFX) from the closure's assets/game-shell.json:
+  // a world scene is born playable, not a dev capsule (redstrand 2026-10-31). No shell in the closure: the capsule stays.
+  // ... standing at the world spawn: the starter town's gate street (tools/_world-spawn.mts), else pickSpawn's point
+  const shelled = withGameShell(project, doc as unknown as Parameters<typeof withGameShell>[1], shellSpawn(recipe, path.dirname(assetsRoot()), field));
+  writeJsonFile(file, shelled.doc, { label: "worldgen scene", allowRemovals: true }); // a new scene, or --force over the old one
+  console.log(`wrote ${path.relative(process.cwd(), file)}${shelled.added.length ? ` with the game shell (${shelled.added.length} parts; tools/game-shell.mts)` : " (no game-shell.json in the closure: dev capsule)"}`);
 }
 
 // ---------------------------------------------------------------- height grid
@@ -6828,27 +6868,28 @@ function commandPaths(): void {
   });
   if (groups.size > 1) console.log(`  towns sit on ${groups.size} separate landmasses — roading each independently`);
 
-  const edges: { a: number; b: number; tree: boolean }[] = [];
-  for (const members of groups.values()) {
-    const local = spanningEdges(
-      members.map((i) => towns[i]!),
-      option("extra", 2),
-    );
-    for (const edge of local) edges.push({ a: members[edge.a]!, b: members[edge.b]!, tree: edge.tree });
-  }
-
   const paths: RoadDoc[] = [];
   /** Gates a path actually arrived at, `town/gate`, for the unserved-gate report below. */
   const served = new Set<string>();
-  for (const { a, b, tree } of edges) {
-    // The end of a path is the town's GATE when it has one, and the two ends
-    // are chosen against each other: the gate of A that faces B, the gate of
-    // B that faces A.
-    const start = townTerminal(towns[a]!, towns[b]!.center, grid, field, routeGrid);
-    const end = townTerminal(towns[b]!, towns[a]!.center, grid, field, routeGrid);
-    const from = start.cell;
-    const to = end.cell;
+  // THE NETWORK the paths build (Derek 2026-10-31: "a lot of criss-crossing and overlapping"). Links used to be routed
+  // per PAIR (a spanning tree over straight distances plus the --extra shortest leftovers), each alone on the bare grid
+  // from gate to gate: a second link out of a town re-found the first one's valley beside it and the two braided (town-1
+  // to the Red Dial: 390 m side by side, crossing 8 times). Now the network GROWS from a hub (Prim): the destination
+  // nearest the network joins it at the nearest point of its roads (a junction), a cell an existing road runs over is
+  // cheap and a cell beside one dear (networkCost), and mergeIntoNetwork cuts only the stretches the network lacks, each
+  // ending on the road it meets, its tread pinned level with it. Loops (--extra, default 2) only where the network's way
+  // round is LOOP_DETOUR x the straight line and the new link saves REDUNDANT_RATIO x. The network starts with every road
+  // a stage does not own (road-*, place tracks), town streets left out. tools/_road-network.mts; `roads` status row.
+  const townIds = recipe.features.towns.map((t) => t.id);
+  const netRoads: NetRoad[] = routedOn.features.roads.filter((r) => !/^(path|trail|barrier|pass)-/.test(r.id) && isNetworkRoad(r, townIds));
+  const onRoad = new Set<number>();
+  for (const r of netRoads) for (const c of cellsAlong(r.points, (x, z) => grid.nearest(x, z), grid.step)) onRoad.add(c);
+  const baseCross = option("max-cross", 1.0);
+  const openCell = (c: number): number => { if (!Number.isFinite(routeGrid.cost[c]!)) routeGrid.cost[c] = 1; return c; };
+  /** Route, fold into the network and grade one link; false when no capped route exists. */
+  const cutLink = (linkId: string, start: TownTerminal, end: TownTerminal, tree: boolean, labels: [string, string], accept?: (routedLength: number) => boolean): boolean => {
     const t0 = performance.now();
+    const priced: RouteGrid = { ...routeGrid, cost: networkCost(routeGrid.cost, routeGrid.n, onRoad) };
     // each 45° bend costs as much as 24 m of path, and a path may bend by at
     // most one of them per cell: a hairpin is four bends over four cells.
     // The grade is capped HARD at 1.5× the design grade per step, so the
@@ -6865,13 +6906,12 @@ function commandPaths(): void {
     // at all under that rule, and an island capital with no road is a worse
     // world than a traverse with a steep bank. An extra link keeps the strict
     // cap: a shortcut nobody gets is no loss.
-    const baseCross = option("max-cross", 1.0);
     const crossLadder = tree ? [baseCross, baseCross * 2, baseCross * 3] : [baseCross];
     let route: number[] | null = null;
     let cap: number | undefined;
     let usedCross = baseCross;
     for (const maxCross of crossLadder) {
-      const attempt = routeWithGradeCap(routeGrid, from, to, {
+      const attempt = routeWithGradeCap(priced, start.cell, end.cell, {
         maxGrade,
         gradeWeight: 12,
         riverToll: 420,
@@ -6890,43 +6930,128 @@ function commandPaths(): void {
     }
     if (!route) {
       const how = tree ? `${(maxGrade * 400).toFixed(0)} % over a ${degreesOf(baseCross * 3)}° flank` : `${(maxGrade * 400).toFixed(0)} %`;
-      console.warn(`  no route between ${towns[a]!.id} and ${towns[b]!.id} within ${how} — left unlinked`);
-      continue;
+      console.warn(`  no route between ${labels[0]} and ${labels[1]} within ${how} — left unlinked`);
+      return false;
     }
-    const built = roadFrom(`path-${towns[a]!.id}-${towns[b]!.id}`, route, grid, field, routeGrid, {
-      width: option("width", 3.4),
-      maxGrade,
-      // a footpath follows the ground: the cut/fill clamp wins over the
-      // grade clamp, so it steepens on a spur instead of trenching through it
-      finalClamp: "cut",
-      maxFill: option("max-fill", 0.8),
-      maxCut: option("max-cut", 3),
-      pinStart: start.pinY,
-      pinEnd: end.pinY,
-      smoothPasses: option("smooth-passes", 2),
-      bridgeMin: option("bridge-min", 6),
-      surface: paint.surface,
-      surfaceByBiome: paint.surfaceByBiome,
-      lead: { start: start.lead, end: [...end.lead].reverse() },
+    const routedLength = route.length * grid.step;
+    if (accept && !accept(routedLength)) return false;
+    const line = route.map((c) => [grid.worldX(c % grid.n), grid.worldZ((c / grid.n) | 0)] as [number, number]);
+    const merged = mergeIntoNetwork(line, [...netRoads, ...paths]);
+    if (merged.pieces.length === 0) {
+      console.log(`  ${linkId}: the network already joins ${labels[0]} and ${labels[1]} (${Math.round(routedLength)} m on its roads) - nothing new cut`);
+      return true;
+    }
+    const built: { roads: RoadDoc[]; bridges: BridgeDoc[] } = { roads: [], bridges: [] };
+    const r = route;
+    merged.pieces.forEach((piece, k) => {
+      const atStart = piece.from === 0 && !piece.start, atEnd = piece.to === r.length - 1 && !piece.end;
+      const one = roadFrom(k === 0 ? linkId : `${linkId}.j${k + 1}`, r.slice(piece.from, piece.to + 1), grid, field, routeGrid, {
+        width: option("width", 3.4),
+        maxGrade,
+        // a footpath follows the ground: the cut/fill clamp wins over the
+        // grade clamp, so it steepens on a spur instead of trenching through it
+        finalClamp: "cut",
+        maxFill: option("max-fill", 0.8),
+        maxCut: option("max-cut", 3),
+        // a gate end is pinned to the gate; a junction end to the tread of the road it meets (a level junction)
+        pinStart: atStart ? start.pinY : piece.start?.y ?? undefined,
+        pinEnd: atEnd ? end.pinY : piece.end?.y ?? undefined,
+        smoothPasses: option("smooth-passes", 2),
+        bridgeMin: option("bridge-min", 6),
+        surface: paint.surface,
+        surfaceByBiome: paint.surfaceByBiome,
+        lead: {
+          start: atStart ? start.lead : piece.start ? [piece.start.at] : [],
+          end: atEnd ? [...end.lead].reverse() : piece.end ? [piece.end.at] : [],
+        },
+      });
+      built.roads.push(...one.roads);
+      built.bridges.push(...one.bridges);
     });
-    for (const r of built.roads) if (keepAll || onLandform(r.points)) { r.keepLandforms = true; kept.push(r.id); }
+    if (merged.absorbed > 0) console.log(`  ${linkId}: ${merged.absorbed} m runs on roads the network has; ${merged.pieces.length} new piece(s)`);
+    for (const road of built.roads) for (const c of cellsAlong(road.points, (x, z) => grid.nearest(x, z), grid.step)) onRoad.add(c);
+    for (const road of built.roads) if (keepAll || onLandform(road.points)) { road.keepLandforms = true; kept.push(road.id); }
     // the doc carries the cut/fill caps the profile was solved with, so the FIELD holds the shoulder and band to them too
     // (2026-10-28, firstshore: the band regrade beside a bridge abutment stood a 1.15 m fill rim on the river bank,
     // where the solved tread itself was within 0.8 m of the ground; trails already did this)
-    for (const r of built.roads) { r.maxCut ??= option("max-cut", 3); r.maxFill ??= option("max-fill", 0.8); }
+    for (const road of built.roads) { road.maxCut ??= option("max-cut", 3); road.maxFill ??= option("max-fill", 0.8); }
     paths.push(...built.roads);
     bridges.push(...built.bridges);
-    if (start.gate) served.add(`${towns[a]!.id}/${start.gate.id}`);
-    if (end.gate) served.add(`${towns[b]!.id}/${end.gate.id}`);
-    const len = (route.length * grid.step) / 1000;
+    const len = built.roads.reduce((m, road) => m + road.points.reduce((s2, p, i) => (i ? s2 + Math.hypot(p[0]! - road.points[i - 1]![0]!, p[1]! - road.points[i - 1]![1]!) : 0), 0), 0) / 1000;
     const relaxed =
       (cap === undefined ? ", grade cap DROPPED" : cap > maxGrade * 2 ? ", grade cap relaxed" : "") +
       (usedCross > baseCross ? `, across a ${degreesOf(usedCross)}° flank` : "");
     const spans = built.bridges.length > 0 ? `, ${built.bridges.length} bridge${built.bridges.length > 1 ? "s" : ""}` : "";
-    const pts = built.roads.reduce((n, r) => n + r.points.length, 0);
-    const through = [start.gate && `${towns[a]!.id}'s ${start.gate.id}`, end.gate && `${towns[b]!.id}'s ${end.gate.id}`].filter(Boolean);
-    const gated = through.length > 0 ? `, through ${through.join(" and ")}` : "";
-    console.log(`  ${built.roads[0]?.id ?? "path"}: ${pts} points, ${len.toFixed(1)} km${spans}${relaxed}${gated} (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
+    const pts = built.roads.reduce((n, road) => n + road.points.length, 0);
+    console.log(`  ${built.roads[0]?.id ?? "path"}: ${pts} points, ${len.toFixed(1)} km${spans}${relaxed} (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
+    return true;
+  };
+  const tierRank = (t: TownDoc): number => ["capital", "city", "town", "village", "hamlet"].indexOf(tierOf(t)) + (t.tags.includes("site") ? 10 : 0);
+  for (const members of groups.values()) {
+    // the hub: the most important settlement (a capital before a village; a --to place last)
+    const order = [...members].sort((p, q) => tierRank(towns[p]!) - tierRank(towns[q]!));
+    const joined = [order[0]!];
+    const pending = order.slice(1);
+    const hubCell = townTerminal(towns[order[0]!]!, towns[order[0]!]!.center, grid, field, routeGrid).cell;
+    while (pending.length > 0) {
+      // the way back to the hub along the network, per road cell (the join point trades it against the new length)
+      const fromHub = networkDistancesFrom(new Set([...onRoad, hubCell]), grid.n, grid.step, hubCell);
+      const hubDistance = (p: readonly [number, number]): number => fromHub.get(grid.nearest(p[0], p[1])) ?? Math.hypot(p[0] - towns[order[0]!]!.center[0], p[1] - towns[order[0]!]!.center[1]) * 2;
+      const next = nextToJoin(
+        pending.map((i) => ({ id: towns[i]!.id, x: towns[i]!.center[0], z: towns[i]!.center[1] })),
+        joined.map((i) => ({ id: towns[i]!.id, x: towns[i]!.center[0], z: towns[i]!.center[1] })),
+        // only roads CONNECTED to what is joined (a place track out in a field is not the network yet)
+        connectedRoads([...netRoads, ...paths], joined.map((i) => ({ x: towns[i]!.center[0], z: towns[i]!.center[1], reach: towns[i]!.radius + towns[i]!.falloff + 30 }))).filter((r) => (r.width ?? 0) >= 3),
+        hubDistance,
+      );
+      if (!next) break;
+      const u = pending.splice(next.index, 1)[0]!;
+      const town = towns[u]!;
+      const start = townTerminal(town, next.at, grid, field, routeGrid);
+      let end: TownTerminal;
+      let target: string;
+      if (next.town !== null) {
+        const v = towns.findIndex((t) => t.id === next.town);
+        end = townTerminal(towns[v]!, town.center, grid, field, routeGrid);
+        target = next.town;
+        if (end.gate) served.add(`${next.town}/${end.gate.id}`);
+      } else {
+        // a junction on a road: the path ends exactly on it, level with its tread
+        end = { cell: openCell(grid.nearest(next.at[0], next.at[1])), lead: [next.at], pinY: treadAt(next.road!, next.at) ?? field.height(next.at[0], next.at[1]), gate: null };
+        // named for the joined destination nearest the junction
+        target = towns[[...joined].sort((p, q) => Math.hypot(towns[p]!.center[0] - next.at[0], towns[p]!.center[1] - next.at[1]) - Math.hypot(towns[q]!.center[0] - next.at[0], towns[q]!.center[1] - next.at[1]))[0]!]!.id;
+      }
+      if (cutLink(`path-${town.id}-${target}`, start, end, true, [town.id, target])) {
+        joined.push(u);
+        if (start.gate) served.add(`${town.id}/${start.gate.id}`);
+      }
+    }
+    // loops: the shortest pairs first, each only where the network's way round is long
+    let loops = 0;
+    const maxLoops = option("extra", 2);
+    const pairs: [number, number, number][] = [];
+    for (let i = 0; i < joined.length; i++) for (let j = i + 1; j < joined.length; j++) {
+      const p = towns[joined[i]!]!, q = towns[joined[j]!]!;
+      pairs.push([joined[i]!, joined[j]!, Math.hypot(p.center[0] - q.center[0], p.center[1] - q.center[1])]);
+    }
+    pairs.sort((x, y) => x[2] - y[2]);
+    for (const [a, b, straight] of pairs) {
+      if (loops >= maxLoops) break;
+      const start = townTerminal(towns[a]!, towns[b]!.center, grid, field, routeGrid);
+      const end = townTerminal(towns[b]!, towns[a]!.center, grid, field, routeGrid);
+      const around = cellNetworkDistance(onRoad, grid.n, grid.step, start.cell, end.cell);
+      if (!loopWanted(around, straight)) continue;
+      const ok = cutLink(`path-${towns[a]!.id}-${towns[b]!.id}`, start, end, false, [towns[a]!.id, towns[b]!.id], (routed) => {
+        if (loopWanted(around, straight, routed)) return true;
+        console.log(`  ${towns[a]!.id} - ${towns[b]!.id}: no loop (the network's way round is ${Math.round(around)} m; a ${Math.round(routed)} m link saves under ${REDUNDANT_RATIO}x)`);
+        return false;
+      });
+      if (ok) {
+        loops++;
+        if (start.gate) served.add(`${towns[a]!.id}/${start.gate.id}`);
+        if (end.gate) served.add(`${towns[b]!.id}/${end.gate.id}`);
+      }
+    }
   }
 
   // A gate nothing arrives at is a door onto a field — either the town has
@@ -6986,6 +7111,47 @@ function reservationDiscs(world: string): { x: number; z: number; radius: number
       for (const r of (JSON.parse(fs.readFileSync(file, "utf8")).reservations ?? []) as { center: [number, number]; radius: number }[]) out.push({ x: r.center[0], z: r.center[1], radius: r.radius });
     } catch { /* unreadable: reservedDoors says so */ }
   }
+  return out;
+}
+
+/** Places a road of the network may end at beyond the towns (tools/worldgen-road-net.mts): zonegen reservations by
+ *  location id (disc + 40 m), else the recipe's POIs (40 m). */
+function networkExtraPlaces(recipe: WorldRecipe): NetPlace[] {
+  const out: NetPlace[] = [];
+  const zones = project ? path.join(path.dirname(assetsRoot()), "authoring", "zonegen", recipe.name, "zones") : null;
+  if (zones && fs.existsSync(zones)) {
+    for (const zone of fs.readdirSync(zones)) {
+      const file = path.join(zones, zone, "reservations.json");
+      if (!fs.existsSync(file)) continue;
+      try {
+        for (const r of (JSON.parse(fs.readFileSync(file, "utf8")).reservations ?? []) as { location?: string; center: [number, number]; radius: number }[]) {
+          out.push({ id: r.location ?? "reservation", x: r.center[0], z: r.center[1], reach: r.radius + 40 });
+        }
+      } catch { /* unreadable: reservedDoors says so */ }
+    }
+  }
+  if (out.length === 0) for (const p of recipe.features.pois) out.push({ id: p.id, x: p.position[0], z: p.position[2], reach: 40 });
+  return out;
+}
+
+/** Reserved places as trail targets (`worldgen trails --places`): the last point of each reservation's `approach.points`
+ *  (where the place's own approach hands over), else its centre; `reach` = radius + 40 m (a road that near reaches it). */
+function reservedPlaceTargets(world: string, ids: readonly string[] | null): { id: string; kind: string; position: [number, number, number]; from: string; reach: number }[] {
+  if (!project) return [];
+  const zones = path.join(path.dirname(assetsRoot()), "authoring", "zonegen", world, "zones");
+  if (!fs.existsSync(zones)) return [];
+  const out: { id: string; kind: string; position: [number, number, number]; from: string; reach: number }[] = [];
+  for (const zone of fs.readdirSync(zones)) {
+    const file = path.join(zones, zone, "reservations.json");
+    if (!fs.existsSync(file)) continue;
+    const list = (JSON.parse(fs.readFileSync(file, "utf8")).reservations ?? []) as { location?: string; center: [number, number]; radius: number; approach?: { points?: [number, number][] } }[];
+    for (const r of list) {
+      if (!r.location || (ids && !ids.includes(r.location))) continue;
+      const end = r.approach?.points?.length ? r.approach.points[r.approach.points.length - 1]! : r.center;
+      out.push({ id: r.location, kind: "place", position: [end[0], 0, end[1]], from: r.approach?.points?.length ? "its approach hand-over" : "its centre", reach: r.radius + 40 });
+    }
+  }
+  if (ids) for (const id of ids) if (!out.some((p) => p.id === id)) fail(`trails --places: no reservation ${id}`);
   return out;
 }
 
@@ -7053,6 +7219,16 @@ function commandTrails(): void {
   // doors FIRST: a door trail sets off from the road network, not from a peak trail cut earlier in this run (2026-10-28:
   // pushed last, the Wristgate trail attached to trail-peak-x 1 km west at 176 m and came down to the gorge from it)
   targets.unshift(...(doorTargets as unknown as typeof targets));
+  // --places <id,id|all>: RESERVED PLACES as trail ends (2026-10-31 w-roads: the west half of redstrand had no trails; a
+  // place a trail should reach was a coordinate in a hand-off). Each ends where the place's own approach hands over (the
+  // last point of the reservation's `approach.points`, else its centre); a place a connected road already reaches (within
+  // its radius + 40 m) gets none. They are joined in PRIM order — the place nearest the network first, from the network
+  // as it then stands — so a chain of places becomes one trail line with spurs, not a fan of trails from the town.
+  const placeIds = stringOption("places", "");
+  const placeTargets = placeIds ? reservedPlaceTargets(recipe.name, placeIds === "all" ? null : placeIds.split(",").map((x) => x.trim()).filter(Boolean)) : [];
+  for (const p of placeTargets) console.log(`  place target ${p.id}: [${p.position[0].toFixed(0)}, ${p.position[2].toFixed(0)}] (${p.from})`);
+  const placeSet = new Set<unknown>(placeTargets);
+  targets.push(...(placeTargets as unknown as typeof targets));
   if (targets.length === 0) fail(`no POIs of kind ${kinds.join("/")} — run: worldgen pois <world>`);
   const field = createWorldField(recipe);
   const extent = extentFor(recipe);
@@ -7084,7 +7260,13 @@ function commandTrails(): void {
   // joined the town anywhere but at its gate.
   const walled = recipe.features.towns.filter((t) => t.gates.length > 0);
   const insideWalls = (x: number, z: number): boolean => walled.some((t) => Math.hypot(x - t.center[0], z - t.center[1]) < t.radius + t.falloff);
-  const network: number[][] = recipe.features.roads.map((r) =>
+  // only roads CONNECTED to a settlement start a trail (tools/_road-network.mts connectedRoads): a place's own track out
+  // in a field, or a track that stops short of the network, is not the network (2026-10-31 w-roads)
+  const settled = settlementTowns(recipe.features.towns);
+  const startRoads = settled.length > 0
+    ? connectedRoads(recipe.features.roads, settled.map((t) => ({ x: t.center[0], z: t.center[1], reach: t.radius + t.falloff + 30 })))
+    : recipe.features.roads;
+  const network: number[][] = startRoads.map((r) =>
     r.points.filter((pt) => !insideWalls(pt[0], pt[1])).map((pt) => grid.nearest(pt[0], pt[1])),
   );
   network.push(
@@ -7105,7 +7287,29 @@ function commandTrails(): void {
     ? [...reservedPlaces, ...recipe.features.towns.map((t) => ({ x: t.center[0], z: t.center[1], radius: t.radius + t.falloff }))]
     : null;
   const trails: RoadDoc[] = [];
-  for (const poi of targets) {
+  // the network a trail folds into (tools/_road-network.mts): roads and paths, and the trails cut before it
+  const trailTowns = recipe.features.towns.map((t) => t.id);
+  const trailNet: NetRoad[] = recipe.features.roads.filter((r) => isNetworkRoad(r, trailTowns));
+  const queue = [...targets];
+  const nearNetwork = (t: (typeof targets)[number]): number => {
+    const g = grid.nearest(t.position[0], t.position[2]), gx = g % n, gz = (g / n) | 0;
+    let best = Infinity;
+    for (const r of network) for (const c of r) best = Math.min(best, Math.hypot((c % n) - gx, ((c / n) | 0) - gz));
+    return best * grid.step;
+  };
+  while (queue.length > 0) {
+    // doors and peaks in their order; reserved places in Prim order (nearest the network as it now stands)
+    let pick = 0;
+    if (placeSet.has(queue[0])) {
+      let bd = Infinity;
+      queue.forEach((t, i) => { if (!placeSet.has(t)) return; const d = nearNetwork(t); if (d < bd) { bd = d; pick = i; } });
+    }
+    const poi = queue.splice(pick, 1)[0]!;
+    if (placeSet.has(poi)) {
+      const reach = (poi as unknown as { reach: number }).reach;
+      const reached = trailNet.some((r) => r.points.length >= 2 && nearestOn(r.points, [poi.position[0], poi.position[2]]).d <= reach) && nearNetwork(poi) <= reach + grid.step;
+      if (reached) { console.log(`  ${poi.id}: a road already reaches it (within ${Math.round(reach)} m) — no trail`); continue; }
+    }
     const goal = grid.nearest(poi.position[0], poi.position[2]);
     const mass = landmass[goal]!;
     const local = network.map((r) => r.filter((c) => landmass[c] === mass)).filter((r) => r.length > 0);
@@ -7124,7 +7328,12 @@ function commandTrails(): void {
     // and never across a hillside steeper than --max-cross: the grade cap
     // looks along the path, and a trail traversing a 65° face at 20 % left
     // a 17 m cut wall beside it (the "thorns" along every climb)
-    const { route, cap, reached } = routeWithGradeCap(routeGrid, start, goal, {
+    // a road cell is cheap and the cell beside one dear: a trail follows the road it shares a way with, never a
+    // second tread beside it (Derek 2026-10-31)
+    const onRoad = new Set<number>();
+    for (const r of network) for (const c of r) onRoad.add(c);
+    const priced: RouteGrid = { ...routeGrid, cost: networkCost(routeGrid.cost, routeGrid.n, onRoad) };
+    const { route, cap, reached } = routeWithGradeCap(priced, start, goal, {
       maxGrade,
       gradeWeight: 7,
       riverToll: 200,
@@ -7147,20 +7356,37 @@ function commandTrails(): void {
         ? `, ends ${dy.toFixed(0)} m below the summit, ${away.toFixed(0)} m out (no ${((cap ?? maxGrade) * 100).toFixed(0)} % route to the top)`
         : `, ends level with the summit ${away.toFixed(0)} m out`;
     }
-    const builtTrail = roadFrom(`trail-${poi.id}`, route, grid, field, routeGrid, {
-      width: option("width", 3.4),
-      // a footpath may steepen into a scramble where the ground does; a
-      // trench dug into the summit so the last leg stays at 22 % is what it
-      // must never do (every trail in the demo ended in a 100-300 m cut)
-      finalClamp: "cut",
-      maxGrade,
-      maxFill: option("max-fill", 0.8),
-      maxCut: option("max-cut", 3),
-      smoothPasses: option("smooth-passes", 2),
-      bridgeMin: option("bridge-min", 6),
-      surface: paint.surface,
-      surfaceByBiome: paint.surfaceByBiome,
+    const merged = mergeIntoNetwork(route.map((c) => [grid.worldX(c % n), grid.worldZ((c / n) | 0)] as [number, number]), trailNet);
+    if (merged.pieces.length === 0) {
+      console.log(`  trail-${poi.id}: the network already reaches it - nothing new cut`);
+      continue;
+    }
+    const builtTrail: { roads: RoadDoc[]; bridges: BridgeDoc[] } = { roads: [], bridges: [] };
+    merged.pieces.forEach((piece, k) => {
+      if (piece.to - piece.from < 1) return;
+      const one = roadFrom(k === 0 ? `trail-${poi.id}` : `trail-${poi.id}.j${k + 1}`, route.slice(piece.from, piece.to + 1), grid, field, routeGrid, {
+        width: option("width", 3.4),
+        // a footpath may steepen into a scramble where the ground does; a
+        // trench dug into the summit so the last leg stays at 22 % is what it
+        // must never do (every trail in the demo ended in a 100-300 m cut)
+        finalClamp: "cut",
+        maxGrade,
+        maxFill: option("max-fill", 0.8),
+        maxCut: option("max-cut", 3),
+        smoothPasses: option("smooth-passes", 2),
+        bridgeMin: option("bridge-min", 6),
+        surface: paint.surface,
+        surfaceByBiome: paint.surfaceByBiome,
+        // an end on another road meets it level, on it
+        pinStart: piece.start?.y ?? undefined,
+        pinEnd: piece.end?.y ?? undefined,
+        lead: { start: piece.start ? [piece.start.at] : [], end: piece.end ? [piece.end.at] : [] },
+      });
+      builtTrail.roads.push(...one.roads);
+      builtTrail.bridges.push(...one.bridges);
     });
+    trailNet.push(...builtTrail.roads);
+    for (const r of builtTrail.roads) network.push(r.points.map((pt) => grid.nearest(pt[0]!, pt[1]!)));
     // the tread never trenches deeper than --tread-cut or stands higher than --tread-fill over the ground (the field
     // clamps the roadway point by point): a footpath rides the slope
     for (const r of builtTrail.roads) { r.maxCut = option("tread-cut", 1.5); r.maxFill = option("tread-fill", 1); }
@@ -7191,8 +7417,8 @@ function commandTrails(): void {
   if (places && !flag("bare-peaks")) {
     const drop = new Set<string>();
     for (const piece of trails) {
-      const base = piece.id.replace(/(\.s?\d+)+$/, "");
-      if (doorTargets.some((d) => `trail-${d.id}` === base)) continue;
+      const base = piece.id.replace(/(\.[sj]?\d+)+$/, "");
+      if (doorTargets.some((d) => `trail-${d.id}` === base) || placeTargets.some((d) => `trail-${d.id}` === base)) continue;
       const pts = piece.points, ys = piece.surfaceY ?? pts.map((q) => field.height(q[0], q[1]));
       if (pts.length < 2) continue;
       let run = 0, k = pts.length - 1;
@@ -7206,7 +7432,7 @@ function commandTrails(): void {
       }
     }
     if (drop.size) {
-      const keep = trails.filter((t) => !drop.has(t.id.replace(/(\.s?\d+)+$/, "")));
+      const keep = trails.filter((t) => !drop.has(t.id.replace(/(\.[sj]?\d+)+$/, "")));
       trails.splice(0, trails.length, ...keep);
       for (let j = trailBridges.length - 1; j >= 0; j--) if ([...drop].some((d) => trailBridges[j]!.id.startsWith(`bridge-${d}`))) trailBridges.splice(j, 1);
     }
@@ -7693,8 +7919,11 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
         if (f.length > 0) return `${f.length} tree species/biome pair(s) the ${floraClimate(r)} climate does not grow: ${describeFlora(f)}`;
         // ground cover follows it too (papyrus at a dry world's lake), and the woodland keeps the owner's curation and
         // the places' footprints (2026-10-29 w9)
-        const c = coverFloraFindings(r);
+        const c = coverFloraFindings(r, coverSources().tileNames);
         if (c.length) return `${c.length} cover layer/biome pair(s) the ${floraClimate(r)} climate does not grow: ${[...new Set(c.map((x) => x.layer))].join(", ")}`;
+        // grass matches its ground tile (owner ruling 2026-10-30)
+        const col = coverColourFindings(r, coverSources());
+        if (col.length) return `${col.length} cover layer/tile pair(s) off the ground colour: ${[...new Set(col.map((x) => `${x.layer}@${x.tile}`))].join(", ")} (worldgen flora re-tints)`;
         const file = findRecipeFile(worldName);
         const w = file ? woodlandFindings(r, woodlandContext(r, file, worldName)) : [];
         return w.length ? `woodland: ${w.map((x) => `${x.rule} ${x.why}`).join("; ")}` : null;
@@ -7754,6 +7983,9 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
         return under > 0 ? `${under} trail sample(s) under the water deeper than a ford — re-run trails` : null;
       },
     },
+    // the network reads as one: no crossings that are no crossroads, no two roads side by side, no second route between
+    // the same places, no stubs (Derek 2026-10-31: "a lot of criss-crossing and overlapping") — tools/worldgen-road-net.mts
+    { name: "roads", after: ["paths", "trails"], by: "procedural", how: "worldgen road-net <world> --png <out>  (re-run paths/trails: they fold into the network)", check: (r) => { const file = findRecipeFile(r.name); return roadsStageCheck(r, networkExtraPlaces(r), file ? readNetExceptions(file) : []); } },
     { name: "caves", after: ["continents"], by: "procedural", how: "worldgen caves <world>", optional: true, check: (r) => has(r.features.tunnels.length) },
     {
       name: "spawn", after: ["zones", "paths"], by: "procedural", how: "worldgen spawn <world> --scene <scene>", check: (r) => has(r.features.camps.length),
@@ -7834,6 +8066,16 @@ function pipelineStages(recipeFile?: string): PipelineStage[] {
       how: "tsx tools/voxel-floaters.mts <world> --world --apply --stamp   (per area: --river <id> | --box x0,z0,x1,z1; gate = without --apply)",
       check: (r) => (r.pipeline?.["floaters"] ? null : "never swept clean (tools/voxel-floaters.mts <world> --world --apply --stamp)"),
     },
+    {
+      // the world scene is PLAYABLE: the game shell of the closure's assets/game-shell.json (player prefab, camera rig,
+      // HUD, inventory, NPC talk, name tags, telegraphs, fx + pools, soundscape, combat audio, ambient particles).
+      // Redstrand ran 3 days as a dev capsule with none of it (2026-10-31). Reads the scene, not the recipe: no stamp.
+      name: "game-shell",
+      after: [],
+      by: "procedural",
+      how: "tsx tools/game-shell.mts <world>   (--check lists the gaps; one applyOps batch, inverse in authoring/installs; the player at the starter town's gate street)",
+      check: (r) => gameShellStageCheck(project, path.join(assetsRoot(), "scenes", `${r.name}.scene.json`), r, projectDir ?? path.dirname(assetsRoot())),
+    },
   ];
 }
 
@@ -7898,6 +8140,18 @@ function commandStatus(): void {
   const fine = fineStatusLine(recipe, recipeFile);
   console.log(`  ${fine.line}`);
   if (!fine.ok) process.exitCode = 1;
+  // every palette surface the world paints must reach the render through its terrain material (e-paving 2026-11-02)
+  {
+    const at = terrainMaterialFile(recipe, recipeFile);
+    let doc: unknown = null;
+    try { doc = at.found ? JSON.parse(fs.readFileSync(at.found, "utf8")) : null; } catch { /* unreadable = fault */ }
+    const faults = terrainPaletteFaults(recipe, doc);
+    if (faults.length === 0) console.log(`  ok      palette       ${recipe.surfaces.length} surfaces reach the render (${at.id})`);
+    else {
+      console.log(`  FAIL    palette       ${faults.length} surface(s) do not reach the render through ${at.id}: ${faults.slice(0, 3).map((f) => f.why).join("; ")} — fix: worldgen material ${worldName}${project ? ` --project ${project}` : ""} (or any recipe-writing stage)`);
+      process.exitCode = 1;
+    }
+  }
   if (next) {
     console.log(`\nnext: ${next.stage.by === "agent" ? "AGENT — " : ""}${next.stage.how.replace("<world>", worldName)}`);
     console.log("  (--next prints just that line)");
@@ -8176,39 +8430,6 @@ function commandStory(): void {
   }
 }
 
-/**
- * Minimum spanning tree over the towns, plus the `extra` shortest leftover
- * links. `tree` marks the ones that MUST be cut for the network to reach
- * everywhere — an extra that no route can hold is a shortcut nobody gets, a
- * tree edge that fails is a town with no road.
- */
-function spanningEdges(towns: TownDoc[], extra: number): { a: number; b: number; tree: boolean }[] {
-  const all: { a: number; b: number; d: number }[] = [];
-  for (let a = 0; a < towns.length; a++) {
-    for (let b = a + 1; b < towns.length; b++) {
-      all.push({
-        a,
-        b,
-        d: Math.hypot(towns[a]!.center[0] - towns[b]!.center[0], towns[a]!.center[1] - towns[b]!.center[1]),
-      });
-    }
-  }
-  all.sort((x, y) => x.d - y.d);
-  const parent = towns.map((_, i) => i);
-  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i]!)));
-  const tree: { a: number; b: number; tree: boolean }[] = [];
-  const leftover: { a: number; b: number; tree: boolean }[] = [];
-  for (const edge of all) {
-    const ra = find(edge.a);
-    const rb = find(edge.b);
-    if (ra === rb) leftover.push({ a: edge.a, b: edge.b, tree: false });
-    else {
-      parent[ra] = rb;
-      tree.push({ a: edge.a, b: edge.b, tree: true });
-    }
-  }
-  return [...tree, ...leftover.slice(0, Math.max(0, extra))];
-}
 
 // ---------------------------------------------------------------- pois
 
@@ -8319,16 +8540,21 @@ function commandFlora(): void {
   console.log(`  climate ${floraClimate(recipe)}: ${before.length ? describeFlora(before) : "every tree species fits"}`);
   const ctx = woodlandContext(recipe, file, worldName);
   if (flag("check")) {
-    const cover = coverFloraFindings(recipe), wood = woodlandFindings(recipe, ctx);
+    const cover = coverFloraFindings(recipe, coverSources().tileNames), wood = woodlandFindings(recipe, ctx);
+    const colour = coverColourFindings(recipe, coverSources());
     for (const c of cover) console.log(`  cover ${c.layer} in ${c.biome}: ${c.why}`);
     for (const w of wood) console.log(`  woodland ${w.rule}: ${w.why}`);
-    if (before.length || cover.length || wood.length) process.exitCode = 1;
+    for (const c of colour) console.log(`  colour ${describeCoverColour(c)}`);
+    if (before.length || cover.length || wood.length || colour.length) process.exitCode = 1;
+    else console.log("  flora ok: species, cover kinds, woodland and cover colours");
     return;
   }
   for (const n of applyFlora(recipe)) console.log(`  ${n}`);
-  for (const n of applyCoverFlora(recipe)) console.log(`  ${n}`);
+  for (const n of applyCoverFlora(recipe, coverSources().tileNames)) console.log(`  ${n}`);
   // the woodland (woodland-botany species by role): --no-woodland leaves the generated rules as they are
   if (!flag("no-woodland")) for (const n of applyWoodland(recipe, ctx)) console.log(`  ${n}`);
+  // grass matches its ground tile: a failing layer is re-tinted onto the tiles it stands on
+  for (const n of fitCoverColours(recipe, coverSources())) console.log(`  ${n}`);
   writeRecipe(recipe, file);
 }
 
@@ -8836,9 +9062,13 @@ function segmentsCross(a: [number, number], b: [number, number], c: [number, num
  * asking you to keep two files in sync by hand.
  */
 function commandMaterial(): void {
-  const { recipe } = loadRecipe();
-  const id = recipe.material ?? `terrain/${recipe.name}`;
-  writeTerrainMaterial(recipe, id, true);
+  const { recipe, file } = loadRecipe();
+  const at = terrainMaterialFile(recipe, file);
+  if (at.found && path.resolve(at.found) !== path.resolve(at.own)) {
+    // another project's material (a lab naming the live world's): never rewrite it; writeRecipe gives this world its
+    // own terrain/<world> when the palette no longer matches the shared one
+    writeRecipe(recipe, file);
+  } else writeTerrainMaterial(recipe, at.id, true);
   const textured = recipe.surfaces.filter((s) => s.map).length;
   console.log(`${textured}/${recipe.surfaces.length} surfaces textured`);
   for (const s of recipe.surfaces) {
@@ -10822,7 +11052,7 @@ function commandCover(): void {
     for (const b of layer.biomes) if (!biomeIds.has(b)) findings.push(`${layer.id}: biome "${b}" is not in this recipe (${[...biomeIds].join(", ")})`);
     for (const n of layer.surfaces) if (!surfaceNames.has(n.toLowerCase())) findings.push(`${layer.id}: surface "${n}" is not in this palette`);
     if (layer.water?.mode === "surface" && layer.orient !== "flat") findings.push(`${layer.id}: floats on water but is not orient "flat" — upright cards standing in a lake`);
-    if (layer.biomes.length === 0 && layer.surfaces.length === 0 && !layer.water) findings.push(`${layer.id}: no biome, surface or water gate — it grows on every dry slope in the world`);
+    if (layer.biomes.length === 0 && layer.surfaces.length === 0 && !layer.water && !layer.fields) findings.push(`${layer.id}: no biome, surface or water gate — it grows on every dry slope in the world`);
     const perDisc = Math.round(Math.PI * layer.radius * layer.radius * layer.density);
     console.log(
       `  ${layer.id.padEnd(18)} ${(layer.orient === "flat" ? "flat" : "up").padEnd(4)} ${String(layer.density).padStart(5)}/m² r${layer.radius}  ` +
@@ -10831,93 +11061,10 @@ function commandCover(): void {
     );
   }
 
-  // ---- colour: a layer's blades read against the ground tile they grow on. Owner walk 2026-10-27: moving grass popped
-  // in at the fade distance in a colour the zone's ground did not have (every layer shared one bright tip, keyed on
-  // generic surface names while each zone paints its own tiles). Effective blade colour = the sprite's mean opaque
-  // colour over its used tiles x bladeColor (what the grass shader draws), or blade/tip mixed for untextured blades;
-  // compared with the mean colour of every ground surface the layer names, by value (luminance ratio) and by hue.
-  const COLOUR = { lumRatio: [0.5, 2.0] as const, hueDeg: 40, minSat: 0.15 };
-  type Rgb = [number, number, number];
-  const hex = (s: string): Rgb | null => {
-    const m = /^#?([0-9a-f]{6})$/i.exec((s ?? "").trim());
-    if (!m) return null;
-    const v = parseInt(m[1]!, 16);
-    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-  };
-  const toHex = (c: Rgb): string => `#${c.map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, "0")).join("")}`;
-  const meanCache = new Map<string, Rgb | null>();
-  const meanOf = (file: string, tiles?: { cols: number; rows: number; used: number[] }): Rgb | null => {
-    const key = `${file}|${tiles ? tiles.used.join(",") : ""}`;
-    if (meanCache.has(key)) return meanCache.get(key)!;
-    let out: Rgb | null = null;
-    try {
-      const { width, height, data } = decodePng(fs.readFileSync(file)) as { width: number; height: number; data: Uint8Array };
-      const tw = tiles ? width / tiles.cols : width;
-      const th = tiles ? height / tiles.rows : height;
-      let r = 0, g = 0, b = 0, n = 0;
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          if (tiles && !tiles.used.includes(Math.floor(y / th) * tiles.cols + Math.floor(x / tw))) continue;
-          const i = (y * width + x) * 4;
-          if (data[i + 3]! < 64) continue;
-          r += data[i]!; g += data[i + 1]!; b += data[i + 2]!; n++;
-        }
-      }
-      if (n > 0) out = [r / n, g / n, b / n];
-    } catch { out = null; }
-    meanCache.set(key, out);
-    return out;
-  };
-  const lum = (c: Rgb): number => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
-  const hueSat = (c: Rgb): [number, number] => {
-    const r = c[0] / 255, g = c[1] / 255, b = c[2] / 255;
-    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
-    let h = 0;
-    if (d > 1e-6) h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
-    return [(h * 60 + 360) % 360, mx > 0 ? d / mx : 0];
-  };
-  const hueGap = (a: number, b: number): number => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
-  for (const layer of layers) {
-    if (layer.water || layer.surfaces.length === 0) continue;
-    let blade: Rgb | null = null;
-    if (layer.texture) {
-      const used = layer.atlas ? (layer.tiles.length ? layer.tiles : [...Array(layer.atlas.columns * layer.atlas.rows).keys()]) : [];
-      const sprite = meanOf(textureFile(layer.texture), layer.atlas ? { cols: layer.atlas.columns, rows: layer.atlas.rows, used } : undefined);
-      const k = hex(layer.bladeColor) ?? [255, 255, 255];
-      if (sprite) blade = [(sprite[0] * k[0]) / 255, (sprite[1] * k[1]) / 255, (sprite[2] * k[2]) / 255];
-    } else {
-      const a = hex(layer.bladeColor), b = hex(layer.tipColor);
-      if (a && b) blade = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
-    }
-    if (!blade) continue;
-    const [bh, bs] = hueSat(blade);
-    // a layer names a generic surface ("grass"); inside a zone the tile actually drawn for it is the zone's own
-    // (`regions[].ground.grass`, worldgen zone-textures), so the blades are read against every tile they stand on
-    const tilesFor = (name: string): { where: string; surface: string }[] => [
-      { where: "", surface: name },
-      ...(recipe.regions ?? []).flatMap((g) => {
-        const m = (g as { ground?: Record<string, string> }).ground?.[name.toLowerCase()];
-        return m && m.toLowerCase() !== name.toLowerCase() ? [{ where: ` in ${g.id}`, surface: m }] : [];
-      }),
-    ];
-    for (const name of layer.surfaces) {
-      for (const tile of tilesFor(name)) {
-      const sf = recipe.surfaces.find((s) => s.name.toLowerCase() === tile.surface.toLowerCase());
-      if (!sf?.map) continue;
-      const ground = meanOf(textureFile(sf.map));
-      if (!ground) continue;
-      const ratio = lum(blade) / Math.max(0.02, lum(ground));
-      const [gh, gs] = hueSat(ground);
-      const hueOff = bs >= COLOUR.minSat && gs >= COLOUR.minSat ? hueGap(bh, gh) : 0;
-      if (ratio < COLOUR.lumRatio[0] || ratio > COLOUR.lumRatio[1] || hueOff > COLOUR.hueDeg)
-        findings.push(
-          `${layer.id}: blades read ${toHex(blade)} over ${tile.surface}${tile.where} (${toHex(ground)}): value x${ratio.toFixed(2)}, hue ${Math.round(hueOff)}° off — ` +
-            `they pop in at the fade distance in a colour the ground does not have; derive bladeColor/tipColor from the zone's ground tile ` +
-            `(value within x${COLOUR.lumRatio[0]}-${COLOUR.lumRatio[1]}, hue within ${COLOUR.hueDeg}°)`,
-        );
-      }
-    }
-  }
+  // ---- colour: a layer's blades read against the ground tile they grow on (owner walk 2026-10-27; owner ruling
+  // 2026-10-30 "grass always needs to match the colour of the grass tile"): tools/worldgen-cover-colour.mts, the same
+  // check the `flora` status row runs. Fix: `worldgen flora <world>` re-tints a failing layer onto its tiles.
+  for (const f of coverColourFindings(recipe, coverSources())) findings.push(describeCoverColour(f));
 
   const points = option("points", 1500);
   if (points > 0) {
@@ -11137,6 +11284,12 @@ switch (command) {
   case "trails":
     commandTrails();
     break;
+  case "road-net": {
+    // the network's crossings, side-by-side runs, redundant links and dead ends, drawn with --png (tools/worldgen-road-net.mts)
+    const { recipe, file } = loadRecipe();
+    { const exceptions = readLipsExceptions(file); void commandRoadNet({ argv, recipe, file, writeRecipe, extra: networkExtraPlaces(recipe), base: path.join(assetsRoot(), "maps", `${recipe.name}.base.png`), extent: extentFor(recipe), lipsOf: (r, near) => runLipsGate(r, { near, exceptions }).faults }); }
+    break;
+  }
   case "road-water":
     // roads filled across a lake's edge where a dry detour under 2x exists (worldgen-road roadLakeFills)
     commandRoadWater({ argv, loadRecipe: () => loadRecipe(), writeRecipe, fail, grade: () => fail("road-water does not grade") });

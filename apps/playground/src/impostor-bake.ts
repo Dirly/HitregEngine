@@ -20,7 +20,8 @@ import {
 // Two passes per model:
 //  - albedo: the model's own materials under a uniform white ambient of π —
 //    Lambert's ambient term is albedo · irradiance / π, so that intensity
-//    yields the un-lit base colour (plus the material's own alpha cut-outs).
+//    yields the un-lit base colour (plus the material's own alpha cut-outs;
+//    foliage a little under it, see FOLIAGE_SELF_SHADE).
 //    Lighting is NOT baked in: the impostor is lit at runtime through the…
 //  - …normal atlas: every mesh temporarily wears an unlit material writing
 //    its model-space normal (`normalWorld` with the object at the origin),
@@ -115,9 +116,16 @@ function pageWithRoom(blockSize: number, depth: boolean): ImpostorPage {
   for (const page of pages) {
     if (page.blockSize === blockSize && page.cursor < perRow * perRow) return page;
   }
+  const target = (): THREE.RenderTarget => {
+    const rt = new THREE.RenderTarget(PAGE_SIZE, PAGE_SIZE, { depthBuffer: depth });
+    // Close in, a frame is magnified about 3x (one 96 px frame across a tree 170 px tall at the 110 m switch): NEAREST
+    // keeps the stepped texel the meshes beside it have, where linear smeared it into a soft blob. Minified stays linear.
+    rt.texture.magFilter = THREE.NearestFilter;
+    return rt;
+  };
   const page: ImpostorPage = {
-    albedo: new THREE.RenderTarget(PAGE_SIZE, PAGE_SIZE, { depthBuffer: depth }),
-    normal: new THREE.RenderTarget(PAGE_SIZE, PAGE_SIZE, { depthBuffer: depth }),
+    albedo: target(),
+    normal: target(),
     cursor: 0,
     perRow,
     blockSize,
@@ -157,6 +165,23 @@ Object.assign(globalThis, {
   __hitregImpostorRead: readImpostorBlock,
 });
 
+/**
+ * The near tree shades its own inner boughs through the sun's shadow map; an impostor receives no shadow from itself
+ * and every baked normal leans up, so a canopy came out ~28% brighter than its mesh at noon (2026-11-05, same camera,
+ * mesh vs impostor). Foliage bakes that much darker. Solid props have no inner boughs and bake at 1.
+ */
+const FOLIAGE_SELF_SHADE = 0.78;
+
+function albedoScale(object: THREE.Object3D): number {
+  let cutout = false;
+  object.traverse((node) => {
+    const material = (node as THREE.Mesh).material;
+    if (!material) return;
+    for (const m of Array.isArray(material) ? material : [material]) if (m.alphaTest > 0) cutout = true;
+  });
+  return cutout ? FOLIAGE_SELF_SHADE : 1;
+}
+
 function normalMaterialFor(source: THREE.Material): THREE.MeshBasicNodeMaterial {
   const src = source as THREE.Material & { map?: THREE.Texture | null; alphaTest?: number; transparent?: boolean };
   const material = new THREE.MeshBasicNodeMaterial({ side: src.side });
@@ -167,7 +192,9 @@ function normalMaterialFor(source: THREE.Material): THREE.MeshBasicNodeMaterial 
   material.outputNode = vec4(normalWorld.mul(0.5).add(0.5), float(role === "leaves" ? 1 : role === "bark" ? 0.5 : 0));
   if (src.map && ((src.alphaTest ?? 0) > 0 || src.transparent)) {
     material.opacityNode = tslTexture(src.map, uv()).a;
-    material.alphaTest = Math.max(src.alphaTest ?? 0, 0.5);
+    // the SAME cut as the albedo pass: the sampler divides both atlases by the albedo's coverage, so a texel
+    // kept there and dropped here would decode to a normal of (-1,-1,-1)
+    material.alphaTest = (src.alphaTest ?? 0) > 0 ? src.alphaTest! : 0.5;
   }
   return material;
 }
@@ -238,7 +265,7 @@ export function bakeImpostorAtlas(
     gl.setClearColor(0x000000, 0); // transparent, not chroma-keyed — no fringing
 
     // pass 1: albedo under a flat white ambient (see header)
-    const ambient = new THREE.AmbientLight(0xffffff, Math.PI);
+    const ambient = new THREE.AmbientLight(0xffffff, Math.PI * albedoScale(object));
     scene.add(ambient);
     const page = shared ? pageWithRoom(size, !viaScratch) : null;
     const block = page ? page.cursor++ : 0;

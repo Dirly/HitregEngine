@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three/webgpu";
-import { ParticleSystem, PARTICLE_SLEEP_DISTANCE, type ParticlesData } from "../src/particles.js";
+import { ParticleSystem, PARTICLE_SLEEP_DISTANCE, farGrowScale, type ParticlesData } from "../src/particles.js";
+import { CullingSystem } from "../src/culling.js";
 
 /** A steady fire: 20 births a second, each living two seconds. */
 const fire: ParticlesData = {
@@ -44,6 +45,23 @@ function setup(distance: number) {
 }
 
 describe("particle distance sleep", () => {
+  it("sleeps within particle range when the source room is culled, and wakes on approach", () => {
+    const { group, camera } = setup(30);
+    group.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial()));
+    const culling = new CullingSystem();
+    culling.register({ objects: [group], interior: true, reveal: 5, occlusion: false });
+    const particles = new ParticleSystem();
+    particles.register("fire", group, fire);
+    culling.update(camera, 720);
+    particles.update(0.1, camera);
+    expect(particles.stats()).toMatchObject({ asleep: 1, particles: 0 });
+    camera.position.x = 30;
+    culling.update(camera, 720);
+    for (let i = 0; i < 10; i++) particles.update(0.1, camera);
+    expect(particles.stats().asleep).toBe(0);
+    expect(particles.stats().particles).toBeGreaterThan(0);
+    culling.clear();
+  });
   it("an emitter beyond the sleep distance simulates nothing; one inside it burns", () => {
     const particles = new ParticleSystem();
     const far = setup(PARTICLE_SLEEP_DISTANCE + 50);
@@ -81,5 +99,34 @@ describe("particle distance sleep", () => {
     for (let i = 0; i < 10; i++) particles.update(0.1, camera);
     expect(particles.stats().asleep).toBe(0);
     expect(particles.stats().particles).toBeGreaterThan(0);
+  });
+
+  it("an emitter's own sleepDistance (vfx.farDraw) keeps it awake past 220 m; the default still sleeps", () => {
+    const particles = new ParticleSystem();
+    const beacon = setup(330);
+    particles.register("beacon", beacon.group, { ...fire, sleepDistance: 1320 });
+    const torch = setup(330);
+    particles.register("torch", torch.group, fire);
+    for (let i = 0; i < 30; i++) particles.update(0.1, beacon.camera);
+    const s = particles.stats();
+    expect(s.emitters).toBe(2);
+    expect(s.asleep).toBe(1);
+    expect(s.particles).toBeGreaterThan(20);
+    // past its own distance the beacon sleeps too
+    const gone = new ParticleSystem();
+    const far = setup(2000);
+    gone.register("beacon", far.group, { ...fire, sleepDistance: 1320 });
+    for (let i = 0; i < 10; i++) gone.update(0.1, far.camera);
+    expect(gone.stats().asleep).toBe(1);
+  });
+});
+
+describe("farGrow (a beacon's flame keeps its screen size far off)", () => {
+  it("is 1 inside farGrow or when unset, and distance / farGrow past it", () => {
+    expect(farGrowScale(undefined, 300, 0, 0)).toBe(1);
+    expect(farGrowScale(0, 300, 0, 0)).toBe(1);
+    expect(farGrowScale(150, 100, 0, 0)).toBe(1);
+    expect(farGrowScale(150, 0, 0, 300)).toBeCloseTo(2);
+    expect(farGrowScale(150, 180, 0, 240)).toBeCloseTo(2); // 300 m off
   });
 });

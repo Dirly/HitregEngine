@@ -13,6 +13,11 @@ test("cellFoot: a lintel or roof keeps the floor under it", () => {
   // up hits the soffit (134), the sky ray the lintel top (146): different faces, the floor stays
   assert.equal(cellFoot(120, 134, 146), 120);
 });
+test("cellFoot: a foot inside a built solid stands on its top, even under a roof", () => {
+  // the terrain pokes up inside a gate's door platform (its bottom face just under the foot): the platform top (134.4), not the arch (168.4)
+  assert.equal(cellFoot(130.4, 134.4, 168.4, true), 134.4);
+  assert.equal(cellFoot(130.4, 134.4, 168.4, false), 130.4);
+});
 test("edgeCost: a built stair's risers are not an edge; a kerb and a terrain step are", () => {
   assert.equal(edgeCost(0.75, true), 0); // three 0.25 m risers across a cell diagonal
   assert.equal(edgeCost(1.0, true), 4); // a 1 m cheek wall

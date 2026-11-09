@@ -45,7 +45,9 @@ export interface Target {
   /** Walk THROUGH: start here, pass `at`, end at `through` (doors, openings). */
   from?: P3;
   through?: P3;
-  portal?: { entityId: string; trigger: boolean; sealed?: string };
+  portal?: { entityId: string; trigger: boolean; sealed?: string; /** the trigger box's smaller horizontal half extent (m) */ half?: number; /** the trigger box centre when it stands off the anchor (portal-cover --fit offset); no height */ box?: [number, null, number] };
+  /** Walked with the stick only, never jumping (a door: the way in must be steps, not a jump onto a raised sill). */
+  noJump?: boolean;
   /** Bog/open water: reached within this XZ distance when the point is under water. */
   wadeXZ?: number;
 }
@@ -236,6 +238,8 @@ export interface EntityView {
   tags: readonly string[];
   position: P3 | null;
   quaternion: [number, number, number, number] | null;
+  /** World scale (the transform scales multiplied up the parent chain); a portal's box is scaled by it. */
+  scale?: P3;
   components: Record<string, unknown>;
 }
 
@@ -257,8 +261,20 @@ export const DOOR_FACE_M = 1.8;
  * Targets the POI's entities imply: WFC doorway parts (walked through from 4 m out on the door axis to the cell
  * centre), portals (walk to the anchor, the portal must send), quest / interactable entities.
  */
-export function entityTargets(views: EntityView[]): Target[] {
+export function entityTargets(views: EntityView[], doorsOfAsset?: (assetId: string) => { id: string; position: readonly number[]; yaw: number }[]): Target[] {
   const out: Target[] = [];
+  // every CATALOGUED BUILDING's door (its model's `door` markers): walked in from 4 m outside, through the door to 2.5 m
+  // inside, without jumping. L (Marrow's Farm 2026-10-30, Derek: "you can't get into the farm house, it's raised too high")
+  if (doorsOfAsset) for (const v of views) {
+    const asset = (v.components["mesh"] as { source?: { assetId?: unknown } } | undefined)?.source?.assetId;
+    if (typeof asset !== "string" || !v.position || !v.quaternion) continue;
+    for (const d of doorsOfAsset(asset)) {
+      const at = rotate(v.quaternion, d.position), ly = (d.yaw * Math.PI) / 180, o = rotate(v.quaternion, [Math.sin(ly), 0, Math.cos(ly)]);
+      const l = Math.hypot(o[0], o[2]); if (l < 1e-6) continue;
+      const nx = o[0] / l, nz = o[2] / l, door: P3 = [v.position[0] + at[0], v.position[1] + at[1], v.position[2] + at[2]];
+      out.push({ id: `door:${v.id}/${d.id}`, kind: "door", at: door, tolXZ: MISS_XZ, from: [door[0] + nx * 4, door[1], door[2] + nz * 4], through: [door[0] - nx * 2.5, door[1], door[2] - nz * 2.5], noJump: true });
+    }
+  }
   const byId = new Map(views.map((v) => [v.id, v]));
   for (const v of views) {
     const parentIsDoor = v.parent ? (byId.get(v.parent)?.tags ?? []).some((t) => DOOR_PART_RE.test(t)) : false;
@@ -285,7 +301,17 @@ export function entityTargets(views: EntityView[]): Target[] {
       const trigger = script.params?.["mode"] === "trigger";
       // a SEALED door (no scene, a refusal: a dungeon that opens in a later round) must refuse with its own words, not send
       const sealed = !script.params?.["scene"] && typeof script.params?.["refusal"] === "string" ? (script.params["refusal"] as string) : undefined;
-      out.push({ id: `portal:${v.id}`, kind: "portal", at: [v.position[0], v.position[1], v.position[2]], tolXZ: 3, portal: { entityId: v.id, trigger, ...(sealed ? { sealed } : {}) } });
+      const he = script.params?.["halfExtents"];
+      const sc = v.scale ?? [1, 1, 1];
+      const half = Array.isArray(he) && isNum(he[0]) && isNum(he[2]) ? Math.min((he[0] as number) * sc[0], (he[2] as number) * sc[2]) : undefined;
+      // the walk-in goes to the BOX, not the entity origin: portal-cover --fit sets the box `offset` onto the passage's
+      // narrowest closed section, which can stand metres behind the anchor (Weeping Stair 2026-11-01: box 0.65-2.35 m
+      // behind it, "reached the anchor, the portal did not send"). The reach and hold stay on the anchor (its floor);
+      // the walk-in heads for the box centre (`box`, no height: a sloped bore falls 1.3 m under it).
+      const off = script.params?.["offset"];
+      const shift: P3 = Array.isArray(off) && isNum(off[0]) && isNum(off[2]) && v.quaternion ? rotate(v.quaternion, [(off[0] as number) * sc[0], 0, (off[2] as number) * sc[2]]) : [0, 0, 0];
+      const box: [number, null, number] | undefined = Math.hypot(shift[0], shift[2]) > 0.1 ? [v.position[0] + shift[0], null, v.position[2] + shift[2]] : undefined;
+      out.push({ id: `portal:${v.id}`, kind: "portal", at: [v.position[0], v.position[1], v.position[2]], tolXZ: 3, portal: { entityId: v.id, trigger, ...(sealed ? { sealed } : {}), ...(half !== undefined ? { half } : {}), ...(box ? { box } : {}) } });
     } else if (v.position && (v.tags.includes("quest-object") || v.tags.includes("interactable") || script?.name === "npc")) {
       const r = isNum(script?.params?.["radius"]) ? (script!.params!["radius"] as number) : 3;
       out.push({ id: `quest:${v.id}`, kind: "quest", at: [v.position[0], null, v.position[2]], tolXZ: Math.min(Math.max(r - 0.5, 1), 3) });
@@ -549,6 +575,18 @@ export function dropHoldFault(id: string, feet: P3, surfaceY: number, wet: boole
  * stepped out of and walked into again once, an interact portal gets [E]. Only THIS portal's travels count.
  */
 export interface PortalSteps { stepOut(): void; walkIn(): void; interact(): void; idle(): void }
+/**
+ * Where a trigger portal's walk-in stops: on the portal plane, just inside the box's near face (toward `from`, the side the
+ * walk came from), not at the anchor. Aimed at the anchor, a body running in coasts past it, and in a shallow sealed recess
+ * it ran into the back wall: moon 2026-10-31, a BODY at the recess back wall 1.7 m past the anchor, 2 m behind the
+ * portal plane. `half` is the box's smaller horizontal half extent; the stop is `PORTAL_INSIDE_M` inside its face.
+ */
+export const PORTAL_INSIDE_M = 0.25;
+export function portalWalkInPoint(at: P3 | readonly [number, number | null, number], from: readonly [number, number | null, number], half: number | undefined): [number, number | null, number] {
+  const ux = from[0] - at[0], uz = from[2] - at[2], l = Math.hypot(ux, uz);
+  const back = half !== undefined && l > 1e-6 ? Math.max(0, half - PORTAL_INSIDE_M) : 0;
+  return back > 0 ? [at[0] + (ux / l) * back, at[1], at[2] + (uz / l) * back] : [at[0], at[1], at[2]];
+}
 export function portalSentAfterReach(portal: { entityId: string; trigger: boolean }, travels: ReadonlyArray<unknown>, steps: PortalSteps): boolean {
   const sent = (): boolean => travels.some((t) => (t as { portalId?: unknown } | null)?.portalId === portal.entityId);
   if (sent()) return true;
@@ -609,6 +647,9 @@ export const WALK_THROUGH_TAGS: ReadonlySet<string> = new Set(["zone-boundary", 
 export function bodySkip(entities: Record<string, any>, id: string): boolean {
   const e = entities[id];
   if (!e || !(e.components?.mesh || e.components?.prefab) || e.components?.visibility?.visible === false || e.components?.mesh?.visible === false) return true;
+  // a WATER sheet (a `water` component: still water a body wades through, a layout `waters` sheet) is waded, never a clash.
+  // L (w-temple10 2026-11-03: the sunken temple stair passage's own dark water flagged BODY at every wading step)
+  if (e.components?.water) return true;
   for (let cur: any = e, n = 0; cur && n < 64; cur = cur.parent ? entities[cur.parent] : null, n++) {
     const tags: string[] = cur.tags ?? [];
     if (tags.some((t) => WALK_THROUGH_TAGS.has(t) || t === "npc" || t === "populate")) return true;

@@ -1,6 +1,7 @@
 import type { AnimationLayerOptions, LivePostFxOptions, LiveSkyOptions, LiveSkyBase, BiomeAt, RegionAt, WaterAt, ModelLook, ModelTables } from "./script.js";
 import type * as THREE from "three";
-import type { NetStateStore, PlayerDataService, ProfilerLike, SceneDoc } from "@hitreg/core";
+import type { AudioChannel, NetStateStore, PlayerDataService, ProfilerLike, SceneDoc } from "@hitreg/core";
+import { registerEncounterNetState } from "@hitreg/core";
 import type {
   InputLike,
   Script,
@@ -60,9 +61,9 @@ export interface RuntimeOptions {
   /** Host animation hook: fade the layer out, restoring the full-body base. */
   clearAnimationLayer?: (entityId: string, fadeSeconds?: number) => void;
   /** Host audio hook: play an entity's audio component or a sound asset id. */
-  playSound?: (entityId: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number; at?: readonly [number, number, number] }) => void;
+  playSound?: (entityId: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number; channel?: AudioChannel; at?: readonly [number, number, number] }) => void;
   /** Host audio hook: keep one named, script-owned loop playing at a chosen gain. */
-  setSoundLoop?: (entityId: string, slot: string, soundId: string | undefined, opts?: { volume?: number; positional?: boolean; refDistance?: number }) => void;
+  setSoundLoop?: (entityId: string, slot: string, soundId: string | undefined, opts?: { volume?: number; positional?: boolean; refDistance?: number; channel?: AudioChannel }) => void;
   /** Host billboard hook: mutate an entity's billboard (fill/text/visible). */
   setBillboard?: (
     entityId: string,
@@ -83,6 +84,7 @@ export interface RuntimeOptions {
       direction?: [number, number, number];
       speed?: [number, number];
       colorScale?: number;
+      weather?: boolean;
     },
   ) => void;
   /** Host clock hook: how much daylight there is (see ScriptContext.daylight). */
@@ -266,6 +268,7 @@ export class ScriptRuntime {
   private activeCameraId: string | null = null;
 
   constructor(private readonly opts: RuntimeOptions) {
+    if (opts.netState) registerEncounterNetState(opts.netState);
     this.entities = new Map(Object.entries(opts.doc.entities));
     for (const [id, entity] of this.entities) this.indexTags(id, entity.tags, entity);
     // COPY, never alias: the runtime deletes from this map when entities are
@@ -745,7 +748,7 @@ export class ScriptRuntime {
           : {}),
         ...(this.opts.playSound
           ? {
-              playSound: (soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number; at?: readonly [number, number, number] }) =>
+              playSound: (soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number; channel?: AudioChannel; at?: readonly [number, number, number] }) =>
                 this.opts.playSound!(id, soundId, opts),
             }
           : {}),
@@ -754,7 +757,7 @@ export class ScriptRuntime {
           : {}),
         ...(this.opts.setSoundLoop
           ? {
-              setSoundLoop: (slot: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number }) =>
+              setSoundLoop: (slot: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; channel?: AudioChannel }) =>
                 this.opts.setSoundLoop!(id, slot, soundId, opts),
             }
           : {}),
@@ -777,6 +780,7 @@ export class ScriptRuntime {
                 direction?: [number, number, number];
                 speed?: [number, number];
                 colorScale?: number;
+                weather?: boolean;
               }) => this.opts.setParticles!(entityId, opts),
             }
           : {}),
@@ -858,6 +862,7 @@ export class ScriptRuntime {
       emit: (name, payload) => bus.emit(name, payload),
       on: (name, cb) => track(bus.on(name, cb)),
       once: (name, cb) => track(bus.once(name, cb)),
+      firstUnheard: (name) => bus.firstUnheard(name),
     };
   }
 

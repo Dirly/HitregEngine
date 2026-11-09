@@ -14,7 +14,7 @@ export async function previewPng(gltf, tile = 480) {
   for(let i=0;i<rgba.length;i+=4)rgba.set([39,44,49,255],i);
   const light=new T.Vector3(-.5,.8,.6).normalize();
   for(const [vi,direction] of [[0,[0,-.08,-1]],[1,[-1,-.08,0]],[2,[-.75,-.15,-1]]]){
-    const f=new T.Vector3(...direction).normalize(),r=new T.Vector3().crossVectors(new T.Vector3(0,1,0),f).normalize(),u=new T.Vector3().crossVectors(f,r);
+    const f=new T.Vector3(...direction).normalize(),r=new T.Vector3().crossVectors(f,new T.Vector3(0,1,0)).normalize(),u=new T.Vector3().crossVectors(r,f);
     let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
     for(const tri of triangles)for(const p of tri.p){const x=p.dot(r),y=p.dot(u);minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);}
     const scale=.9*tile/Math.max(maxX-minX,maxY-minY,1e-6);

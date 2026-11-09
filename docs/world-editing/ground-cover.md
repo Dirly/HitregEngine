@@ -105,7 +105,8 @@ merge them by *what they look like* (atlas tiles):
 
 A cover edge that FLICKERS while walking is the fade reach breathing: the
 disc trails the camera, the fade pulls in to stay on placed ground, and tufts
-along the moving edge cut in and out of the alpha test. `RECENTER_FRACTION`
+along the moving edge shrink and regrow (cover grows in over the last 15% of its
+reach, a vertex-stage height scale from a uniform). `RECENTER_FRACTION`
 (render grass.ts) bounds the drift — 0.6 let a diagonal walk pull a 40 m edge
 in to 26 m; 0.35 holds it at the radius (test: "walking DIAGONALLY").
 

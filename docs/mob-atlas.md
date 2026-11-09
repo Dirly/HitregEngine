@@ -1,5 +1,9 @@
 # Mob atlases
 
+For ghosts and spectral creatures, also follow [ghost-authoring.md](ghost-authoring.md):
+paint their situation-specific identity first, then apply the shared spectral
+surface, smooth foot fade and measured rectangular eye effect.
+
 How a creature goes from a modelled body to a textured mob in the engine:
 unwrap its shells, hand a generator a colour KEY of that unwrap, register the
 artwork it paints back onto the mesh, and look at the result.
@@ -103,6 +107,8 @@ The machinery is identical; what a recipe MEANS changes.
 
 Steps 3 and 7 both re-read the key, so **any change to the recipe strands every
 sheet already painted against it.** Batch recipe changes; regenerate art last.
+
+Nearest reduction can miss a thin painted mark entirely. Before repainting, compare the original artwork and a uniform sampling-lattice phase using `--sample-phase-x` / `--sample-phase-y` (target-texel offsets from -0.5 to +0.5). Nonzero phases require nearest filtering; the default zero preserves existing output. A phase applies to the whole sheet, never one feature or UV island. Record the chosen phase in the owning project and review eyes, mouth, seams and cutouts at the final size. The registered atlas tool exposes the same controls.
 
 ## Choosing the projection
 

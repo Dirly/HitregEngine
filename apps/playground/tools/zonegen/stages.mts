@@ -467,6 +467,18 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
       return f.length ? `${f.length} building(s) with terrain through the floor: ${f.slice(0, 2).join("; ")}` : null;
     }, [{ file: layout, authored: false, proj: (l) => (l.buildings ?? []).map((b: { id: string; groundY?: number; full?: unknown; ground?: unknown }) => [b.id, b.groundY, b.full ?? b.ground]) }, { file: p.recipe, authored: false, proj: groundNear(t.id, 200, true) }],
     (r: { at?: unknown }) => ({ ...r, at: 0 }));
+    // seated: every INSTALLED piece of the town stands on the walked ground (tools/town-seated.mts, f-ground 2026-10-31,
+    // Derek: "Why is shit floating if we have code assist for placement?"): structures along their whole base outline at
+    // their true bottom, dressing by the float rule, every skirt on its own bottom; no piece unmeasured. Re-judged after
+    // any ground change round the town or any change to the town's entities in its scene
+    const seatedReport = path.join(towns, "survey", `${name}-seated.json`);
+    const seatedSceneId = exists(doc) ? (json<{ scene?: string }>(doc).scene ?? project) : project;
+    const seatedScene = path.join(p.projectDir, "assets", "scenes", `${seatedSceneId}.scene.json`);
+    if (exists(seatedScene) && exists(install)) step("seated", "procedural", `${tool("town-seated", `--town ${name}`)}  (a failure: ${tool("town-settle", `--town ${name} --skirts`)} for structures, float.mts scene --fix for dressing)`, seatedReport, () => {
+      const r = json<{ ok?: boolean; counts?: { faults?: number; judged?: number }; failures?: string[] }>(seatedReport);
+      return r.ok ? null : `${r.counts?.faults ?? "?"} piece(s) show daylight or are unmeasured: ${(r.failures ?? []).slice(0, 2).join("; ") || "report not ok"}`;
+    }, [{ file: seatedScene, authored: false, proj: (s) => Object.entries(s.entities ?? {}).filter(([, e]: [string, any]) => (e?.tags ?? []).includes(`town:${name}`)).map(([id, e]: [string, any]) => [id, e.components?.transform, e.components?.prefab?.prefabId]) }, { file: p.recipe, authored: false, proj: groundNear(t.id, 200, true) }],
+    (r: { at?: unknown }) => ({ ...r, at: 0 }));
     // wall: the town wall / palisade (`wall` operators named `<town>-wall*`) seated along its whole line: no <= 4 m
     // segment shows daylight under it (`worldgen seated --wall`, tools/_wall-seated.mts); re-judged after any ground
     // change round the town or an edit of the wall op (Reedholt palisade, 2026-10-21)

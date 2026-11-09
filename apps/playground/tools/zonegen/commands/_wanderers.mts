@@ -12,6 +12,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { mobBehaviorArchetypeSchema, mobBehaviorOverride, resolveMobBehavior } from "@hitreg/core";
 import type { Ctx, Finding } from "../lib.mts";
 
 export const WANDER_RULES = {
@@ -67,7 +68,7 @@ export type Disposition = keyof typeof DISPOSITIONS;
  */
 export function starterDisposition(family: string, key: string): Disposition {
   if (family === "wolf") return hash01(key) < WANDER_RULES.starterWaryWolves ? "wary" : "aggressive";
-  if (["rat", "giant-rat", "bat", "beetle", "salamander", "dragonfly", "deer", "muledeer", "elk", "raven", "goat", "sheep", "horse", "pig", "bison", "bighornsheep"].includes(family)) return "passive";
+  if (["ant", "rat", "giant-rat", "bat", "beetle", "salamander", "dragonfly", "deer", "muledeer", "elk", "raven", "goat", "sheep", "horse", "pig", "bison", "bighornsheep"].includes(family)) return "passive";
   return "aggressive";
 }
 function hash01(s: string): number {
@@ -80,11 +81,14 @@ const temperament = z.enum(["hostile", "territorial", "passive"]);
 const disposition = z.enum(["passive", "wary", "aggressive", "hostile", "neutral", "skittish"]).describe("passive (= neutral, skittish) ignores players until attacked and stands 1-3 levels under where it lives (fodder); wary attacks only within WANDER_RULES.waryMetres; aggressive (= hostile) attacks on sight. Wins over `temperament`. Unset in a starter zone = the family's default (starterDisposition).");
 const member = z.object({
   creature: z.string().min(1).describe("Catalogue bestiary creature id (wolf, giant-spider, bandit-cutthroat...)."),
+  scale: z.number().min(0.5).max(6).default(1).describe("Uniform body size on common roamers and companions. Populate scales collision, attack reach, eyes and gait together, using the same path as oversized rares."),
   theme: z.string().default("").describe("Theme of that creature (its painted skin or, for a human, its outfit set)."),
+  faction: z.string().optional().describe("Combat and assist faction for this population member. Separate peaceful foragers from hostile nest guards so an unprovoked nest pull does not recruit them."),
   name: z.string().optional().describe("Display name, '<Kin> <Role>' (Moor Wolf, Bandit Cutpurse). Default: the catalogue's."),
   role: z.enum(["melee", "ranged", "caster", "swarm", "brute", "skirmisher", "support", "elite", "boss"]).optional().describe("Combat role (pack stats). Default: the creature's first role."),
 });
 const mixRow = member.extend({
+  behaviorArchetype: mobBehaviorArchetypeSchema.optional(),
   weight: z.number().positive().default(1),
   count: z.tuple([z.number().int().min(1), z.number().int().min(1)]).default([1, 1]).describe("[min, max] of this row spawned together by one roll."),
   temperament: temperament.optional(),
@@ -92,12 +96,15 @@ const mixRow = member.extend({
   with: z.array(member).default([]).describe("Companions spawned in the same roll (a band): each its own template."),
 });
 const rare = member.extend({
+  behaviorArchetype: mobBehaviorArchetypeSchema.optional(),
   id: z.string().min(1),
   name: z.string().min(1).describe("The rare's own name (Greyjaw)."),
   title: z.string().optional().describe("Its title (the Moor Reaver)."),
   level: z.number().int().min(1),
   scale: z.number().positive().default(1),
   chance: z.number().min(0).max(1).default(0.12),
+  temperament: temperament.optional(),
+  disposition: disposition.optional(),
   lockout: z.tuple([z.number().min(0), z.number().min(0)]).default([600, 1200]),
 });
 const anchor = z.object({
@@ -109,7 +116,7 @@ export const wandererAreaSchema = z.object({
   name: z.string().min(1),
   placement: z.enum(["route", "anywhere", "solo"]).describe(
     "route: a pack walking a road or a loop. anywhere: singles and pairs roaming one disc. solo: SINGLE creatures (each roll is one) on short wander loops, " +
-      "scattered over many discs: one per `places` entry, or the whole zone's open land tiled (`tile`). Owner ruling 2026-10-22: a hunting ground is mostly solos; packs are the exception.",
+      "scattered over discs: one at `at`, one per `places` entry, or the whole zone's open land tiled (`tile`). A concentrated habitat can hold many independent singles. Owner ruling 2026-10-22: a hunting ground is mostly solos; packs are the exception.",
   ),
   places: z.array(z.string()).optional().describe("`solo`: reserved location ids, one disc round each."),
   tile: z.boolean().optional().describe("`solo`: tile the zone's open land (off towns, water, cliffs) with discs of `radius`."),
@@ -123,11 +130,14 @@ export const wandererAreaSchema = z.object({
       closed: z.boolean().default(false).describe("`points` form a loop."),
     })
     .optional(),
-  at: anchor.optional().describe("`anywhere`: the disc's centre."),
+  at: anchor.optional().describe("`anywhere` or `solo`: the disc's centre. An anchored solo table creates one concentrated habitat population of independently roaming creatures, subject to the local view cap."),
   radius: z.number().positive().default(150).describe("`anywhere`: the disc creatures spawn and roam in (shrunk to stay off towns and inside the zone)."),
   population: z.number().int().min(1).optional().describe("Creatures alive at once (per disc for `solo`). Required unless a `solo` gives `perKm2`."),
+  hiddenFrom: z.number().min(0).optional().describe("Minimum player distance for births, passed to spawnArea. Compact habitat populations need this smaller than their final clipped radius so a cold arrival at the centre can populate the surrounding ground."),
+  roamRange: z.tuple([z.number().min(0), z.number().min(0)]).optional().describe("Independent per-creature wandering distances in metres, passed to spawnArea. Use short ranges for occupied habitat pockets and longer ranges for open-country roamers."),
   level: z.number().int().min(1).optional().describe("Default: walking distance from the hub, as every populate level."),
   hours: z.tuple([z.number().min(0).max(24), z.number().min(0).max(24)]).optional(),
+  behaviorArchetype: mobBehaviorArchetypeSchema.optional(),
   temperament: temperament.optional(),
   disposition: disposition.optional(),
   mix: z.array(mixRow).min(1),
@@ -158,11 +168,11 @@ export function wandererCreatures(a: WandererArea): Array<{ creature: string; te
   const out: Array<{ creature: string; temperament: string }> = [];
   for (const m of a.mix) {
     const d = m.disposition ?? a.disposition;
-    const t = d ? DISPOSITIONS[d] : (m.temperament ?? a.temperament ?? "hostile");
+    const t = resolveMobBehavior(mobBehaviorOverride({behaviorArchetype:m.behaviorArchetype,temperament:m.disposition ? DISPOSITIONS[m.disposition] : m.temperament},{behaviorArchetype:a.behaviorArchetype,temperament:d ? DISPOSITIONS[d] : a.temperament})).temperament;
     out.push({ creature: m.creature, temperament: t });
     for (const w of m.with) out.push({ creature: w.creature, temperament: t });
   }
-  for (const r of a.rares) out.push({ creature: r.creature, temperament: "hostile" });
+  for (const r of a.rares) out.push({ creature: r.creature, temperament: resolveMobBehavior({behaviorArchetype:r.behaviorArchetype,temperament:r.disposition ? DISPOSITIONS[r.disposition] : r.temperament ?? "hostile"}).temperament });
   return out;
 }
 

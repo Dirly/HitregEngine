@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
 import { VEGETATION_TINT_ATTRIBUTES } from "./vegetation-tint.js";
 import { addRimLight } from "./rim-light.js";
+import { addModelFill } from "./model-fill.js";
 import { APPEARANCE_FLOATS, appearanceColorNode, appearanceTileNode, skinPageOf, tileTableOf, type SkinContext } from "./appearance.js";
 import {
   Fn,
@@ -408,6 +409,7 @@ export function applyInstanceGlow(material: THREE.Material): void {
     return;
   }
   if (node.userData[GLOW_FLAG] === true) return;
+  addModelFill(material);
   const glow = attribute<"vec4">(INSTANCE_GLOW_ATTRIBUTE, "vec4");
   const pulse = attribute<"vec4">(INSTANCE_GLOW_PULSE_ATTRIBUTE, "vec4");
   const flowAttr = attribute<"vec4">(INSTANCE_GLOW_FLOW_ATTRIBUTE, "vec4");

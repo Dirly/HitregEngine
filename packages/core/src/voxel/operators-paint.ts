@@ -21,6 +21,8 @@ export const paintOperatorSchema = z
     edgeNoise: z.number().min(0).max(12).default(1.5).describe("Metres the painted edge wanders (~12 m wavelength): never a drawn line."),
     strength: z.number().min(0).max(1).default(1).describe("Opacity at full weight."),
     breakup: z.number().min(0).max(0.9).default(0).describe("Fraction left unpainted in ~10 m noise blotches (0 = solid; 0.3 = worn patches)."),
+    fringe: z.number().min(0).max(40).default(0).describe("Metres inside the outline over which the paint breaks into splotches, then islands, then nothing by the feather's outer edge: a creep or a spill that fades out gradually (0 = the plain feather)."),
+    blotch: z.number().min(3).max(30).default(8).describe("Size (metres) of the fringe's splotches."),
     slope: z.tuple([z.number().min(0).max(90), z.number().min(0).max(90)]).optional().describe("Only on ground whose slope is inside [min, max] degrees, e.g. [0, 20] = the floor only, [28, 45] = the banks only."),
     height: z.tuple([z.number().finite(), z.number().finite()]).optional().describe("Only on ground inside [minY, maxY] world metres, e.g. a shelf floor's level +-1 m."),
     faces: z.boolean().default(false).describe("Also paint near-vertical faces (default: they keep the zone's cliff stone, like every ground paint)."),

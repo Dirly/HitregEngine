@@ -163,13 +163,47 @@ export const clearingSchema = z
 
 export type ClearingDoc = z.infer<typeof clearingSchema>;
 
+/**
+ * A declared FIELD: the only ground a crop cover layer (`cover[].fields: true` — wheat, grain) grows on. Owner ruling
+ * 2026-10-30 (redstrand): a desert has no wheat-looking grass; a farm has crops. A place (a farm, a croft) declares
+ * its strips here; everywhere else the crop layers are off.
+ */
+export const fieldSchema = z
+  .object({
+    id: slug.describe("Stable id; prefix with the owner (`strand-farm-strips`)."),
+    polygon: z.array(z.tuple([z.number(), z.number()])).min(3).optional().describe("Outline in world metres [x, z]. Give this OR center + radius."),
+    center: z.tuple([z.number(), z.number()]).optional().describe("Circle centre [x, z] (with `radius`)."),
+    radius: z.number().positive().optional().describe("Circle radius in metres (with `center`)."),
+    feather: z
+      .number()
+      .min(0)
+      .max(30)
+      .default(2)
+      .describe("Metres INSIDE the edge over which the crop thins to nothing at the edge (0 = a hard edge, a ploughed strip)."),
+    layers: z
+      .array(z.string().min(1))
+      .optional()
+      .describe("The crop layer ids (`cover[].id` with `fields: true`) sown here; omitted = every crop layer."),
+    owner: z.string().optional().describe("Who declared it (a place or town id) — installers remove their own by owner."),
+  })
+  .refine((c) => (c.polygon !== undefined) !== (c.center !== undefined && c.radius !== undefined), {
+    message: "a field needs a polygon OR center + radius (not both, not neither)",
+  })
+  .describe(
+    "Ground where crop cover grows (a farm's strips). Crop layers (`cover[].fields: true`) grow nowhere else; every " +
+      "other layer ignores fields. Terrain and scatter are untouched. Written by `worldgen vegetation --fields <file>`.",
+  );
+
+export type FieldDoc = z.infer<typeof fieldSchema>;
+
 /** The recipe fields this module reads — kept structural so tests can pass a slice. */
 export interface VegetationRecipe {
   regions?: readonly RegionDoc[];
   scatter: readonly { id: string; collider?: string }[];
-  cover?: readonly { id: string }[];
+  cover?: readonly { id: string; fields?: boolean; regions?: readonly string[]; exceptRegions?: readonly string[] }[];
   features: {
     clearings?: readonly ClearingDoc[];
+    fields?: readonly FieldDoc[];
 
     groundPaints?: readonly { polygon?: [number, number][]; center?: [number, number]; radius?: number; feather?: number; clear?: { scatter: boolean; cover: boolean } }[];
     kitWalls?: readonly { cuts: readonly { origin: readonly number[]; dir: readonly number[]; s: readonly number[]; n: readonly number[] }[] }[];
@@ -249,6 +283,15 @@ export class VegetationIndex {
   private readonly clearings: readonly ClearingDoc[];
   private readonly clearingIndex: PolygonIndex | null;
   private readonly clearingBuckets = new Buckets();
+  /** Some cover layer grows only in (or never in) named regions. */
+  readonly hasRegionLayers: boolean;
+  /** Per cover layer: null = anywhere, else per region index (last slot = outside every region) 1 = may grow. */
+  private readonly layerRegions: readonly (Uint8Array | null)[];
+  /** Crop layers (`cover[].fields`) exist: every one of them grows only inside a declared field. */
+  readonly hasCrops: boolean;
+  private readonly fields: readonly FieldDoc[];
+  private readonly fieldIndex: PolygonIndex | null;
+  private readonly fieldBuckets = new Buckets();
   private readonly layerOf = new WeakMap<object, number>();
   private readonly layerById = new Map<string, number>();
   private readonly ruleById = new Map<string, number>();
@@ -288,11 +331,14 @@ export class VegetationIndex {
       .map((r, i) => ({ i, depth: depth(i), place: r.tags.includes("place") ? 1 : 0 }))
       .sort((a, b) => b.depth - a.depth || b.place - a.place || a.i - b.i);
     this.hasPlans = plans.some((p) => p !== null);
+    // a cover layer limited to regions (`cover[].regions` / `exceptRegions`: one layer per zone tint) needs the region at a point
+    this.hasRegionLayers = cover.some((l) => (l.regions?.length ?? 0) > 0 || (l.exceptRegions?.length ?? 0) > 0);
+    const indexed = this.hasPlans || this.hasRegionLayers;
     // EVERY region is indexed once any has a plan: a point inside a region whose
     // chain has none must answer null, not fall to a neighbour's margin
-    this.regionOrder = this.hasPlans ? order.map((o) => o.i) : [];
+    this.regionOrder = indexed ? order.map((o) => o.i) : [];
     // band 24 m (> the raster's coarsest 16 m cell) keeps the sign exact at every edge
-    this.regionIndex = this.hasPlans
+    this.regionIndex = indexed
       ? new PolygonIndex(this.regionOrder.map((i): OutlineSpec => ({ kind: "polygon", points: regions[i]!.polygon, band: Math.max(24, (regions[i]!.vegetation?.margin ?? 0) + 16) })))
       : null;
     this.regionMargin = this.regionOrder.map((i) => regions[i]!.vegetation?.margin ?? 0);
@@ -300,6 +346,20 @@ export class VegetationIndex {
     this.regionOrder.forEach((i, slot) => {
       const [x0, z0, x1, z1] = boundsOf(regions[i]!.polygon, 1 + this.regionMargin[slot]!);
       this.regionBuckets.add(slot, x0, z0, x1, z1);
+    });
+
+    // per region-limited layer: may it grow in each region (its chain names an allowed region and no excepted one)?
+    this.layerRegions = cover.map((l) => {
+      if (!l.regions?.length && !l.exceptRegions?.length) return null;
+      const ok = new Uint8Array(regions.length + 1);
+      for (let i = 0; i < regions.length; i++) {
+        const ids = chainOf(i).map((k) => regions[k]!.id);
+        const inside = !l.regions?.length || ids.some((id) => l.regions!.includes(id));
+        ok[i] = inside && !ids.some((id) => l.exceptRegions?.includes(id)) ? 1 : 0;
+      }
+      ok[regions.length] = l.regions?.length ? 0 : 1; // outside every region
+      for (const id of [...(l.regions ?? []), ...(l.exceptRegions ?? [])]) if (!byId.has(id)) this.warnings.push(`cover ${l.id}: unknown region "${id}"`);
+      return ok;
     });
 
     // ---- clearings
@@ -337,7 +397,41 @@ export class VegetationIndex {
       const [x0, z0, x1, z1] = boundsOf(pts, c.feather + CLEARING_PAD);
       this.clearingBuckets.add(k, x0, z0, x1, z1);
     });
-    this.empty = !this.hasPlans && !this.hasClearings;
+    // ---- fields (crop cover grows only inside them)
+    this.hasCrops = cover.some((l) => l.fields === true);
+    this.fields = recipe.features.fields ?? [];
+    this.fieldIndex =
+      this.fields.length > 0
+        ? new PolygonIndex(this.fields.map((f): OutlineSpec => (f.polygon ? { kind: "polygon", points: f.polygon, band: f.feather + 4 } : { kind: "disc", center: f.center!, radius: f.radius! })))
+        : null;
+    this.fields.forEach((f, k) => {
+      const pts = f.polygon ?? [[f.center![0] - f.radius!, f.center![1] - f.radius!], [f.center![0] + f.radius!, f.center![1] + f.radius!]];
+      const [x0, z0, x1, z1] = boundsOf(pts, 1);
+      this.fieldBuckets.add(k, x0, z0, x1, z1);
+    });
+    this.empty = !this.hasPlans && !this.hasClearings && !this.hasCrops && !this.hasRegionLayers;
+  }
+
+  /**
+   * Fraction of a crop layer's blades that grow at (x, z): 0 outside every field sowing it, 1 inside past the
+   * feather, rising across the feather from the edge inward.
+   */
+  fieldKeep(x: number, z: number, layerId: string | undefined): number {
+    if (!this.fieldIndex) return 0;
+    const list = this.fieldBuckets.at(x, z);
+    if (!list) return 0;
+    let keep = 0;
+    for (let k = 0; k < list.length; k++) {
+      const f = this.fields[list[k]!]!;
+      if (f.layers && (layerId === undefined || !f.layers.includes(layerId))) continue;
+      const sd = this.fieldIndex.signedDistance(list[k]!, x, z);
+      if (sd >= 0) continue;
+      const depth = sd <= FAR_INSIDE ? Infinity : -sd;
+      const here = f.feather <= 0 || depth >= f.feather ? 1 : depth / f.feather;
+      if (here > keep) keep = here;
+      if (keep >= 1) return 1;
+    }
+    return keep;
   }
 
   private compile(region: string, chain: readonly RegionVegetation[], recipe: VegetationRecipe, layers: number): VegetationPlan {
@@ -408,6 +502,23 @@ export class VegetationIndex {
       };
     }
     return { region, ruleKeep, replace, layerKeep, lean };
+  }
+
+  /** Index into `recipe.regions` of the most specific region whose polygon contains (x, z), or -1. */
+  regionAt(x: number, z: number): number {
+    if (!this.regionIndex) return -1;
+    const slots = this.regionBuckets.at(x, z);
+    if (!slots) return -1;
+    for (let k = 0; k < slots.length; k++) if (this.regionIndex.signedDistance(slots[k]!, x, z) < 0) return this.regionOrder[slots[k]!]!;
+    return -1;
+  }
+
+  /** May cover layer `li` grow at (x, z) by its `regions` / `exceptRegions`? */
+  layerRegionOk(li: number, x: number, z: number): boolean {
+    const ok = li >= 0 ? this.layerRegions[li] : null;
+    if (!ok) return true;
+    const r = this.regionAt(x, z);
+    return ok[r < 0 ? ok.length - 1 : r] === 1;
   }
 
   /** The plan of the most specific region containing (x, z) that has one, or null. */
@@ -488,6 +599,8 @@ export function vegetationIndex(recipe: VegetationRecipe): VegetationIndex {
 export interface CoverVegetationLayer {
   id?: string;
   clump?: Parameters<typeof coverClumpKeep>[0];
+  /** A crop layer: grows only inside `features.fields`. */
+  fields?: boolean;
 }
 
 /**
@@ -507,6 +620,13 @@ export function coverVegetationRejects(
   const index = vegetationIndex(recipe);
   let k = 1;
   if (!index.empty) {
+    // a crop layer grows only in a declared field (cheapest no first: most of the world is not a field)
+    if (layer.fields) {
+      const f = index.fieldKeep(x, z, layer.id);
+      if (f <= 0 || (f < 1 && coverKeepHash(x, z, 0xf1e1d) >= f)) return true;
+    }
+    // a layer limited to regions (one tint per zone's ground tile)
+    if (index.hasRegionLayers && !index.layerRegionOk(index.layerIndex(layer), x, z)) return true;
     const c = index.clearingKeep(x, z, 1);
     if (c <= 0 || (c < 1 && coverKeepHash(x, z, 0x5c1e) >= c)) return true;
     const plan = index.planAt(x, z);

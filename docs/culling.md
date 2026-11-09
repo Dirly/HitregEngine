@@ -43,6 +43,71 @@ published or dropped). Stats HUD: `N unloaded ground`. A/B: `__hitreg.culling.gr
 Probe: `tools/far-draw-probe.mts --scene <world>` lists what the camera draws over unloaded ground from fixed
 spots, gate off vs on, with pictures; it exits 1 when anything is left with the gate on.
 
+## Places stream (built near the focus, not at load)
+
+Culling hides; it does not save the BUILD. Every parentless root tagged `poi`, `poi:<id>` (dressing groups) or
+`town:<id>` — or carrying a `placeStream` component — is left out of the client's base build and built when the focus
+(the player in play, the orbit target in the editor) comes within `placeStream.distance` (default 300 m) of its
+footprint; it is freed past `distance + keepPadding` (default 100 m), so walking a boundary never rebuilds it.
+`landmark` subtrees inside a place stay built (re-rooted at their world transform) and carry the far view; a portal
+under a landmark keeps working from anywhere. Selecting a place's entity in the editor builds it and keeps it built.
+
+An explicit `placeStream` on a nested root makes it independently resident. A furnished room can therefore stay
+unbuilt while its town shell is loaded: hiding a room alone saves draws, whereas residency also defers model
+fetch/decode, render objects and visual effects. The client detaches the room at its world transform; the authored
+parent tree and authoritative physics remain intact. Parent edits also update detached rooms. Nested `always`
+stays with its enclosing place. Nested tags without an explicit component keep their old inheritance.
+
+`dress apply` gives indoor room roots a 32 m build distance, 48 m keep band and 2 m footprint padding, ahead of the
+default 12 m culling reveal. Large open-door sightlines need a measured wider reveal and a build distance at least
+20 m farther out. Bell Strand's chapel keeps its mural visible to 80 m and its bulk/rays to 50 m; their build distances
+are 100 m/70 m. This is room residency plus distance culling, not wall occlusion. Exterior yards keep normal clutter
+grouping. `footprintPadding` defaults to 16 m for existing places; room units use the smaller explicit padding.
+
+- Planning is pure and headless (`planPlaceStreaming`, packages/core/src/place-stream.ts); residency is
+  `PlaceStreamer` (apps/playground/src/place-streamer.ts); a built place batches, gates and culls like the base scene
+  (`batchPlacedContent` in main.ts) and is precompiled on its own.
+- Untouched: the scene doc, `lastExpanded` (queries, portal anchors, quests), the play sim (built from the whole doc,
+  statics streamed around bodies on its own) and every server — gameplay authority never streams by a camera.
+- `placeStream: { mode: "always" }` keeps a root built at load; `distance` widens or narrows one place.
+- A/B: `?places=all` (everything built at load, as before) and `?places=none` (no place ever built).
+  `__hitreg.placeStreamer.stats` → places, loaded, entities, loads, unloads, lastBuildMs.
+
+## Props hide by size (no hand tagging)
+
+Out of doors nothing appears nearer than `OUTDOOR_PROP_MIN_REVEAL` (100 m, `propRevealIndex`): a porch has no wall to hide a pop behind. Size still decides a prop's shadow, and a numeric `dressing.hideDistance` stands.
+
+Every placed prop whose catalogue `dressing` declares a `size` hides by DISTANCE: `propHideDistance` takes ~45 m per
+metre of its largest extent (scaled by `category`: tableware/documents nearer, sacred/street farther) snapped up to a
+bucket (30 / 60 / 100 / 160 m); over 3.5 m it never hides (it is the silhouette). The batcher merges a place's (and
+the base scene's) hiding props per bucket per 64 m cell and registers each group as a grounded unit drawn only within
+its distance (`interior` + `reveal`). Overrides: `dressing.hideDistance` (metres or `"never"`) on the prop's
+catalogue entry; a `culling` component on the placed prop itself; anything under a `landmark` never auto-hides. A
+dressing room's authored `culling` takes precedence over the generic distance bucket, so its furniture remains
+batched by room and obeys the room's reveal distance, including shadow passes. Enclosing fallback gates must not
+claim renderables under an already registered room root, including meshes that arrive asynchronously.
+
+Room-root cull verdicts also gate particle simulation, ambient VFX and authored light candidates. Culling leaves
+authored `visible` values alone; a shared hierarchy visibility check carries the verdict to effects whose rendered
+objects live outside their source room. Pooled point-light slots remain present with stable identities; hidden
+sources stop competing for them. This is distance/terrain culling, not building-wall occlusion or room unloading.
+Window-daylight fixtures on outward-facing window anchors belong to the room behind the pane, so they follow
+the same room gate rather than becoming a separate outdoor lighting group (`resolveDressing`).
+
+## Shadow casters
+
+Every shadow caster is drawn again in each sun cascade it falls in, so a town's clutter cost ~3x its main-pass draws
+in shadows alone (Bell Strand 2026-11-04: 460 of 758 draws). The host rules two groups out of every shadow pass,
+whatever `mesh.castShadow` says (core `shadowlessEntities`, read through the `shadowless` build option, so plain,
+merged, instanced and pooled copies all obey):
+- **interior furnishings**: anything under a `culling.interior` unit. The house shell already shades its interior.
+  Not in an interior scene (a `cullingProfile`, a dungeon), where the room lights are all there is.
+- **small props**: a hide distance of `PROP_SHADOW_MIN_HIDE` (30 m) or less, the tableware/small-pot bucket.
+
+What still casts is merged: a shadow pass draws everything with one override material, so `batchStaticMeshes` puts each
+culling unit's plain casters (and its loose static meshes) into one shadow-only mesh on `OCCLUDED_LAYER`, whatever their
+materials. Cutouts and wind plants keep their own shadows. `?shadowMerge=0` is the A/B.
+
 ## Authoring a POI or a building
 
 - The root needs nothing: `poi` tag = a unit that hides behind terrain.

@@ -542,6 +542,35 @@ audio are fetched when used. Do not put private authoring references in a
 runtime asset folder expecting export to remove them. See deploy/README.md
 for the static client mount and gateway routes.
 
+**What publish compresses** (`tools/publish-compress.mjs`, run by `build:game`; `--no-compress` skips it).
+Owner ruling 2026-11-05: the low-res nearest-neighbour art must look exactly the same, so every step is lossless and
+the tool has no lossy option. It writes only into the bundle; source projects are never touched.
+
+- **Shared images.** An image embedded in two or more models moves to `content/shared/<hash>.<ext>`. Kit tools embed
+  the same atlas in every file: the redstrand closure held 945 MB of embedded images, 109 MB of them distinct.
+- **Containers.** Every model becomes a GLB at its existing path, so a `.gltf` file may hold GLB bytes. GLTFLoader reads
+  the magic, so no reference changes. Anything else that reads a bundle's models must do the same.
+- **Geometry.** `EXT_meshopt_compression` with no filter and no quantisation, so views decode bit-exact. Do not add
+  quantisation: 12-bit UVs moved ~16,600 pixels of a prop by up to 159 levels. Runtime: `scene-builder` and
+  `collision-geometry` both set the decoder; a new GLTFLoader without it throws on published models.
+- **PNGs.** Re-encoded only when smaller and only when decoded RGBA is byte-identical; a file with gAMA/cHRM/iCCP keeps
+  its bytes, since browsers apply those on the `<img>` path. Canvas paths (`prop-sheet`, `terrain-splat`) still get
+  ordinary images.
+- **Sidecars.** `<file>.br` for models, code and JSON, `<file>.gz` for code and JSON. A model's `.br` holds whichever
+  form is smaller, usually without meshopt, because brotli beats meshopt + brotli on this repetitive low-poly data, so
+  it may not be the brotli of the plain file beside it. Both decode to the same model.
+- **The proof.** Every model is re-read and compared with its source (JSON, every accessor byte, image identity), and
+  any difference aborts the publish.
+
+KTX2 is not used: Basis modes are lossy, and raw RGBA8 + zstd was only 7% under the optimised PNGs while adding a
+decoder and breaking `drawImage`. The dedicated server reads source `projects/`, not the bundle, so its colliders
+(`gltfCollisionGeometry`, which cannot decode meshopt) are unaffected; pointing it at a bundle would turn them into boxes.
+
+**Serving it:** `deploy/Caddyfile` serves the sidecars (`precompressed br gzip`). Caddy's `encode` leaves model types
+alone, so without that line models go uncompressed. A host with no sidecar support still gets the meshopt files; on R2,
+upload the `.br` content over the plain key with `Content-Encoding: br` or accept the plain sizes. A publish takes
+about 20 minutes on the full closure, mostly brotli over 16,000 models.
+
 **Open dev server, no gateway** (`serve --scene x` without `--secret`)
 still works exactly as before: `?server=ws://…`, anyone joins, nothing
 persists. `--secret` alone (no `--main`) is *standalone*: tickets required,

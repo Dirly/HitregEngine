@@ -147,5 +147,4 @@ looks down +X with +Y up.
 - **The part index is `uv1.x`** on an ubermesh vertex, and the `parts` table
   (name → index) is in the mesh node's glTF extras. An item naming a part that
   is not in the table gets a warning and draws without it.
-- **Glow and effects are not in the icon.** A magic sword renders as its steel.
-  If rarity must read in the cell, the cell's rarity tint already carries it.
+- **Authored item glow appears as steady emission on its selected parts.** The software renderer adds the real colour/intensity in linear light and tone maps emitting pixels for the PNG. Ordinary non-glowing parts retain their original shading. Bloom halos, pulse/noise animation and standing VFX are not simulated; rarity still reads through the cell tint.

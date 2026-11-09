@@ -115,6 +115,24 @@ afterEach(() => {
 });
 
 describe("soundscape", () => {
+  it("fades a quiet room bed over its duration instead of reaching low gain almost instantly", () => {
+    const w = world({ params: { settleSeconds: 0, bedFadeSeconds: 8 }, zone: {
+      radius: 20, fade: 0, ambience: "ambience/interior/tavern-busy.ogg", ambienceVolume: 0.3, outdoorMix: 0,
+    } });
+    w.step(2);
+    const first = w.audible()["ambience/interior/tavern-busy.ogg"]!;
+    expect(first).toBeGreaterThan(0.01);
+    expect(first).toBeLessThan(0.03);
+    w.step(7);
+    expect(w.audible()["ambience/interior/tavern-busy.ogg"]).toBeCloseTo(0.075, 3);
+    w.player.position.set(50, 0, 0);
+    w.player.updateMatrixWorld();
+    w.step(2);
+    expect(w.audible()["ambience/interior/tavern-busy.ogg"]).toBeGreaterThan(0.04);
+    w.step(8);
+    expect(w.audible()["ambience/interior/tavern-busy.ogg"]).toBeUndefined();
+  });
+
   it("plays the biome's bed for the hour, and that biome's music", () => {
     worldClock.hour = 12;
     const w = world({});
@@ -154,6 +172,23 @@ describe("soundscape", () => {
     w.step(8);
     a = w.audible();
     expect(a["music/combat/normal-1.ogg"]).toBeUndefined();
+  });
+
+  it("can crossfade a dungeon's combat score directly back to its exploration score", () => {
+    const w = world({ params: { combatReturnCrossfade: true, combatFadeIn: 2, combatFadeOut: 6 } });
+    w.step(8);
+    w.player.userData["combatUntil"] = 1e9;
+    w.step(1);
+    expect(w.audible()["music/biome/forest-day.ogg"]).toBeGreaterThan(0.01);
+    expect(w.audible()["music/combat/normal-1.ogg"]).toBeGreaterThan(0.01);
+    w.step(3);
+    w.player.userData["combatUntil"] = 0;
+    w.step(2);
+    expect(w.audible()["music/biome/forest-day.ogg"]).toBeGreaterThan(0.01);
+    expect(w.audible()["music/combat/normal-1.ogg"]).toBeGreaterThan(0.01);
+    w.step(6);
+    expect(w.audible()["music/biome/forest-day.ogg"]).toBeGreaterThan(0.3);
+    expect(w.audible()["music/combat/normal-1.ogg"]).toBeUndefined();
   });
 
   it("exploration music plays once, then leaves a silence, then returns", () => {

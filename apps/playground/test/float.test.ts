@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { applyOps, ComponentRegistry, createWorldField, defaultWorldRecipe, registerCoreComponents, worldRecipeSchema } from "@hitreg/core";
-import { buriedReason, commandFloat, crossingColumns, fixOnCurrent, fixOps, floatScatter, floatScene, inverseState, LANDMARK_SUPPORT, sceneDigest, tautSpanEnds, withLandmarkSupport } from "../tools/float.mts";
+import { afloat, buriedReason, commandFloat, crossingColumns, fixOnCurrent, fixOps, floatScatter, floatScene, inverseState, LANDMARK_SUPPORT, sceneDigest, tautSpanEnds, withLandmarkSupport } from "../tools/float.mts";
 import { standardStages } from "../../../tools/dungeon-pipeline/pipeline.mjs";
 import { floatBlock } from "../../../tools/poi-review/job.mjs";
 
@@ -233,4 +233,60 @@ test("buriedReason: a prop inside a closed built block, or crossed by a built to
   assert.equal(buriedReason(built, null, fp(2.8)), null, "sunk 0.2 m into the top is seating");
   assert.match(buriedReason(built, null, fp(2, 4)) ?? "", /buried/, "a 4 m block with its lower half inside");
   assert.equal(buriedReason(null, null, fp(-0.4)), null, "no built mass");
+});
+
+test("buried: a kit piece's declared footing is read as in the ground, its body from the foot up (Red Dial 2026-10-30)", async () => {
+  const { buriedReason, bodyAboveFooting } = await import("../tools/float.mts");
+  // a ruin house: mesh bottom 95 (a 3.2 m footing), its foot (origin) on the ground at 98.2, walls to 101.4; the field is solid below 98.2
+  const field = { floor: (_x: number, _z: number, top: number, bottom: number) => (bottom < 98.2 ? Math.min(top, 98.2) : null) } as any;
+  const fp = { x: 0, z: 0, y: 95, halfX: 6, halfZ: 5, height: 6.4 };
+  assert.match(String(buriedReason(null, field, fp)), /buried/, "read from the footing's bottom, the ground crosses it");
+  assert.equal(buriedReason(null, field, bodyAboveFooting(fp, 95, 3.2)), null, "read from its foot, it stands clear");
+  assert.deepEqual(bodyAboveFooting(fp, 95, 0), fp);
+});
+
+test("TOOLS-FLOAT BEDDED: a bedded piece is held when its base is under the LOWEST ground of its footprint (sunk, not hovering)", async () => {
+  const { beddedGround } = await import("../tools/float.mts");
+  // a cliff rising 1 m per metre toward -z: the footprint (x 0, z 0, 4 x 4 m) has its lowest ground on its +z side
+  const field = { height: (_x: number, z: number) => -z };
+  const low = beddedGround(field, { x: 0, z: 0, halfX: 2, halfZ: 2, yaw: 0 })!;
+  assert.ok(Math.abs(low - -1.8) < 1e-9, `lowest ground ${low}`);
+  assert.equal(beddedGround({ height: () => NaN }, { x: 0, z: 0, halfX: 1, halfZ: 1, yaw: 0 }), null);
+});
+
+test("a boat afloat (slot:boat + wet) whose hull crosses sea level rides the water; a dry, sunk or flown boat is still judged (o-coast sunwine-hold 2026-10-31)", () => {
+  const boat = ["poi:x", "slot:boat", "wet"];
+  assert.equal(afloat(boat, { y: -2.5, height: 12 }, 0), true, "keel under the sea, deck above: afloat");
+  assert.equal(afloat(boat, { y: 1.2, height: 12 }, 0), false, "base above the sea: not afloat (judged on the ground)");
+  assert.equal(afloat(boat, { y: -14, height: 12 }, 0), false, "wholly under the sea: sunk, judged");
+  assert.equal(afloat(["slot:boat"], { y: -2.5, height: 12 }, 0), false, "not marked wet");
+  assert.equal(afloat(["slot:landmark", "wet"], { y: -2.5, height: 12 }, 0), false, "not a boat");
+  assert.equal(afloat(boat, { y: 3, height: 12 }, 5), true, "a raised sea level");
+});
+
+test("float scene, NO SILENT SKIPS (t-ground 2026-10-31): a placed prefab with no geometry is a fault by id; a founded piece is listed as handed to seated", () => {
+  const { assets, doc } = project(1);
+  doc.entities.ghost = { name: "ghost", parent: null, components: { transform: { position: [2, 1, 2] }, prefab: { prefabId: "t/missing-prefab" } } };
+  doc.entities.f = { name: "f", parent: null, components: { transform: { position: [-3, 1, 3] }, prefab: { prefabId: "t/crate" } } };
+  doc.entities["f--foundation"] = { name: "f--foundation", parent: null, components: { transform: { position: [-3, 0.5, 3] }, collider: { shape: "box", size: [1.2, 1, 1.2] } } };
+  const r = floatScene(assets, doc as never, null, {}, 0.05);
+  const ghost = r.rows.find((q) => q.id === "ghost");
+  assert.ok(ghost, "the geometry-less piece is a row");
+  assert.equal(ghost!.status, "off");
+  assert.match(ghost!.reason ?? "", /not measured, so not passed/);
+  assert.deepEqual(r.deferred, ["f"]);
+  assert.equal(r.unsized, 1);
+  // a FLAT piece (zero height, real footprint) is judged as a slab, never skipped
+  fs.writeFileSync(path.join(assets, "prefabs", "t", "mat.json"), JSON.stringify({ root: "r", entities: { r: { name: "mat", parent: null, components: { transform: {} } }, m: { name: "m", parent: "r", components: { transform: {}, mesh: { source: { kind: "primitive", shape: "box", size: [1, 0, 1] } } } } } }));
+  doc.entities.mat = { name: "mat", parent: null, components: { transform: { position: [3, 1.5, -3] }, prefab: { prefabId: "t/mat" } } };
+  const r2 = floatScene(assets, doc as never, null, {}, 0.05), mat = r2.rows.find((q) => q.id === "mat");
+  assert.ok(mat && mat.status === "off" && Math.abs(mat.gap - 0.5) < 0.05, `a mat 0.5 m over the deck floats: ${JSON.stringify(mat)}`);
+});
+
+test("buried: a SHORT prop with the ground over its middle is buried (o-wild3 2026-11-02: a 0.33 m bone pile 69 % under passed)", () => {
+  // flat ground at 10: the field is solid below it
+  const field = { floor: (_x: number, _z: number, top: number, bottom: number) => (bottom <= 10 ? Math.min(top, 10) : null) } as any;
+  const fp = (y: number) => ({ x: 0, z: 0, y, halfX: 0.4, halfZ: 0.4, height: 0.33 });
+  assert.match(String(buriedReason(null, field, fp(9.77))), /buried/, "0.23 of 0.33 m under the ground");
+  assert.equal(buriedReason(null, field, fp(9.93)), null, "seated 0.07 m in");
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   clearingSchema,
+  fieldSchema,
   coverClumpRejects,
   coverVegetationRejects,
   createWorldField,
@@ -205,5 +206,58 @@ describe("clearings", () => {
     expect(clearingSchema.safeParse({ id: "a", center: [0, 0], radius: 3 }).success).toBe(true);
     expect(clearingSchema.safeParse({ id: "a", polygon: square(0, 0, 1, 1), center: [0, 0], radius: 3 }).success).toBe(false);
     expect(clearingSchema.safeParse({ id: "a" }).success).toBe(false);
+  });
+});
+
+/**
+ * Declared FIELDS (owner ruling 2026-10-30, redstrand: "a desert wouldn't have wheat-looking grass; the farm would have
+ * crops"): a crop layer (`cover[].fields`) grows only inside `features.fields`; every other layer ignores them.
+ */
+describe("fields: crop cover grows only where a farm declares it", () => {
+  const recipeWith = (fields: unknown[] | undefined, cropLayers = ["wheat"]) => {
+    const base = defaultWorldRecipe();
+    return worldRecipeSchema.parse({
+      ...base,
+      features: { ...base.features, ...(fields ? { fields } : {}) },
+      cover: [
+        { id: "grass", density: 2 },
+        ...cropLayers.map((id) => ({ id, density: 2, fields: true })),
+      ],
+    });
+  };
+
+  it("a crop layer with no field anywhere grows nowhere; a plain layer is untouched", () => {
+    const recipe = recipeWith(undefined);
+    const [grass, wheat] = recipe.cover;
+    for (let x = -50; x < 50; x += 7) {
+      expect(coverVegetationRejects(recipe, wheat!, x, 3)).toBe(true);
+      expect(coverVegetationRejects(recipe, grass!, x, 3)).toBe(false);
+    }
+  });
+
+  it("inside a field the crop grows, outside it does not, and it thins across the feather from the edge in", () => {
+    const recipe = recipeWith([{ id: "farm-strips", polygon: square(0, 0, 40, 20), feather: 4, owner: "farm" }]);
+    const wheat = recipe.cover[1]!;
+    const veg = vegetationIndex(recipe);
+    expect(veg.fieldKeep(20, 10, "wheat")).toBe(1);
+    expect(veg.fieldKeep(-5, 10, "wheat")).toBe(0);
+    expect(veg.fieldKeep(60, 10, "wheat")).toBe(0);
+    const edge = veg.fieldKeep(1, 10, "wheat");
+    expect(edge).toBeGreaterThan(0);
+    expect(edge).toBeLessThan(1);
+    expect(coverVegetationRejects(recipe, wheat, 20, 10)).toBe(false);
+    for (let x = -30; x < -1; x += 3) expect(coverVegetationRejects(recipe, wheat, x, 10)).toBe(true);
+  });
+
+  it("a field naming its layers sows only those", () => {
+    const recipe = recipeWith([{ id: "barley-only", center: [0, 0], radius: 20, feather: 0, layers: ["barley"] }], ["wheat", "barley"]);
+    const [, wheat, barley] = recipe.cover;
+    expect(coverVegetationRejects(recipe, wheat!, 0, 0)).toBe(true);
+    expect(coverVegetationRejects(recipe, barley!, 0, 0)).toBe(false);
+  });
+
+  it("schema: polygon OR circle", () => {
+    expect(fieldSchema.safeParse({ id: "a", center: [0, 0], radius: 3 }).success).toBe(true);
+    expect(fieldSchema.safeParse({ id: "a" }).success).toBe(false);
   });
 });

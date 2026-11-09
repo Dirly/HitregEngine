@@ -1,4 +1,4 @@
-import type { ItemEffect, ItemGlow, RegionAmbientLayer, RegionSound } from "@hitreg/core";
+import type { AudioChannel, ItemEffect, ItemGlow, RegionAmbientLayer, RegionSound } from "@hitreg/core";
 import type * as THREE from "three";
 import type { z } from "zod";
 import type { EntityDoc, EventRegistrationOptions, PlayerDataService } from "@hitreg/core";
@@ -204,6 +204,8 @@ export interface LiveSkyBase {
 
 export interface ScriptParamSpec {
   default: unknown;
+  /** Authored choices exposed by the registry/spec for enum-like parameters. */
+  options?: readonly string[];
   min?: number;
   max?: number;
   description?: string;
@@ -412,7 +414,7 @@ export interface ScriptContext {
    * Play this entity's audio component, or any sound asset id, at this entity —
    * or, with `at`, at that world point (an ambient bird call off in the trees).
    */
-  playSound?(soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number; at?: readonly [number, number, number] }): void;
+  playSound?(soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number; channel?: AudioChannel; at?: readonly [number, number, number] }): void;
   /** Material/surface name under a world point; hosts return a sensible fallback when unknown. */
   surfaceAt?(x: number, y: number, z: number): string;
   /** True while the world around the player is still streaming in (a scene switch, a fresh spawn). */
@@ -422,7 +424,7 @@ export interface ScriptContext {
   /** Seconds of a sound once it has been decoded; undefined before the first load (or for a missing sound). */
   soundDuration?(soundId: string): number | undefined;
   /** Keep a named script-owned loop alive; omit soundId to stop that slot. */
-  setSoundLoop?(slot: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number }): void;
+  setSoundLoop?(slot: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; channel?: AudioChannel }): void;
   /** Mutate this entity's billboard at runtime (HP bar fill, label text) — never the document. */
   setBillboard?(opts: { fill?: number; text?: string; visible?: boolean; play?: boolean; row?: number; tint?: string }): void;
   /**
@@ -449,6 +451,8 @@ export interface ScriptContext {
     speed?: [number, number];
     /** Multiply the whole colour ramp — how a weather script dims its emitters after dark. */
     colorScale?: number;
+    /** Marks a camera-following weather emitter: limited to the view, thinned by the graphics setting (see the renderer). */
+    weather?: boolean;
   }): void;
   /** Runtime-only control for this entity's light component. */
   setLight?(entityId: string, opts: { enabled?: boolean; intensity?: number; color?: string }): void;
@@ -684,6 +688,12 @@ export interface ScriptEvents {
   emit(name: string, payload: unknown): void;
   on(name: string, cb: (payload: unknown, meta?: { from?: string }) => void): () => void;
   once(name: string, cb: (payload: unknown, meta?: { from?: string }) => void): () => void;
+  /**
+   * True the first time (per bus) this is asked about an event nobody listens
+   * to. For a script whose event is a request another script must answer: warn
+   * once that the answer is missing instead of failing silently.
+   */
+  firstUnheard?(name: string): boolean;
 }
 
 /** One chat line as scripts see it (structurally @hitreg/comms' ChatMessage). */

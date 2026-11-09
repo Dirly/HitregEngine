@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
 import { dot, float, normalize, normalView, positionView, pow, saturate, texture, uniform } from "three/tsl";
 import { nightLevel } from "./daylight.js";
+import { addModelFill } from "./model-fill.js";
 
 /**
  * A cold edge light on CHARACTERS (players, NPCs — everything drawn through
@@ -100,6 +101,7 @@ export function addRimLight(material: THREE.Material): void {
   }
   node.emissiveNode = own ? own.add(rimLightNode()) : rimLightNode();
   node.userData["hitregRim"] = true;
+  addModelFill(material);
   node.needsUpdate = true;
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */

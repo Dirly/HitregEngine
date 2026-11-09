@@ -12,6 +12,11 @@ Related: `docs/armor-sets.md` (outfits: a town's look is armor-set work),
 `docs/character-progression.md` (the sheet, items), `docs/voxel-worlds.md`
 §"Stories: what one zone is FOR" (the zone story a town sits inside).
 
+Before choosing or reusing a resident's name, follow [the name registry](name-registry.md).
+For a project covered by a database, `town-npcs` checks the resident's stable
+actor ID and name against its registered identity before installation. Reserve
+new residents first; an existing deity or boss name is not a free name.
+
 ## Rule: directions come from the world, never from the writer
 
 Quest and NPC text never carries a literal compass word (north, south-west,

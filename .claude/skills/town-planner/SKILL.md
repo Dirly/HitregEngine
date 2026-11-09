@@ -76,6 +76,12 @@ The old radius / program-band path (`worldgen terrace` without `--from-plan`) is
   regrade, then export with `--lift 0`. Floors sit raised ~0.6 m over the highest ground of their foundation, never
   flush. Encoded: it casts the model's FULL footprint (`full`); `town-settle --check` (`terrain-through-floor`) is the
   town's `floors` row, STALE after any ground change.
+- **Nothing installed floats** (Derek 2026-10-31: "Why is shit floating if we have code assist for placement?"): after
+  install, `npx tsx tools/town-seated.mts --project <p> --town <t>` judges every piece on the walked ground (structures
+  along their base outline at their true bottom, dressing by the float rule; none unmeasured). Daylight under a raised
+  slab is fixed by construction: `town-settle --skirts` lays a foundation skirt in the piece's foundation material.
+  Encoded: the town's `seated` row.
+- **No default grey** (Derek 2026-10-31, Bell Strand): `npx tsx tools/town-grey.mts --project <p> --town <t>` reads every town piece's texels where its UVs land (grey or cold blue-grey stone over 25 % and 2 m2 fails), skirts' materials and the town's terrace-wall masonry. Fix by re-skin: `tools/prop-regrade.mts <prefab> --palette <region stone tile> --out <png>` then `props variant ... --project world-kit`, confirm with `props status` (blank-uv + texel density).
 - **Wear follows occupancy**: style `wear` 3 (holed walls, slipped roofs) for ruins and abandoned buildings only;
   inhabited poor quarters 1-2. An abandoned house carries a story (things left behind, vermin). Encoded: `zonegen town`
   `wear-inhabited` (style or request wear 3 on a lived-in building) and `skinned-budget` (plan `bodyCap`, else the tier's).
@@ -84,11 +90,16 @@ The old radius / program-band path (`worldgen terrace` without `--from-plan`) is
   bridge ends) as one ops batch; `town-lights.mts check` prints `LIGHTS <town>: ... -> ok|FAILED`; row
   `town <t>: lights` comes before `walk` (lanterns are solid). FAILED -> fix the town data or the rule file, rerun
   apply; never place or move a lantern by hand, never a new lantern model.
+- **Stone inside the walls** (Derek 2026-11-02, Bell Strand): `worldgen terrace --from-plan` paves every intramural terrace with the zone's `ground.paving` stone (`<town>-plan-paving-<terrace>` ground paints); gate `npx tsx tools/town-paving.mts --project <p> --town <t>` (bare share <= 3 % per intramural terrace; a garden bed is a ground paint whose id has `garden`/`green`). Steps up to a chapel close or a raised square are a `stair` connection with `form: "axial"` (insert `stair-axial`: broad straight flight square to the wall, cheek walls), never a ramp along the face. Streets meet an axial stair at its FOOT on its axis, never at the wall beside its head (town-design check faults a street crossing its cheek). When the zone's paving is the same tone as its dirt (red flag on red clay), give the design `paving: { surface, map }` with a stone that contrasts in VALUE (never grey).
 - **Walk**: `npx tsx tools/town-walk.mts --project <p> --town <t>` with the real body; kit stairs are walked from the
   real ground (a plinth lip the body cannot step is bridged on the stair's own slope).
 - Two streets never run side by side at different heights; vegetation grows everywhere off plots, streets and door
   paths; capitals and starter towns get a dungeon close by or tied in (sewers, a mine, a wreck).
 - Fill the space first, then fit residents into it (`town-npcs`); not everyone needs a house.
+- **Rows are packed by plan type** (k-town9): `packRow` in `tools/town-row-pack.mts` picks the row's house types from
+  the kit catalogue's `plan` (lots = `plan.rowPitchMetres`, party sides) and the kit's `row-fit.json` (re-run
+  `town-kit-check row-fit ... --json <kit authoring>/row-fit.json` after adding a type: it records the `lots`): proven
+  pairs only, a corner type on the row's +x end, no side-by-side repeats. Never cycle a fixed list of house ids.
 - Lanterns face the middle of what they light, never along the road (not checked yet).
 
 ## Never

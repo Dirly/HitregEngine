@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import { PRECOMPILE_SAFE } from "./precompile-safe.js";
+import { hierarchyVisible } from "./cull-visibility.js";
 import { InstancedProps, applyInstancedProps } from "./instancing.js";
 import { worldDaylight } from "./daylight.js";
 import { smokeWind } from "./chimney-smoke.js";
@@ -18,6 +19,7 @@ import {
   texture as tslTexture,
   uv,
   vec2,
+  vec3,
   viewportDepthTexture,
 } from "three/tsl";
 
@@ -27,6 +29,17 @@ type N = any;
 
 /** Validated `particles` component data (schema lives in @hitreg/core). */
 export interface ParticlesData {
+  /**
+   * This emitter's own sleep distance (metres from the render camera; 0 = never), overriding the system's
+   * `sleepDistance`. Set by a standing play with `vfx.farDraw` (a landmark beacon that must read from 300 m+); unset = the system's.
+   */
+  sleepDistance?: number | undefined;
+  /**
+   * Metres from the render camera past which this emitter keeps its screen size: particle size and each particle's offset
+   * from the emitter scale by distance / farGrow (a beacon's small flame still reads far off; up close nothing changes).
+   * Set by a standing play with `vfx.farGrow`; unset/0 = off.
+   */
+  farGrow?: number | undefined;
   /** Time of day the emitter runs (rate scaled by darkness/daylight). */
   when?: "always" | "night" | "day";
   emitting: boolean;
@@ -148,6 +161,80 @@ export interface ParticleValue {
    * drives this from the hour.
    */
   colorScale?: number;
+  /**
+   * This emitter is camera-following WEATHER (the weather script sets it on its own emitters): births and drawn
+   * quads are limited to the view, and its rate follows {@link setWeatherParticleScale}. Scene emitters never are.
+   */
+  weather?: boolean;
+}
+
+/**
+ * The graphics setting for falling weather: 1 = as authored, 0 = none, between thins the fall (drops, snow, grit; splashes
+ * follow the drops that land). Takes effect on the next births, survives scene rebuilds, and is callable before any
+ * system exists.
+ */
+export function setWeatherParticleScale(scale: number): void {
+  weatherParticleScale = Math.min(1, Math.max(0, Number.isFinite(scale) ? scale : 1));
+}
+let weatherParticleScale = 1;
+
+/** A/B switch (`?rainCull=0`): off, weather emitters are born and drawn all round the camera as before. */
+export function setWeatherViewCull(on: boolean): void {
+  weatherViewCull = on;
+}
+let weatherViewCull = true;
+
+/** Degrees either side of the view a drop may still be BORN: it falls for about a second, so the view must not turn into bare air. */
+const WEATHER_BIRTH_MARGIN = (28 * Math.PI) / 180;
+/** Metres around the camera weather is always born, whichever way it faces. */
+const WEATHER_NEAR = 9;
+/** Seconds of the current turn rate the birth wedge leads by (a turning camera meets rain already falling). */
+const WEATHER_TURN_LEAD = 1.1;
+/** Longest-lived weather limited at birth, seconds. Past this it is only limited when drawn. */
+const WEATHER_BIRTH_MAX_LIFE = 2;
+/** Looking this far up or down (|forward.y|), the view is not a wedge of the ground plane any more: no birth limit. */
+const WEATHER_STEEP = 0.72;
+/** Slack on the drawn frustum, as a tangent, and in metres: a streak is ~0.4 m long and must not clip at the frame edge. */
+const WEATHER_DRAW_SLACK = 0.06;
+const WEATHER_DRAW_PAD = 0.6;
+
+/**
+ * What is under weather, remembered per 1 m column. A landing drop's ground used to be a fresh query for every birth and
+ * every wind re-check, and that query is not a lookup: a physics ray, then the world field's terrain and water noise.
+ * Measured in a storm: 32% of the frame, 5000 queries a second over ground that does not change, where the matrices of
+ * every drop were 1%. Direct-mapped on a 128 m torus, which holds the whole rain box, so nothing here allocates or
+ * collides; an answer lasts 20 s (the ground under a storm does not move, and a streamed collider catches up that fast). A splash still asks
+ * exactly where it lands (`Emitter.advance`), so the rings sit on the ground and a column's slope only moves where an
+ * unseen streak ends.
+ */
+const COLUMN_SIDE = 128;
+const COLUMN_LIFE = 20;
+class GroundColumns {
+  private readonly xs = new Int32Array(COLUMN_SIDE * COLUMN_SIDE);
+  private readonly zs = new Int32Array(COLUMN_SIDE * COLUMN_SIDE);
+  private readonly heights = new Float32Array(COLUMN_SIDE * COLUMN_SIDE);
+  private readonly expires = new Float64Array(COLUMN_SIDE * COLUMN_SIDE);
+  /** Seconds, advanced by the system. */
+  now = 0;
+  constructor(private readonly groundAt: (x: number, y: number, z: number) => number | null) {}
+
+  at(x: number, y: number, z: number): number | null {
+    const ix = Math.floor(x), iz = Math.floor(z);
+    const slot = (iz & (COLUMN_SIDE - 1)) * COLUMN_SIDE + (ix & (COLUMN_SIDE - 1));
+    if (this.expires[slot]! > this.now && this.xs[slot] === ix && this.zs[slot] === iz) {
+      const h = this.heights[slot]!;
+      if (h !== h) return null;
+      // the answer is the first surface under whoever asked first; from beneath it, ask afresh
+      if (h <= y) return h;
+      return this.groundAt(x, y, z);
+    }
+    const h = this.groundAt(x, y, z);
+    this.xs[slot] = ix;
+    this.zs[slot] = iz;
+    this.heights[slot] = h === null ? NaN : h;
+    this.expires[slot] = this.now + COLUMN_LIFE;
+    return h;
+  }
 }
 
 /** Renderer-side safety net on top of the schema's own cap. */
@@ -333,7 +420,38 @@ const camQuat = new THREE.Quaternion();
 /** Camera world position — the velocity/upright billboards need the vector TO
  * the viewer per particle, which a rotation alone cannot give. */
 const camPos = new THREE.Vector3();
-const tmpBasis = new THREE.Matrix4();
+
+/** The camera's view this frame, for weather emitters. See ParticleSystem.update. */
+const weatherView = { on: false, fx: 0, fz: 1, cosBirth: -2, tanH: 1, tanV: 1 };
+const viewRight = new THREE.Vector3();
+const viewUp = new THREE.Vector3();
+const viewFwd = new THREE.Vector3();
+
+/** May weather be born at (x, z)? A wedge of the ground plane from the camera, plus a disc around it. */
+function weatherBirthInView(x: number, z: number): boolean {
+  const dx = x - camPos.x, dz = z - camPos.z;
+  const d2 = dx * dx + dz * dz;
+  if (d2 < WEATHER_NEAR * WEATHER_NEAR) return true;
+  return dx * weatherView.fx + dz * weatherView.fz >= weatherView.cosBirth * Math.sqrt(d2);
+}
+
+/** Is this world point inside the camera frustum (with slack)? Weather quads outside it are not written at all. */
+function weatherInFrustum(x: number, y: number, z: number): boolean {
+  const dx = x - camPos.x, dy = y - camPos.y, dz = z - camPos.z;
+  const depth = dx * viewFwd.x + dy * viewFwd.y + dz * viewFwd.z;
+  if (depth < -WEATHER_DRAW_PAD) return false;
+  const reach = depth > 0 ? depth : 0;
+  const side = dx * viewRight.x + dy * viewRight.y + dz * viewRight.z;
+  const rise = dx * viewUp.x + dy * viewUp.y + dz * viewUp.z;
+  return Math.abs(side) <= reach * weatherView.tanH + WEATHER_DRAW_PAD && Math.abs(rise) <= reach * weatherView.tanV + WEATHER_DRAW_PAD;
+}
+
+/** `farGrow`: the factor a cloud grows by at this camera offset (1 inside `farGrow` metres or when unset). */
+export function farGrowScale(farGrow: number | undefined, dx: number, dy: number, dz: number): number {
+  if (!farGrow || farGrow <= 0) return 1;
+  const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  return dist > farGrow ? dist / farGrow : 1;
+}
 const tmpRight = new THREE.Vector3();
 const tmpUp = new THREE.Vector3();
 const tmpFwd = new THREE.Vector3();
@@ -378,6 +496,12 @@ class Emitter {
   private runtimeVisible = true;
   /** Hidden (by the document or at runtime) or beyond the sleep distance this frame: no simulation, nothing drawn. */
   private asleep = false;
+  /** Camera-following weather: see ParticleValue.weather. */
+  private weather = false;
+  /** Height of whatever is under a falling particle: the column cache for weather. */
+  private fallGround(x: number, y: number, z: number): number | null {
+    return this.weather && weatherViewCull && this.columns ? this.columns.at(x, y, z) : this.groundAt!(x, y, z);
+  }
   get sleeping(): boolean {
     return this.asleep;
   }
@@ -422,6 +546,8 @@ class Emitter {
     private readonly groundAt?: (x: number, y: number, z: number) => number | null,
     /** A particle met the ground at this world point (`ground.splash` fires through it). */
     private readonly onLand?: (x: number, y: number, z: number) => void,
+    /** The same ground as `groundAt`, remembered per column: what weather falls on. */
+    private readonly columns?: GroundColumns,
   ) {
     this.emitting = data.emitting;
     this.capacity = Math.min(Math.max(1, Math.floor(data.max)), HARD_MAX);
@@ -451,6 +577,7 @@ class Emitter {
       this.alive = 0;
       this.spawnDebt = 0;
     }
+    if (value.weather !== undefined) this.weather = value.weather;
     if (value.emitting !== undefined) this.emitting = value.emitting;
     if (value.rate !== undefined) this.data.rate = Math.max(0, value.rate);
     // Wind. Written into the authored tuples in place — this runs every tick
@@ -475,12 +602,7 @@ class Emitter {
   }
 
   private isHierarchyVisible(): boolean {
-    let current: THREE.Object3D | null = this.group;
-    while (current) {
-      if (!current.visible) return false;
-      current = current.parent;
-    }
-    return true;
+    return hierarchyVisible(this.group);
   }
 
   /** The Scene this emitter's entity lives in, or null while it is detached. */
@@ -559,8 +681,10 @@ class Emitter {
   private spawn(count: number): void {
     const world = this.data.space === "world";
     if (world) this.group.getWorldQuaternion(worldQuat);
+    // short-lived fall only: snow hangs for ten seconds, and a wedge of it would leave the turned-to view bare for as long
+    const viewLimited = world && this.weather && weatherView.on && this.data.lifetime[1] <= WEATHER_BIRTH_MAX_LIFE;
     for (let n = 0; n < count && this.alive < this.capacity; n++) {
-      const i = this.alive++;
+      const i = this.alive;
       this.sampleOffset();
       // direction first, while tmpPos is still the LOCAL offset (the radial
       // modes aim along it)
@@ -568,11 +692,16 @@ class Emitter {
       // world space: bake the emitter's CURRENT transform into the particle,
       // then never touch it again — that is what makes trails
       if (world) tmpPos.applyMatrix4(this.group.matrixWorld);
+      if (world) tmpDir.applyQuaternion(worldQuat);
+      const speed = randRange(this.data.speed[0], this.data.speed[1]);
+      const life = Math.max(MIN_LIFE, randRange(this.data.lifetime[0], this.data.lifetime[1]));
+      // Rain culling: a drop whose flight stays out of view is simply not born — no slot, no ground ray, no quad. Judged
+      // at the middle of its flight, since a gale carries it metres from where it starts.
+      if (viewLimited && !weatherBirthInView(tmpPos.x + tmpDir.x * speed * life * 0.5, tmpPos.z + tmpDir.z * speed * life * 0.5)) continue;
+      this.alive++;
       this.pos[i * 3] = tmpPos.x;
       this.pos[i * 3 + 1] = tmpPos.y;
       this.pos[i * 3 + 2] = tmpPos.z;
-      if (world) tmpDir.applyQuaternion(worldQuat);
-      const speed = randRange(this.data.speed[0], this.data.speed[1]);
       this.vel[i * 3] = tmpDir.x * speed;
       this.vel[i * 3 + 1] = tmpDir.y * speed;
       this.vel[i * 3 + 2] = tmpDir.z * speed;
@@ -584,13 +713,13 @@ class Emitter {
         this.vel[i * 3 + 2] = this.vel[i * 3 + 2]! + smokeWind.value.y * w;
       }
       this.age[i] = 0;
-      this.life[i] = Math.max(MIN_LIFE, randRange(this.data.lifetime[0], this.data.lifetime[1]));
+      this.life[i] = life;
       this.rot[i] = this.data.spin === 0 ? 0 : Math.random() * Math.PI * 2;
       this.phase[i] = Math.random() * Math.PI * 2;
       this.seed[i] = Math.random();
       this.landed[i] = 0;
       this.rechecked[i] = 0;
-      this.groundY[i] = this.data.ground && this.groundAt && world ? (this.groundAt(tmpPos.x, tmpPos.y, tmpPos.z) ?? NaN) : NaN;
+      this.groundY[i] = this.data.ground && this.groundAt && world ? (this.fallGround(tmpPos.x, tmpPos.y, tmpPos.z) ?? NaN) : NaN;
     }
   }
 
@@ -664,6 +793,7 @@ class Emitter {
     // Authored-hidden and runtime-hidden effects are genuinely asleep: no
     // births, integration, instance writes, or invisible steady-state cloud.
     this.asleep = !this.runtimeVisible || !this.isHierarchyVisible();
+    if (d.sleepDistance !== undefined) sleepDistanceSq = d.sleepDistance > 0 ? d.sleepDistance * d.sleepDistance : 0;
     if (!this.asleep && sleepDistanceSq > 0) {
       const e = this.group.matrixWorld.elements; // last laid-out position: a frame stale at worst, fine for a distance
       const dx = e[12]! - camPos.x, dy = e[13]! - camPos.y, dz = e[14]! - camPos.z;
@@ -694,6 +824,7 @@ class Emitter {
   /** This frame's birth rate: the authored rate, dimmed by daylight for `when` layers. */
   private rateNow(): number {
     const d = this.data;
+    if (this.weather) return d.rate * weatherParticleScale;
     return d.when === "night" ? d.rate * (1 - worldDaylight.value) : d.when === "day" ? d.rate * worldDaylight.value : d.rate;
   }
 
@@ -720,6 +851,16 @@ class Emitter {
     const clock = this.elapsed * d.turbulenceSpeed;
     const ground = d.ground;
     const { groundY, landed, landT, landAge, rechecked } = this;
+    // gravity is world-down in either space: a local emitter's axes turn with whatever carries it (flames still rise
+    // off a lowered sword), so the pull is re-aimed into them
+    let gravX = 0, gravY = d.gravity, gravZ = 0;
+    if (d.gravity !== 0 && d.space === "local") {
+      this.group.getWorldQuaternion(worldQuat);
+      tmpAxis.set(0, d.gravity, 0).applyQuaternion(worldQuat.invert());
+      gravX = tmpAxis.x;
+      gravY = tmpAxis.y;
+      gravZ = tmpAxis.z;
+    }
     for (let i = 0; i < this.alive; i++) {
       age[i] = age[i]! + dt;
       if (age[i]! >= life[i]!) {
@@ -728,8 +869,9 @@ class Emitter {
         continue;
       }
       if (landed[i]) continue; // resting on the ground: no physics, only the fade clock above
-      // gravity pulls along world -Y (in local space: emitter-local -Y)
-      vel[i * 3 + 1] = vel[i * 3 + 1]! - d.gravity * dt;
+      vel[i * 3] = vel[i * 3]! - gravX * dt;
+      vel[i * 3 + 1] = vel[i * 3 + 1]! - gravY * dt;
+      vel[i * 3 + 2] = vel[i * 3 + 2]! - gravZ * dt;
       // Turbulence: a smooth, cheap wander field. Three decorrelated sine
       // rates per particle, offset by its own phase, so specks drift and
       // curl past each other instead of marching. This — not the spawn
@@ -777,7 +919,7 @@ class Emitter {
           vel[i * 3]! * vel[i * 3]! + vel[i * 3 + 2]! * vel[i * 3 + 2]! > 0.0625
         ) {
           rechecked[i] = 1;
-          const again = this.groundAt(pos[i * 3]!, pos[i * 3 + 1]!, pos[i * 3 + 2]!);
+          const again = this.fallGround(pos[i * 3]!, pos[i * 3 + 1]!, pos[i * 3 + 2]!);
           if (again !== null) {
             groundY[i] = again;
             g = again;
@@ -789,7 +931,9 @@ class Emitter {
           // a ring for each is a sheet of white, which is not what rain looks
           // like (and is a fill-rate bill besides).
           if (ground.splash && (ground.splashChance === undefined || ground.splashChance >= 1 || Math.random() < ground.splashChance)) {
-            this.onLand?.(pos[i * 3]!, floor, pos[i * 3 + 2]!);
+            // weather's floor is its column's; the one thing seen lying on the ground asks where it really is
+            const exact = this.weather && this.columns && this.groundAt ? this.groundAt(pos[i * 3]!, floor + 1.5, pos[i * 3 + 2]!) : null;
+            this.onLand?.(pos[i * 3]!, exact === null ? floor : exact + ground.offset, pos[i * 3 + 2]!);
           }
           if (ground.mode === "kill") {
             this.retire(i);
@@ -841,8 +985,15 @@ class Emitter {
     // unlit smoke darkens toward a moonlit floor at night instead of glowing (`nightDim`)
     const dim = d.nightDim ?? 0;
     const scale = this.colorScale * (dim > 0 ? 1 - dim * 0.8 * (1 - worldDaylight.value) : 1);
+    // farGrow: past that distance the cloud grows about the emitter so it keeps its screen size
+    const ew = this.group.matrixWorld.elements;
+    const grow = farGrowScale(d.farGrow, ew[12]! - camPos.x, ew[13]! - camPos.y, ew[14]! - camPos.z);
+    // weather follows the camera in world space, so only its quads in the frustum are written (and uploaded, and drawn)
+    const viewLimited = this.weather && !local && weatherView.on;
+    let written = 0;
     for (let i = 0; i < this.alive; i++) {
-      const o = offset + i;
+      if (viewLimited && !weatherInFrustum(pos[i * 3]!, pos[i * 3 + 1]!, pos[i * 3 + 2]!)) continue;
+      const o = offset + written++;
       const rest = landed[i] === 1;
       const lifeT = rest ? landT[i]! : age[i]! / life[i]!;
       // PSX banding: the look is sampled at the middle of the step the particle
@@ -869,7 +1020,7 @@ class Emitter {
         : d.sizeStart + (d.sizeEnd - d.sizeStart) * t;
       // snapped to whole grid cells, but never below one: a living particle
       // must not vanish because it is smaller than the grid
-      const size = snap > 0 && rawSize > 0 ? Math.max(snap, Math.round(rawSize / snap) * snap) : rawSize;
+      const size = (snap > 0 && rawSize > 0 ? Math.max(snap, Math.round(rawSize / snap) * snap) : rawSize) * grow;
 
       // Colour: a multi-stop gradient when authored, else the two-colour ramp.
       if (this.gradient) {
@@ -900,6 +1051,7 @@ class Emitter {
 
       tmpPos.set(pos[i * 3]!, pos[i * 3 + 1]!, pos[i * 3 + 2]!);
       if (local) tmpPos.applyMatrix4(this.group.matrixWorld); // local sim → world
+      if (grow !== 1) tmpPos.set(ew[12]! + (tmpPos.x - ew[12]!) * grow, ew[13]! + (tmpPos.y - ew[13]!) * grow, ew[14]! + (tmpPos.z - ew[14]!) * grow);
       if (snap > 0) {
         // PSX precision: positions land on a world grid, so a drifting mote
         // hops cell to cell instead of gliding
@@ -941,8 +1093,15 @@ class Emitter {
             }
             tmpRight.normalize();
             tmpFwd.crossVectors(tmpRight, tmpUp).normalize();
-            tmpBasis.makeBasis(tmpRight, tmpUp, tmpFwd);
-            tmpQuat.setFromRotationMatrix(tmpBasis);
+            // The basis IS the rotation: written straight into the instance matrix, rather than through a quaternion
+            // and back (rain is thousands of these a frame). The same matrix compose would build.
+            const long = size + speed * stretch * grow;
+            const m = o * 16;
+            matrices[m] = tmpRight.x * size; matrices[m + 1] = tmpRight.y * size; matrices[m + 2] = tmpRight.z * size; matrices[m + 3] = 0;
+            matrices[m + 4] = tmpUp.x * long; matrices[m + 5] = tmpUp.y * long; matrices[m + 6] = tmpUp.z * long; matrices[m + 7] = 0;
+            matrices[m + 8] = tmpFwd.x * size; matrices[m + 9] = tmpFwd.y * size; matrices[m + 10] = tmpFwd.z * size; matrices[m + 11] = 0;
+            matrices[m + 12] = tmpPos.x; matrices[m + 13] = tmpPos.y; matrices[m + 14] = tmpPos.z; matrices[m + 15] = 1;
+            continue;
           } else {
             // Roll the camera-facing quad so its +Y lies along the velocity as
             // the camera sees it, then lengthen it by distance travelled.
@@ -950,7 +1109,7 @@ class Emitter {
             tmpSpin.setFromAxisAngle(Z_AXIS, Math.atan2(tmpAxis.x, tmpAxis.y));
             tmpQuat.copy(camQuat).multiply(tmpSpin);
           }
-          tmpScale.set(size, size + speed * stretch, size);
+          tmpScale.set(size, size + speed * stretch * grow, size);
           oriented = true;
         }
       } else if (orient === "upright") {
@@ -980,7 +1139,7 @@ class Emitter {
       tmpMat.compose(tmpPos, tmpQuat, tmpScale);
       tmpMat.toArray(matrices, o * 16);
     }
-    return (this.drawn = this.alive);
+    return (this.drawn = written);
   }
 
   /**
@@ -1185,14 +1344,22 @@ class ParticleBatch {
     // plain Mesh has no `instanceColor` of its own.
     const tint: N = attribute("aColor", "vec3");
     const map = this.material.map;
+    let shade: N = tint;
     if (map) {
       const sampled: N = tslTexture(map, sampleUv);
       // Instance colour still tints; the sheet supplies shape and detail.
-      this.material.colorNode = sampled.rgb.mul(tint);
+      shade = sampled.rgb.mul(tint);
       this.material.opacityNode = mul(sampled.a, per.x);
     } else {
-      this.material.colorNode = tint;
       this.material.opacityNode = per.x;
+    }
+    // An additive particle is light (fire, sparks), so it goes out as emission: AO multiplies everything that is not
+    // emission, and it reads the depth of the wall BEHIND a flame, which drew that wall's dark edges across the fire.
+    if (d.blending === "additive") {
+      this.material.colorNode = vec3(0);
+      (this.material as unknown as { emissiveNode: N }).emissiveNode = shade;
+    } else {
+      this.material.colorNode = shade;
     }
 
     // Soft particles: fade as the quad approaches whatever is behind it. A
@@ -1284,10 +1451,12 @@ export const PARTICLE_SLEEP_DISTANCE = 220;
 export class ParticleSystem {
   private readonly emitters = new Map<string, Emitter>();
   private readonly batches = new Map<string, ParticleBatch>();
+  private readonly columns: GroundColumns | undefined;
   /** Runtime knob (probes A/B it): metres, 0 = never. */
   sleepDistance: number;
   constructor(private readonly options: ParticleSystemOptions = {}) {
     this.sleepDistance = options.sleepDistance ?? PARTICLE_SLEEP_DISTANCE;
+    this.columns = options.groundAt ? new GroundColumns(options.groundAt) : undefined;
   }
 
   register(
@@ -1315,7 +1484,7 @@ export class ParticleSystem {
           }
         }
       : undefined;
-    const emitter = new Emitter(group, data, batch, this.options.groundAt, onLand);
+    const emitter = new Emitter(group, data, batch, this.options.groundAt, onLand, this.columns);
     batch.add(emitter);
     this.emitters.set(entityId, emitter);
   }
@@ -1326,10 +1495,38 @@ export class ParticleSystem {
     camera.getWorldQuaternion(camQuat);
     camera.getWorldPosition(camPos);
     invCamQuat.copy(camQuat).invert();
+    this.updateWeatherView(dt, camera);
+    if (this.columns) this.columns.now += dt;
     const sleepSq = this.sleepDistance > 0 ? this.sleepDistance * this.sleepDistance : 0;
     for (const emitter of this.emitters.values()) emitter.simulate(dt, sleepSq);
     for (const batch of this.batches.values()) batch.flush();
   }
+
+  /** The view weather is limited to this frame: the frustum's tangents and the ground wedge drops may be born in. */
+  private updateWeatherView(dt: number, camera: THREE.Camera): void {
+    const persp = camera as THREE.PerspectiveCamera;
+    weatherView.on = weatherViewCull && persp.isPerspectiveCamera === true;
+    if (!weatherView.on) return;
+    viewRight.set(1, 0, 0).applyQuaternion(camQuat);
+    viewUp.set(0, 1, 0).applyQuaternion(camQuat);
+    viewFwd.set(0, 0, -1).applyQuaternion(camQuat);
+    const tanV = Math.tan((persp.fov * Math.PI) / 360) / (persp.zoom || 1);
+    const tanH = tanV * persp.aspect;
+    weatherView.tanV = tanV + WEATHER_DRAW_SLACK;
+    weatherView.tanH = tanH + WEATHER_DRAW_SLACK;
+    // How fast the view is turning, held briefly: the wedge leads the turn, so a flick does not face bare air.
+    const flat = Math.hypot(viewFwd.x, viewFwd.z);
+    if (flat > 1e-3) {
+      const fx = viewFwd.x / flat, fz = viewFwd.z / flat;
+      const turned = Math.acos(Math.min(1, Math.max(-1, fx * weatherView.fx + fz * weatherView.fz)));
+      this.turnRate = Math.max(turned / Math.max(dt, 1e-3), this.turnRate * Math.exp(-dt * 3));
+      weatherView.fx = fx;
+      weatherView.fz = fz;
+    }
+    const half = Math.atan(tanH) + WEATHER_BIRTH_MARGIN + this.turnRate * WEATHER_TURN_LEAD;
+    weatherView.cosBirth = Math.abs(viewFwd.y) > WEATHER_STEEP || half >= Math.PI ? -2 : Math.cos(half);
+  }
+  private turnRate = 0;
 
   /** Drop one entity's emitter (its visuals were rebuilt or removed); an emptied batch goes with it. */
   unregister(entityId: string): void {

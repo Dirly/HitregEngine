@@ -14,7 +14,7 @@ const point=z.tuple([z.number().finite().min(-.00001).max(1.00001),z.number().fi
 export const paintPlanSchema=z.object({
  geometrySha256:z.string().regex(/^[a-f0-9]{64}$/).describe('Hash of geometry, metre UVs, materials and surface declarations. Changing it requires a fresh guide and artwork import.'),
  roles:z.array(z.string()).min(1).describe('Existing town-craft material roles still used by the prop.'),
- surfaces:z.array(z.object({name:slug,part:z.string().min(1),projection:z.enum(['front','back','left','right','top','bottom','cylinder']),detail:z.string().min(1).describe('What the image artist paints: identity, ornament, carved shading and wear; no added geometry.'),metres:z.tuple([z.number().positive(),z.number().positive()]),pixels:z.tuple([z.number().int().positive(),z.number().int().positive()]).describe('Measured surface span at 40 texels/m. The packer never shrinks it to fit.'),triangles:z.array(z.tuple([point,point,point])).min(1).describe('Actual projected mesh footprint, UV bottom-up. Holes and circular outlines remain white on the guide.'),faces:z.number().int().positive()})).max(32)
+ surfaces:z.array(z.object({name:slug,part:z.string().min(1),projection:z.enum(['front','back','left','right','top','bottom','cylinder']),detail:z.string().min(1).describe('What the image artist paints: identity, ornament, carved shading and wear; no added geometry.'),metres:z.tuple([z.number().positive(),z.number().positive()]),pixels:z.tuple([z.number().int().positive(),z.number().int().positive()]).describe('Measured surface span at 40 texels/m. The packer never shrinks it to fit.'),triangles:z.array(z.tuple([point,point,point])).min(1).describe('Actual projected mesh footprint, UV bottom-up. Holes and circular outlines remain white on the guide.'),faces:z.number().int().positive(),mirror:z.tuple([z.string(),z.number()]).optional().describe('paint(mirror=(axis, at)): the UVs fold about that plane, so this region carries one side and the other side repeats it mirrored.'),shared:z.array(slug).optional().describe('paint(share=...): other declared surfaces mapped into this region at the same metres per texel (their faces are counted and drawn on the guide).')})).max(32)
 }).superRefine((p,c)=>{
  if(new Set(p.surfaces.map(s=>s.name)).size!==p.surfaces.length)c.addIssue({code:'custom',message:'Surface names must be unique'});
  for(const s of p.surfaces)if(s.pixels.some((v,i)=>v/s.metres[i]!<32||v/s.metres[i]!>48))c.addIssue({code:'custom',message:s.name+': measured resolution must stay within 32–48 texels/m (target 40)'});
@@ -83,14 +83,27 @@ export function planPainting(wk:string,name:string,input:unknown):PaintLayout{
  write(path.join(dir,'layout.json'),layout);write(path.join(dir,'manifest.json'),{size:layout.size,bleed:4,filter:'nearest',bgLum:236,slots});
  return layout;
 }
+/** Share of the source page the regions take, bleed included (the `paint plan` fit report). */
+export function pageFill(layout:PaintLayout){let a=0;for(const r of [...Object.values(layout.roles),...Object.values(layout.surfaces)])a+=(r.w+2*layout.pad)*(r.h+2*layout.pad);return Math.round(a/(layout.size*layout.size)*1000)/1000;}
 export function paintingBrief(layout:PaintLayout){
- return ['Paint the attached UV guide for a PSX / WoW Classic / EverQuest 3D prop.','Keep every island in its exact position and footprint. Opaque hand-painted colour artwork, deliberate low-resolution brushwork, nearest-filtered pixels.','Paint convincing carved form, shell segmentation, ornamental relief, bevel shading, patina and wear. These details belong in the artwork, not modeled strands, legs, veins or rivets.','Even diffuse illumination; painted local form shading is wanted. No scene cast shadows, directional highlights, perspective, text labels, extra islands, normal maps or geometry.','White outside the colored islands. Do not reproduce the colored guide fills. Match the requested palette across islands.',...layout.plan.surfaces.map(s=>{const r=layout.surfaces[s.name]!;return `${s.name}: ${r.color}, rectangle x=${r.x}, y=${r.y}, width=${r.w}, height=${r.h}. ${s.projection} of ${s.part}, ${s.metres.map(v=>v.toFixed(3)).join(' x ')} metres. Paint: ${s.detail}`;})].join('\n');
+ return ['Paint the attached UV guide for a PSX / WoW Classic / EverQuest 3D prop.','Keep every island in its exact position and footprint. Opaque hand-painted colour artwork, deliberate low-resolution brushwork, nearest-filtered pixels.','Paint convincing carved form, shell segmentation, ornamental relief, bevel shading, patina and wear. These details belong in the artwork, not modeled strands, legs, veins or rivets.','Even diffuse illumination; painted local form shading is wanted. No scene cast shadows, directional highlights, perspective, text labels, extra islands, normal maps or geometry.','White outside the colored islands. Do not reproduce the colored guide fills. Match the requested palette across islands.',...layout.plan.surfaces.map(s=>{const r=layout.surfaces[s.name]!;return `${s.name}: ${r.color}, rectangle x=${r.x}, y=${r.y}, width=${r.w}, height=${r.h}. ${s.projection} of ${s.part}, ${s.metres.map(v=>v.toFixed(3)).join(' x ')} metres.${s.mirror?` Mirrored about ${s.mirror[0].replace(/^[+-]/,'')} = ${s.mirror[1]} m: paint one side, it repeats on the other.`:''}${s.shared?.length?` The same pixels also cover ${s.shared.join(', ')}: keep the artwork generic enough to read on every one of them.`:''} Paint: ${s.detail}`;})].join('\n');
+}
+/** GRAIN (o-gates 2026-10-30, Derek: "the weeping faces are not the same texel size as the surrounding rock"): the mean run of
+ *  identical colours (5 bits/channel) along a surface's rows. Art painted at 40 texels/m but smooth (airbrushed) reads FINER
+ *  than the 40 tx/m rock and ashlar beside it (their run ~1.1); over SMOOTH_RUN it is a finding: re-paint it with per-texel
+ *  grain (the Weeping Sun face went 1.39 -> 1.19). */
+export const SMOOTH_RUN=1.3;
+export function paintGrain(art:{width:number;data:Uint8Array|number[]},layout:{surfaces:Record<string,{x:number;y:number;w:number;h:number}>}):Record<string,number>{
+ const out:Record<string,number>={};
+ for(const [n,r] of Object.entries(layout.surfaces)){let runs=0,cells=0;for(let y=r.y;y<r.y+r.h;y++){let prev=-1;for(let x=r.x;x<r.x+r.w;x++){const i=(y*art.width+x)*4,q=(art.data[i]!>>3)<<10|(art.data[i+1]!>>3)<<5|(art.data[i+2]!>>3);if(q!==prev)runs++;prev=q;cells++;}}out[n]=Math.round(cells/Math.max(1,runs)*100)/100;}
+ return out;
 }
 export function paintingStatus(wk:string,name:string,plan?:PaintPlan){
  const dir=paintDir(wk,name),faults:string[]=[];let layout:PaintLayout|undefined,receipt:any;
  try{layout=paintLayoutSchema.parse(read(path.join(dir,'layout.json')));if(plan&&layout.geometrySha256!==plan.geometrySha256)faults.push('UV guide is stale; run props paint plan');}catch{faults.push('UV guide missing or invalid; run props paint plan');}
  try{receipt=read(path.join(dir,'receipt.json'));for(const [f,key] of [['layout.json','layoutSha256'],['art.png','artSha256'],['atlas.png','atlasSha256'],['key.png','keySha256'],['manifest.json','manifestSha256']] as const)if(!fs.existsSync(path.join(dir,f))||sha(path.join(dir,f))!==receipt[key])faults.push(f+' missing or changed; import artwork again');if(sha(path.join(wk,'assets/textures/town-craft/materials.png'))!==receipt.roleSheetSha256)faults.push('Shared role sheet changed; import artwork again');}catch{faults.push('Registered artwork missing; run props paint import');}
- return {name,ready:!faults.length,faults,layout,receipt};
+ let smooth:string[]=[];try{if(layout&&fs.existsSync(path.join(dir,'art.png')))smooth=Object.entries(paintGrain(decodePng(fs.readFileSync(path.join(dir,'art.png'))),layout)).filter(([,v])=>v>SMOOTH_RUN).map(([k,v])=>`${k} (run ${v} > ${SMOOTH_RUN}: smoother than the 40 tx/m rock, reads finer: re-paint with per-texel grain)`);}catch{}
+ return {name,ready:!faults.length,faults,smooth,layout,receipt};
 }
 export function importPainting(wk:string,name:string,artFile:string){
  const dir=paintDir(wk,name),layout=paintLayoutSchema.parse(read(path.join(dir,'layout.json'))),art=decodePng(fs.readFileSync(artFile));
@@ -126,7 +139,7 @@ export function designConcept(wk:string,name:string,play=path.resolve(wk,'../..'
 /** The stone tile the paint must sit on (request `tint`, e.g. the zone's cliff tile): a set of carved pieces matches ONE zone stone, not each concept frame's own red. */
 export function designTint(wk:string,name:string,play=path.resolve(wk,'../..')):string|undefined{return requestFile(wk,name,'tint',play);}
 function requestFile(wk:string,name:string,key:'concept'|'tint',play:string):string|undefined{
- try{const o=read(path.join(wk,'authoring/codex-craft/requests.json')).props?.[name];if(!o)return;const reqs=read(path.join(wk,'..',o.project,'authoring/dressing/prop-requests.json')).requests??[];const c=reqs.find((r:any)=>r.id===o.request)?.[key];return typeof c==='string'&&fs.existsSync(path.resolve(play,c))?path.resolve(play,c):undefined;}catch{return;}
+ try{const o=read(path.join(wk,'authoring/codex-craft/requests.json')).props?.[name];if(!o)return;const reqs=read(path.join(wk,'..',o.project,'authoring/dressing/prop-requests.json')).requests??[];const c=String(reqs.find((r:any)=>r.id===o.request)?.[key]??'').split(',')[0];return c&&fs.existsSync(path.resolve(play,c))?path.resolve(play,c):undefined;}catch{return;}
 }
 /** The prompt line naming each attached reference by position: UV guide, then concept frame, then tint tile. */
 export function paintRefsLine(concept?:string,tint?:string):string{
@@ -136,12 +149,13 @@ export function paintRefsLine(concept?:string,tint?:string):string{
  if(tint)out+=` the ${nth[i++]} is the zone's stone tile: every stone surface takes ITS hue, saturation and value (the concept's red is only a hint), so the piece sits beside the zone's cliffs and the other carved pieces of its set.`;
  return out;
 }
-export function generatePainting(wk:string,name:string,force=false){
+/** previous: the prop's OLD artwork (copied out of the paint folder first: gen overwrites art.png), sent as the last reference. */
+export function generatePainting(wk:string,name:string,force=false,previous?:string){
  const dir=paintDir(wk,name),layout=paintLayoutSchema.parse(read(path.join(dir,'layout.json'))),play=path.resolve(wk,'../..'),concept=designConcept(wk,name,play),tint=designTint(wk,name,play);
  const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'hitreg-paint-prompt-')),promptFile=path.join(scratch,'prompt.txt');
  try{
-  fs.writeFileSync(promptFile,paintingBrief(layout)+paintRefsLine(concept,tint));
-  const r=spawnSync(process.execPath,[path.join(play,'tools/image-request.mjs'),'gen','--id',`prop-${name}-paint`,'--target',path.relative(play,path.join(dir,'art.png')),'--size',`${layout.size}x${layout.size}`,'--ref',path.join(dir,'key.png'),...(concept?['--ref',concept]:[]),...(tint?['--ref',tint]:[]),'--purpose','UV-registered hand-painted prop artwork','--prompt-file',promptFile,...(force?['--force']:[])],{encoding:'utf8',cwd:play,maxBuffer:1<<26});
+  fs.writeFileSync(promptFile,paintingBrief(layout)+paintRefsLine(concept,tint)+(previous?"\nThe LAST attached image is this prop's PREVIOUS artwork on an older UV layout: keep its palette, stone, carving and motifs, repainted onto the new guide's islands (never its island positions).":''));
+  const r=spawnSync(process.execPath,[path.join(play,'tools/image-request.mjs'),'gen','--id',`prop-${name}-paint`,'--target',path.relative(play,path.join(dir,'art.png')),'--size',`${layout.size}x${layout.size}`,'--ref',path.join(dir,'key.png'),...(concept?['--ref',concept]:[]),...(tint?['--ref',tint]:[]),...(previous?['--ref',previous]:[]),'--purpose','UV-registered hand-painted prop artwork','--prompt-file',promptFile,...(force?['--force']:[])],{encoding:'utf8',cwd:play,maxBuffer:1<<26});
   if(r.status!==0)throw Error('Image generation failed: '+r.stdout+r.stderr);
  }finally{const resolved=path.resolve(scratch);if(!resolved.startsWith(path.resolve(os.tmpdir())+path.sep)||!path.basename(resolved).startsWith('hitreg-paint-prompt-'))throw Error('Unexpected painting prompt scratch path');fs.rmSync(resolved,{recursive:true,force:true});}
  importPainting(wk,name,path.join(dir,'art.png'));
@@ -150,11 +164,12 @@ export function generatePainting(wk:string,name:string,force=false){
 }
 /** One disposable build plan, with no runtime export and no generation. Safe for CLI and installer preflight. */
 export async function measurePainting(wk:string,names:string[]=[]){
- const {blenderBuild}=await import('./check.mts'),dir=path.join(wk,'authoring/codex-craft/designs'),files=(names.length?names.map(n=>slug.parse(n)+'.py'):fs.readdirSync(dir).filter(f=>f.endsWith('.py'))).sort().map(f=>path.join(dir,f));
+ const {blenderBuild}=await import('./check.mts'),dir=path.join(wk,'authoring/codex-craft/designs'),files=(names.length?names.map(n=>n.endsWith('.py')?path.resolve(n):path.join(dir,slug.parse(n)+'.py')):fs.readdirSync(dir).filter(f=>f.endsWith('.py')).map(f=>path.join(dir,f))).sort();
+ // a name may be a path to a HELD design .py outside designs/ (plan + import it there, move it in only when painted: an unpainted design in designs/ blocks every install)
  const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'hitreg-prop-paint-'));
  try{return blenderBuild(wk,files,scratch,path.join(scratch,'geometry.json'),{paintMode:'plan'});}finally{const resolved=path.resolve(scratch),temp=path.resolve(os.tmpdir())+path.sep;if(!resolved.startsWith(temp)||!path.basename(resolved).startsWith('hitreg-prop-paint-'))throw Error('Unexpected painting scratch path');fs.rmSync(resolved,{recursive:true,force:true});}
 }
-export async function paintCommand(wk:string,action:string,names:string[],options:{art?:string;force?:boolean}={}){
+export async function paintCommand(wk:string,action:string,names:string[],options:{art?:string;force?:boolean;previous?:string}={}){
  if(action==='schema')return {plan:z.toJSONSchema(paintPlanSchema),layout:z.toJSONSchema(paintLayoutSchema)};
  if(!['plan','status','gen','import'].includes(action))throw Error('props paint plan|status|gen|import <design name...> | schema');
  if(['gen','import'].includes(action)&&names.length!==1)throw Error('paint gen/import takes exactly one design name');
@@ -163,12 +178,12 @@ export async function paintCommand(wk:string,action:string,names:string[],option
   if(g.error)throw Error(g.name+': '+g.error);
   if(!g.paintPlan?.surfaces.length){if(names.length)throw Error(g.name+': no paint(...) declarations');continue;}
   const plan=paintPlanSchema.parse(g.paintPlan);
-  if(action==='plan'){const layout=planPainting(wk,g.name,plan);results.push({name:g.name,size:layout.size,surfaces:plan.surfaces.map(s=>s.name),guide:path.join(paintDir(wk,g.name),'key.png')});}
+  if(action==='plan'){const layout=planPainting(wk,g.name,plan);results.push({name:g.name,size:layout.size,fill:pageFill(layout),surfaces:plan.surfaces.map(s=>s.name),shared:Object.fromEntries(plan.surfaces.filter(s=>s.shared?.length).map(s=>[s.name,s.shared])),guide:path.join(paintDir(wk,g.name),'key.png')});}
   else {
    const status=paintingStatus(wk,g.name,plan);
    if(action==='status'){results.push({name:g.name,ready:status.ready,faults:status.faults});continue;}
    if(!status.layout||status.layout.geometrySha256!==plan.geometrySha256)throw Error(g.name+': guide missing or stale; run props paint plan first');
-   const imported=action==='gen'?generatePainting(wk,g.name,options.force):importPainting(wk,g.name,options.art?path.resolve(options.art):path.join(paintDir(wk,g.name),'art.png'));
+   const imported=action==='gen'?generatePainting(wk,g.name,options.force,options.previous?path.resolve(options.previous):undefined):importPainting(wk,g.name,options.art?path.resolve(options.art):path.join(paintDir(wk,g.name),'art.png'));
    results.push({name:g.name,ready:imported.ready,faults:imported.faults});
   }
  }

@@ -493,6 +493,10 @@ export function commandNeeds(host: SiteNeedsHost): void {
   // solve on the ground WITHOUT this run's own patches (re-running replaces them) and without town pads
   const base: WorldRecipe = { ...recipe, features: { ...recipe.features, towns: [], heightPatches: recipe.features.heightPatches.filter((p) => !ids.has(p.id)) } };
   let g = needGround(base, createWorldField(base));
+  // the world as it stands (town pads in) with no need patch at all: a cliff block's mask ring copies only ground no other
+  // need raises and no town pad changes (w15: the needs ground without its towns drew the sea cliff by the Moon 2.4 m
+  // higher, and a copy of it stood on the real cliff as a step)
+  const bareField = createWorldField({ ...recipe, features: { ...recipe.features, heightPatches: recipe.features.heightPatches.filter((p) => !p.id.startsWith("need-")) } });
   let failed = 0;
   for (const need of needs) {
     let area;
@@ -504,6 +508,9 @@ export function commandNeeds(host: SiteNeedsHost): void {
       // the block keeps off a river (a fall pool) as off a shore (w11: the Moon block put a 4.5 m ledge in fall-5's drop)
       rivers: recipe.features.rivers.map((r) => ({ id: r.id, points: r.points.map((q) => [q[0]!, q[q.length - 1]!] as [number, number]), half: Math.max(r.width, ...(r.widths ?? [])) / 2 })),
       foot,
+      bare: (x, z) => bareField.height(x, z),
+      // graded roads that may cross the block's ground (one that ends on its apron is its approach and rides it)
+      roads: recipe.features.roads.filter((r) => r.flatten > 0).map((r) => ({ id: r.id, points: r.points.map((q) => [q[0]!, q[q.length - 1]!] as [number, number]), reach: r.width / 2 + r.shoulder + r.smooth + 1 })),
     }) : need.kind === "roadside-rib" ? solveRoadsideRib(g, need, area) : solveWalledNeck(g, need, area);
     if (!s.ok) { console.error(`  ${need.id} (${need.kind}): NOT SOLVED: ${s.message}`); failed++; continue; }
     recipe.features.heightPatches = recipe.features.heightPatches.filter((p) => p.id !== `need-${need.id}`);
@@ -513,7 +520,7 @@ export function commandNeeds(host: SiteNeedsHost): void {
       base.features.heightPatches.push(s.patch);
       g = needGround(base, createWorldField(base));
     }
-    need.solved = { at: s.at, faces: s.faces, height: s.height, patch: s.patch?.id ?? "", raised: s.raised, ran: new Date().toISOString() };
+    need.solved = { at: s.at, faces: s.faces, height: s.height, patch: s.patch?.id ?? "", raised: s.raised, ...(s.rock ? { rock: s.rock } : {}), ran: new Date().toISOString() };
     console.log(`  ${need.id} (${need.kind}${need.for ? ` for ${need.for}` : ""}): ${s.message}; faces ${compassWord(s.faces)}`);
   }
   host.writeRecipe(recipe, file);

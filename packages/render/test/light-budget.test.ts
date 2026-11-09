@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three/webgpu";
-import { LightBudgetSystem } from "../src/light-budget.js";
+import { budgetEdgeFade, LightBudgetSystem } from "../src/light-budget.js";
 
 /** The lights the renderer would actually see: visible, in the scene. */
 function litPointLights(scene: THREE.Scene): THREE.PointLight[] {
@@ -238,5 +238,14 @@ describe("halo wash (Red Dial 2026-10-30)", () => {
     expect(far.radius).toBeCloseTo(450 * FAR_HALO_ANGLE, 5);
     expect(far.radius / 450).toBeLessThan(0.006);
     g.dispose();
+  });
+});
+
+describe("budgetEdgeFade", () => {
+  it("is full well inside the list, fades to nothing at the line, and never fades when every light fits", () => {
+    expect(budgetEdgeFade(10, 100)).toBe(1);
+    expect(budgetEdgeFade(75, 100)).toBeCloseTo(0.5);
+    expect(budgetEdgeFade(100, 100)).toBe(0);
+    expect(budgetEdgeFade(100, null)).toBe(1);
   });
 });

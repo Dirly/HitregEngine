@@ -14,7 +14,7 @@ a skill or a check, never into prose here. Raw evidence (with place names): `doc
 | `encounters.md` | `encounter-standards` | `zonegen populate`, `site-packs.json` |
 | `interiors.md` | `interior-standards` | `dress` |
 | `props.md` | `prop-intake` | `props` |
-| `towns.md` | `town-planner`, `building-constructor`, `town-npcs` | `town-settle`, `town-lights`, `town-walk` |
+| `towns.md` | `town-planner`, `building-constructor`, `town-npcs` | `town-settle`, `town-seated`, `town-lights`, `town-walk` |
 | `building-styles.md` | `building-styles` | `style_make.py` |
 | `review-rubric.md` | (the reviewer's checklist, kept whole) | `zonegen map --dev` |
 
@@ -60,6 +60,10 @@ its skill's Gates and delete it here.
   (mountains); entrance mix (landmark vs hidden) per zone.
 
 **Dungeons**
+- Selective dressing and self-review (owner, Weeping Sun 2026-11-08): remove legacy prop/type and built-piece
+  count floors; add purpose/clear-space, contact/effect-owner and actual entity-lighting/motion checks. Current
+  coverage and the proposed changes: [shared skill reference](../../.claude/skills/dungeon-standards/references/placement-review.md).
+  This is a tooling backlog, not an implemented density validator.
 - Plan check for repeated outlines across halls and against neighbour dungeons; one dominant space; no overlapping
   interiors; coarser voxel and ramps for giant scale; real-body walk ordered right after the first bake.
 - Accidental pattern breaks; set pieces crafted from the start; set piece contrast with its holder.
@@ -81,7 +85,8 @@ its skill's Gates and delete it here.
 - Per-kind real-size ranges + a placement check; silhouette check for scaled-up props; refusing LOW/needs-art props
   (today only flagged); `props menu` flagging primitive-built props.
 - Prop requests instead of composites; owner-made mechanisms; small lights and wall-free furniture for every scale/culture.
-- OPEN: furnishing target by floor area; the set per room role; the largest empty floor allowed.
+- OPEN: room-role furnishing guidance and useful density diagnostics. Deliberate empty floor is acceptable;
+  do not invent a maximum empty area or minimum furnishing quota to fill it (owner, 2026-11-08).
 
 **Towns and buildings**
 - Buildable area vs planned envelopes (zonegen town lint); lots respecting wall/gate lines; no side-by-side streets at

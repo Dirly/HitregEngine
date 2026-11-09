@@ -10,6 +10,10 @@
 
 Workflow: `hitreg-dungeon-authoring`. Open values: `README.md` "Not encoded yet".
 
+Current placement quality bar: [Weeping Sun placement and self-review](../../.claude/skills/dungeon-standards/references/placement-review.md)
+(owner, 2026-11-08). Selective purposeful groups and usable empty floor supersede older density targets.
+The reference distinguishes working checks, project-specific audits and proposed automation.
+
 ## Quality recipe
 The gates and their numbers are `tools/dungeon-pipeline/README.md` and `thresholds.json` (never edited for one
 dungeon; a justified miss goes in the dungeon's `authoring/quality-exceptions.json` with a `why`). The measured recipe

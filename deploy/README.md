@@ -34,6 +34,7 @@ not be the public client. Publishing exports the selected project's dependency
 closure, packs boot JSON into bounded static requests, and includes only that
 closure's project scripts. Models, images and sounds are hosted as files and
 fetched when used; export does not yet prune unused files within that closure.
+The bundle is compressed losslessly and the Caddyfile serves its `.br`/`.gz` sidecars (docs/hosting.md, "What publish compresses").
 Sign-in does not construct or stream the world behind the panel.
 The player build fails if editor UI, model/material thumbnail baking, thumbnail
 storage, the editor entry, or live authoring code enters its emitted modules.

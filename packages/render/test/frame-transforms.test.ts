@@ -12,6 +12,7 @@ function rendererWith(draw: (scene: THREE.Scene, camera: THREE.Camera) => void):
     renderer: { render: draw }, plan: [], volumetric: null,
     shadowEye: new THREE.Vector3(), skinnedShadowDistance: 40, shadowless: [], skipShadowless: true,
     minScreenRadiusPx: 0, screenCull: { eye: new THREE.Vector3(), pxPerUnit: 0, minRadiusPx: 0 },
+    pipelineGate: { active: false, pending: 0, buildMs: 0, budgetMs: Infinity },
   });
   return renderer;
 }

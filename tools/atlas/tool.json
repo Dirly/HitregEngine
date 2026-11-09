@@ -56,7 +56,9 @@
       "label": "Prop UV manifest",
       "description": "Required for the custom prop sheet: manifest.json from props paint plan. Its named islands, measured square size and bleed govern registration; size/bleed/filter controls below apply only to armor and weapon presets. This tool registers custom artwork; props paint import combines it with shared material tiles for the model.",
       "required": false,
-      "accept": ["application/json"],
+      "accept": [
+        "application/json"
+      ],
       "maxBytes": 262144
     },
     "name": {
@@ -122,6 +124,24 @@
       "description": "Optional comma-separated island names that are absent from this set, such as hood,ornament.",
       "required": false,
       "placeholder": "hood,ornament"
+    },
+    "samplePhaseX": {
+      "kind": "number",
+      "label": "Nearest sample phase X",
+      "description": "Uniform horizontal sampling-lattice offset in target texels. Zero preserves existing output. Nonzero requires nearest filtering; it samples existing artwork without editing UVs or painting features.",
+      "default": 0,
+      "min": -0.5,
+      "max": 0.5,
+      "step": 0.25
+    },
+    "samplePhaseY": {
+      "kind": "number",
+      "label": "Nearest sample phase Y",
+      "description": "Uniform vertical sampling-lattice offset in target texels. Zero preserves existing output. Nonzero requires nearest filtering; useful when a thin authored mark falls between coarse sample centres.",
+      "default": 0,
+      "min": -0.5,
+      "max": 0.5,
+      "step": 0.25
     }
   }
 }

@@ -44,6 +44,11 @@ export function endSkinnedShadowFrame(previous: { frame: number; eye: [number, n
   range = previous.range;
 }
 
+/** Metres from the eye past which no animated body casts: its range plus the hysteresis band, Infinity with no limit. */
+export function skinnedShadowLimit(): number {
+  return range > 0 && range !== Infinity ? range + HYSTERESIS : Infinity;
+}
+
 /** Make this skinned mesh's shadow casting range-limited inside renderer frames. Idempotent. */
 export function enableSkinnedShadowRange(mesh: THREE.Object3D): void {
   if (installed.has(mesh)) return;

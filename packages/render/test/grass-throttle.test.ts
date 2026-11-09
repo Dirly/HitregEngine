@@ -371,7 +371,7 @@ describe("cover reaches past its own fade in every direction", () => {
    * This is the bug the placement pad and the coverage clamp exist for. The
    * fade is measured from the CAMERA and the disc is placed around a snapped,
    * hysteretic CENTRE, so on the trailing side the disc used to end at about
-   * 0.58 of the radius — well inside a fade that does not start until 0.7.
+   * 0.58 of the radius — well inside a band that does not start until 0.85.
    */
   const worstReach = (r: Rig, camX: number, camZ: number): number => {
     const BINS = 16;
@@ -400,9 +400,9 @@ describe("cover reaches past its own fade in every direction", () => {
       r.pump(x, 0);
       if (i % 30 === 0 && i > 300) worst = Math.min(worst, worstReach(r, x, 0));
     }
-    // FADE_BAND in grass.ts: nothing fades at all before 0.7 of the radius,
+    // FADE_BAND in grass.ts: nothing shrinks at all before 0.85 of the radius,
     // so a field that ends inside that is a visible edge
-    expect(worst).toBeGreaterThan(DATA.radius * 0.7);
+    expect(worst).toBeGreaterThan(DATA.radius * 0.85);
   });
 
   it("keeps the whole authored radius covered walking DIAGONALLY", () => {

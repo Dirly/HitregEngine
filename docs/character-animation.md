@@ -419,6 +419,23 @@ node tools/reskin.mjs --rig projects/foundation/assets/models/mmo/human.glb \
   thighs, which is what warped them. Pinned, they hang, and `clothSway` gives
   them their swing (they still do not collide with a thigh in a full stride).
   An open robe keeps its copied weights and moves with the legs.
+- **After every reskin, fit the robe for running**: `node tools/skirt-fit.mjs
+  --glb <body.glb> --robe --write`. A run kicks the heel nearly to the hip, and
+  the robe back (1 cm off the legs) let the thighs and calves through every
+  stride. The fit writes the model's `covers` extras (leg triangles above the
+  robe's hem that face back and that no front-side view of the standing body
+  sees, left out of the draw while the robe back shows; hiding the whole back
+  of the legs left holes visible through the open front:
+  @hitreg/render `applyModelPartMask`; a new part could not do it, the body
+  uses all 32 part bits); marks the inner thighs and the backs the front can
+  see `uv1.y = -1`, hidden only while the camera is behind the hips; draws the
+  robe 3 cm nearer the camera along each sightline (`depthPull`, same pixels,
+  so seams hold: @hitreg/render `applyModelDepthPull`); and hands the robe's lower part to each side's calf,
+  back panel and front flaps alike, so the hem rides up with the kick and the
+  seams stay welded. No vertex moves, no UV changes, the run clips stay as they
+  are; every human body is the same mesh, so it serves every outfit. Without
+  `--robe` the tool measures legs through tassets and robes across the
+  locomotion clips, and `--sheet` draws them (judge the sheet; the number counts calves below a hem).
 - `--theme <sheetId>=<atlas.png>` (repeated) packs every outfit's sheet onto
   one page and writes the `tiles` table, like `weapon-page`; the first theme is
   the default look (KHR_texture_transform). An outfit is then a tile plus a

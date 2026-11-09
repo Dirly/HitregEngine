@@ -39,6 +39,8 @@ export interface TerrainLipOptions {
   maxSlopeAt?: (x: number, z: number) => number | undefined;
   /** One-sample rim/slot height (m) above the reference's that counts as a lip. Default 0.75. */
   lipTol?: number;
+  /** Per-cell override of `lipTol` (cell centre x, z); undefined keeps `lipTol`. */
+  lipTolAt?: (x: number, z: number) => number | undefined;
   /** Where |edited - reference| is below this (m) at all four corners, the cell is untouched. Default 0.15. */
   touched?: number;
   /** Optional mask: only cells whose centre passes are measured (e.g. "near a patch edge"). */
@@ -156,7 +158,7 @@ export function measureTerrainLips(
       const rim = (g: Float64Array, ax: number, az: number): number =>
         Math.max(spike(at(g, ax, az), at(g, ax - 1, az), at(g, ax + 1, az)), spike(at(g, ax, az), at(g, ax, az - 1), at(g, ax, az + 1)));
       const lip = rim(E, i, j) - rim(R, i, j);
-      if (lip > lipTol) add("lip", i, j, lip);
+      if (lip > (options.lipTolAt?.(cx + s / 2, cz + s / 2) ?? lipTol)) add("lip", i, j, lip);
     }
   }
   // longest 8-connected run of faulty cells

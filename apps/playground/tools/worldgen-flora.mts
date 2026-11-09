@@ -82,13 +82,25 @@ function biomeTraits(recipe: WorldRecipe): Map<string, BiomeTraits> {
   return out;
 }
 
-/** Why `kind` may not grow in biome `biome` of this world's climate, or null. */
-export function floraBan(recipe: WorldRecipe, climate: FloraClimate = floraClimate(recipe), traits = biomeTraits(recipe)): (kind: FloraKind, biome: string) => string | null {
-  return (kind, biome) => {
-    if ((kind === "palm" || kind === "jungle") && climate !== "tropical") return `${kind} in a ${climate} climate (tropical only)`;
+/**
+ * Why `kind` may not grow in biome `biome` of this world's climate, or null. `byWater`: the rule stands on a lake or
+ * river bank (scatter `water.mode: "shore"`).
+ *
+ * BY WATER IN A DRY CLIMATE (owner ruling 2026-10-30, redstrand: "the weeping willows really shouldn't be there. Palm
+ * trees along the lakes, yeah"): the desert's water edge (dry ground and the oasis ribbon) grows PALMS, never willows;
+ * a willow stands only by upland water. Away from water a palm is still tropical only.
+ */
+export function floraBan(recipe: WorldRecipe, climate: FloraClimate = floraClimate(recipe), traits = biomeTraits(recipe)): (kind: FloraKind, biome: string, byWater?: boolean) => string | null {
+  return (kind, biome, byWater = false) => {
+    const t0 = traits.get(biome);
+    const desertWater = climate === "dry" && byWater && !!t0 && (t0.dry || t0.riparian);
+    if (kind === "palm" && desertWater) return null;
+    if (kind === "palm" && climate === "dry" && byWater) return `palm by ${t0?.shore ? "a shore band's" : "upland"} water (a dry climate grows palms only at the desert's and the oasis's water)`;
+    if ((kind === "palm" || kind === "jungle") && climate !== "tropical") return `${kind} in a ${climate} climate (tropical only${kind === "palm" && climate === "dry" ? "; by desert water a palm is fine" : ""})`;
     if (climate !== "dry") return null;
-    const t = traits.get(biome);
+    const t = t0;
     if (!t) return null;
+    if (kind === "broadleaf" && byWater) return desertWater ? `broadleaf by ${t.riparian ? "the oasis's" : "desert"} water (a dry climate's water edge grows palms; willows only by upland water)` : null;
     if (kind === "pine" && (t.dry || t.riparian || t.shore)) return `pine in ${t.riparian ? "the oasis ribbon" : t.shore ? "a shore band" : "dry ground"} (a dry climate grows pine only on the upland)`;
     if (kind === "broadleaf" && (t.dry || t.shore)) return `broadleaf on ${t.shore ? "a shore band" : "dry ground"} (a dry climate grows broadleaf only by water or on the upland)`;
     return null;
@@ -105,14 +117,13 @@ export function floraFindings(recipe: WorldRecipe): FloraFinding[] {
   for (const rule of recipe.scatter) {
     const kind = floraKindOf(rule);
     if (!kind || rule.density <= 0) continue;
-    // a shore rule stands BY water: the dry climate's broadleaf rule ("only by water or on the upland") is met
-    const byWater = (rule as { water?: { mode: string } }).water?.mode === "shore" && kind === "broadleaf";
-    if (byWater) continue;
+    // a shore rule stands BY water: judged by the by-water rules (palms at desert water, willows at upland water)
+    const byWater = (rule as { water?: { mode: string } }).water?.mode === "shore";
     // an empty biome list grows anywhere: judged against every biome of the world
     const biomes = rule.biomes.length ? rule.biomes : [...live];
     for (const b of biomes) {
       if (!live.has(b) || (rule.biomeDensity?.[b] ?? 1) <= 0) continue;
-      const why = ban(kind, b);
+      const why = ban(kind, b, byWater);
       if (why) out.push({ rule: rule.id, biome: b, kind, why });
     }
   }
@@ -147,7 +158,9 @@ export function applyFlora(recipe: WorldRecipe): string[] {
     let line = `flora: ${rule.id} out of ${f.biome} (${f.why})`;
     // the replacement species, in a dry climate only: the oasis grows broadleaf (figs, tamarisk), dry ground scrub trees
     const t = traits.get(f.biome);
-    const instead: FloraKind | null = climate !== "dry" || !t || t.shore ? null : t.riparian ? "broadleaf" : t.dry ? "scrub-tree" : null;
+    // a bank rule's trees are not handed to the dry ground's species (the woodland's oasis palms take the desert water)
+    const bank = (rule as { water?: { mode: string } }).water?.mode === "shore";
+    const instead: FloraKind | null = bank || climate !== "dry" || !t || t.shore ? null : t.riparian ? "broadleaf" : t.dry ? "scrub-tree" : null;
     const sub = instead ? firstOf(instead) : undefined;
     if (sub && sub !== rule && !sub.biomes.includes(f.biome) && sub.biomes.length > 0 && sub.density > 0) {
       const g = Math.round(Math.min(1, wanted / sub.density) * 1000) / 1000;
@@ -185,7 +198,7 @@ export function applyFlora(recipe: WorldRecipe): string[] {
  * (`features.clearings[].rules`), so the rocks the ground carries there stay.
  */
 
-export type WoodlandRole = "canopy" | "understory" | "shore";
+export type WoodlandRole = "canopy" | "understory" | "shore" | "oasis";
 export interface WoodlandSpecies {
   /** catalogue / curation id */
   id: string;
@@ -210,14 +223,25 @@ export const WOODLAND_SPECIES: readonly WoodlandSpecies[] = [
   { id: "woodland-botany/tropical-broadleaf", model: "woodland-botany/tropical-broadleaf.glb", role: "understory", kind: "jungle", leaves: "leaves,broadlea", scale: [0.8, 1.2], footprint: 0.6, collider: "none", colliderSize: [1, 1, 1] },
   { id: "woodland-botany/woodland-fern", model: "woodland-botany/woodland-fern.glb", role: "understory", kind: null, leaves: "leaves,fern,frond", scale: [0.8, 1.3], footprint: 0.55, collider: "none", colliderSize: [1, 1, 1] },
   { id: "woodland-botany/weeping-willow", model: "woodland-botany/weeping-willow.glb", role: "shore", kind: "broadleaf", leaves: "leaves,willow", scale: [2.0, 3.0], footprint: 1.3, collider: "cylinder", colliderSize: [0.9, 5, 0.9] },
+  // 6.9 m at scale 1 -> 11-18 m date palms (owner ruling 2026-10-30: palms along a dry world's lakes)
+  { id: "mmo/nature/PalmTree", model: "mmo/nature/PalmTree.gltf", role: "oasis", kind: "palm", leaves: "leaves,bush", scale: [1.6, 2.6], footprint: 0.9, collider: "cylinder", colliderSize: [0.6, 6.6, 0.6] },
 ];
 
 /** The generated rule id per role (rewritten on every run). */
-export const WOODLAND_RULE: Record<WoodlandRole, string> = { canopy: "woodland-canopy", understory: "woodland-understory", shore: "woodland-shore" };
+export const WOODLAND_RULE: Record<WoodlandRole, string> = { canopy: "woodland-canopy", understory: "woodland-understory", shore: "woodland-shore", oasis: "oasis-palm" };
+/** The oasis palms' second, sparser band further back from the water: density falls off away from the bank. */
+export const OASIS_GROVE_RULE = "oasis-palm-grove";
+/** Every rule id the woodland writes (rewritten on every run). */
+const WOODLAND_IDS: readonly string[] = [...Object.values(WOODLAND_RULE), OASIS_GROVE_RULE];
 /** The woodland mask: low-frequency stands a few hundred metres across with a short edge. Canopy and understory share it. */
 export const WOODLAND_CLUMP = { frequency: 0.0042, octaves: 3, threshold: 0.08, blend: 0.16, floor: 0, seed: 61 };
 /** Peak densities (per m2) inside a stand. */
-const WOODLAND_DENSITY = { canopy: 0.011, understory: 0.04, shore: 0.03 } as const;
+const WOODLAND_DENSITY = { canopy: 0.011, understory: 0.04, shore: 0.03, oasis: 0.03 } as const;
+/** The bank band (wade, in footprints x scale: - = landward) and the grove band behind it, sparser. */
+/** clearance: metres from roads, river banks and the LAKE OUTLINE (featureClearance counts lakes): a bank tree 4 m off
+ *  the outline (the willow's) never stands at the water, so the palms keep 1 m (the bank) and 3 m (the grove). */
+const OASIS_BANK = { reach: 14, wade: [-2.5, -0.6] as [number, number], keep: 1, clearance: 1 };
+const OASIS_GROVE = { reach: 18, wade: [-9, -2.5] as [number, number], keep: 0.5, density: 0.012, clearance: 3 };
 const WOODLAND_KEEP_PREFIX = "woodland-keep-";
 const BARE_BIOME = /seabed|beach|alpine|crag|glacier|ice|snow/;
 
@@ -254,21 +278,24 @@ export function applyWoodland(recipe: WorldRecipe, o: WoodlandOptions = {}): str
   const ban = floraBan(recipe, climate);
   const woods = woodlandBiomes(recipe);
   const shore = shoreBiomes(recipe);
-  const ruleIds = new Set<string>(Object.values(WOODLAND_RULE));
+  const ruleIds = new Set<string>(WOODLAND_IDS);
   recipe.scatter = recipe.scatter.filter((r) => !ruleIds.has(r.id));
   const written: string[] = [];
   const rip = recipe.climate.zones?.riparian?.anchor ?? null;
-  for (const role of ["canopy", "understory", "shore"] as WoodlandRole[]) {
-    const biomes = role === "shore" ? shore : woods;
+  for (const role of ["canopy", "understory", "shore", "oasis"] as WoodlandRole[]) {
+    const bank = role === "shore" || role === "oasis";
+    const biomes = bank ? shore : woods;
+    // the oasis is a DRY world's water edge: elsewhere the climate's own palms (tropical) or none
+    if (role === "oasis" && climate !== "dry") continue;
     let chosen: WoodlandSpecies | null = null;
     let allowed: string[] = [];
     for (const sp of WOODLAND_SPECIES.filter((s) => s.role === role)) {
       // the climate first (the reason that holds whatever the owner decides), then the owner's curation
-      if ((sp.kind === "jungle" || sp.kind === "palm") && climate !== "tropical") { notes.push(`woodland: ${sp.id} refused (${sp.kind} in a ${climate} climate: tropical only)`); continue; }
+      if ((sp.kind === "jungle" || (sp.kind === "palm" && !bank)) && climate !== "tropical") { notes.push(`woodland: ${sp.id} refused (${sp.kind} in a ${climate} climate: tropical only)`); continue; }
       const ex = o.excluded?.(sp.id) ?? null;
       if (ex) { notes.push(`woodland: ${sp.id} refused (owner curation: ${ex})`); continue; }
-      // a shore species stands by water, so a dry climate's broadleaf ban (dry ground) does not reach it
-      const ok = biomes.filter((b) => !sp.kind || !ban(sp.kind, b) || (role === "shore" && sp.kind === "broadleaf"));
+      // a bank species is judged by the by-water rules: palms at the desert's water, willows at upland water
+      const ok = biomes.filter((b) => !sp.kind || !ban(sp.kind, b, bank));
       if (!ok.length) { notes.push(`woodland: ${sp.id} refused (no ${role} biome of this ${climate} climate grows ${sp.kind})`); continue; }
       if (!chosen) { chosen = sp; allowed = ok; }
     }
@@ -290,8 +317,8 @@ export function applyWoodland(recipe: WorldRecipe, o: WoodlandOptions = {}): str
       wind: { mode: under ? "sway" : "ripple", strength: under ? 0.035 : 0.05, speed: under ? 1.1 : 1.5, canopy: under ? 0.25 : 0.4, materials: chosen.leaves },
       cameraFade: !under,
       biomes: allowed,
-      biomeDensity: role === "shore" ? {} : gain,
-      clump: role === "shore" ? { frequency: 0.02, octaves: 2, threshold: -0.1, blend: 0.4, floor: 0.25, seed: 62 } : { ...WOODLAND_CLUMP },
+      biomeDensity: bank ? {} : gain,
+      clump: bank ? { frequency: 0.02, octaves: 2, threshold: -0.1, blend: 0.4, floor: 0.25, seed: 62 } : { ...WOODLAND_CLUMP },
       density: WOODLAND_DENSITY[role],
       slopeMax: under ? 0.6 : 0.45,
       slopeMin: 0,
@@ -301,7 +328,7 @@ export function applyWoodland(recipe: WorldRecipe, o: WoodlandOptions = {}): str
       alignToNormal: 0,
       yOffset: under ? -0.02 : -0.3,
       jitter: 0.9,
-      clearance: under ? 0.6 : 4,
+      clearance: under ? 0.6 : role === "oasis" ? OASIS_BANK.clearance : 4,
       footprint: chosen.footprint,
       spacing: under ? 0.6 : 1.5,
       collider: chosen.collider,
@@ -310,9 +337,15 @@ export function applyWoodland(recipe: WorldRecipe, o: WoodlandOptions = {}): str
       castShadow: !under,
       lod: true,
       ...(role === "shore" ? { water: { mode: "shore", waters: "both", snap: true, snapStep: 6, reach: 14, wade: [-1.6, -0.9], keep: 1, steepness: 0.4, headland: 0 } } : {}),
+      ...(role === "oasis" ? { water: { mode: "shore", waters: "both", snap: true, snapStep: 6, reach: OASIS_BANK.reach, wade: OASIS_BANK.wade, keep: OASIS_BANK.keep, steepness: 0.4, headland: 0 } } : {}),
     };
     recipe.scatter.push(rule as unknown as Rule);
     written.push(`${id} = ${chosen.id} in ${allowed.join("/")}`);
+    if (role === "oasis") {
+      // the grove behind the bank row: fewer palms further from the water (the density falls off with distance)
+      recipe.scatter.push({ ...rule, id: OASIS_GROVE_RULE, density: OASIS_GROVE.density, clearance: OASIS_GROVE.clearance, clump: { ...rule.clump, seed: 63 }, water: { ...rule.water!, reach: OASIS_GROVE.reach, wade: OASIS_GROVE.wade, keep: OASIS_GROVE.keep } } as unknown as Rule);
+      written.push(`${OASIS_GROVE_RULE} = its grove band`);
+    }
   }
   notes.unshift(`woodland (${climate} climate): ${written.join("; ") || "nothing allowed"}`);
   // keep-outs: the generated species never stand in a sited place's footprint (the rocks there stay)
@@ -341,7 +374,7 @@ export function woodlandFindings(recipe: WorldRecipe, o: WoodlandOptions = {}): 
       }
     }
   }
-  const ruleIds = new Set<string>(Object.values(WOODLAND_RULE));
+  const ruleIds = new Set<string>(WOODLAND_IDS);
   const live = recipe.scatter.filter((r) => ruleIds.has(r.id)).map((r) => r.id);
   if (live.length) {
     const clearings = (recipe.features as unknown as { clearings?: { id: string; rules?: string[] }[] }).clearings ?? [];
@@ -354,47 +387,127 @@ export function woodlandFindings(recipe: WorldRecipe, o: WoodlandOptions = {}): 
 }
 
 // ------------------------------------------------------------------ GROUND COVER species (2026-10-29 w9: papyrus at town-1's lake)
-type CoverLayer = { id: string; texture?: string; biomes: string[]; density?: number; water?: { mode: string } };
+/*
+ * Cover follows the climate like the trees do. A layer's KINDS come from the tiles it draws (the atlas page's
+ * tiles.json names) and its id:
+ *
+ *   tropical  papyrus, bamboo, jungle plants: only in a tropical climate (2026-10-29 w9)
+ *   crop      wheat: a crop, grown only in DECLARED FIELDS (`cover[].fields` + `features.fields`), in any climate
+ *   grain     wheat-looking plumes (savannatall): never on a dry world's dry ground
+ *   lush      tall green grass and meadow flowers: never on a dry world's dry ground
+ *   desert    desert scrub, prickly pear, agave, short straw tufts: what dry ground grows instead
+ *
+ * Owner ruling 2026-10-30 (redstrand): "we have this wheat-looking grass, which honestly a desert wouldn't have; now the
+ * farm would have some crops."
+ */
+type CoverLayer = { id: string; texture?: string; tiles?: number[]; biomes: string[]; surfaces?: string[]; density?: number; water?: { mode: string }; fields?: boolean; clump?: unknown };
+export type CoverKind = "tropical" | "crop" | "grain" | "lush" | "desert";
+/** Names of an atlas page's tiles (its tiles.json), by texture id; null = unknown page. */
+export type CoverTileNames = (texture: string) => readonly (string | null)[] | null;
 
-/** A cover layer's plant kind, judged like a tree's: papyrus, palms and bamboo are tropical. */
-export function coverKindOf(layer: { id: string; texture?: string }): "tropical" | null {
-  return /papyrus|palm|bamboo|jungle/.test(layer.id.toLowerCase()) ? "tropical" : null;
-}
+const TILE_KIND: Record<string, CoverKind> = {
+  wheat: "crop",
+  savannatall: "grain",
+  tallgrass: "lush", poppies: "lush", daisies: "lush", lupine: "lush", buttercups: "lush", clover: "lush", foxglove: "lush", bluebells: "lush",
+  desertscrub: "desert", pricklypear: "desert", agave: "desert", savannagrass: "desert",
+  papyrus: "tropical", bamboo: "tropical", elephantear: "tropical", junglefern: "tropical", bromeliad: "tropical", heliconia: "tropical",
+};
 
-/** Every live (cover layer, biome) pair this climate does not grow. */
-export function coverFloraFindings(recipe: WorldRecipe): { layer: string; biome: string; why: string }[] {
-  const climate = floraClimate(recipe);
-  if (climate === "tropical") return [];
-  const live = new Set(recipe.biomes.map((b) => b.id));
-  const out: { layer: string; biome: string; why: string }[] = [];
-  for (const l of recipe.cover as unknown as CoverLayer[]) {
-    if (!coverKindOf(l) || (l.density ?? 1) <= 0) continue;
-    for (const b of l.biomes?.length ? l.biomes : [...live]) if (live.has(b)) out.push({ layer: l.id, biome: b, why: `tropical cover (papyrus/palm/bamboo) in a ${climate} climate` });
+/** The kinds a cover layer draws: from its tiles' names (when the page is known) and its id. */
+export function coverKindsOf(layer: { id: string; texture?: string; tiles?: number[] }, tileNames?: CoverTileNames): Set<CoverKind> {
+  const out = new Set<CoverKind>();
+  const id = layer.id.toLowerCase();
+  if (/papyrus|palm|bamboo|jungle/.test(id)) out.add("tropical");
+  if (/wheat|grain|crop/.test(id)) out.add("crop");
+  const names = layer.texture && tileNames ? tileNames(layer.texture) : null;
+  if (names) {
+    const used = layer.tiles?.length ? layer.tiles : names.map((_, i) => i);
+    for (const t of used) {
+      const k = TILE_KIND[names[t] ?? ""];
+      if (k) out.add(k);
+    }
   }
   return out;
 }
 
-/** Take the tropical cover out of a non-tropical world's biomes; the temperate layer of the same water mode (the shore
- * reeds and cattails) takes those biomes instead. Mutates `recipe.cover`; returns notes. */
-export function applyCoverFlora(recipe: WorldRecipe): string[] {
-  const found = coverFloraFindings(recipe);
+/** A cover layer's plant kind, judged like a tree's: papyrus, palms and bamboo are tropical. */
+export function coverKindOf(layer: { id: string; texture?: string }): "tropical" | null {
+  return coverKindsOf(layer).has("tropical") ? "tropical" : null;
+}
+
+export interface CoverFloraFinding { layer: string; biome: string; why: string }
+
+/** Every live (cover layer, biome) pair this climate does not grow, and every crop layer growing wild. */
+export function coverFloraFindings(recipe: WorldRecipe, tileNames?: CoverTileNames): CoverFloraFinding[] {
+  const climate = floraClimate(recipe);
+  const traits = biomeTraits(recipe);
+  const live = new Set(recipe.biomes.map((b) => b.id));
+  const out: CoverFloraFinding[] = [];
+  for (const l of recipe.cover as unknown as CoverLayer[]) {
+    if ((l.density ?? 1) <= 0) continue;
+    const kinds = coverKindsOf(l, tileNames);
+    const biomes = (l.biomes?.length ? l.biomes : [...live]).filter((b) => live.has(b));
+    if (kinds.has("crop") && !l.fields) {
+      out.push({ layer: l.id, biome: "(wild)", why: "crop cover (wheat) grows only in declared fields (cover[].fields + features.fields)" });
+      continue;
+    }
+    if (l.fields) continue;
+    if (kinds.has("tropical") && climate !== "tropical") {
+      for (const b of biomes) out.push({ layer: l.id, biome: b, why: `tropical cover (papyrus/palm/bamboo) in a ${climate} climate` });
+      continue;
+    }
+    if (climate === "dry" && !l.water && (kinds.has("grain") || kinds.has("lush"))) {
+      for (const b of biomes) if (traits.get(b)?.dry) out.push({ layer: l.id, biome: b, why: `${kinds.has("grain") ? "wheat-looking grass" : "lush grass/flowers"} on a dry world's dry ground (it grows desert scrub, cactus and straw tufts)` });
+    }
+  }
+  return out;
+}
+
+/**
+ * Make the cover follow the climate. Mutates `recipe.cover`; returns notes.
+ *  - a crop layer becomes a FIELDS layer (no biome/surface/clump gate: the declared field decides);
+ *  - tropical cover leaves a non-tropical world's biomes (the temperate layer of the same water mode takes them);
+ *  - on a dry world wheat-looking and lush cover leave the dry biomes; every desert layer grows there instead (with the
+ *    ground surfaces the leaving layer stood on).
+ * A layer left with no biome is dropped (an empty list would grow anywhere).
+ */
+export function applyCoverFlora(recipe: WorldRecipe, tileNames?: CoverTileNames): string[] {
+  const found = coverFloraFindings(recipe, tileNames);
   if (!found.length) return [];
   const notes: string[] = [];
   const layers = recipe.cover as unknown as CoverLayer[];
+  const emptied: string[] = [];
   for (const id of new Set(found.map((f) => f.layer))) {
     const l = layers.find((x) => x.id === id)!;
+    const kinds = coverKindsOf(l, tileNames);
+    if (kinds.has("crop") && !l.fields) {
+      l.fields = true;
+      l.biomes = [];
+      l.surfaces = [];
+      delete l.clump;
+      notes.push(`flora: cover ${id} is a crop: it grows only in declared fields now (features.fields; worldgen vegetation --fields)`);
+      continue;
+    }
     const gone = found.filter((f) => f.layer === id).map((f) => f.biome);
-    const twin = layers.find((x) => x !== l && !coverKindOf(x) && x.biomes.length > 0 && (x.water?.mode ?? null) === (l.water?.mode ?? null));
-    if (twin) for (const b of gone) if (!twin.biomes.includes(b)) twin.biomes.push(b);
+    let instead: CoverLayer[];
+    if (kinds.has("tropical")) {
+      const twin = layers.find((x) => x !== l && !coverKindsOf(x, tileNames).has("tropical") && x.biomes.length > 0 && (x.water?.mode ?? null) === (l.water?.mode ?? null));
+      instead = twin ? [twin] : [];
+    } else {
+      instead = layers.filter((x) => x !== l && !x.water && !x.fields && x.biomes.length > 0 && coverKindsOf(x, tileNames).has("desert"));
+    }
+    for (const t of instead) {
+      for (const b of gone) if (!t.biomes.includes(b)) t.biomes.push(b);
+      if (!kinds.has("tropical") && t.surfaces?.length) for (const s of l.surfaces ?? []) if (!t.surfaces.includes(s)) t.surfaces.push(s);
+    }
     if (!l.biomes.length) l.biomes = recipe.biomes.map((b) => b.id);
     l.biomes = l.biomes.filter((b) => !gone.includes(b));
-    notes.push(`flora: cover ${id} out of ${gone.join("/")}${twin ? `; ${twin.id} grows there instead` : ""}`);
+    if (!l.biomes.length) emptied.push(id);
+    notes.push(`flora: cover ${id} out of ${gone.join("/")}${instead.length ? `; ${instead.map((t) => t.id).join(", ")} grow${instead.length > 1 ? "" : "s"} there instead` : ""}`);
   }
-  // a layer left with no biome would grow anywhere: drop it
-  const dropped = layers.filter((x) => coverKindOf(x) && x.biomes.length === 0).map((x) => x.id);
-  if (dropped.length) {
-    (recipe as { cover: unknown[] }).cover = layers.filter((x) => !dropped.includes(x.id));
-    notes.push(`flora: dropped cover ${dropped.join(", ")} (no biome of this ${floraClimate(recipe)} climate grows it)`);
+  if (emptied.length) {
+    (recipe as { cover: unknown[] }).cover = layers.filter((x) => !emptied.includes(x.id));
+    notes.push(`flora: dropped cover ${emptied.join(", ")} (no biome of this ${floraClimate(recipe)} climate grows it)`);
   }
   return notes;
 }

@@ -11,14 +11,36 @@ Each model's unwrap/key/import steps are **docs/mob-atlas.md** (the
 `weapon-unwrap` skill); item looks are **docs/item-looks.md**; icons are
 **docs/item-icons.md**.
 
+## Kit or instance: decide first
+
+- **Dungeon loot is an `instance` set** (the default for any dungeon): ONE theme, 1-2 MIXED body sheets (each region
+  its own weight: plate chest, leather legs, cloth hands…), ONE helm and ONE shoulder sheet painted part by part in
+  several weights (`helmPaint` / `shoulderPaint`), and NAMED pieces from a loot plan. Never four full kits for one
+  dungeon (Derek 2026-10-29; the four shackle-* kits were retired for this).
+- **A `kit`** (one weight, one item per slot per tier) is only for a town, faction or vendor outfit.
+- **Loot plan first** for an instance: `armor loot-plan <dungeon> --set <id> --input <sources.json>` (or
+  `--bestiary <file> --area <poi>`) writes the skeleton from the dungeon's sources; name every piece after its
+  source (EQ style: a bloodstained tunic off the crypt ghouls), give each its sheet and parts, then re-run it to lint:
+  all four weights, every slot in 2+ weights, no two pieces with the same look, rarity within the level band,
+  ornaments rare+, every source a real mob and area. A SET appears only when a `lootRules` rule fires (large/hard
+  dungeon, or a zone-spread set) and the plan names it.
+- **Every kit ships 2-4 helm pieces and 2-4 shoulder pieces** (`helms[]` / `shoulders[]`), each a full part pick
+  with its own name and tiers, chosen for the set's character (cloth: hoods, cowls, bandanas; leather: caps, hoods
+  over coifs; mail: coifs, nasal helms; plate: closed and great helms; rare: crowns and ornaments). The sheets paint
+  every part, so more pieces cost no art. `armor picks` shows every set's pieces and fails identical picks across
+  sets; spread bases.
+
 ## Order
 
 1. `node --import tsx tools/armor.mts brief new <id> --project foundation` (from `apps/playground`), fill
-   every TODO: the SUBJECT, materials, palette, back ornament, tiers, helm/shoulder parts and looks.
+   every TODO: the SUBJECT, materials, palette, back ornament, tiers, the helm and shoulder pieces and looks
+   (an instance: `kind: "instance"`, `bodies`, `helmPaint`, `shoulderPaint`, `loot`; then its loot plan).
 2. `armor run <id> --project foundation`: brief lint, gen (Codex), import + gates, bake, items, review.
    It stops at the first failing gate with the stage kept; fix the cause (usually the brief's words), re-run.
    Several sets: `armor queue <ids…>`. Where it stands: `armor status`.
-3. **Look at** `authoring/armor-sets/review/<id>.png` (and the creator) before calling the set done.
+3. **Look at** `authoring/armor-sets/review/<id>.png` (a row per helm and per shoulder piece, both sexes, plus a
+   3/4 close-up; an instance adds a row per body sheet) and the creator before calling the set done.
+4. A set going away: `armor retire <id> …` (tiles off the pages, re-baked square; items, icons, art; prints the ids).
 
 ### Manual fallback (what each stage does)
 
@@ -52,5 +74,4 @@ Each model's unwrap/key/import steps are **docs/mob-atlas.md** (the
   Derek is dogfooding the art pipeline, not collecting perfect sheets.
 - **Rules live in the models** (`rules`, core `partProblems`): check an item's
   parts against them before writing it.
-- **Read "Not built yet" in the doc** before promising mixed sets in game: the
-  body shows one tile per character until per-part tiles exist.
+- **Read "Not built yet" in the doc** before promising anything it lists.

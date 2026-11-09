@@ -25,6 +25,8 @@ export {
   type CullingProfileData,
   landmarkComponentSchema,
   type LandmarkComponentData,
+  placeStreamSchema,
+  type PlaceStreamData,
   meshSchema,
   lightSchema,
   cameraSchema,
@@ -33,6 +35,8 @@ export {
   animatorSchema,
   clothSwaySchema,
   audioSchema,
+  AUDIO_CHANNELS,
+  type AudioChannel,
   skySchema,
   postfxSchema,
   particlesSchema,
@@ -204,6 +208,7 @@ export {
   type SceneIndex,
 } from "./scene-index.js";
 export { diffSceneDocs } from "./diff.js";
+export { contentTag, rebaseSceneEdits, type RebaseResult } from "./scene-rebase.js";
 export {
   spritesheetSchema,
   resolveSpriteFrames,
@@ -347,7 +352,9 @@ export * from "./dressing/index.js";
 export {
   voxelWorldSchema,
   registerVoxelComponents,
+  voxelCellInBounds,
   type VoxelWorldData,
+  type VoxelWorldBounds,
 } from "./components/voxel.js";
 export * from "./voxel/index.js";
 export {
@@ -421,8 +428,15 @@ export { LANDING_NETSTATE, landingKey, landingSchema, registerLandingNetState, i
 export { STAFF_NETSTATE, STAFF_ROLES, STAFF_TELEPORT_EVENT, staffKey, staffSchema, staffTeleportSchema, staffTeleportRefusal, registerStaffNetState, staffRole } from "./staff.js";
 export type { StaffRole, StaffTeleportRequest } from "./staff.js";
 export { NOTICE_NETSTATE, noticeKey, noticeSchema, registerNoticeNetState, readNotice } from "./notice.js";
+export { encounterChoiceSchema, registerEncounterNetState } from "./encounter.js";
 export {
   MOB_EVENTS,
+  MOB_BEHAVIOR_ARCHETYPES,
+  mobBehaviorArchetypeSchema,
+  resolveMobBehavior,
+  mobBehaviorOverride,
+  type MobBehaviorArchetype,
+  type MobBehaviorInput,
   MOB_STATES,
   mobEventDecls,
   COMBAT_NETSTATE,
@@ -472,3 +486,7 @@ export * from "./npc/index.js";
 export * from "./zfight.js";
 export * from './prop-curation.js';
 export { COOLDOWN_NETSTATE, cooldownKey, cooldownSchema, registerCooldownNetState } from "./cooldown.js";
+export * from "./place-solver/index.js";
+export { placeRuleSchema, placeOpeningSchema, registerPlaceRuleComponent, PLACE_SEATS, type PlaceRule, type PlaceRuleInput, type PlaceSeat, type PlaceOpening } from "./components/place-rule.js";
+
+export { planPlaceStreaming, placeDoc, placeWanted, placeEdgeDistance, placeStreamOf, FOOTPRINT_PAD, propHideDistance, propHideIndex, propRevealIndex, OUTDOOR_PROP_MIN_REVEAL, shadowlessEntities, PROP_HIDE_BUCKETS, PROP_SHADOW_MIN_HIDE, type PlaceSpec, type PlacePlan } from "./place-stream.js";

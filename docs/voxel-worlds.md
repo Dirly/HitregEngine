@@ -1186,11 +1186,15 @@ every scatter system grows them:
      is squared.
   2. **Clamp the fade to the coverage that actually exists.** The band is a
      per-frame uniform, `min(radius, placeRadius - |camera - centre|)`, so
-     cover ALWAYS reaches zero opacity before it runs out of blades whatever
+     cover ALWAYS shrinks to nothing before it runs out of blades whatever
      the pad, the recenter fraction and the lead happen to add up to. When
      there is headroom it sits at the authored radius and costs nothing. Do
      not be tempted to anchor the fade to the CENTRE instead: the centre jumps
-     a whole cell on a recenter, so every blade's opacity would jump with it.
+     a whole cell on a recenter, so every blade's size would jump with it.
+
+The edge is a vertex-stage height scale, measured to each tuft's `instanceOrigin`
+over the last 15% of the reach (flat cards scale outward). Not an alpha ramp: on
+hard-alpha PSX cards that is just a per-pixel arc where it crosses `alphaTest`.
 
 ## 29. Tiling: break the grid, don't chase a better texture
 
@@ -1758,6 +1762,26 @@ with a river's width (a brook is crossed anywhere, a broad river only where a
 bridge is worth it, and running *along* a river pays every step), and
 multiplies swamp cells. Wide rivers were walls once and a town on a peninsula
 behind one became unreachable.
+
+**One network, not a fan of links (2026-10-31, Derek: "a lot of criss-crossing and
+overlapping").** `worldgen paths` routed every link PER PAIR, alone on the bare grid: two links out of
+one gate re-found the same valley side by side and braided (redstrand: 390 m, 8 crossings), and place
+tracks and hand-routed roads ran beside paths. Now (tools/_road-network.mts): the network GROWS from the
+most important town (Prim), each destination joining the roads already CONNECTED to it at the point
+that trades the new length against the way back to the hub; a road cell is cheap and the cell beside one
+dear, so a link follows the road it shares a way with; every new line (paths, trails, `worldgen road`,
+place tracks) is folded in — a stretch within 15 m of a road for over 40 m is dropped and the piece ends
+ON the road it meets, its tread pinned level. Loops only where the network's way round is 2.5x the
+straight line and the link saves 1.3x. The `roads` status row (`worldgen road-net`, `--png` draws it)
+fails crossings that are no crossroads, side-by-side runs, redundant links and stubs; `road-net --fold`
+mends an old network by slicing docs, `trails --places` routes trails to reserved places in Prim order,
+`road --route --join start` sets a track off from the network. A fold written with `--write` is recorded as a ROAD TRIM in
+the world-order stages file: places under it re-check `sited` / `installed` by the gates (`zonegen stages --recheck
+<place>`) and keep their concepts and designs. A fold is lips-checked: a new fault round the roads it changed keeps
+the tread there (re-folded, up to 4 rounds) or the fold is refused. The cut meets the doubled road along its own line,
+the junction takes the host's banks, a replaced road keeps its place in the array (overlaps draw in order), the tread
+another route ends on is never cut, and a hairpin (two routes retracing each other from a shared end that is no place)
+loses both tails.
 
 `worldgen trails` routes a footpath from the nearest point of the road
 network — on the SAME landmass — up to each peak POI, allowed a steeper grade
@@ -3699,9 +3723,43 @@ untouched. This replaces burying 20 m-deep additive blobs under a site to
 suppress foliage; it is also the per-plot town exclusion (one clearing per
 building plot, street and door path, the rest of the town keeps its grass).
 
+**`features.fields`** + **`cover[].fields: true`** — a CROP layer (wheat)
+grows only inside a declared field (polygon or `center` + `radius`, `feather`
+inward from the edge, `layers` = which crop layers it sows, `owner`) and
+nowhere else, whatever its biomes (owner ruling 2026-10-30, redstrand: "a
+desert wouldn't have wheat-looking grass; the farm would have crops"). A place
+declares its strips in `<job>/fields.json` (ids `<poi>-*`, owner `<poi>`):
+place-build install writes them with `worldgen vegetation --fields`, and a
+remove takes them off with the place's other features.
+
+**`cover[].regions` / `exceptRegions`** — a layer grows only in (or never in)
+the named regions, nested regions included. `worldgen flora` writes them when
+it splits a layer per zone so each copy carries its zone's ground-tile tint
+(below); not hand-written.
+
+**Species and cover follow the climate** (`tools/worldgen-flora.mts`, the
+`flora` status row, `worldgen flora <world> [--check]`): palms and jungle only
+in a tropical climate, except BY WATER in a dry one — a dry world's desert and
+oasis water grows palms (`oasis-palm` bank row + the sparser `oasis-palm-grove`
+behind it: the density falls off away from the bank) and its willows stand only
+by upland water. Cover kinds come from the tiles a layer draws (the page's
+`tiles.json`): `wheat` is a crop (fields only, any climate); wheat-looking
+plumes (`savannatall`) and lush grass/flowers never grow on a dry world's dry
+ground, where the desert layers (scrub, prickly pear, agave, straw tufts) take
+their place. **Grass matches its ground tile** (owner ruling 2026-10-30): every
+non-water, non-crop layer's blades (sprite x `bladeColor`) are within x0.7-1.4
+in value and 25 deg in hue of every tile they stand on (the zone tile of the
+surface's role, else the base tile; `tools/worldgen-cover-colour.mts`).
+`worldgen flora` fixes a miss: it re-tints the layer onto its tiles, splits it
+per zone when one tint cannot fit (`<id>--<region>` copies), and stops a layer
+growing on a surface it still cannot match.
+
 Commands (from apps/playground):
 
 ```
+npx tsx tools/worldgen.mts vegetation <world> --project <p> --fields <file>        # upsert declared fields by id
+npx tsx tools/worldgen.mts vegetation <world> --project <p> --remove-fields <owner|id,...>
+npx tsx tools/worldgen.mts flora <world> --project <p> [--check]                    # species, cover kinds, woodland, cover colours
 npx tsx tools/worldgen.mts vegetation <world> --project <p>                         # report, warnings for unknown ids
 npx tsx tools/worldgen.mts vegetation <world> --project <p> --region <id> --set <json|file> [--dry-run]
 npx tsx tools/worldgen.mts vegetation <world> --project <p> --region <id> --count   # scatter per rule inside it
@@ -3973,7 +4031,18 @@ the coordinator rules an exception for (e.g. a walk-in stair tunnel whose lining
 
 **The doc.** `features.operators: [{ id, op, ...params }]`. Each `op` registers a Zod params schema (listed with its
 descriptions in the engine spec's `landformOperators`); an unknown op or a bad param fails recipe validation. Shipped:
-`terrace`, `ledges`, `cave`, `landmark`, `scree`, `paint`, `wall`. Planned: `harbor`.
+`terrace`, `ledges`, `cave`, `landmark`, `scree`, `paint`, `wall`, `island`. Planned: `harbor`.
+
+**Islands** (`island`, `operators-island.ts`; owner ruling 2026-11-02, the Weeping Stair moved onto an island in lake-1): raise-only
+masked height patches over the lake bed the field already carved (patches apply after lakes, and the water sheet is clipped
+against the terrain, so the island is dry ground the sheet hides under; the lake keeps its one level). A beach shelf runs
+`shelf` m under the water at the beach grade, the beach climbs `beach` m over `shore` m, the shoulder rises to `waterY + rise`
+at `slope` (eased both ends), the flank drops to the bed at `flank`. `core` adds a rock knoll (the mass a cave/stair-well or a
+door is cut into: a flat top gives the `cave` operator no face, and its mouth stretch on flat ground is ~25 m); `shoal` lays
+a submerged crest `depth` m under the water toward a shore for stepping stones. The waterline lobes grow with distance from
+the centre (a bay, never a crease over the top). Refuses a centre in < 1.5 m of water and a waterline onto dry ground (a
+peninsula). A bore under the island may run below the water level: the swim query and the sheet both read the heightfield
+(the island top), so nothing floods it; keep its floor above the lake bed.
 
 **Path ribbons were REMOVED 2026-10-30** (owner ruling: buried by terrain, never approved, then "it shouldn't even be part of our world-building tools anymore"). The `path` operator, `features.ribbons`, ribbon.ts and the ribbon materials are gone; a recipe, an operator doc or a recipe edit that still declares one fails to load with `ribbons were removed 2026-10-30: use carved+painted tracks`. Walks are carved + painted tracks: `worldgen road` (a recipe road graded into the voxels and painted).
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { floorCheck, lattice } from "../tools/town-settle.mts";
+import { floorCheck, lattice, solveFloor, CLEAR_DEFAULT } from "../tools/town-settle.mts";
 
 type P = [number, number];
 const sq = (x0: number, z0: number, x1: number, z1: number): P[] => [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
@@ -27,4 +27,12 @@ test("a floor flush with the ground fails as not raised (Derek 10-02: ~0.6 m ove
   const low = floorCheck([{ id: "flush", groundY: 10.15, ground: sq(0, 0, 5, 5) }], top);
   assert.match(low.failures[0]!, /floor-not-raised flush/);
   assert.equal(floorCheck([{ id: "raised", groundY: 10.6, ground: sq(0, 0, 5, 5) }], top).failures.length, 0);
+});
+
+test("the placement solver seats a town floor CLEAR over the highest ground of its footprint, and the check passes it", () => {
+  const top = (x: number): number => 10 + x * 0.2; // a 1 m fall across a 5 m lot
+  const fp = sq(0, 0, 5, 5), r = solveFloor(fp, top, CLEAR_DEFAULT);
+  assert.equal(r.status, "ok");
+  assert.ok(Math.abs(r.y! - (11 + CLEAR_DEFAULT)) < 0.02, `floor ${r.y}`);
+  assert.equal(floorCheck([{ id: "lot", groundY: r.y!, ground: fp }], top).failures.length, 0);
 });

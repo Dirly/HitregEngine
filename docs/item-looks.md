@@ -36,6 +36,18 @@ collapse in the vertex stage; this does not remove their vertex cost.
 
 ## The item file
 
+Worn items sharing a model keep their separate texture groups. Their glow is
+limited to the item's own visible parts after the wearer's fit remap; a later
+item replacing a part also replaces ownership of its glow. This lets a hood
+and a separate eye-light item share a helmet model without lighting the hood.
+The model supports one glow style: the last relevant glowing item in fixed
+`wear` order, or `EQUIPMENT_SLOTS` order for a character sheet, selects it.
+Items with identical glow settings contribute their selected parts together.
+Removing or hiding the last glowing part explicitly clears the old glow.
+Ordinary models also honor the selected glow parts, preserving their atlas
+and authored emissive shader; their fallback glow is steady. Animated pulse,
+noise and length fade use the moving-batch path.
+
 ```json
 {
   "name": "Venomfang",
@@ -171,6 +183,12 @@ swing. On the longsword:
 - **±X points off the flats**.
 
 Gravity stays world-down: drips fall and flames rise whatever the pose.
+
+**Ride the item or stay behind.** Set the emitter's `space`. `"local"` is for
+anything that belongs ON the item (flames, embers, sparkles, motes): particles
+ride the blade, so running or swinging never smears them across the world.
+Leave it `"world"` (the default) for anything that leaves the item: a drip or a
+poison vapour falls away where it was shed.
 
 **Pinpointing the emitter.** `anchor.part` + `anchor.at` resolve against the
 part's box, read from the geometry: `"tip"`, `"base"` (the ends of the longest

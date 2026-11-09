@@ -3,7 +3,7 @@ import {
   createScene,
   entityDocSchema,
   subtreeOf,
-  validateScene,
+  validateSceneStructure,
   type EntityDoc,
   type SceneDoc,
 } from "./scene.js";
@@ -416,7 +416,9 @@ export function expandScene(
     }
   }
 
-  const issues = validateScene(out, registry);
+  // normalizeEntity already validated and applied defaults to every final
+  // component. Recheck the assembled hierarchy without parsing them all again.
+  const issues = validateSceneStructure(out);
   if (issues.length > 0) {
     throw new PrefabError(
       `expanded scene is invalid:\n` +

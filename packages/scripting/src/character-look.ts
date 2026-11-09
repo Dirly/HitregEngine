@@ -1,15 +1,44 @@
 import {
   dressCharacter,
+  buildAppearance,
+  bodyOptionOf,
+  remapPart,
   EQUIPMENT_SLOTS,
   partRulesSchema,
   type CharacterCreation,
   type LookPiece,
+  type LookRemap,
+  type ItemGlow,
   type ModelPlacement,
   type PartRules,
 } from "@hitreg/core";
 import type * as THREE from "three";
 import { Script, type ModelLook, type ModelTables } from "./script.js";
 import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } from "./character-store.js";
+
+type WornPiece = LookPiece & { glow?: ItemGlow | undefined };
+
+/** One glow style per model: final visible item ownership, then last relevant style wins. */
+function wornGlow(pieces: readonly WornPiece[], model: string, visible: readonly string[], remap: LookRemap | null | undefined): ItemGlow | null {
+  const shown = new Set(visible), owner = new Map<string, WornPiece>();
+  for (const piece of pieces) if (piece.model === model) for (const raw of piece.parts) {
+    const part = remapPart(raw, remap);
+    if (shown.has(part)) owner.set(part, piece);
+  }
+  const contributions: Array<{ glow: ItemGlow; parts: string[]; style: string }> = [];
+  for (const piece of pieces) {
+    const glow = piece.glow;
+    if (piece.model !== model || !glow) continue;
+    const parts = [...new Set((glow.parts ?? piece.parts).map((p) => remapPart(p, remap)))].filter((p) => owner.get(p) === piece);
+    if (!parts.length) continue;
+    // Explicit field order; parts are a selection, not a different glow style.
+    const style = JSON.stringify([glow.color, glow.intensity, glow.pulse, glow.noise, glow.fade]);
+    contributions.push({ glow, parts, style });
+  }
+  const last = contributions.at(-1);
+  if (!last) return null; // Clearing is intentional: undefined would retain an earlier glow.
+  return { ...last.glow, parts: [...new Set(contributions.filter((c) => c.style === last.style).flatMap((c) => c.parts))] };
+}
 
 /**
  * Draws a CHARACTER from its replicated sheet: the creation build's body,
@@ -178,18 +207,20 @@ export class CharacterLook extends Script {
     const creation = this.creation;
     if (!creation || !this.targetModel) return;
     const catalog = catalogOf(this.ctx);
-    const items: LookPiece[] = [];
+    const items: WornPiece[] = [];
     const fixed = this.fixedLook();
     const sheet = fixed ? null : readSheet(this.store, this.param<string>("actor"));
     const worn = fixed ? fixed.wear : EQUIPMENT_SLOTS.map((slot) => { const uid = sheet?.equipment[slot]; return uid ? (sheet?.items[uid]?.itemId ?? "") : ""; });
     for (const itemId of worn) {
       const appearance = itemId ? catalog(itemId)?.appearance : undefined;
-      if (appearance) items.push({ model: appearance.model, parts: appearance.parts, texture: appearance.texture ?? null });
+      if (appearance) items.push({ model: appearance.model, parts: appearance.parts, texture: appearance.texture ?? null, glow: appearance.glow });
       else if (itemId && fixed) console.warn(`[character-look] ${this.entityId}: worn item "${itemId}" has no appearance`);
     }
+    const appearance = fixed ? fixed.appearance : (sheet?.build?.appearance ?? null);
+    const remap = bodyOptionOf(creation, { appearance: buildAppearance(creation, { appearance: appearance ?? {} }) })?.remap;
     const dressed = dressCharacter({
       creation,
-      appearance: fixed ? fixed.appearance : (sheet?.build?.appearance ?? null),
+      appearance,
       items,
       rules: (model) => this.rulesOf(model),
       sheets: (model) => {
@@ -208,6 +239,7 @@ export class CharacterLook extends Script {
     const look: ModelLook = {
       parts: show?.parts ?? [],
       groups: show?.groups ?? [],
+      glow: wornGlow(items, this.targetModel, show?.parts ?? [], remap),
       skinTint: show?.tint ?? null,
       skinSheets: mine?.skinSheets ?? [],
       ...(mine?.tintWhole ? { tintWhole: true } : {}),

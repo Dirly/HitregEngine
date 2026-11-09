@@ -49,15 +49,15 @@ export async function runJob(req: Req, o: { name?: string; scale: ScaleInfo; sca
   const helpers = path.join(jobDir, "helpers.py"), examples = path.join(jobDir, "examples.py"), job = path.join(jobDir, "job.json"), brief = path.join(jobDir, "brief.md");
   fs.writeFileSync(helpers, helperContext(o.worldKit));
   fs.writeFileSync(examples, exampleContext(o.worldKit));
-  fs.writeFileSync(job, JSON.stringify({ name, culture: req.culture, scale: o.scale, scales: o.scales, worldKit: path.resolve(o.worldKit), ...(req.landmark ? { landmark: req.landmark } : {}) }, null, 2));
+  fs.writeFileSync(job, JSON.stringify({ name, culture: req.culture, scale: o.scale, scales: o.scales, worldKit: path.resolve(o.worldKit), ...(req.landmark ? { landmark: req.landmark } : {}), ...(req.footprint ? { footprint: req.footprint } : {}) }, null, 2));
   const dest = path.join(collectionDir(o.worldKit), "designs", `${name}.py`);
   const t0 = Date.now(); let tokens: number | null = null, gate = "", stage: string | undefined, retry: string | undefined;
   for (let attempt = 1; attempt <= 2; attempt++) {
     fs.writeFileSync(brief, writeBrief({ request: req, name, scale: o.scale, cultureNote: o.cultureNote, reviewNote: o.reviewNote, retry, reuseNotes:reuseBrief(reusePolicy) }));
     const check = `npx tsx tools/prop-codex/check.mts {stage} --job "${job}"`;
     log(`  ${name}: codex attempt ${attempt}`);
-    const concept = req.concept ? path.resolve(PLAYGROUND, req.concept) : undefined;
-    const r = await runner(["--brief", brief, "--out", `${name}.py=${dest}`, "--context", [helpers, examples, ...(concept && fs.existsSync(concept) ? [concept] : [])].join(","), "--check", check, "--timeout", "1500"]);
+    const concepts = (req.concept ?? "").split(",").filter(Boolean).map((c) => path.resolve(PLAYGROUND, c)).filter((c) => fs.existsSync(c));
+    const r = await runner(["--brief", brief, "--out", `${name}.py=${dest}`, "--context", [helpers, examples, ...concepts].join(","), "--check", check, "--timeout", "1500"]);
     const t = parseTokens(r.output); if (t !== null) tokens = (tokens ?? 0) + t;
     stage = parseStage(r.output) ?? stage;
     const gateFile = stage ? path.join(stage, "gate.txt") : "";
@@ -92,7 +92,7 @@ export async function runBatch(reqs: Req[], o: { names?: Record<string, string>;
   for (const j of results) {
     appendLedger(o.projectsDir, j);
     if (j.status === "pass" || j.status === "retry-pass")
-      writeOrigin(o.worldKit, j.name, { request: j.request.id, project: j.request.project, for: j.request.for, culture: j.request.culture, scale: j.request.scale, ...(j.request.landmark ? { landmark: j.request.landmark } : {}), tokens: j.tokens, seconds: j.seconds, attempts: j.attempts, at: new Date().toISOString() });
+      writeOrigin(o.worldKit, j.name, { request: j.request.id, project: j.request.project, for: j.request.for, culture: j.request.culture, scale: j.request.scale, ...(j.request.landmark ? { landmark: j.request.landmark } : {}), ...(j.request.footprint ? { footprint: j.request.footprint } : {}), tokens: j.tokens, seconds: j.seconds, attempts: j.attempts, at: new Date().toISOString() });
   }
   return results;
 }

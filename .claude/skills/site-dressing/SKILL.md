@@ -32,6 +32,13 @@ npx tsx tools/dress.mts apply  --project <p> --plan <plan> --scene <s> --at 0,0,
 Named pitches: `hearth-seat`, `spit-side`, `firewood-side`, `door-left/right`, `cave-inside`, `cave-flank`,
 `path-side`, `edge`, `water-edge`.
 
+## Placement is solved
+
+Agents state intent (what, roughly where, facing); the placement solver owns exact transforms. A gate that catches a placement fault means the solver is missing a rule: fix the solver, never the place by hand. A repeated visual is one prefab with shared parameters. `dress apply` runs the placement solver after its seat (door clear zones 1.5 m x opening + 0.4 m, stair
+approaches, lanes, structure walls): a prop that cannot stand is moved or DROPPED with its reason (`solver` rows in the
+inverse file; `--no-solve` only for an A/B). A dropped prop is a plan fault: move its area or pick a smaller prop, never
+re-add it by transform. `REPEATS` lines name repeated inline lights/effects/assemblies: make them one prefab.
+
 ## Gates: failure -> fix
 - `CHECK ... -> FAILED`: read each violation code.
   - `wrong-scale` / `wrong-culture` / `scale-undeclared` -> pick from the filtered menu; if nothing fits, that is a

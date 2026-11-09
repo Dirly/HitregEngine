@@ -475,6 +475,17 @@ describe("a lane the real player fits through", () => {
     expect(codes(wrongKind, "torch")).toEqual(["anchor-only"]);
     expect(() => dressingSchema.parse({ mount: "surface", size: [0.1, 0.1, 0.1], anchorKinds: ["sconce"] })).toThrow();
   });
+
+  it("assigns window daylight to the room behind an outward-facing window for room culling", () => {
+    props.set("daylight", dressingSchema.parse({ mount: "wall", size: [0.1, 0.1, 0.1], solid: false, category: "light", anchorKinds: ["window"], setting: "indoor" }));
+    const map = buildMap();
+    map.anchors.push({ id: "window", kind: "window", level: 0, position: [2.8, 1.8, -0.1], yaw: 180, mount: "wall", outdoor: true });
+    const r = go([{ id: "day", prop: "daylight", place: { kind: "anchor", anchor: "window" } }], { map });
+    expect(codes(r, "day")).toEqual([]);
+    const placed = r.placements.find((p) => p.id === "day")!;
+    expect(placed.room).toBe("A");
+    expect(placed.position[2]).toBeCloseTo(-0.1 - MOUNT_WALL);
+  });
 });
 
 describe("circulation mask ('x' walking paths)", () => {
@@ -1085,5 +1096,41 @@ describe("plan zones (open-plan role zones)", () => {
   it("warns a zone under its item minimum", () => {
     const r = zoned(items, [{ id: "all", rect: [0.25, 0.25, 4, 5.75], minWall: 0, minItems: 5 }]);
     expect(wcodes(r, "all")).toEqual(["zone-sparse"]);
+  });
+});
+
+describe("owner walk 2026-10-30 (Reeve's house): posts, bare shelves, chandeliers off the beam", () => {
+  const extra = new Map<string, DressingData>([
+    ...PROPS,
+    ["sconce-lit", dressingSchema.parse({ mount: "wall", size: [0.1, 0.3, 0.18], solid: false, fire: true, use: ["light"] })],
+    ["shelf-g", dressingSchema.parse({ mount: "floor", against: "wall", size: [1.2, 1.6, 0.4], use: ["shelf", "storage"], holdsGoods: true, provides: [{ id: "b1", kind: "surface", position: [0, 0.6, 0], size: [1.1, 0.35] }, { id: "b2", kind: "surface", position: [0, 1.2, 0], size: [1.1, 0.35] }] })],
+    ["jar", dressingSchema.parse({ mount: "surface", size: [0.2, 0.3, 0.2] })],
+    ["beam-chandelier", dressingSchema.parse({ mount: "ceiling", size: [1, 0.8, 1], chain: "chain-link", hangFrom: "beam" })],
+  ]);
+  const go = (items: DressingPlanInput["items"], map = MAP) =>
+    resolveDressing({ plan: dressingPlanSchema.parse({ id: "zt", map: "zt-house", items }), map, prop: (id) => extra.get(id), set: () => undefined, options: { minItems: () => 0 } });
+  const ids = (r: DressingResolveResult, item: string) => [...r.violations, ...r.warnings].filter((v) => v.item === item).map((v) => v.code);
+  it("wall-post: a sconce on a post standing proud of the wall fails; the plain wall beside it is fine", () => {
+    const m = structuredClone(MAP);
+    // a post one cell proud of room A's west wall at z 2.5..3.0 (rows 10-11, column 1)
+    m.levels[0]!.cells = m.levels[0]!.cells.map((row, r) => (r === 10 || r === 11 ? row.slice(0, 1) + "#" + row.slice(2) : row));
+    expect(ids(go([{ id: "s", prop: "sconce-lit", place: { kind: "wall", wall: "A.W", t: 2.5, height: 1.6 } }], m), "s")).toContain("wall-post");
+    expect(ids(go([{ id: "s", prop: "sconce-lit", place: { kind: "wall", wall: "A.W", t: 4.2, height: 1.6 } }], m), "s")).not.toContain("wall-post");
+  });
+  it("shelf-empty: a shelf made to be filled needs goods on every board; unsocketed goods spread to the emptiest board", () => {
+    const shelf = { id: "sh", prop: "shelf-g", place: { kind: "wall" as const, wall: "A.N", t: 2 } };
+    expect(ids(go([shelf]), "sh")).toContain("shelf-empty");
+    expect(ids(go([shelf, { id: "j1", prop: "jar", place: { kind: "on", item: "sh" } }]), "sh")).toContain("shelf-empty");
+    expect(ids(go([shelf, { id: "j1", prop: "jar", place: { kind: "on", item: "sh" } }, { id: "j2", prop: "jar", place: { kind: "on", item: "sh" } }]), "sh")).not.toContain("shelf-empty");
+  });
+  it("beam-hang: a chandelier that hangs from a beam is refused off the beam line and warned when the map has no beam", () => {
+    const m = structuredClone(MAP);
+    m.anchors.push({ id: "beam-1", kind: "beam", level: 0, position: [6, 5, 3], yaw: 90, mount: "ceiling", outdoor: false, size: [5, 0, 0.3] }); // runs along z (the marker faces across it)
+    expect(ids(go([{ id: "c", prop: "beam-chandelier", place: { kind: "ceiling", level: 0, at: [6, 2], drop: 1 } }], m), "c")).not.toContain("beam-hang");
+    expect(ids(go([{ id: "c", prop: "beam-chandelier", place: { kind: "ceiling", level: 0, at: [5, 2], drop: 1 } }], m), "c")).toContain("beam-hang");
+    expect(go([{ id: "c", prop: "beam-chandelier", place: { kind: "ceiling", level: 0, at: [6, 2], drop: 1 } }]).warnings.some((v) => v.code === "beam-hang")).toBe(true);
+    // an auto chandelier lands on the beam
+    const a = go([{ id: "c", prop: "beam-chandelier", place: { kind: "auto", room: "B" } }], m);
+    expect(Math.abs(a.placements.find((p) => p.id === "c")!.position[0] - 6)).toBeLessThan(0.01);
   });
 });

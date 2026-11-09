@@ -7,6 +7,7 @@ import { InstancedProps } from "./instancing.js";
 import { impostorGeometry, impostorInstanceData, type ImpostorInstanceData } from "./impostor.js";
 import {
   buildLodProxyGeometry,
+  isCutoutMaterial,
   buildMidTier,
   cachedImpostor,
   cachedInstancedMaterial,
@@ -360,10 +361,11 @@ export class InstancedPropPool {
         far = new InstancedProps(impostorGeometry(bounds, capacity), baked.material, capacity);
         impostor = { rotations: new Float32Array(capacity * 4), scales: new Float32Array(capacity) };
       } else {
-        const { geometry, isTall } = buildLodProxyGeometry(submeshes);
         const dominant = submeshes.reduce((a, b) =>
           b.geometry.attributes["position"]!.count > a.geometry.attributes["position"]!.count ? b : a,
         );
+        // a cutout texture (dead bush, fern) on an opaque box draws black cubes: cross cards instead
+        const { geometry, isTall } = buildLodProxyGeometry(submeshes, isCutoutMaterial(override ?? dominant.material));
         far = new InstancedProps(geometry, instancedFarProxyMaterial(isTall, materialLook(dominant.material)), capacity);
       }
     } else {

@@ -20,7 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createWorldField, terraceWallSchema, type HeightPatchDoc, type TerraceDoc, type TerraceWallDoc, type WorldRecipe } from "@hitreg/core";
-import { recipeInverse, removeTerrace, solveTerraceChain, terraceGates, townWallStyle, type TerraceFit, type TerraceKit } from "./worldgen-terrace-walls.mts";
+import { recipeInverse, removeTerrace, solveTerraceChain, terraceGates, townWallStyle, zoneCliffAt, type TerraceFit, type TerraceKit } from "./worldgen-terrace-walls.mts";
 import { checkDesign, densify, footprintOf, inPoly, lineDist, polyEdgeDist, polyEdges, r2, siteFall, type DesignReport, type Envelopes, type ResolvedEdge, type V2 } from "./town-design-check.mts";
 import { DESIGN_RULE, townDesignSchema, type DesignTerrace, type TownDesign } from "./town-design-schema.mts";
 import { programFromPlan } from "./worldgen-town-program.mts";
@@ -29,6 +29,17 @@ import { requirePlaceStage } from "./world-order.mts";
 type RoadDoc = WorldRecipe["features"]["roads"][number];
 
 export const planPatchId = (town: string): string => `town-plan-${town}`;
+/** k-town4: the paving laid over every walled (intramural) terrace of a designed town: `<town>-plan-paving-<terrace>`. */
+export const planPavingId = (town: string, terrace: string): string => `${town}-plan-paving-${terrace}`;
+const isPlanPaving = (town: string, id: string): boolean => id.startsWith(`${town}-plan-paving-`);
+/** The paving surface of the zone a point stands in (its region's `ground.paving`), else the palette's first paving-like surface. */
+export function zonePavingSurface(recipe: Pick<WorldRecipe, "regions" | "surfaces">, at: readonly [number, number]): string {
+  for (const r of recipe.regions ?? []) {
+    const name = (r as { ground?: Record<string, string> }).ground?.paving;
+    if (name && inPoly(r.polygon as V2[], at[0], at[1])) return name;
+  }
+  return recipe.surfaces.find((x) => /paving|flag|cobble/.test(x.name))?.name ?? "gravel";
+}
 const isPlanRoad = (town: string, id: string): boolean => id.startsWith(`${town}-street-`) || id.startsWith(`${town}-ramp-`) || id.startsWith(`${town}-stair-`);
 
 /** The recipe with this town's earthworks lifted off: the natural ground every from-plan cut is measured on. */
@@ -37,6 +48,7 @@ export function bareOfTown(recipe: WorldRecipe, townId: string): WorldRecipe {
   for (const t of [...(bare.features.terraceWalls ?? [])]) if (t.owner === townId && t.tags.includes("town-riser")) removeTerrace(bare, t.id);
   bare.features.heightPatches = bare.features.heightPatches.filter((p) => p.id !== planPatchId(townId));
   bare.features.roads = bare.features.roads.filter((r) => !isPlanRoad(townId, r.id));
+  bare.features.groundPaints = (bare.features.groundPaints ?? []).filter((g) => !isPlanPaving(townId, g.id));
   bare.features.towns = bare.features.towns.map((t) => (t.id === townId ? { ...t, flatten: 0, terraces: [] } : t));
   return bare;
 }
@@ -111,7 +123,7 @@ export interface EarthworkPlan {
  * Everything the cut writes, from the design and the natural ground (pure apart from `height`). `spacing` is the
  * raster's sample step (1 m; 2 m for a town over 1 km across).
  */
-export function planEarthworks(design: TownDesign, site: { height: (x: number, z: number) => number; sea: number }, envelopes: Envelopes = {}, opts: { tier?: string; tags?: string[]; centre?: V2; spacing?: number } = {}): EarthworkPlan {
+export function planEarthworks(design: TownDesign, site: { height: (x: number, z: number) => number; sea: number }, envelopes: Envelopes = {}, opts: { tier?: string; tags?: string[]; centre?: V2; spacing?: number; zoneCliff?: string } = {}): EarthworkPlan {
   const fall = siteFall(site.height, opts.centre ?? design.gate.at, 60);
   const report = checkDesign(design, { ...site, ...fall }, envelopes);
   const edges = report.edges;
@@ -199,7 +211,9 @@ export function planEarthworks(design: TownDesign, site: { height: (x: number, z
 
   // ---- walls: every terrace / tread with a wall edge
   const walls: TerraceWallDoc[] = [];
-  const style = (t: DesignTerrace | undefined, e?: ResolvedEdge) => e?.style ?? townWallStyle({ tier: opts.tier, tags: opts.tags ?? [] });
+  // k-town2: the town's own masonry (its buildings' kit style, else its zone's stone), never the grey generic by default
+  const townMasonry = townWallStyle({ tier: opts.tier, tags: opts.tags ?? [] }, { kitStyles: design.buildings.map((b) => (b.request as { style?: string } | undefined)?.style), zoneCliff: opts.zoneCliff });
+  const style = (t: DesignTerrace | undefined, e?: ResolvedEdge) => e?.style ?? townMasonry;
   // ONE DOC PER RUN of consecutive wall edges over the same thing (a lower terrace, or the natural ground / sea): the
   // fitter builds one wall height per doc, so a terrace whose risers drop 3.6 m to the shelf below and 2 m to the hill
   // is two docs. Each doc's footprint is a BAND along its run (the run + the run offset 5 m inward): the band's other
@@ -210,7 +224,12 @@ export function planEarthworks(design: TownDesign, site: { height: (x: number, z
     const n = t.polygon.length;
     const isWall = (i: number) => { const e = edges.find((x) => x.terrace === t.id && x.edge === i); return !!e && e.kind === "drop" && (e.treatment === "wall" || e.treatment === "stepped"); };
     const edgeAt = (i: number) => edges.find((x) => x.terrace === t.id && x.edge === i)!;
-    const key = (i: number) => `${edgeAt(i).outside}|${edgeAt(i).treatment}|${tierHeight(edgeAt(i))}`;
+    // a run is one wall HEIGHT on one FOOT level (the fitter builds one height per doc): a wall over the terrace below and
+    // the top tier of a stepped edge that both stand 2 m on the same level are one run, round their corner with a corner
+    // piece; keyed by what they stand over, each ended open at the corner with a stepped end whose bank sank the corner
+    // (town-1 10-30: gutter 0.67 m, foot gap 0.43 m). The sea is fitted, its own run.
+    const wallH = (e: ResolvedEdge) => (e.treatment === "stepped" ? tierHeight(e) : kitH(t.level - footLevel(design, e)));
+    const key = (i: number) => { const e = edgeAt(i); return e.outside === "sea" ? "sea" : `${r2(t.level - wallH(e))}|${wallH(e)}|${e.style ?? ""}`; };
     const wallIdx = [...Array(n).keys()].filter(isWall);
     if (!wallIdx.length) continue;
     // runs: start where the previous edge is not a wall of the same key
@@ -250,7 +269,9 @@ export function planEarthworks(design: TownDesign, site: { height: (x: number, z
         if (!e || e.terrace !== t.id || !run.includes(e.edge)) continue;
         // the insert stands where the connection crosses the edge, snapped down to the 2 m grid
         const hit = densify(c.points, 0.5).map((p) => ({ p, r: lineDist([e.a, e.b], p[0], p[1]) })).sort((p, q) => p.r.d - q.r.d)[0]!;
-        inserts.push({ role: c.kind === "ramp" ? "ramp" : "stair", edge: closed ? e.edge : run.indexOf(e.edge), at: Math.max(0, Math.floor(hit.r.s / 2) * 2 - 2), run: 4 });
+        // an AXIAL stair (k-town4) is centred on the connection's axis (6 m wide); the others start 2 m before the crossing
+        const axial = c.kind === "stair" && c.form === "axial";
+        inserts.push({ role: c.kind === "ramp" ? "ramp" : axial ? "stair-axial" : "stair", edge: closed ? e.edge : run.indexOf(e.edge), at: Math.max(0, axial ? Math.round((hit.r.s - 3) / 2) * 2 : Math.floor(hit.r.s / 2) * 2 - 2), run: 4 });
       }
       walls.push(terraceWallSchema.parse({
         id: `${design.town}-plan-${t.id}${runs.length > 1 ? `-${ri + 1}` : ""}`,
@@ -269,7 +290,9 @@ export function planEarthworks(design: TownDesign, site: { height: (x: number, z
   for (const tr of treads) {
     const e = edges.find((x) => x.terrace === tr.terrace && x.edge === tr.edge)!;
     const next = treads.find((x) => x.terrace === tr.terrace && x.edge === tr.edge && x.k === tr.k + 1)?.level ?? footLevel(design, e);
-    walls.push(terraceWallSchema.parse({ id: `${design.town}-plan-${tr.id}`, owner: design.town, style: style(undefined, e), footprint: tr.polygon, walls: [2], topY: tr.level, height: kitH(tr.level - next), feather: 4, tags: ["town-riser", "town-plan", "tread"] }));
+    // NOT `<town>-plan-<terrace>-tread-…`: a terrace whose walls are one run is the doc `<town>-plan-<terrace>`, and the
+    // fitter owns every feature under `tw-<doc id>-` — fitting it deleted the tread wall's patch (town-1 10-30: STALE)
+    walls.push(terraceWallSchema.parse({ id: `${design.town}-plan-tread-${tr.terrace}-${tr.edge}-${tr.k}`, owner: design.town, style: style(undefined, e), footprint: tr.polygon, walls: [2], topY: tr.level, height: kitH(tr.level - next), feather: 4, tags: ["town-riser", "town-plan", "tread"] }));
   }
 
   // ---- roads: streets (painted, at their designed level), cut stairs / ramps
@@ -281,9 +304,16 @@ export function planEarthworks(design: TownDesign, site: { height: (x: number, z
     return site.height(x, z);
   };
   const roads: RoadDoc[] = [];
+  // e-paving (2026-11-02): a paving street INSIDE the walls of a design that names its own stone (design.paving) is laid
+  // in that stone. As role "paving" it took the zone's paving (the red flag) and painted it over the terraces' pale
+  // flagstone: the square read red down every street and across the fork island.
+  const intramural = design.terraces.filter((t) => !t.extramural);
   for (const st of design.streets) {
     const pts = densify(st.points, 4).map((p) => [r2(p[0]), r2(p[1])] as V2);
-    roads.push({ id: `${design.town}-street-${st.id}`, points: pts, width: st.width, shoulder: 0.5, smooth: 0, flatten: 0, surfaceY: pts.map((p) => r2(groundAt(p[0], p[1]))), surface: st.surface === "paving" ? "gravel" : st.surface, surfaceEdge: 1, ...(st.surface === "paving" ? { role: "paving" as const } : {}) } as RoadDoc);
+    const own = !!design.paving && st.surface === "paving" && pts.filter((p) => intramural.some((t) => inPoly(t.polygon as V2[], p[0], p[1]))).length * 2 > pts.length;
+    const surface = own ? design.paving!.surface : st.surface === "paving" ? "gravel" : st.surface;
+    const role = own ? ({ role: "none" as const }) : st.surface === "paving" ? { role: "paving" as const } : {};
+    roads.push({ id: `${design.town}-street-${st.id}`, points: pts, width: st.width, shoulder: 0.5, smooth: 0, flatten: 0, surfaceY: pts.map((p) => r2(groundAt(p[0], p[1]))), surface, surfaceEdge: 1, ...role } as RoadDoc);
   }
   for (const k of corridors) {
     const pts = densify(k.c.points, 2).map((p) => [r2(p[0]), r2(p[1])] as V2);
@@ -313,7 +343,12 @@ export function planEarthworks(design: TownDesign, site: { height: (x: number, z
   });
   const c = opts.centre ?? design.gate.at;
   let radius = 0;
-  for (const s of shapes) for (const p of s.polygon) radius = Math.max(radius, Math.hypot(p[0] - c[0], p[1] - c[1]));
+  // the town's radius is its own (walled) ground, the disc the siting needs measure: an EXTRAMURAL terrace (a strand, a
+  // suburb outside the gate) is cut like any other but does not grow it (town-1 2026-10-30: a strand to the shore grew
+  // 45 -> 116 m, the pad disc reached the lake and the walled-town ring read 325 m open)
+  const inner = new Set(design.terraces.filter((t) => !t.extramural).map((t) => t.id));
+  for (const t of design.terraces) if (inner.has(t.id)) for (const p of t.polygon) radius = Math.max(radius, Math.hypot(p[0] - c[0], p[1] - c[1]));
+  // (a stepped edge's treads are its riser, like a bank's run: outside the platform, not the town's pad)
   return { patch, walls, roads, terraces, treads, report, radius: r2(radius + 2) };
 }
 
@@ -339,16 +374,71 @@ export function applyEarthworks(recipe: WorldRecipe, design: TownDesign, plan: E
   recipe.features.heightPatches.push(plan.patch);
   recipe.features.roads.push(...plan.roads);
   const town = recipe.features.towns.find((t) => t.id === design.town)!;
+  // k-town4 (Derek 2026-11-02: "the entire inside of the walled city should feel like a European walled city, so you
+  // wouldn't see a lot of dirt, you'd see stone"): every INTRAMURAL terrace is paved with the zone's paving stone (splat
+  // only, scatter and cover kept off it); dirt stays outside the walls (extramural terraces, the gate yard, the strand)
+  // k-town5: a design may name its own intramural stone (design.paving), added to the palette when missing
+  if (design.paving && !recipe.surfaces.some((x) => x.name === design.paving!.surface))
+    recipe.surfaces.push({ name: design.paving.surface, color: design.paving.color, roughness: 0.95, map: design.paving.map, uvScale: design.paving.uvScale } as never);
+  const paving = design.paving?.surface ?? zonePavingSurface(recipe, town.center as V2);
+  recipe.features.groundPaints = recipe.features.groundPaints ?? [];
+  // k-town8: a design that names its paving EDGE (the curtain's inner face) gets ONE paint over that outline with a hard
+  // edge (feather 0): no paving runs under or past the curtain
+  const pavEdge = (design.paving as { edge?: V2[] } | undefined)?.edge;
+  if (pavEdge) recipe.features.groundPaints.push({ id: planPavingId(design.town, "curtain"), surface: paving, polygon: pavEdge.map((q) => [r2(q[0]), r2(q[1])] as V2), feather: 0, edgeNoise: 0, strength: 1, breakup: 0, fringe: 0, blotch: 8, faces: false, clear: { scatter: true, cover: true } } as never);
+  else for (const t of design.terraces.filter((x) => !x.extramural))
+    recipe.features.groundPaints.push({ id: planPavingId(design.town, t.id), surface: paving, polygon: t.polygon.map((q) => [r2(q[0]), r2(q[1])] as V2), feather: 1, edgeNoise: 0, strength: 1, breakup: 0, fringe: 0, blotch: 8, faces: false, clear: { scatter: true, cover: true } } as never);
+  if (design.paving) for (const s of clipForeignRoads(recipe, design)) log(s);
   town.terraces = plan.terraces;
   town.flatten = 0;
   town.groundY = Math.min(...design.terraces.map((t) => t.level));
-  town.radius = Math.max(town.radius, plan.radius);
+  town.radius = plan.radius; // the design is the truth: a re-cut of a smaller design shrinks it back (no ratchet)
   // the design's gate is the town's way in (the designer may move it to the saddle the road arrives by)
   const g0 = town.gates[0];
   town.gates = [{ id: g0?.id ?? "gate", width: g0?.width ?? 6, approach: g0?.approach ?? 30, tags: [...(g0?.tags ?? []), "plan"].filter((v, i, a) => a.indexOf(v) === i), at: [r2(design.gate.at[0]), r2(design.gate.at[1])], facing: [r2(design.gate.facing[0]), r2(design.gate.facing[1])] }, ...town.gates.slice(1)];
   const program = programFromPlan(design as never, {}, `authoring/towns/${design.name}-design.json`);
   town.program = { area: Math.max(1, program.area), lots: program.lots, across: program.across, source: program.source };
   return plan.walls.length ? solveTerraceChain(recipe, plan.walls, kit, log) : [];
+}
+
+/**
+ * i-town (2026-11-02): a world road that does not belong to the town (a footpath routed to the town centre before the
+ * town had a gate) ENDS at the walls: its run over the intramural paving is cut at the paving's edge (every per-point
+ * profile interpolated there). Road paint wins over ground paint, so Bell Strand's site path (dirt, 3.4 m + 3 m
+ * shoulder) laid a red-earth strip from the square down the whole Gate Street over the pale flagstone. A road that
+ * crosses the town (two runs outside) is kept whole and reported: it needs re-routing round or through the gate.
+ */
+export function clipForeignRoads(recipe: WorldRecipe, design: TownDesign): string[] {
+  const edge = (design.paving as { edge?: V2[] } | undefined)?.edge;
+  const polys = edge ? [edge] : design.terraces.filter((t) => !t.extramural).map((t) => t.polygon as V2[]);
+  if (polys.length === 0) return [];
+  const inside = (p: readonly number[]) => polys.some((q) => inPoly(q, p[0]!, p[1]!));
+  const out: string[] = [];
+  for (const road of recipe.features.roads) {
+    if (road.id.startsWith(`${design.town}-`)) continue;
+    const flags = road.points.map(inside);
+    if (!flags.some(Boolean)) continue;
+    const runs: [number, number][] = [];
+    for (let i = 0; i < flags.length; i++) if (!flags[i]) { if (runs.length && runs[runs.length - 1]![1] === i - 1) runs[runs.length - 1]![1] = i; else runs.push([i, i]); }
+    if (runs.length !== 1) { out.push(`  WARN road ${road.id}: ${flags.filter(Boolean).length} point(s) over ${design.town}'s intramural paving, ${runs.length} run(s) outside: not clipped (re-route it to the gate)`); continue; }
+    const [i0, i1] = runs[0]!;
+    const n = road.points.length;
+    // every per-point profile (surfaceY, leftY, rightY, ...) is cut with the points
+    const keys = Object.keys(road).filter((k) => k !== "points" && Array.isArray((road as never)[k]) && ((road as never)[k] as unknown[]).length === n && ((road as never)[k] as unknown[]).every((v) => typeof v === "number"));
+    const edge = (a: number, b: number): number => { let lo = 0, hi = 1; for (let k = 0; k < 24; k++) { const m = (lo + hi) / 2; const p = road.points[a]!, q = road.points[b]!; if (inside([p[0]! + (q[0]! - p[0]!) * m, p[1]! + (q[1]! - p[1]!) * m])) hi = m; else lo = m; } return lo; };
+    const at = (a: number, b: number, t: number) => ({ p: [r2(road.points[a]![0]! + (road.points[b]![0]! - road.points[a]![0]!) * t), r2(road.points[a]![1]! + (road.points[b]![1]! - road.points[a]![1]!) * t)] as [number, number], v: keys.map((k) => { const arr = (road as never)[k] as number[]; return r2(arr[a]! + (arr[b]! - arr[a]!) * t); }) });
+    // the end cap (half the tread + its verge) stays off the paving too: the cut is pulled back that far along the segment
+    const back = road.width / 2 + (road.surfaceEdge ?? 0);
+    const pulled = (a: number, b: number): number => { const t = edge(a, b), len = Math.hypot(road.points[b]![0]! - road.points[a]![0]!, road.points[b]![1]! - road.points[a]![1]!); return Math.max(0, t - back / Math.max(len, 1e-6)); };
+    const head = i0 > 0 ? at(i0, i0 - 1, pulled(i0, i0 - 1)) : null;
+    const tail = i1 < n - 1 ? at(i1, i1 + 1, pulled(i1, i1 + 1)) : null;
+    const pts = [...(head ? [head.p] : []), ...road.points.slice(i0, i1 + 1), ...(tail ? [tail.p] : [])];
+    keys.forEach((k, j) => { const arr = (road as never)[k] as number[]; (road as Record<string, unknown>)[k] = [...(head ? [head.v[j]!] : []), ...arr.slice(i0, i1 + 1), ...(tail ? [tail.v[j]!] : [])]; });
+    const cut = n - (i1 - i0 + 1);
+    road.points = pts as never;
+    out.push(`  road ${road.id}: ${cut} point(s) over ${design.town}'s intramural paving cut; it now ends at the paving edge ${JSON.stringify(head?.p ?? tail?.p)}`);
+  }
+  return out;
 }
 
 export interface FromPlanHost {
@@ -376,12 +466,12 @@ export function commandTerraceFromPlan(host: FromPlanHost, planFile: string): vo
   const envFile = path.join(path.dirname(file), `${design.name}-envelopes.json`);
   const envelopes: Envelopes = fs.existsSync(envFile) ? JSON.parse(fs.readFileSync(envFile, "utf8")) : {};
   const bare = createWorldField(bareOfTown(recipe, design.town));
-  const plan = planEarthworks(design, { height: (x, z) => bare.heightfield(x, z), sea: recipe.seaLevel }, envelopes, { tier: town!.tier, tags: town!.tags, centre: town!.center as V2 });
+  const plan = planEarthworks(design, { height: (x, z) => bare.heightfield(x, z), sea: recipe.seaLevel }, envelopes, { tier: town!.tier, tags: town!.tags, centre: town!.center as V2, zoneCliff: zoneCliffAt(recipe as never, town!.center) });
   if (!plan.report.ok && !argv.includes("--force")) {
     for (const f of plan.report.faults) console.error(`  ! ${f}`);
     host.fail(`terrace --from-plan: the design fails ${plan.report.faults.length} check(s) — fix it (town-design check) before the cut; nothing written`);
   }
-  console.log(`  ${design.town}: ${design.terraces.length} terraces + ${plan.treads.length} tread(s), patch ${plan.patch.id} ${plan.patch.columns}x${plan.patch.rows} at ${plan.patch.size[0] / (plan.patch.columns - 1)} m, ${plan.walls.length} wall doc(s), ${plan.roads.length} road(s)`);
+  console.log(`  ${design.town}: ${design.terraces.length} terraces + ${plan.treads.length} tread(s), patch ${plan.patch.id} ${plan.patch.columns}x${plan.patch.rows} at ${plan.patch.size[0] / (plan.patch.columns - 1)} m, ${plan.walls.length} wall doc(s), ${plan.roads.length} road(s), town radius ${plan.radius} m (extramural terraces not counted)`);
   for (const e of plan.report.edges.filter((x) => x.kind === "drop")) console.log(`    ${e.terrace} edge ${e.edge}: ${e.treatment}${e.tiers > 1 ? ` x${e.tiers}` : ""}, ${e.drop} m to ${e.outside}`);
   const before = structuredClone(recipe);
   let fits: TerraceFit[] = [];

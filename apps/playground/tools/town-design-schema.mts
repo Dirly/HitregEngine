@@ -98,6 +98,8 @@ export const designBuildingSchema = z.object({
   request: kitRequestSchema.optional().describe("Its kit request. Omitted only with `model` (it reuses that building's model and request)."),
   model: z.string().optional().describe("Reuse another building's model (its id): the town fills out with houses already built."),
   optional: z.boolean().optional().describe("May be dropped when it does not fit (reported, never silently)."),
+  prefab: z.string().optional().describe("The shipped kit prefab this lot installs (e.g. strand-town/strand-row-house-a); a row pair is judged by that kit's row-fit proof."),
+  row: z.string().optional().describe("A party-wall row (terraced houses with R77 party walls, request `party: [\"-x\", \"+x\"]`): two NEIGHBOURS of one row stand at EXACTLY the kit's row pitch (lateral distance = half the two LOTS the row-fit proof measured them at (its `lots`, = the catalogue's `plan.rowPitchMetres`; the fronts' widths when the proof has none), within 2 cm; the left house's request party has \"+x\" and the right one's \"-x\", so a one-party-side corner type ends a row on its +x), facing the same way with their street fronts on one line (within 2 cm), and their two `prefab`s are a pair the kit's row-fit proof passed (`town-kit-check row-fit --json <kit authoring>/row-fit.json`: mesh-measured, nothing crosses the party line, no gap on it). Such a pair needs no lot air; any other pair of the row is judged by the ordinary lot-air and eaves rules. Put a neighbour, the town wall or a lane end at each end of a row."),
   note: z.string().optional(),
 });
 
@@ -111,7 +113,7 @@ export const edgeTreatmentSchema = z.object({
         "`auto` = the riser rule decides (wall when the drop is over 2.5 m, a street or building stands within 3 m of the top edge, or the " +
         "bank's run does not fit before the next terrace, a street, a lot or the sea; else bank).",
     ),
-  style: z.enum(["masonry-common", "masonry-stone"]).optional().describe("Wall style; default from the town tier (capital/city = stone)."),
+  style: z.enum(["masonry-common", "masonry-stone", "masonry-strand"]).optional().describe("Wall style; default: the town's own masonry (its buildings' kit style palette, e.g. strand-lime -> masonry-strand; worldgen-terrace-walls townWallStyle), else from the town tier (capital/city = stone)."),
 });
 
 export const designTerraceSchema = z.object({
@@ -121,6 +123,7 @@ export const designTerraceSchema = z.object({
   polygon: polygon.describe("The designed platform outline. Irregular block shapes follow the ground and the streets; a straight band along the contour is the old draft, not a design."),
   buildings: z.array(z.string()).default([]).describe("The buildings standing on it (ids). Each building is on exactly one terrace, inside it by the kit margins (1.5 m off a wall edge, 1 m off a bank)."),
   edges: z.array(edgeTreatmentSchema).default([]).describe("Per-edge treatment; edges not listed are `auto`."),
+  extramural: z.boolean().optional().describe("Outside the town walls (a fishers' strand, houses along the road out of the gate): cut, checked and built like any terrace, but not part of the town's own radius (the walled pad the siting needs measure)."),
   quay: z.boolean().optional().describe("A harbour platform at the water: its seaward edges may stand over the sea (a quay wall)."),
   note: z.string().optional(),
 });
@@ -149,6 +152,7 @@ export const designConnectionSchema = z.object({
   from: z.string().describe("Lower terrace id, or `gate` (the natural ground at the gate)."),
   to: z.string().describe("Upper terrace id."),
   points: polyline.describe("Its line from the lower end (on `from`) to the upper end (on `to`), world XZ; the run is its length."),
+  form: z.enum(["along", "axial"]).default("along").describe("stair only, through a WALL edge: along = the kit stair against the face (the default); axial = broad straight civic steps SQUARE to the wall on the connection's own axis (retaining-wall insert stair-axial, 6 m wide), e.g. a chapel close or a raised square reached head-on from a street."),
   width: z.number().positive().default(4),
   street: z.string().optional().describe("The street it carries (a street crossing levels runs through it)."),
 });
@@ -170,6 +174,16 @@ export const townDesignSchema = z
       .object({ at: xz, facing: xz.describe("Outward, away from the town.") })
       .describe("The way in (from the recipe town's first gate). The main street starts here; a square stands within 30 m of it or of the harbour."),
     harbour: xz.optional().describe("Coastal towns: the landing point on the water (quay head)."),
+    paving: z
+      .object({
+        surface: z.string().describe("Surface name in the world palette (added to `surfaces` by the cut when missing)."),
+        map: z.string().describe("Its tile, under the project's assets/textures (town texel standard: 128 px per 3.2 m)."),
+        color: z.string().default("#ffffff").describe("Tint over the tile."),
+        uvScale: z.number().positive().default(3.2).describe("Metres per tile repeat."),
+        edge: z.array(z.tuple([z.number(), z.number()])).min(3).optional().describe("The closed outline (world x,z) the intramural paving fills INSTEAD of the intramural terraces' own polygons, painted with a HARD edge (no feather): the town wall's INNER FACE, notched out through each gate passage to the gatehouse's outer face. Without it the paving follows the terrace polygons, which run past the curtain (k-town8, Derek 2026-11-02: paving must stop at the wall's inner face)."),
+      })
+      .optional()
+      .describe("The stone every INTRAMURAL terrace is paved with (`terrace --from-plan`), instead of the zone's `ground.paving`: a walled town whose zone paving is the same tone as the zone's dirt reads as dirt from above (k-town5, Bell Strand: red flagstone on red clay). Pick a stone that contrasts in VALUE with the zone ground, never grey."),
     districts: z
       .array(z.object({ id, name: z.string(), role: z.string().describe("harbour, market, chapel close, high town, craft row ..."), note: z.string().optional() }))
       .default([]),

@@ -72,6 +72,8 @@ export async function run(context, inputs) {
     "--filter",
     String(custom?preset.filter:inputs.filter ?? preset.filter),
   ];
+  if (inputs.samplePhaseX !== undefined) args.push("--sample-phase-x", String(inputs.samplePhaseX));
+  if (inputs.samplePhaseY !== undefined) args.push("--sample-phase-y", String(inputs.samplePhaseY));
   if (inputs.slices) args.push("--slices");
   if (inputs.artMargin) args.push("--art-margin");
   if (inputs.skip) args.push("--skip", String(inputs.skip));

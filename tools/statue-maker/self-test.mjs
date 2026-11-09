@@ -103,3 +103,18 @@ test('grow scales an attachment about its own centre (a deep cowl) and refuses m
  assert.deepEqual(out.report.bounds.map(v=>v.map(n=>+n.toFixed(6))),[[-0.75,0,-0.75],[2.25,6,2.25]]);
  await assert.rejects(buildStatue({...recipe(),attachments:[{model:'fixture.gltf',grow:3}]},()=>source()),/grow scale/);
 });
+test('skin keeps the body atlas UVs, drops the splat weight and reports texel density at the baked size',async()=>{
+ const b=new GltfBuilder('uv fixture'); const p=new Float32Array([0,0,0, 1,0,0, 0,1,0]);
+ b.pushMesh({primitives:[{attributes:{POSITION:b.pushAccessor(p,'VEC3',{minMax:true}),TEXCOORD_0:b.pushAccessor(new Float32Array([0,0, .5,0, 0,.5]),'VEC2')}}]});b.pushNode({mesh:0},true);
+ const bytes=Buffer.from(JSON.stringify(b.finish()));
+ // baked height 2 m: 2 m legs, 0.5 uv legs on a 64 px sheet = 32 px over 2 m = 16 px/m; a 32 px/m target needs 128 px
+ const out=await buildStatue({...recipe(),height:2,skin:{size:64,texelsPerMetre:32}},()=>bytes);
+ const attrs=out.model.meshes[0].primitives[0].attributes;
+ assert.ok(attrs.TEXCOORD_0!==undefined);assert.equal(attrs._SPLATWEIGHT,undefined);
+ assert.deepEqual(out.report.skin,{size:[64,64],texelsPerMetre:16,target:32,matchingSize:[128,128]});
+ const plain=await buildStatue({...recipe(),height:2},()=>bytes);
+ assert.ok(plain.model.meshes[0].primitives[0].attributes._SPLATWEIGHT!==undefined);assert.equal(plain.model.meshes[0].primitives[0].attributes.TEXCOORD_0,undefined);
+ await assert.rejects(buildStatue({...recipe(),skin:{size:64}},()=>source()),/TEXCOORD_0/);
+ await assert.rejects(buildStatue({...recipe(),skin:{size:0}},()=>bytes),/skin.size/);
+ await assert.rejects(buildStatue({...recipe(),skin:{size:64},attachments:[{model:'fixture.gltf'}]},()=>bytes),/one atlas/);
+});

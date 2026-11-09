@@ -20,6 +20,8 @@
  *   content/<kind>/<file>              (the copied content)
  */
 import { AudioSystem, type AudioComponentData } from "./audio-system.js";
+import { listenForAudioPanel } from "./audio-panel.js";
+import { AudioSettingsController } from "./audio-settings.js";
 import { bundleAssetReader } from "./bundle-reads.js";
 import { setAssetBundleBase } from "./asset-url.js";
 import { GroundLoadHold } from "./ground-load-hold.js";
@@ -51,7 +53,9 @@ import {
   type ChunkStreamerData,
   type SpritesheetDoc,
 } from "@hitreg/core";
-import { MovingInstanceSystem, EngineRenderer, PRECOMPILE_SLICE_LOADING_MS, PRECOMPILE_SLICE_MS, buildScene, gltfLoadingCount, type PostFxData, makeMeshGeometryProvider, AnimationSystem, CROWD_POSE_LOD, ParticleSystem, BillboardSystem, LightBudgetSystem, updateWorldAmbience, updateCharacterGrounding, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
+import { bootSettings, browserStorage, createGraphics, shadowQualityOf } from "./graphics-settings.js";
+import { listenForGraphicsPanel } from "./graphics-panel.js";
+import { AdaptiveResolution, asyncPipelines, SHADER_BUILD_BUDGET_MS, CullingSystem, FirstDrawWarm, PropSheets, freezeStaticSubtree, refreshStaticSubtree, makeMaterial, setSunShadowQuality, setWeatherParticleScale, HorizonTerrain, HORIZON_STEP, hlodMaterial, renderScaleFromSearch, MovingInstanceSystem, EngineRenderer, PRECOMPILE_SLICE_LOADING_MS, PRECOMPILE_SLICE_MS, buildScene, gltfLoadingCount, type PostFxData, makeMeshGeometryProvider, AnimationSystem, CROWD_POSE_LOD, ParticleSystem, BillboardSystem, LightBudgetSystem, updateWorldAmbience, updateCharacterGrounding, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
 import { createAmbientVfx, createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 
 /** The `camera` component, straight off the schema. */
@@ -60,6 +64,8 @@ import { ScriptRegistry, registerBuiltinScripts, ScriptRuntime, InputService, Ev
 import { createModelLooks } from "./model-looks.js";
 import { createFaceShotHost } from "./face-shot-host.js";
 import { mountLoadScreen } from "./load-screen.js";
+import { createPlacedBatcher, createStillness } from "./placed-batch.js";
+import { createPlaceRuntime } from "./place-runtime.js";
 import { Layers, PhysicsSim, initPhysics } from "@hitreg/physics";
 import { applyBodyState } from "./physics-sync.js";
 import { initProjectScripts } from "./project-scripts.js";
@@ -73,9 +79,11 @@ import {
   loadVolumes,
   loadWorldRecipes,
   resolveVoxelWorld,
+  startScatterMaterials,
   voxelChunkProvider,
   voxelMeshViaWorker,
   voxelSupercellViaWorker,
+  voxelHorizonViaWorker,
 } from "./voxel-world.js";
 import { registerCommsEvents, type Comms } from "@hitreg/comms";
 import { NetPresence } from "./net-presence.js";
@@ -332,7 +340,48 @@ async function main(): Promise<void> {
     modelLooks,
     clipsOf: (entityId) => animations.clipsOf(entityId),
   });
+  const { isAutoStatic, isShadowless, subtreeStill } = createStillness(
+    () => expanded,
+    (name) => scriptRegistry.get(name) as { stillWith?: (params: Record<string, unknown>) => boolean } | undefined,
+  );
+  const culling = new CullingSystem();
+  const batchPlacedContent = createPlacedBatcher({ culling, sheets: new PropSheets(), subtreeStill });
+  const placesRoot = new THREE.Group();
+  placesRoot.name = "places";
+  /** The still subtrees the per-frame matrix walk skips (see freezeStaticSubtree): whole towns and camps. */
+  const frozenRoots = new Set<THREE.Object3D>();
+  const freezeStill = (entities: SceneDoc["entities"], objects: ReadonlyMap<string, THREE.Object3D>): void => {
+    for (const [id, entity] of Object.entries(entities)) {
+      if (!subtreeStill(id) || (entity.parent && subtreeStill(entity.parent))) continue;
+      const object = objects.get(id);
+      if (!object) continue;
+      freezeStaticSubtree(object);
+      frozenRoots.add(object);
+    }
+  };
+  let staticBatch: ReturnType<typeof batchPlacedContent>["batch"] = null;
+  let staticUnits: ReturnType<typeof batchPlacedContent>["units"] = [];
+  /** Models land after the build: merge again once they stop, or everything late stays a draw per pass. */
+  let staticBatchPending = true;
+  let staticBatchPendingSince: number | null = null;
+  const rebuildStaticBatch = (): void => {
+    staticBatchPending = false;
+    for (const unit of staticUnits) culling.unregister(unit);
+    staticBatch?.dispose();
+    // streamed places batch on their own: keep their meshes out of the base merge
+    placesRoot.visible = false;
+    try {
+      const done = batchPlacedContent(built.scene, baseDoc, built.objects);
+      staticBatch = done.batch;
+      staticUnits = done.units;
+    } finally {
+      placesRoot.visible = true;
+    }
+    if (staticBatch && probe.precompile) void renderer.precompileGroup(staticBatch.group, camera, built.scene);
+  };
   const buildOptions: BuildOptions = {
+    autoStatic: isAutoStatic,
+    shadowless: isShadowless,
     movingInstances,
     resolveModel: (id: string) => assets.getModel(id)?.url,
     resolveMaterial: (id: string) => assets.getDataAsset(id)?.data,
@@ -354,7 +403,14 @@ async function main(): Promise<void> {
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onModelLoaded: (entityId, root, clips) => {
+      for (let at: THREE.Object3D | null = root; at; at = at.parent) {
+        if (frozenRoots.has(at)) {
+          refreshStaticSubtree(at);
+          break;
+        }
+      }
       modelLooks.modelLoaded(entityId, root);
+      if (expanded.entities[entityId] && !placeStreamer.placeOf(entityId) && isAutoStatic(entityId)) staticBatchPending = true;
       // a server-spawned body's model: its doc lives in the session's runtime registry
       const entity = expanded.entities[entityId] ?? netWorld?.docs.get(entityId);
       const animator = entity?.components["animator"];
@@ -370,7 +426,42 @@ async function main(): Promise<void> {
       );
     },
   };
-  const built = buildScene(expanded, buildOptions);
+  // before the build: a sun's cascades read their map size as they are made (graphics-settings.ts)
+  setSunShadowQuality(shadowQualityOf(bootSettings(location.search, browserStorage()).shadows));
+  // the sim, scripts and queries keep the whole doc; only the render build streams (place-streamer.ts)
+  const { placeStreamer } = createPlaceRuntime({
+    placesRoot,
+    batch: batchPlacedContent,
+    culling,
+    foliageLod,
+    clusterLod,
+    buildOptions: () => buildOptions,
+    objects: () => built.objects,
+    precompile: (group) => {
+      if (probe.precompile) void renderer.precompileGroup(group, camera, built.scene);
+    },
+    onBuilt: (placed, objects) => {
+      freezeStill(placed.entities, objects);
+      scripts.addEntities(placed, objects);
+      audio.startAutoplay(placed.entities, objects);
+    },
+    onFreed: (objects) => {
+      audio.stopAutoplay(objects.keys());
+      for (const [id, object] of objects) {
+        frozenRoots.delete(object);
+        animations.unregister(id);
+        particles.unregister(id);
+        billboards.unregister(id);
+        grass.unregister(id);
+        ambientVfx.unregister(id);
+      }
+      scripts.removeEntities([...objects.keys()]);
+    },
+  });
+  const baseDoc = placeStreamer.plan(expanded);
+  const built = buildScene(baseDoc, buildOptions);
+  freezeStill(baseDoc.entities, built.objects);
+  built.scene.add(placesRoot);
   built.scene.add(movingInstances.root);
   vfx.attach(built.scene);
 
@@ -689,10 +780,11 @@ async function main(): Promise<void> {
     setModelLook: (id, look) => modelLooks.set(id, look),
     modelTables: (assetId) => modelLooks.tables(assetId),
     playSound: (entityId, soundId, opts) => {
-      const src = soundId ?? (expanded.entities[entityId]?.components["audio"] as AudioComponentData | undefined)?.src;
+      const comp = expanded.entities[entityId]?.components["audio"] as AudioComponentData | undefined;
+      const src = soundId ?? comp?.src;
       if (!src) return;
       if (opts?.at) void audio.playAt(built.scene, opts.at, src, opts);
-      else void audio.play(built.objects.get(entityId) ?? null, src, opts);
+      else void audio.play(built.objects.get(entityId) ?? null, src, soundId ? opts : { ...(comp ?? {}), ...opts });
     },
     setSoundLoop: (entityId, slot, soundId, opts) =>
       audio.setLoop(`${entityId}/${slot}`, built.objects.get(entityId) ?? null, soundId, opts),
@@ -705,12 +797,16 @@ async function main(): Promise<void> {
       return seconds;
     },
   });
-  vfx.resolvers.playSound = (soundId, at, volume) => void audio.playAt(built.scene, at, soundId, { volume });
+  vfx.resolvers.playSound = (soundId, at, volume) => void audio.playAt(built.scene, at, soundId, { volume, channel: "effects" });
+  // the player's Audio settings; the HUD asks for the panel by event, as for Graphics (audio-panel.ts)
+  listenForAudioPanel(new AudioSettingsController({ setMix: (mix) => audio.setMix(mix), voice: () => comms?.voice ?? null }, browserStorage()));
   // browsers start audio suspended until a gesture
   window.addEventListener("pointerdown", () => audio.resume(), { once: true });
   window.addEventListener("keydown", () => audio.resume(), { once: true });
   scripts.start();
   animations.setRunning(true);
+  // autoplay audio components (music, ambience): the base scene now; a place starts its own as it streams in
+  audio.startAutoplay(baseDoc.entities, built.objects);
 
   // 8b. streamed chunk worlds -------------------------------------------------
   // The scene's terrain is runtime-only content: it never appears in the scene
@@ -723,6 +819,9 @@ async function main(): Promise<void> {
   const probe: Record<string, unknown> & { precompile: boolean } = {
     precompile: new URLSearchParams(location.search).get("precompile") !== "0",
   };
+  if (new URLSearchParams(location.search).get("asyncPipelines") === "0") asyncPipelines.enabled = false;
+  placeStreamer.attach();
+  probe["placeStreamer"] = placeStreamer;
   const chunkManager = new ChunkManager(assets, registry, {
     // HLOD supercells re-mesh their member cells on a coarser lattice; these
     // send that marching-cubes run to the voxel worker pool instead of the
@@ -769,6 +868,8 @@ async function main(): Promise<void> {
   // collider is cooked from the built objects, so this must be in place before
   // the first cell lands or the player spawns before the ground does.
   chunkManager.setSim(sim);
+  chunkManager.setCulling(culling);
+  culling.ground = chunkManager;
 
   let streamer: ChunkStreamerData | null = null;
   for (const entity of Object.values(expanded.entities)) {
@@ -780,10 +881,28 @@ async function main(): Promise<void> {
   // comes from the RECIPE, not the component — see streamerFor.
   const voxelWorld = resolveVoxelWorld(expanded);
   chunkManager.setProvider(voxelWorld ? voxelChunkProvider(voxelWorld, assets) : null);
+  if (voxelWorld) startScatterMaterials(voxelWorld.field, assets, (data) => makeMaterial(data, buildOptions));
   if (voxelWorld) streamer = voxelWorld.streamer;
+  const adaptiveResolution = new AdaptiveResolution();
+  // the player's Graphics settings (graphics-settings.ts); the HUD asks for the panel by event (graphics-panel.ts)
+  const graphics = createGraphics({
+    renderer,
+    adaptive: adaptiveResolution,
+    urlRenderScale: renderScaleFromSearch(location.search),
+    setSunShadows: setSunShadowQuality,
+    setWeatherScale: setWeatherParticleScale,
+    grass,
+    foliageLod,
+    chunks: chunkManager,
+    culling,
+    horizon: () => horizon,
+  }, location.search, browserStorage());
+  listenForGraphicsPanel(graphics);
+  streamer = graphics.scaleStreamer(streamer);
   const voxelWorldId = voxelWorld?.data.world ?? null;
   // the load-in screen: painted, until the world around the player is in and the frame rate has settled
-  mountLoadScreen({
+  const firstDraws = new FirstDrawWarm();
+  const loadCover = mountLoadScreen({
     creation: () => findCreation(assets),
     textureUrl: (id) => assets.getTexture(id)?.url,
     signals: {
@@ -798,6 +917,7 @@ async function main(): Promise<void> {
           : !networked && chunkManager.isArrivalReady(camera.position.x, camera.position.z);
         return ready && (!!voxelWorldId || gltfLoadingCount() === 0);
       },
+      finishing: () => gltfLoadingCount() > 0 || staticBatchPending || firstDraws.busy || renderer.pipelinesPending > 0,
       switching: () => false,
       place: () => {
         const id = localPlayerId();
@@ -807,7 +927,24 @@ async function main(): Promise<void> {
       },
     },
   });
+  // the island past the streamed rings, one draw
+  let horizon: HorizonTerrain | null = null;
+  if (streamer?.rings && voxelWorld) {
+    const land = new HorizonTerrain(streamer.rings.farTerrain * streamer.cellSize, streamer.cellSize);
+    horizon = land;
+    built.scene.add(land.root);
+  }
   await chunkManager.configure(streamer, built.scene);
+  if (horizon && voxelWorld) {
+    const land = horizon;
+    void voxelHorizonViaWorker(HORIZON_STEP)?.then((mesh) => {
+      if (mesh) land.setMesh(mesh, hlodMaterial(voxelWorld.field.recipe.material, {
+        resolveMaterial: (id: string) => assets.getDataAsset(id)?.data,
+        resolveTexture: (id: string) => assets.getTexture(id)?.url,
+        resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
+      } as BuildOptions));
+    }, (error: unknown) => console.warn("[horizon] failed:", error));
+  }
   // ground probes for the `grass` component; null world -> no cover, no throw
   const ground = voxelGroundProbes(() => (voxelWorldId ? getVoxelWorld(voxelWorldId) : null), () => voxelWorldId);
   // the world carries its own cover (recipe.cover), one layer per `cover:<id>`
@@ -1095,6 +1232,7 @@ async function main(): Promise<void> {
         chunkManager.integrationBurst = bootCurtainUp;
         renderer.precompileSliceMs = bootCurtainUp ? PRECOMPILE_SLICE_LOADING_MS : PRECOMPILE_SLICE_MS;
         chunkManager.update(p.x, p.z);
+        placeStreamer.update(p.x, p.z);
       }
       if (!followId) controls.update(dt); // the rig owns the camera when there is one
       // Camera priority: a script-switched camera wins, then a RIGLESS active
@@ -1113,7 +1251,7 @@ async function main(): Promise<void> {
       if (!vfxWarmed) {
         // once: every effect pipeline compiles now instead of on the first cast
         vfxWarmed = true;
-        if (probe.precompile) void warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, renderCam, built.scene), renderCam);
+        if (probe.precompile) void warmVfx(vfx, assets, (group, collected) => renderer.precompileGroup(group, renderCam, built.scene, collected), renderCam);
       }
       modelLooks.update(); // item effects placed once their model has loaded
       ambientVfx.update(renderCam, built.scene); // before the plays step and the light budget re-aims
@@ -1132,10 +1270,23 @@ async function main(): Promise<void> {
       if (skyDomeMesh) (skyDomeMesh as THREE.Object3D).position.copy(renderCam.getWorldPosition(camWorldPos));
       profiler.begin("draw");
       vfx.applyShake(renderCam); // the rig owns the camera; the offset lives only inside the draw
+      horizon?.update(renderCam.position.x, renderCam.position.z);
+      if (staticBatchPending) {
+        const now = performance.now();
+        staticBatchPendingSince ??= now;
+        if (gltfLoadingCount() === 0 || now - staticBatchPendingSince > 4000) {
+          staticBatchPendingSince = null;
+          rebuildStaticBatch();
+        }
+      }
+      culling.update(renderCam, renderer.renderHeight || canvas.clientHeight || window.innerHeight);
+      renderer.shaderBudgetMs = loadCover.showing() ? Infinity : SHADER_BUILD_BUDGET_MS;
+      firstDraws.step(built.scene, loadCover.showing());
       renderer.render(built.scene, renderCam);
       vfx.restoreShake(renderCam);
       listenerCamera = renderCam;
       comms?.update(); // voice: gate outgoing tracks, VAD, spatial gains
+      if (!loadCover.showing()) audio.update(); // the world starts sounding when the player can see it
       profiler.end();
       const gpu = renderer.gpuFrameMs();
       if (gpu !== null) profiler.setGpuMs(gpu);
@@ -1143,7 +1294,15 @@ async function main(): Promise<void> {
     },
   });
 
-  const frame = (now: number): void => { loop.tick(now); requestAnimationFrame(frame); };
+  // a GPU that cannot keep up gets fewer pixels; `?renderScale=0.75` pins the scale, `=1` keeps it full
+  const pinnedRenderScale = renderScaleFromSearch(location.search);
+  if (pinnedRenderScale !== null) renderer.setRenderScale(pinnedRenderScale);
+  const frame = (now: number): void => {
+    const started = performance.now();
+    loop.tick(now);
+    graphics.frame(now, performance.now() - started, gltfLoadingCount() > 0, true);
+    requestAnimationFrame(frame);
+  };
   requestAnimationFrame(frame);
 
   const resize = (): void => {
@@ -1178,7 +1337,7 @@ async function main(): Promise<void> {
   // Probe handle for headless measurement (see docs/perf-investigation-2026-09-02.md):
   // the published build has no editor, so this is the only way a script can
   // read draw calls, chunk state and the pipeline caches behind a stall.
-  Object.assign(probe, { renderer, chunkManager, profiler, controls, camera, built, sim, lightBudget, foliageLod, grass, ambientVfx });
+  Object.assign(probe, { graphics, renderer, chunkManager, profiler, controls, camera, built, sim, lightBudget, foliageLod, grass, ambientVfx });
   // read-only session facts for headless checks (no admin, no script runtime)
   if (presence) {
     const session = presence;

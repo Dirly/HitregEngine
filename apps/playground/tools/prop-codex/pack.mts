@@ -11,8 +11,16 @@ export const PAINTED_ATLAS='codex-craft-painted';
  * plus its 4 px bleed fills a whole 2048 page (OPEN: paint pages sized to tile with bleed), a landmark is one piece per
  * place and a page loads only with the model that uses it, so ONE PAGE PER LANDMARK is the deliberate rule. */
 export const LANDMARK_ATLAS='codex-craft-landmark';
+/** Painted CULTURE SET atlases: a people's painted props pack on their own pages, apart from the shared painted atlas.
+ * p-crockin (2026-11-03): the 14-piece Crockin set took the shared painted atlas to 5 of its 4 pages. A set is placed
+ * together (a Crockin camp or lair loads one set page, not pieces of four shared ones), so its own budget both keeps the
+ * shared atlas inside its cap and loads less. A painted prop whose emit() cultures include the key packs onto that atlas. */
+export const SET_ATLASES:Record<string,{atlas:string;max:number}>={'crocodile-kin':{atlas:'codex-craft-crockin',max:2}};
+const setAtlas=(g:{cultures?:string[]}):string|undefined=>Object.entries(SET_ATLASES).find(([c])=>(g.cultures ?? []).includes(c))?.[1].atlas;
+/** Every painted atlas a prop can pack onto (shared, landmark, culture sets), for the catalogue's page records. */
+export const PAINTED_ATLASES=():string[]=>[PAINTED_ATLAS,LANDMARK_ATLAS,...Object.values(SET_ATLASES).map(s=>s.atlas)];
 /** The painted atlas a built prop packs onto (town-craft for unpainted designs). */
-export const atlasFor=(g:{name:string;paint?:unknown},landmarks:ReadonlySet<string>=new Set()):string=>!g.paint?'town-craft':landmarks.has(g.name)?LANDMARK_ATLAS:PAINTED_ATLAS;
+export const atlasFor=(g:{name:string;paint?:unknown;cultures?:string[]},landmarks:ReadonlySet<string>=new Set()):string=>!g.paint?'town-craft':landmarks.has(g.name)?LANDMARK_ATLAS:setAtlas(g) ?? PAINTED_ATLAS;
 /** The base-colour images a packed source glb contributes (what the packer adds per material). */
 function sourceImages(file:string):{width:number;height:number;rgba:Uint8Array}[]{
  if(!fs.existsSync(file))return [];const g=readGltf(file),out:{width:number;height:number;rgba:Uint8Array}[]=[];
@@ -54,7 +62,7 @@ export function assertAtlasBudget(layout:any,entries:{file:string;out:string;kin
  }
 }
 export function packBuiltProps(wk:string,built:GeometryRecord[],log:(s:string)=>void=()=>{},landmarks:ReadonlySet<string>=new Set()){
- const assetsDir=path.join(wk,'assets'),groups=[{atlas:'town-craft',max:1},{atlas:PAINTED_ATLAS,max:4},{atlas:LANDMARK_ATLAS,max:8}].map(g=>({...g,rows:built.filter(r=>atlasFor(r,landmarks)===g.atlas)}));
+ const assetsDir=path.join(wk,'assets'),groups=[{atlas:'town-craft',max:1},{atlas:PAINTED_ATLAS,max:4},{atlas:LANDMARK_ATLAS,max:24/* owner 2026-10-30: was 8; a landmark page loads only with the model that uses it, so the cap guards no runtime memory, only runaway packing. o-sunwine5 2026-11-02: 16 -> 24 (the Sunwine temple front was the 17th one-page landmark; every dungeon door now gets its own front) */},...Object.values(SET_ATLASES)].map(g=>({...g,rows:built.filter(r=>atlasFor(r,landmarks)===g.atlas)}));
  const plans=groups.map(group=>{
   const layoutFile=atlasPaths(assetsDir,group.atlas).layoutFile;
   const existing=fs.existsSync(layoutFile)?JSON.parse(fs.readFileSync(layoutFile,'utf8')):null;

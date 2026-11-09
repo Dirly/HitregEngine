@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createWorldField, defaultWorldRecipe, worldRecipeSchema, type GroundNeedDoc, type WorldRecipe } from "@hitreg/core";
-import { cliffFaceRelief, measureNeeds, needGroundOf, needsFor, needStillMet, solveCliffFace, solveWalledNeck, needArea, unexcepted, type NeedGround } from "../tools/site-needs.mts";
+import { cliffFaceRelief, cliffSilhouette, measureNeeds, needGroundOf, needsFor, needStillMet, solveCliffFace, solveWalledNeck, needArea, unexcepted, type NeedGround } from "../tools/site-needs.mts";
 import { pickFileSchema, roleOfTown } from "../tools/worldgen-site-needs.mts";
 import { placePickSchema } from "../tools/zonegen/commands/reserve.mts";
+import { measureSite } from "../tools/_concept-site.mts";
 
 /** A ground from a height function; water below sea 0. */
 const ground = (h: (x: number, z: number) => number): NeedGround => ({ height: h, wet: (x, z) => h(x, z) < 0.3, sea: 0 });
@@ -162,35 +163,63 @@ test("cliff-face holds: a held lake keeps a rim over its water level where the g
   assert.equal(missing.ok, false);
 });
 
-// 2026-10-30 redstrand w12: both generated faces read as smooth pyramids (one plane up the front, smooth tapers)
-test("cliff-face: the block is broken rock — ledges, off a plane, a ragged crest — and keeps the face and the foot", () => {
+// 2026-10-30 redstrand w12: both generated faces read as smooth pyramids; w15: the w12 lifts + ledges still read as a
+// dome and a pyramid from 300 m, and the concept probe found no face (its ledges broke every steep run)
+test("cliff-face: the block is a CLIFF — the probe reads the face all along, a mesa skyline, strata and bays — and keeps the foot", () => {
   const recipe = flatWorld();
   const g0 = needGroundOf(createWorldField(recipe), recipe.seaLevel);
   const need = { id: "broken-face", kind: "cliff-face", for: "x", near: [0, 0], within: 120, minHeight: 50, width: 90, apron: 40, radius: 45, neck: 60, flankDrop: 12, faces: 180 } as GroundNeedDoc;
   const s = solveCliffFace(g0, need, needArea(need.near, need.within, []));
   assert.equal(s.ok, true, s.message);
-  recipe.features.heightPatches.push(s.patch!);
-  const g1 = needGroundOf(createWorldField(recipe), recipe.seaLevel);
+  assert.ok(s.rock && s.rock[0] > 50 && s.rock[1] > need.width / 2, `rock reach ${s.rock}`);
+  // on the voxel lattice: the raster's corners on even metres, a 2 m cell
+  const p = s.patch!;
+  assert.ok(p.origin.every((v) => v % 2 === 0) && p.size[0] / (p.columns - 1) === 2 && p.size[1] / (p.rows - 1) === 2, `${p.origin} ${p.size} ${p.columns}x${p.rows}`);
+  recipe.features.heightPatches.push(p);
+  const field = createWorldField(recipe);
+  const g1 = needGroundOf(field, recipe.seaLevel);
+  // the concept sheet's tallest-face probe, from the foot, reads the asked height
+  const fit = measureSite(field, s.at, 80, 80);
+  assert.ok(fit.face && fit.face.height >= need.minHeight, `probe ${JSON.stringify(fit.face)}`);
+  // and the face stands that tall all along its width (the same probe, every 6 m across it), steeper than 70 deg on average
   const rel = cliffFaceRelief(g1, s.at, s.faces, need.width, need.minHeight);
-  assert.ok(rel.ledges >= 2, `ledges ${rel.ledges}`);
+  assert.ok(rel.face >= need.minHeight, `face all along ${rel.face}`);
+  // strata and bays: slope breaks up the face, off a single plane, a ragged crest
+  assert.ok(rel.bands >= 1, `bands ${rel.bands}`);
   assert.ok(rel.planeRms >= 2, `plane rms ${rel.planeRms}`);
-  assert.ok(rel.crestRange >= 5, `crest spread ${rel.crestRange}`);
-  // the old shape (one ramp up the face) measures as a plane with no ledges
-  const ramp = ground((_x, z) => 10 + clamp((-z - 0) * 1.5, 0, 55));
+  assert.ok(rel.crestRange >= 3, `crest spread ${rel.crestRange}`);
+  // the block's middle: one face height into the rock (faces south, so the rock lies north, -Z)
+  const centre: [number, number] = [s.at[0], s.at[1] - need.minHeight];
+  // from far off the skyline has a flat or broken top, never one apex, from every side
+  const sil = cliffSilhouette(g1, centre, need.width / 2 + need.minHeight, Math.max(3, need.minHeight * 0.06));
+  assert.ok(sil.worst >= 20, `skyline top ${sil.topWidths}`);
+  // a pyramid (the old read) has an apex: its skyline top is a few metres from every side
+  const pyramid = ground((x, z) => 10 + Math.max(0, 55 - Math.max(Math.abs(x), Math.abs(z + 60)) * 1.2));
+  assert.ok(cliffSilhouette(pyramid, [0, -60], 110, 3.3).worst < 10, "pyramid apex");
+  // the old shape (one ramp up the face) measures as a plane with no bands and no face the probe reads
+  const ramp = ground((_x, z) => 10 + clamp((-z - 0) * 0.9, 0, 55));
   const flat = cliffFaceRelief(ramp, [0, 0], 180, 90, 50);
-  assert.equal(flat.ledges, 0);
+  assert.equal(flat.bands, 0);
+  assert.equal(flat.face, 0);
   assert.ok(flat.planeRms < 1, `ramp rms ${flat.planeRms}`);
   // still the asked face over a walkable apron
-  const after = needStillMet(g1, { ...need, solved: { at: s.at, faces: s.faces, height: s.height, patch: s.patch!.id, raised: s.raised, ran: "" } })!;
+  const after = needStillMet(g1, { ...need, solved: { at: s.at, faces: s.faces, height: s.height, patch: p.id, raised: s.raised, ran: "" } })!;
   assert.equal(after.met, true, after.message);
   // a re-shape at a kept foot does not move it
   const kept = solveCliffFace(g0, need, needArea(need.near, need.within, []), { foot: [s.at[0] + 10, s.at[1]] });
   assert.deepEqual(kept.at, [s.at[0] + 10, s.at[1]]);
-  // the block never stands steeper than the lips gate allows (3) between 2 m samples
-  let worst = 0;
-  for (let z = s.at[1] - 120; z < s.at[1] + 10; z += 2)
-    for (let x = s.at[0] - 130; x < s.at[0] + 130; x += 2) worst = Math.max(worst, Math.abs(g1.height(x + 2, z) - g1.height(x, z)) / 2, Math.abs(g1.height(x, z + 2) - g1.height(x, z)) / 2);
-  assert.ok(worst <= 3.05, `steepest ${worst}`);
+  // never steeper than the lips gate allows the rock (8) between 2 m lattice samples; outside the rock's reach (the
+  // apron and its fill) never steeper than the need-face cap (3)
+  let rockWorst = 0, fillWorst = 0;
+  for (let z = s.at[1] - s.rock![0] - 10; z < s.at[1] + 90; z += 2)
+    for (let x = s.at[0] - s.rock![1] - 20; x < s.at[0] + s.rock![1] + 20; x += 2) {
+      const d = Math.max(Math.abs(field.height(x + 2, z) - field.height(x, z)), Math.abs(field.height(x, z + 2) - field.height(x, z))) / 2;
+      // as the lips gate tells the rock (needRockAt): inside its reach, a corner of the lattice cell lifted more than 3 m
+      const u = s.at[1] - (z + 1), inside = u >= -8 && u <= s.rock![0] && Math.abs(x + 1 - s.at[0]) <= s.rock![1] && Math.max(field.height(x, z), field.height(x + 2, z), field.height(x, z + 2), field.height(x + 2, z + 2)) > 20 + 3;
+      if (inside) rockWorst = Math.max(rockWorst, d); else fillWorst = Math.max(fillWorst, d);
+    }
+  assert.ok(rockWorst <= 8, `steepest rock ${rockWorst}`);
+  assert.ok(fillWorst <= 3.05, `steepest fill ${fillWorst}`);
 });
 
 test("cliff-face: the block keeps off a river (a fall pool beside it) like a shore", () => {

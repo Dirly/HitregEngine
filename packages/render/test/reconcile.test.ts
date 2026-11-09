@@ -44,6 +44,30 @@ function moved(entity: ReturnType<typeof boxEntity>, position: [number, number, 
 }
 
 describe("reconcileScene", () => {
+  it("uses the owning subtree's build callbacks during an actual visual reset", () => {
+    const prev = doc({ room: boxEntity(), base: boxEntity() });
+    const next = structuredClone(prev);
+    for (const entity of Object.values(next.entities)) {
+      entity.components["light"] = {
+        kind: "point", color: "#ffcc88", intensity: 1, range: 10,
+        angle: 0.5, castShadow: false,
+      };
+    }
+    const built = buildScene(prev);
+    const global: string[] = [];
+    const scoped: string[] = [];
+    expect(reconcileScene(built, prev, next, ["room", "base"], {
+      onLight: (id) => global.push(id),
+    }, {
+      buildOptionsFor: (id) => id === "room" ? {
+        onLight: (id) => scoped.push(id),
+      } : undefined,
+    })).toBe(true);
+    expect(scoped).toEqual(["room"]);
+    expect(global).toEqual(["base"]);
+    expect(built.objects.get("room")!.children.some((child) => (child as THREE.Light).isLight)).toBe(true);
+  });
+
   it("applies a transform-only change without touching visuals", () => {
     const prev = doc({ box: boxEntity() });
     const next = doc({ box: moved(boxEntity(), [3, 2, 1]) });

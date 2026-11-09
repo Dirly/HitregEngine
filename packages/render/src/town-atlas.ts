@@ -42,7 +42,9 @@ function atlasMaterialFor(source: THREE.MeshStandardMaterial): THREE.Material {
   const inTile = rect.xy.add(fract(tiled).mul(rect.zw));
   const gradUv = tiled.mul(rect.zw);
   // rain darkens the walls and gives the matte kit a sheen (wetness.ts)
-  const page = texture(map, inTile).grad(dFdx(gradUv), dFdy(gradUv));
+  // nearest on both filters: three binds no sampler, but grad() would name one and fail the shader (see prop-sheet.ts)
+  const unfiltered = map.minFilter === THREE.NearestFilter && map.magFilter === THREE.NearestFilter;
+  const page = unfiltered ? texture(map, inTile) : texture(map, inTile).grad(dFdx(gradUv), dFdy(gradUv));
   material.colorNode = vec4(wetColor(page.rgb), page.a);
   material.roughnessNode = wetRoughness(float(1));
   material.specularIntensityNode = wetSpecular(float(material.specularIntensity));

@@ -7,6 +7,11 @@ this before choosing how a visual feature will be built. A particular model or
 one tool's implementation does not limit this direction to that model or tool.
 An explicit art direction in the user's brief takes precedence.
 
+Audio follows [the game's audio direction](audio.md): polished orchestral
+fantasy music and organic sound effects with darker atmosphere where fitting.
+The PSX visual treatment is not a direction to reduce audio fidelity or use
+retro console/chiptune sounds.
+
 ## Ant and wasp nests
 
 Ants and wasps are non-sapient swarm animals in this game (owner direction,
@@ -19,6 +24,24 @@ are not. An insect silhouette or organic material does not make a human-made
 object appropriate. Keep existing creature models and useful natural materials;
 do not invent an insect civilization to supply a town-style prop list.
 
+## Redstrand Crockin
+
+Redstrand ecology direction (2026-11-06): use occupied habitat pockets with many
+independently wandering creatures, not only isolated singles across empty land.
+Reuse existing rats and pigs as nonhostile farm crop pests. Beetles, including
+their rare, defend themselves alone (Neutral). Ant workers are peaceful until
+provoked and nearby foragers help (Protective). Soldiers use the existing larger
+mandibles and attack on sight (Aggressive); mound and hive guards are Aggressive
+regardless of caste. A soldier's unprovoked attack must not recruit peaceful
+workers. Keep the foragers' assist faction separate from hostile nest guards.
+
+Owner direction (2026-11-06): Redstrand Crockin use a practical freshwater and
+wetland appearance. Keep natural scales, worn cloth, leather, reeds and scavenged
+metal readable in the regional palette. The owner rejects an Egyptian look:
+avoid pharaonic headdresses, striped nemes cloth, broad ceremonial collars,
+hieroglyphs, ankhs and royal gilt. Review the silhouette and worn equipment as
+well as the painted skin; repainting does not remove an unsuitable shape.
+
 ## Trees
 
 Owner direction (2026-10-29): match the existing trees' measured triangle counts
@@ -29,6 +52,49 @@ panels supply the crown's richness. Omit modeled roots that would be underground
 Preserve the painted leaves' proportions when changing a crown: reposition and
 uniformly scale foliage panels, or correct their UV mapping. Inspect the texture-only
 view for stretched leaves, as well as the silhouette and the crown from above.
+
+Owner direction (2026-11-06): match site trees to the surrounding forest in measured
+world-space height, crown width and trunk diameter, retaining its species mix and
+native size cohorts. Reusing the same model does not establish matching scale.
+Do not shrink supporting trees to bring their branches down to webs or cocoons;
+fit the attachments to the established forest. Check the entire transformed basal
+rim against the final rendered ground, with matching collider transforms.
+
+## Spider habitats
+
+Owner direction (2026-11-06): a spider area should feel thoroughly infested, with
+silk spreading across the woodland floor, climbing trunks and linking real
+supports through layered webs and hanging cocoons. Blend a painted ground-silk
+surface into the local forest litter and connect it visually to supported web
+geometry. A few isolated sheets and egg props do not establish the habitat.
+Keep routes and camera space usable. Egg bedding should closely support the
+clutch's actual footprint, with an irregular webbed edge rather than an oversized
+pale mound. Check every solid prop and tree across its full ground-contact area;
+visible hovering is a failure even when its pivot or a traversal check passes.
+
+Owner refinement (2026-11-06): suspended silk should drape under gravity, sit
+higher between its real supports and remain translucent, with muted grey/olive
+threads rather than brilliant white walls. Fade the whole sheet's outer edges
+independently of its repeating artwork; internal mesh subdivisions must not
+produce visible seams. Keep a few believable load strands connecting the wispy
+sheet to bark or rock. Continue the liked conforming trunk silk onto selected
+rocks. Break ground coverage into noisy, irregular deposits with exposed litter,
+and remove artificial painted paths from the infestation. Extend the woodland
+behind the nesting pockets so the habitat occupies a deeper forest space.
+
+Owner refinement (2026-11-06, close review): translucency must leave the webbing
+clearly visible. Keep floor, bark, rock and suspended silk in one pale neutral
+material family; balance brighter ground silk with translucent surface silk.
+Avoid opaque horizontal trunk wraps or repeating cloth bands. Use irregular
+coverage that climbs and spreads from varied real contacts: low trunks, ground,
+rocks and structural boughs at different heights. Close views must show continuous
+silk across mesh joins, without atlas borders, separate face offsets or obvious
+triangle lighting seams. Judge infestation density and consistency in the assembled
+player view, not from sheet counts or a silhouette against the sky alone.
+
+Placement workflow, reusable sources and future indoor adaptations:
+[spider-habitats.md](spider-habitats.md). Read it for spider dressing in woods,
+abandoned buildings, caves and dungeons.
 
 ## Divide the work before modeling
 

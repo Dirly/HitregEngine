@@ -11,7 +11,6 @@ import { sqrt,
   uv,
   positionLocal,
   positionGeometry,
-  positionWorld,
   cameraPosition,
   time,
   color as tslColor,
@@ -256,8 +255,17 @@ const MAX_BLADES = 65000;
  * between recenters.
  */
 const PLACEMENT_PAD = 1.3;
-/** Where the fade starts, as a fraction of wherever it ends. */
-const FADE_BAND = 0.7;
+/**
+ * Where a tuft starts to shrink, as a fraction of wherever it reaches zero.
+ *
+ * Cover GROWS in at the edge of its range, in the vertex stage, from each
+ * tuft's own distance. It does not dissolve: a chunky cutout card has hard
+ * alpha, so a fade through alphaTest is not a fade at all but a per-pixel arc
+ * where the ramp crosses the threshold, and procedural blades have no alpha
+ * test to fade through. Both ends of the band are uniforms, so the player's
+ * grass setting and the coverage clamp move the edge for free.
+ */
+const FADE_BAND = 0.85;
 
 /** Keep the fade inside existing coverage; reveal a completed patch gradually. */
 export function advanceGrassReach(current: number, target: number, elapsedMs: number): number {
@@ -470,6 +478,13 @@ class GrassPatch {
    * uploaded per instance, they belong to the tuft.
    */
   private readonly instanceRandom: THREE.InstancedBufferAttribute;
+  /**
+   * Where each tuft stands: the pivot it grows about, and the point its distance
+   * is measured to, so a whole tuft shrinks as one. Its own attribute because
+   * three keeps the shader's view of the instance matrix to itself. Written only
+   * when a placement commits.
+   */
+  private readonly instanceOrigin: THREE.InstancedBufferAttribute;
   private mapTexture: THREE.Texture | null = null;
   private center = new THREE.Vector2(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
 
@@ -498,6 +513,7 @@ class GrassPatch {
    */
   private scratchMatrix: Float32Array | null = null;
   private scratchRandom: Float32Array | null = null;
+  private scratchOrigin: Float32Array | null = null;
   /** false until one placement has COMPLETED — the first one is not budgeted. */
   private placed = false;
   /** the ground moved under a field already on screen; re-place in place */
@@ -509,7 +525,11 @@ class GrassPatch {
   private readonly tmpScale = new THREE.Vector3();
   private readonly tmpCamPos = new THREE.Vector3();
   /** The disc actually SAMPLED — the authored radius padded, see PLACEMENT_PAD. */
-  private readonly placeRadius: number;
+  private placeRadius: number;
+  /** The authored radius times the player's grass reach (`setQuality`). */
+  private radius: number;
+  private amount = 1;
+  private reach = 1;
   private readonly Y_AXIS = new THREE.Vector3(0, 1, 0);
   private readonly scaleMin: number;
   private readonly scaleSpan: number;
@@ -529,6 +549,7 @@ class GrassPatch {
     // 15% headroom: the jittered grid lands a variable number of points
     // inside the disc, and a buffer sized to the exact mean clips the field's
     // far edge on the rounds that come out heavy
+    this.radius = data.radius;
     this.placeRadius = data.radius * PLACEMENT_PAD;
     this.count = Math.min(
       MAX_BLADES,
@@ -613,7 +634,11 @@ class GrassPatch {
     // Placement commits already mark these buffers dirty explicitly.
     this.instanceRandom.name = "grass-random";
     geometry.setAttribute("instanceRandom", this.instanceRandom);
+    this.instanceOrigin = new THREE.InstancedBufferAttribute(new Float32Array(this.count * 3), 3);
+    this.instanceOrigin.name = "grass-origins";
+    geometry.setAttribute("instanceOrigin", this.instanceOrigin);
     const perInstance: N = attribute("instanceRandom", "vec4");
+    const origin: N = attribute("instanceOrigin", "vec3");
     const bend = positionGeometry.y.div(float(Math.max(0.001, data.bladeHeight)));
     const bendEased = mul(bend, bend);
     const phase = mul(perInstance.x, float(Math.PI * 2));
@@ -627,8 +652,34 @@ class GrassPatch {
     // square root: 3x the wind is ~1.7x the rate and 3x the bend.
     const rate = mul(float(data.windSpeed), sqrt(foliageWindScale));
     const sway = mul(sin(add(mul(time, rate), phase)), mul(float(data.windStrength), foliageWindScale));
-    // a flat card has no height to bend over; it rides the water still
-    if (!flat) {
+    // The fade band is a UNIFORM, not a constant, because the disc's coverage
+    // from the camera is not fixed: the centre is snapped and hysteretic, so
+    // the camera sits anywhere within the deadband of it, and PLACEMENT_PAD
+    // buys headroom rather than a guarantee. Recomputing the band each frame
+    // from the coverage that actually exists means cover ALWAYS reaches zero
+    // size before it runs out of blades — the hard arc cannot come back,
+    // whatever the pad, the recenter fraction and the lead add up to. When
+    // there is headroom to spare the band sits at the authored radius and
+    // this costs nothing.
+    this.fadeStartUniform = uniform(data.radius * FADE_BAND, "float");
+    this.fadeEndUniform = uniform(data.radius, "float");
+    // Past the band a tuft is zero-area and never rasterises. `cameraPosition`
+    // is the pass's own camera, so this field must stay out of the shadow map
+    // (it casts none) or it would shrink there by its distance from the sun.
+    const grow: N = sub(
+      float(1),
+      smoothstep(float(this.fadeStartUniform), float(this.fadeEndUniform), length(sub(cameraPosition, origin))),
+    );
+    if (flat) {
+      // a flat card has no height to bend over; it rides the water still, and
+      // grows outward from its middle instead
+      this.material.positionNode = add(origin, mul(sub(positionLocal, origin), grow));
+    } else {
+      // height only: the tuft rises out of the ground at its own width
+      const standing: N = vec3(positionLocal.x, add(origin.y, mul(sub(positionLocal.y, origin.y), grow)), positionLocal.z);
+      // sway and parting ride the same scale, or a squashed tuft would still
+      // lean out flat along the ground
+      const lean: N = mul(bendEased, grow);
       // …and parts around whoever walks through it (grass-push.ts)
       const world: N = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
       // under lying snow the whole tuft sinks out of sight (wetness.ts snowAt —
@@ -636,8 +687,8 @@ class GrassPatch {
       const buried: N = snowAt(world.x, world.y, world.z);
       const sink: N = vec3(0, buried.mul(float(data.bladeHeight * 1.6 + 0.1)).negate(), 0);
       this.material.positionNode = add(
-        add(add(positionLocal, vec3(mul(sway, bendEased), 0, mul(mul(sway, bendEased), float(0.3)))), sink),
-        grassPushOffset(world, bendEased),
+        add(add(standing, vec3(mul(sway, lean), 0, mul(mul(sway, lean), float(0.3)))), sink),
+        grassPushOffset(world, lean),
       );
     }
     // fake "mostly up" normal (no real geometry normal — a thin blade's true
@@ -652,20 +703,7 @@ class GrassPatch {
     const tint = add(float(0.85), mul(perInstance.y, float(0.3)));
 
     this.heightFadeUniform = uniform(1, "float");
-    // The fade band is a UNIFORM, not a constant, because the disc's coverage
-    // from the camera is not fixed: the centre is snapped and hysteretic, so
-    // the camera sits anywhere within the deadband of it, and PLACEMENT_PAD
-    // buys headroom rather than a guarantee. Recomputing the band each frame
-    // from the coverage that actually exists means cover ALWAYS reaches zero
-    // opacity before it runs out of blades — the hard arc cannot come back,
-    // whatever the pad, the recenter fraction and the lead add up to. When
-    // there is headroom to spare the band sits at the authored radius and
-    // this costs nothing.
-    this.fadeStartUniform = uniform(data.radius * FADE_BAND, "float");
-    this.fadeEndUniform = uniform(data.radius, "float");
-    const camDist = length(sub(cameraPosition, positionWorld));
-    const edgeFade = sub(float(1), smoothstep(float(this.fadeStartUniform), float(this.fadeEndUniform), camDist));
-    const fade = mul(edgeFade, float(this.heightFadeUniform));
+    const fade: N = float(this.heightFadeUniform);
 
     if (textured) {
       // Colour and cutout both come from the billboard. bladeColor still
@@ -697,7 +735,7 @@ class GrassPatch {
       }
       const sampled = tslTexture(map, cardUv);
       this.material.colorNode = sampled.xyz.mul(tslColor(data.bladeColor)).mul(tint);
-      // the texture's own alpha times the fades, so the fades dissolve the
+      // the texture's own alpha times the height fade, so it dissolves the
       // layer through the same alphaTest instead of needing a sorted blend
       // an instance whose tile has no cap discards its cap card (cap tile -1)
       const capHidden: N = capped
@@ -736,6 +774,7 @@ class GrassPatch {
     const gz1 = Math.ceil((centerZ + radius) / spacing);
     this.scratchMatrix ??= new Float32Array(this.count * 16);
     this.scratchRandom ??= new Float32Array(this.count * 4);
+    this.scratchOrigin ??= new Float32Array(this.count * 3);
     this.pending = {
       centerX,
       centerZ,
@@ -787,6 +826,7 @@ class GrassPatch {
     const radiusSq = this.placeRadius * this.placeRadius;
     const matrices = this.scratchMatrix!;
     const random = this.scratchRandom!;
+    const origins = this.scratchOrigin!;
     while (p.n < p.rows && p.visible < this.count) {
       if (!p.rowActive) {
         const gz = p.gzMid + (p.n % 2 === 0 ? p.n / 2 : -((p.n + 1) / 2));
@@ -808,6 +848,7 @@ class GrassPatch {
           if (elapsed >= budgetMs) return elapsed;
         }
         const gx = p.gx++;
+        if (this.amount < 1 && hashCell(gx, gz, 8) >= this.amount) continue; // its own salt: 7 is the tile pick, which would keep only the first tiles
         const worldX = (gx + hashCell(gx, gz, 1)) * spacing;
         const worldZ = (gz + hashCell(gx, gz, 2)) * spacing;
         const dx = worldX - p.centerX;
@@ -832,6 +873,9 @@ class GrassPatch {
         random[p.visible * 4 + 1] = hashCell(gx, gz, 6);
         random[p.visible * 4 + 2] = this.tiles[pick] ?? 0;
         random[p.visible * 4 + 3] = this.capTiles[pick] ?? -1;
+        origins[p.visible * 3] = worldX;
+        origins[p.visible * 3 + 1] = ground;
+        origins[p.visible * 3 + 2] = worldZ;
         p.visible++;
       }
       p.rowActive = false;
@@ -845,6 +889,7 @@ class GrassPatch {
   private commit(p: PendingPlacement): void {
     (this.mesh.instanceMatrix.array as Float32Array).set(this.scratchMatrix!.subarray(0, p.visible * 16));
     (this.instanceRandom.array as Float32Array).set(this.scratchRandom!.subarray(0, p.visible * 4));
+    (this.instanceOrigin.array as Float32Array).set(this.scratchOrigin!.subarray(0, p.visible * 3));
     this.mesh.count = p.visible;
     // an empty layer is not drawn at all: a world carries dozens of biome
     // -gated layers and only the few growing near the camera should cost a
@@ -852,12 +897,15 @@ class GrassPatch {
     this.mesh.visible = p.visible > 0;
     this.mesh.instanceMatrix.clearUpdateRanges();
     this.instanceRandom.clearUpdateRanges();
+    this.instanceOrigin.clearUpdateRanges();
     if (p.visible > 0) {
       this.mesh.instanceMatrix.addUpdateRange(0, p.visible * 16);
       this.instanceRandom.addUpdateRange(0, p.visible * 4);
+      this.instanceOrigin.addUpdateRange(0, p.visible * 3);
     }
     this.mesh.instanceMatrix.needsUpdate = true;
     this.instanceRandom.needsUpdate = true;
+    this.instanceOrigin.needsUpdate = true;
     this.center.set(p.centerX, p.centerZ);
     this.pending = null;
     this.placed = true;
@@ -893,6 +941,21 @@ class GrassPatch {
     return Math.round(value / cell) * cell;
   }
 
+  /**
+   * The player's grass setting. `amount` keeps that share of the lattice, chosen by a per-cell hash, so the same blades
+   * survive at every setting and the field thins rather than reshuffles; `reach` shortens the disc. No new shader and no
+   * reallocation: the next placement just writes fewer instances. The cached ground stays valid (same lattice).
+   */
+  setQuality(amount: number, reach: number): void {
+    if (amount === this.amount && reach === this.reach) return;
+    this.amount = amount;
+    this.reach = reach;
+    this.radius = this.data.radius * reach;
+    this.placeRadius = this.radius * PLACEMENT_PAD;
+    if (this.pending) this.beginPlacement(this.pending.centerX, this.pending.centerZ, this.regionTest);
+    else if (this.placed) this.stale = true;
+  }
+
   /** Drop cached ground; the terrain under this field may have changed. */
   invalidateGround(): void {
     this.samples.clear();
@@ -913,6 +976,10 @@ class GrassPatch {
     regionTest?: CoverRegionTest,
   ): number {
     this.regionTest = regionTest;
+    if (this.amount <= 0) {
+      this.mesh.visible = false;
+      return 0;
+    }
     this.group.updateWorldMatrix(true, false);
     this.mesh.matrix.copy(this.group.matrixWorld).invert();
 
@@ -923,7 +990,7 @@ class GrassPatch {
     // then re-decide — worst case the field is one build behind, which is
     // what the lead below is sized to cover.
     if (!this.pending) {
-      const cell = Math.max(1, this.data.radius * RECENTER_FRACTION);
+      const cell = Math.max(1, this.radius * RECENTER_FRACTION);
       const nextX = this.recenterAxis(this.tmpCamPos.x, this.center.x, cell);
       const nextZ = this.recenterAxis(this.tmpCamPos.z, this.center.y, cell);
       if (nextX !== this.center.x || nextZ !== this.center.y) {
@@ -953,7 +1020,7 @@ class GrassPatch {
         const dz = nextZ - this.center.y;
         const jump = Math.hypot(dx, dz);
         if (Number.isFinite(jump) && jump > 1e-3) {
-          const lead = Math.min(this.data.radius * LEAD_MAX_FRACTION, jump * LEAD_GAIN);
+          const lead = Math.min(this.radius * LEAD_MAX_FRACTION, jump * LEAD_GAIN);
           leadX = (dx / jump) * lead;
           leadZ = (dz / jump) * lead;
         }
@@ -983,8 +1050,8 @@ class GrassPatch {
     const driftX = this.tmpCamPos.x - this.center.x;
     const driftZ = this.tmpCamPos.z - this.center.y;
     const reach = Number.isFinite(this.center.x)
-      ? Math.min(this.data.radius, Math.max(1, this.placeRadius - Math.hypot(driftX, driftZ)))
-      : this.data.radius;
+      ? Math.min(this.radius, Math.max(1, this.placeRadius - Math.hypot(driftX, driftZ)))
+      : this.radius;
     const now = performance.now();
     const fadedReach = this.lastFadeTime === null
       ? reach
@@ -1042,6 +1109,7 @@ class GrassPatch {
     this.pending = null;
     this.scratchMatrix = null;
     this.scratchRandom = null;
+    this.scratchOrigin = null;
   }
 }
 
@@ -1060,6 +1128,15 @@ export class GrassSystem {
   private turn = 0;
   /** Optional host pre-test that lets a layer skip a whole placement; see CoverRegionTest. */
   regionTest: CoverRegionTest | undefined;
+  private amount = 1;
+  private reach = 1;
+
+  /** Player setting, for every layer present and future: `amount` 0..1 of the authored density (0 = none), `reach` 0..1 of the authored radius. */
+  setQuality(amount: number, reach = 1): void {
+    this.amount = Math.min(1, Math.max(0, amount));
+    this.reach = Math.min(1, Math.max(0.1, reach));
+    for (const patch of this.order) patch.setQuality(this.amount, this.reach);
+  }
 
   register(
     entityId: string,
@@ -1068,7 +1145,9 @@ export class GrassSystem {
     resolveTexture?: GrassTextureResolver,
   ): void {
     this.patches.get(entityId)?.dispose();
-    this.patches.set(entityId, new GrassPatch(group, data, resolveTexture));
+    const patch = new GrassPatch(group, data, resolveTexture);
+    patch.setQuality(this.amount, this.reach);
+    this.patches.set(entityId, patch);
     this.order = [...this.patches.values()];
   }
 

@@ -29,6 +29,8 @@ export const groundPaintSchema = z
     edgeNoise: z.number().min(0).max(12).default(1.5).describe("Metres the painted edge wanders in and out (~12 m wavelength), so it never reads as a drawn line."),
     strength: z.number().min(0).max(1).default(1).describe("Paint opacity at full weight (1 = only this surface)."),
     breakup: z.number().min(0).max(0.9).default(0).describe("Fraction of the area left unpainted in noise blotches (~10 m), so a large paint shows the ground through. 0 = solid."),
+    fringe: z.number().min(0).max(40).default(0).describe("Metres INSIDE the outline over which the paint breaks into SPLOTCHES that thin to islands and then nothing by the feather's outer edge (a creep, a spill, a stain that fades gradually), instead of a smooth fade. 0 = the plain feather. L (Rustblood hive 2026-10-30, Derek: the resin creep read as boxes; it must fade out gradually and splotchy)."),
+    blotch: z.number().min(3).max(30).default(8).describe("Size (metres) of the fringe's splotches and islands."),
     slope: z.tuple([z.number().min(0).max(90), z.number().min(0).max(90)]).optional().describe("Only where the ground slope is inside [min, max] degrees (faded over 4 degrees each side)."),
     height: z.tuple([z.number().finite(), z.number().finite()]).optional().describe("Only where the ground is inside [minY, maxY] world metres (faded over 1.5 m each side)."),
     faces: z.boolean().default(false).describe("Also paint near-vertical faces. Default false: like road and lake paint it fades out between 40 and 53 degrees, so a face keeps the zone's cliff stone."),
@@ -61,6 +63,16 @@ export function groundPaintBounds(p: { polygon?: readonly (readonly number[])[];
 const EDGE_SPEC: FbmSpec = { frequency: 1 / 12, amplitude: 1, octaves: 2, lacunarity: 2, gain: 0.5, ridged: false, seed: 2203 };
 const BREAK_SPEC: FbmSpec = { frequency: 1 / 10, amplitude: 1, octaves: 3, lacunarity: 2, gain: 0.5, ridged: false, seed: 2207 };
 
+const FRINGE_SPEC: FbmSpec = { frequency: 1 / 8, amplitude: 1, octaves: 3, lacunarity: 2.1, gain: 0.55, ridged: false, seed: 2213 };
+
+/** Splotchy fade: solid inside `-fringe`, nothing past `feather` outside; between, a noise threshold that rises with
+ *  distance, so the paint breaks into blotches, then islands, then bare ground. `n` = blotch noise in ~[0, 1]. */
+export function fringeWeight(d: number, fringe: number, feather: number, n: number): number {
+  const t = smoothstep(-fringe, Math.max(0.5, feather), d); // 0 solid .. 1 gone
+  const cut = -0.15 + 1.3 * t;
+  return smoothstep(cut - 0.07, cut + 0.07, n);
+}
+
 /** One compiled paint: what `paint` needs per sample, outline indexed. */
 interface PaintRuntime {
   target: number;
@@ -69,6 +81,8 @@ interface PaintRuntime {
   edgeNoise: number;
   strength: number;
   breakup: number;
+  fringe: number;
+  blotch: number;
   slope: [number, number, number, number] | null; // sin(angle): outer lo, inner lo, inner hi, outer hi
   height: [number, number] | null;
   faces: boolean;
@@ -102,7 +116,7 @@ export function createGroundPainter(
   paints.forEach((p, k) => {
     const target = surfaceIndex(p.surface);
     if (target < 0) return;
-    const band = p.feather + p.edgeNoise + 2;
+    const band = p.feather + p.edgeNoise + (p.fringe ?? 0) + 2;
     specs.push(p.polygon ? { kind: "polygon", points: p.polygon, band } : { kind: "disc", center: p.center!, radius: p.radius! });
     list.push({
       target,
@@ -111,6 +125,8 @@ export function createGroundPainter(
       edgeNoise: p.edgeNoise,
       strength: p.strength,
       breakup: p.breakup,
+      fringe: p.fringe ?? 0,
+      blotch: p.blotch ?? 8,
       slope: p.slope ? [sinDeg(p.slope[0] - 4), sinDeg(p.slope[0]), sinDeg(p.slope[1]), sinDeg(p.slope[1] + 4)] : null,
       height: p.height ? [p.height[0], p.height[1]] : null,
       faces: p.faces,
@@ -130,7 +146,9 @@ export function createGroundPainter(
         if (facesOnly && !r.faces) continue;
         let d = index.signedDistance(r.outline, x, z);
         if (r.edgeNoise > 0) d += fbm2(EDGE_SPEC, x + r.salt, z - r.salt, seed) * r.edgeNoise;
-        let w = r.feather > 0 ? 1 - smoothstep(0, r.feather, d) : d <= 0 ? 1 : 0;
+        let w: number;
+        if (r.fringe > 0) w = fringeWeight(d, r.fringe, r.feather, fbm2(FRINGE_SPEC, (x + r.salt) * (8 / r.blotch), (z - r.salt) * (8 / r.blotch), seed) * 1.25 + 0.5); // fbm2 spans ~+-0.4: stretched to ~[0, 1]
+        else w = r.feather > 0 ? 1 - smoothstep(0, r.feather, d) : d <= 0 ? 1 : 0;
         if (w <= 0.002) continue;
         if (!r.faces) w *= flat;
         if (facesOnly) w *= 1 - flat;

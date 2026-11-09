@@ -72,6 +72,8 @@ export { PresenceScript, presentFor } from "./presence.js";
 export { PlayerRecords } from "./player-records.js";
 export { PortalScript } from "./portal.js";
 export { LiftScript, liftCycle, liftLength, liftProgress, isClockDrivenScript } from "./lift.js";
+export { BossGateScript, bossGateProgress, bossGateKey, bossGateCloseKey } from "./boss-gate.js";
+export { EncounterChoiceScript, encounterChoiceKey } from "./encounter-choice.js";
 export { EncounterWavesScript, WaveTracker, npcSpawnEventSchema, npcDespawnEventSchema, type WaveDef, type WaveTrackerConfig } from "./encounter-waves.js";
 export {
   actionIsLayered,

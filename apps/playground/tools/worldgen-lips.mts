@@ -335,7 +335,7 @@ export function cellMaker(recipe: WorldRecipe, field: { height(x: number, z: num
 export interface LipsException { id: string; reason: string; cells: [number, number][] }
 
 /** A road piece's base id: `path-a-b.2.s3` -> `path-a-b` (non-road owners are returned unchanged). */
-export const pieceBase = (id: string): string => id.replace(/(\.s?\d+)+$/, "");
+export const pieceBase = (id: string): string => id.replace(/(\.[sj]?\d+)+$/, "");
 
 export function lipsExceptionsFile(recipeFile: string): string {
   // beside the world: <project>/authoring/terrain/ (as worldgen-operators.mts sideDir, the fine-legacy list)
@@ -352,6 +352,35 @@ export function readLipsExceptions(recipeFile: string): LipsException[] {
 
 /** Rise/run a generated cliff-face need may stand at before lips calls it a wall (72 deg). */
 export const NEED_FACE_MAX_SLOPE = 3;
+/**
+ * Rise/run a cliff-face need's own ROCK may stand at (83 deg): inside the block's solved reach (`needs[].solved.rock`)
+ * where the patch lifts the ground more than NEED_ROCK_LIFT m, the near-vertical walls are the cliff itself (w15: a
+ * cliff need must make a cliff; the 72 deg cap made every face a mound). Its apron, fills and edges keep the 72 deg cap.
+ */
+export const NEED_ROCK_MAX_SLOPE = 8;
+/** One-sample rim a cliff need's rock may hold (m): its corners and arêtes (a front meeting a return) read as one-sample
+ *  peaks on the lattice; a fin or slot taller than this is still a fault. */
+export const NEED_ROCK_LIP = 6;
+const NEED_ROCK_LIFT = 3;
+
+/** (x, z) (a 2 m lattice cell's centre) -> true inside a solved cliff-face need's rock (its block, lifted more than NEED_ROCK_LIFT m). */
+export function needRockAt(recipe: WorldRecipe, lift: (x: number, z: number) => number): (x: number, z: number) => boolean {
+  const rocks = (recipe.needs ?? []).flatMap((n) => {
+    if (n.kind !== "cliff-face" || !n.solved?.rock) return [];
+    const b = (((n.solved.faces + 180) % 360) * Math.PI) / 180, ix = Math.sin(b), iz = -Math.cos(b);
+    return [{ at: n.solved.at, ix, iz, deep: n.solved.rock[0], side: n.solved.rock[1] }];
+  });
+  if (!rocks.length) return () => false;
+  return (x, z) => rocks.some((r) => {
+    const dx = x - r.at[0], dz = z - r.at[1], u = dx * r.ix + dz * r.iz, s = -dx * r.iz + dz * r.ix;
+    // the wall's foot past the face ends stands a few metres in front of the foot line (it follows the apron's fill down)
+    // a lattice cell (centre x, z) the patch lifts that much at a corner or one sample beyond: the toe cell under a riser,
+    // and the crease where a riser meets rising ground, are the rock's
+    if (u < -8 || u > r.deep || Math.abs(s) > r.side) return false;
+    for (const ox of [-3, -1, 1, 3]) for (const oz of [-3, -1, 1, 3]) if (lift(x + ox, z + oz) > NEED_ROCK_LIFT) return true;
+    return false;
+  });
+}
 
 export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number, number]; aliasTol?: number; maxSlope?: number; lipTol?: number; allow?: string[]; exceptions?: LipsException[] } = {}): LipsResult & { faults: (TerrainLipFault & { owner: string })[]; excepted: number } {
   const field = createWorldField(recipe);
@@ -386,6 +415,7 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
   const totals = { alias: 0, step: 0, lip: 0, cells: 0, touched: 0 };
   // measured owner by owner; a cell in two bands is attributed to the edit that made it (else to the nearer band)
   const maker = cellMaker(recipe, field);
+  const inRock = needRockAt(recipe, (x, z) => field.height(x, z) - reference.height(x, z));
   for (const o of list) {
     let [x0, z0, x1, z1] = o.box;
     if (opts.near) {
@@ -405,12 +435,15 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
       // a ground-need patch (`need-*`, worldgen needs) IS a rock face: its 45-60 deg face is the point, so only a wall
       // steeper than NEED_FACE_MAX_SLOPE counts (2026-10-29 redstrand w6: the weeping-sun scarp read as 1173 steps)
       aliasTol: opts.aliasTol, maxSlope: o.kind === "patch" && o.id.startsWith("need-") ? Math.max(opts.maxSlope ?? 1.6, NEED_FACE_MAX_SLOPE) : opts.maxSlope, lipTol: opts.lipTol,
+      lipTolAt: o.kind === "patch" && o.id.startsWith("need-") ? (x, z) => (inRock(x, z) ? Math.max(opts.lipTol ?? 0.75, NEED_ROCK_LIP) : undefined) : undefined,
       // a cell a need face also moved is that face's rock wherever it stands: a road cut deepening its toe is charged to
       // the road, at the face's slope (the steepest tolerance of the edits that moved the cell)
       maxSlopeAt: (x, z) => {
         const rivals = others.filter((q) => q.band(x, z) <= 0);
-        if (!rivals.length) return undefined;
-        return maker(x, z, [o, ...rivals]).moved.some((k) => k.startsWith("patch:need-")) ? Math.max(opts.maxSlope ?? 1.6, NEED_FACE_MAX_SLOPE) : undefined;
+        const need = o.kind === "patch" && o.id.startsWith("need-") ? true : rivals.length ? maker(x, z, [o, ...rivals]).moved.some((k) => k.startsWith("patch:need-")) : false;
+        if (!need) return undefined;
+        // a cliff need's own rock stands near-vertical; everything else it moved keeps the need-face cap
+        return Math.max(opts.maxSlope ?? 1.6, inRock(x, z) ? NEED_ROCK_MAX_SLOPE : NEED_FACE_MAX_SLOPE);
       },
       include: (x, z) => {
         const mine = o.band(x, z);

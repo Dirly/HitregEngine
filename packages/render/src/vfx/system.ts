@@ -575,6 +575,12 @@ export class VfxSystem implements LiveModuleHost {
     this.resolvers = resolvers;
     this.root.name = "vfx";
     this.root.userData["vfx"] = true;
+    // Most of what hangs here is pooled and hidden (460 of a town frame's ~1500 matrix-walk visits), and three walks hidden
+    // objects too. The root stays at the origin, so the walk only needs what shows; a module shown again composes its
+    // matrix on its first frame back.
+    this.root.updateMatrixWorld = (force?: boolean): void => {
+      for (const child of this.root.children) if (child.visible) child.updateMatrixWorld(force);
+    };
     const n = opts.maxLights ?? 4;
     for (let i = 0; i < n; i++) {
       const light = new THREE.PointLight(0xffffff, 0, 8, 2);
@@ -773,7 +779,7 @@ export class VfxSystem implements LiveModuleHost {
    * spritesheet); without them those two variants are skipped.
    */
   async warmup(
-    precompile: (group: THREE.Object3D) => Promise<void> | void,
+    precompile: (group: THREE.Object3D, collected?: () => void) => Promise<void> | void,
     opts: { mask?: string; sheet?: string; sheets?: readonly string[]; decals?: readonly string[]; camera?: THREE.Camera } = {},
   ): Promise<void> {
     const ids: string[] = [];
@@ -848,15 +854,22 @@ export class VfxSystem implements LiveModuleHost {
     this.root.traverse((o) => {
       if (o.userData["vfx"] && (o as THREE.Mesh).isMesh) o.visible = true;
     });
+    let hidden = false;
+    const hide = (): void => {
+      if (hidden) return;
+      hidden = true;
+      play.kill();
+      this.root.traverse((o) => {
+        if (o.userData["vfx"] && (o as THREE.Mesh).isMesh && !(o as THREE.Light).isLight) o.visible = false;
+      });
+    };
     try {
-      await precompile(this.root);
+      // hidden as soon as the draw list is taken: a compile can run 30 s, and every frame meanwhile would draw the sampler
+      await precompile(this.root, hide);
     } catch (error) {
       console.warn("[vfx] warmup precompile failed:", error);
     }
-    play.kill();
-    this.root.traverse((o) => {
-      if (o.userData["vfx"] && (o as THREE.Mesh).isMesh && !(o as THREE.Light).isLight) o.visible = false;
-    });
+    hide();
   }
 
   /**
@@ -875,7 +888,7 @@ export class VfxSystem implements LiveModuleHost {
 
   async warmSpells(
     spells: readonly SpellDoc[],
-    precompile: (group: THREE.Object3D) => Promise<void> | void,
+    precompile: (group: THREE.Object3D, collected?: () => void) => Promise<void> | void,
     camera?: THREE.Camera,
     /** Standalone effects (`vfx` assets a game plays itself, such as hands while casting). */
     effects: readonly VfxEffect[] = [],
@@ -895,7 +908,7 @@ export class VfxSystem implements LiveModuleHost {
   private async warmSpellLooks(
     spells: readonly SpellDoc[],
     standalone: readonly VfxEffect[],
-    precompile: (group: THREE.Object3D) => Promise<void> | void,
+    precompile: (group: THREE.Object3D, collected?: () => void) => Promise<void> | void,
     camera?: THREE.Camera,
   ): Promise<number> {
     const seen = new Set<string>();
@@ -944,15 +957,21 @@ export class VfxSystem implements LiveModuleHost {
     this.root.traverse((o) => {
       if (o.userData["vfx"] && (o as THREE.Mesh).isMesh) o.visible = true;
     });
+    let hidden = false;
+    const hide = (): void => {
+      if (hidden) return;
+      hidden = true;
+      play.kill();
+      this.root.traverse((o) => {
+        if (o.userData["vfx"] && (o as THREE.Mesh).isMesh && !(o as THREE.Light).isLight) o.visible = false;
+      });
+    };
     try {
-      await precompile(this.root);
+      await precompile(this.root, hide);
     } catch (error) {
       console.warn("[vfx] spell warmup precompile failed:", error);
     }
-    play.kill();
-    this.root.traverse((o) => {
-      if (o.userData["vfx"] && (o as THREE.Mesh).isMesh && !(o as THREE.Light).isLight) o.visible = false;
-    });
+    hide();
     return modules.length;
   }
 

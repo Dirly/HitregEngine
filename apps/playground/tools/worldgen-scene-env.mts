@@ -7,6 +7,10 @@
  * sun and the weather/day-night params); without one, the builtins run on their defaults.
  */
 import fs from "node:fs";
+import { applyOps, ComponentRegistry, registerChunkComponents, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
+import type { WorldField, WorldRecipe } from "@hitreg/core";
+import { loadShell, planShell, shellGaps, type PlanOptions } from "./_game-shell.mjs";
+import { worldSpawn } from "./_world-spawn.mts";
 
 export interface SceneEntityJson {
   name: string;
@@ -53,4 +57,45 @@ export function withEnvironment(entities: Record<string, SceneEntityJson>, lookS
     added.push("zone-mood");
   }
   return added;
+}
+
+/**
+ * The world's spawn as the shell wants it: XZ + facing from the world's data (tools/_world-spawn.mts: the starter
+ * town's gate street), the height from `field` when given (surfaceCast + 1.1 m, the body root over its feet), else 0
+ * (an XZ-only check). `projectDir` = the world project's folder (the town design path is relative to it).
+ */
+export function shellSpawn(recipe: WorldRecipe, projectDir: string, field?: WorldField): PlanOptions["spawn"] {
+  const ws = worldSpawn(recipe, projectDir);
+  if (!ws) return null;
+  const ground = field ? (field.surfaceCast(ws.at[0], ws.at[1]) ?? field.height(ws.at[0], ws.at[1])) : -1.1;
+  return { position: [ws.at[0], +(ground + 1.1).toFixed(2), ws.at[1]], rotation: ws.rotation, from: ws.from };
+}
+
+/**
+ * The GAME SHELL (player prefab, camera rig, HUD/UI/fx/audio systems, pooled VFX) the project's closure supplies in
+ * `assets/game-shell.json` (tools/_game-shell.mjs; installer tools/game-shell.mts), applied to a fresh world scene as one
+ * validated ops batch, the player at the world spawn when one is given. A world without one in its closure (no
+ * foundation) keeps the dev capsule. Redstrand 2026-10-31: its scene was born a capsule with no HUD, no combat and no
+ * UI, standing at the origin, and nothing flagged it.
+ */
+export function withGameShell(project: string, doc: SceneDoc, spawn: PlanOptions["spawn"] = null): { doc: SceneDoc; added: string[] } {
+  const loaded = project ? loadShell(project) : null;
+  if (!loaded) return { doc, added: [] };
+  const plan = planShell(loaded, doc, { spawn });
+  const registry = new ComponentRegistry();
+  registerCoreComponents(registry);
+  registerChunkComponents(registry);
+  return { doc: applyOps(doc, plan.ops as Op[], registry).doc, added: plan.added };
+}
+
+/** worldgen status `game-shell` row: null = the world scene carries the whole shell, its player at the world spawn
+ *  (XZ within 4 m), or the closure has no shell. */
+export function gameShellStageCheck(project: string, sceneFile: string, recipe?: WorldRecipe, projectDir?: string): string | null {
+  const loaded = project ? loadShell(project) : null;
+  if (!loaded) return null;
+  if (!fs.existsSync(sceneFile)) return `no world scene (${sceneFile.replaceAll("\\", "/").split("/").slice(-1)[0]})`;
+  const doc = JSON.parse(fs.readFileSync(sceneFile, "utf8")) as SceneDoc;
+  const spawn = recipe && projectDir ? shellSpawn(recipe, projectDir) : null;
+  const gaps = shellGaps(loaded, doc, { spawn });
+  return gaps.length ? `${gaps.length} gap(s): ${gaps.slice(0, 4).join("; ")}${gaps.length > 4 ? " ..." : ""}` : null;
 }

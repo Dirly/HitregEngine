@@ -77,3 +77,23 @@ test("starter mix: passive / wary / aggressive shares are held to the EverQuest 
   }
   assert.equal(fodderLevel(1, "k"), 1);
 });
+
+test("archetypes keep authoring diversity and density reports consistent with member-over-area runtime policy", async () => {
+  const { wandererCreatures } = await import("../tools/zonegen/commands/_wanderers.mts");
+  const { lifeOf, sharesOf } = await import("../tools/zonegen/commands/populate.mts");
+  const w = wanderersSchema.parse({zone:'z',areas:[{id:'colony',name:'Colony',placement:'anywhere',population:10,behaviorArchetype:'aggressive',mix:[
+    {creature:'worker',behaviorArchetype:'protective',weight:4},
+    {creature:'soldier',behaviorArchetype:'aggressive',weight:1},
+    {creature:'beetle',temperament:'passive'},
+  ],rares:[{id:'beetle-rare',name:'Rare beetle',creature:'beetle',level:7,behaviorArchetype:'neutral'}]}]});
+  assert.deepEqual(wandererCreatures(w.areas[0]!).map(r=>[r.creature,r.temperament]),[
+    ['worker','passive'],['soldier','hostile'],['beetle','passive'],['beetle','passive'],
+  ]);
+  const area = {placement:'anywhere',population:10,behaviorArchetype:'aggressive' as const,mix:[
+    {template:'worker',weight:4,behaviorArchetype:'protective' as const},
+    {template:'soldier',weight:1,behaviorArchetype:'aggressive' as const},
+  ]};
+  assert.deepEqual(lifeOf(area),{alive:10,hostile:2});
+  assert.deepEqual(sharesOf([area]),{passive:.8,wary:0,aggressive:.2});
+  assert.deepEqual(lifeOf({spawns:[{template:'worker',count:4,behaviorArchetype:'protective'},{template:'soldier',count:1,behaviorArchetype:'aggressive'}]}),{alive:5,hostile:1});
+});

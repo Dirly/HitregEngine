@@ -20,6 +20,8 @@
  * Town plans stay where the town tools read them: authoring/towns/<town>-plan.json.
  */
 import { z } from "zod";
+import { mobBehaviorArchetypeSchema } from "@hitreg/core";
+// @ts-expect-error Shared JavaScript size-tier authority has no TypeScript declarations.
 import { tierSummary } from "../../../../tools/poi-review/size-tiers.mjs";
 import { needRulingSchema, siteNeedOverridesSchema, siteRoleSchema } from "../site-needs.mts";
 
@@ -367,7 +369,7 @@ export type ZoneBrief = z.infer<typeof zoneBriefSchema>;
 export const zoneBestiarySchema = z
   .object({
     zone: z.string().min(1),
-    wildlife: z.array(z.object({ creature: id, habitats: z.array(z.enum(HABITATS)).min(1), density: z.enum(["sparse", "common", "dense"]).default("common") })),
+    wildlife: z.array(z.object({ creature: id, behaviorArchetype: mobBehaviorArchetypeSchema.optional(), habitats: z.array(z.enum(HABITATS)).min(1), density: z.enum(["sparse", "common", "dense"]).default("common"), scale: z.number().min(0.5).max(6).default(1).describe("Uniform body size for habitat wildlife and its wilderness fill. Populate scales collision, attack reach, eyes and gait together, as for oversized rares."), faction: z.string().optional().describe("Combat and assist faction for habitat wildlife and fill. Allows neutral ant foragers to assist their own colony without joining hostile nest pulls.") })),
     faction: z.array(z.object({ creature: id, theme: id, role: z.enum(CREATURE_ROLES) })).min(1).describe("The main faction's line-up here."),
     minor: z.array(z.object({ creature: id, theme: id, from: z.string().min(1) })).default([]),
     rares: z
@@ -391,7 +393,8 @@ export const zoneBestiarySchema = z
           id,
           name: z.string().min(1),
           faction: z.string().default("").describe("The zone's main faction, one of its cast minors, or one of its cast row's `others`; empty = wildlife with a twist."),
-          members: z.array(z.object({ creature: id, theme: z.string().default(""), role: z.enum(CREATURE_ROLES), scale: z.number().min(0.5).max(6).default(1).describe("Body size multiplier on the base creature (an enormous croc = 3). Populate scales its collider, reach, eye height and gait with it; the server sees anything bigger than a person from further away (up to 600 m) and places its pack beyond that, so a giant is seen coming."), })).min(1),
+          behaviorAt: z.record(z.string(), z.object({ faction: z.string().optional(), temperament: z.enum(["hostile","territorial","passive"]).optional(), behaviorArchetype: mobBehaviorArchetypeSchema.optional() })).default({}).describe("Location-specific combat/assist faction and behavior. One colony may guard its hive on sight while its distant foragers remain peaceful and assist only each other."),
+          members: z.array(z.object({ creature: id, behaviorArchetype: mobBehaviorArchetypeSchema.optional(), theme: z.string().default(""), role: z.enum(CREATURE_ROLES), scale: z.number().min(0.5).max(6).default(1).describe("Body size multiplier on the base creature (an enormous croc = 3). Populate scales its collider, reach, eye height and gait with it; the server sees anything bigger than a person from further away (up to 600 m) and places its pack beyond that, so a giant is seen coming."), })).min(1),
           where: z.string().min(1).describe("Location id, habitat or a few words of where they hold out."),
           premise: z.string().min(1).describe("Their own small reason to be here, apart from the zone's big story."),
         }),

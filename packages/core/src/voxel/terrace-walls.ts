@@ -23,15 +23,17 @@ import type { ChunkDoc } from "../chunks.js";
 const slug = z.string().regex(/^[a-z][a-z0-9-]*$/, "lowercase slug");
 const xz = z.tuple([z.number().finite(), z.number().finite()]);
 
-export const TERRACE_WALL_STYLES = ["masonry-common", "masonry-stone", "natural"] as const;
-export const TERRACE_WALL_INSERTS = ["stair", "stair-turn", "ramp", "drain", "buttress", "door-arch", "door-lintel"] as const;
+export const TERRACE_WALL_STYLES = ["masonry-common", "masonry-stone", "masonry-strand", "natural"] as const;
+/** The masonry styles (the retaining-wall kit's lookup keys without the `masonry-` prefix). */
+export const TERRACE_MASONRY_STYLES = ["masonry-common", "masonry-stone", "masonry-strand"] as const;
+export const TERRACE_WALL_INSERTS = ["stair", "stair-turn", "stair-axial", "ramp", "drain", "buttress", "door-arch", "door-lintel"] as const;
 
 export const terraceWallInsertSchema = z.object({
   role: z
     .enum(TERRACE_WALL_INSERTS)
     .describe(
       "What replaces plain wall at this offset. stair: straight flights against the face (2 m of low ground). stair-turn: " +
-        "dog-leg stair for tight terraces (3.8 m of low ground). ramp: ~10.6 deg ramp along the face. drain / buttress: a " +
+        "dog-leg stair for tight terraces (3.8 m of low ground). stair-axial: a broad straight flight SQUARE to the face (6 m of the face, ~0.4 m of low ground per riser in front of it, cheek walls) climbing through a gap in the wall: civic steps on a street axis (a chapel or a square). ramp: ~10.6 deg ramp along the face. drain / buttress: a " +
         "straight with weep holes / a buttress. door-lintel (wall >= 3.2 m) / door-arch (>= 3.6 m): a doorway with a 2 m " +
         "passage into the pad (its keep-clear box is carved; the pad must stand a lattice node above the passage roof).",
     ),
@@ -93,9 +95,9 @@ export const terraceWallSchema = z
     style: z
       .enum(TERRACE_WALL_STYLES)
       .default("masonry-common")
-      .describe("masonry-common: coursed rubble (houses, lanes, fields). masonry-stone: dressed ashlar (civic works, capitals). natural: rock shelves from the rock kit."),
+      .describe("masonry-common: coursed rubble (houses, lanes, fields). masonry-stone: dressed ashlar (civic works, capitals). masonry-strand: the common rubble in the Redstrand red rubble of the strand-lime town kit (k-town2: a town's walls in its own building stone, never the grey generic; worldgen picks it from the town's kit style). natural: rock shelves from the rock kit."),
     fallback: z
-      .enum(["masonry-common", "masonry-stone"])
+      .enum(TERRACE_MASONRY_STYLES)
       .optional()
       .describe("natural only: the masonry style to build with while the natural shelf kit (world-kit rock-kit shelf-lookup.json) does not exist. Omitted = a natural terrace fails until it does."),
     footprint: z

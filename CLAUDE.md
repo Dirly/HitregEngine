@@ -99,6 +99,10 @@ For fantasy places and their stories, read **`docs/world-standards/adventure-des
 before choosing premises or writing quests. Skelmorrow's POIs are fantasy
 discoveries and adventures; medieval trades are supporting context. A grim name,
 a corpse or ordinary pests do not by themselves turn a work yard into one.
+Before naming a character, named creature or deity, use **`docs/name-registry.md`**:
+look up the identity and reserve its name in the game's shared `authoring/names.json`.
+Redstrand and its dungeon projects share Redstrand's database. Titles and creature
+types do not permit reusing another identity's name; keep technical IDs stable on rename.
 
 - **Accounts, world selection, persistence, camp/logout, or reconnect behavior:** read
   `docs/storage.md` and the relevant flow in `docs/hosting.md`.
@@ -108,6 +112,10 @@ a corpse or ordinary pests do not by themselves turn a work yard into one.
 - **Scene/prefab/component edits:** read the opening ops rules and Pitfalls in
   `docs/scene-authoring.md`, then the sections for what is being changed. Look up
   only the needed component schemas in the live or committed spec.
+- **Spider assets or infestations in woods, abandoned buildings, caves or dungeons:**
+  read `docs/spider-habitats.md` for supported placement, consistent silk, compact
+  egg bedding and review. It distinguishes working outdoor tools from future
+  indoor support/floor adapters.
 - **Engine architecture:** read `ARCHITECTURE.md` before structural engine changes.
   Read `VISION.md` for product direction and roadmap decisions.
 - **Voxel worlds, streaming, or voxel extraction changes:** read the relevant

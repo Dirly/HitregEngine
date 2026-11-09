@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   duplicateAssets,
   fallbackProjectOrder,
+  isScratchProject,
   projectClosure,
   resolveAssetFile,
   readAssetJsonBatch,
@@ -117,4 +118,12 @@ test("batch reads preserve scope, per-file errors, freshness and path boundaries
     await assert.rejects(readAssetJsonBatch(root, ["../project.json"], scope));
     await assert.rejects(readAssetJsonBatch(root, Array(65).fill("items/test.json"), scope));
   } finally { fs.rmSync(path.dirname(projectsRoot), { recursive: true, force: true }); }
+});
+
+test("place-build labs and concept copies are scratch; worlds and dungeons are not (portal-play's default world search)", () => {
+  assert.equal(isScratchProject("pb-weeping-stair", { title: "place-build lab: weeping-stair (scratch)", description: "Scratch crop of redstrand world + scene. Never installed; delete when done." }), true);
+  assert.equal(isScratchProject("wt-drowned-temple", { title: "w-temple scratch (drowned temple concept)", description: "" }), true);
+  assert.equal(isScratchProject("otown2-lab", null), true);
+  assert.equal(isScratchProject("redstrand", { title: "Redstrand", description: "A world." }), false);
+  assert.equal(isScratchProject("undercistern", { title: "The Undercistern", description: "Instanced dungeon behind the temple." }), false);
 });

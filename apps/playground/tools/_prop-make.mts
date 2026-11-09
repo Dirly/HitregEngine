@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { prefabGeometry, measure, readJson, locate, prefabFile, type V3 } from "./_prop-geometry.mts";
+import { decodePng, encodePng } from "./_png.mjs";
 
 export interface MakeCtx { project: string; assets: string; registryFile: string }
 
@@ -141,14 +142,33 @@ export function wrap(ctx: MakeCtx, src: string, id: string, o: WrapOpts) {
 // --------------------------------------------------------------- variant ----
 const pngHasAlpha = (file: string) => { const b = fs.readFileSync(file); return b.readUInt8(25) === 6 || b.readUInt8(25) === 4; };
 const pngSize = (file: string) => { const b = fs.readFileSync(file); return [b.readUInt32BE(16), b.readUInt32BE(20)]; };
-/** Install a PNG under textures/<coll>/ (unless it is already there) and return its texture path. */
-function installArt(ctx: MakeCtx, coll: string, png: string): string {
+/** Rows reversed (top <-> bottom) of an RGBA8 page. */
+export function flipRows(img: { width: number; height: number; data: Uint8Array }): Uint8Array {
+  const row = img.width * 4, out = new Uint8Array(img.data.length);
+  for (let y = 0; y < img.height; y++) out.set(img.data.subarray(y * row, (y + 1) * row), (img.height - 1 - y) * row);
+  return out;
+}
+/**
+ * Install a PNG under textures/<coll>/ (unless it is already there) and return its texture path.
+ * `flip`: the art is a page laid out for a glTF-EMBEDDED texture (row = v * H), but an engine material loads its map
+ * the TextureLoader way (flipY: row = (1 - v) * H). Installed as is, every island samples the mirror row: a well's
+ * roof on the blank half of its page (white), a trough on the page's black padding (2026-10-31). So the page is
+ * written upside down, which lands every island back on the tile it was painted for.
+ */
+function installArt(ctx: MakeCtx, coll: string, png: string, flip = false): string {
   const abs = path.resolve(png), texRoot = path.join(ctx.assets, "textures");
   if (!fs.existsSync(abs)) throw Error(`no art ${png}`);
-  if (abs.startsWith(texRoot + path.sep)) return path.relative(texRoot, abs).replaceAll("\\", "/");
-  const rel = `${coll}/${path.basename(abs)}`;
+  const rel = abs.startsWith(texRoot + path.sep) ? path.relative(texRoot, abs).replaceAll("\\", "/") : `${coll}/${path.basename(abs)}`;
+  if (!flip) {
+    if (abs.startsWith(texRoot + path.sep)) return rel;
+    fs.mkdirSync(path.join(texRoot, coll), { recursive: true });
+    fs.copyFileSync(abs, path.join(texRoot, rel));
+    return rel;
+  }
+  if (abs.startsWith(texRoot + path.sep)) throw Error(`--art ${png} is already an installed texture, but the parts it re-skins sample their glTF's own page (row = v * H) and an engine material reads it flipped: pass the page from outside assets/textures so it can be installed flipped`);
+  const img = decodePng(fs.readFileSync(abs));
   fs.mkdirSync(path.join(texRoot, coll), { recursive: true });
-  fs.copyFileSync(abs, path.join(texRoot, rel));
+  fs.writeFileSync(path.join(texRoot, rel), encodePng(img.width, img.height, flipRows(img)));
   return rel;
 }
 /** A material for new art: the replaced part's own settings (emissive lift, roughness) with its maps swapped. */
@@ -176,7 +196,10 @@ export function variant(ctx: MakeCtx, src: string, id: string, o: VariantOpts) {
   const oldMats = [...new Set(hits.map(([, e]) => e.components.mesh.material).filter(Boolean))];
   let matId: string, texel: string | undefined;
   if (o.art) {
-    const tex = installArt(ctx, coll, o.art);
+    // the replaced parts drew their glTF's own (embedded, flipY false) page when they had no material map of their own
+    const mapOf = (m: string | undefined) => { const f = m && locate(ctx.assets, "materials", `${m}.json`); return f && fs.existsSync(f) ? readJson(f).map : undefined; };
+    const gltfPage = hits.some(([, e]) => !mapOf(e.components.mesh.material));
+    const tex = installArt(ctx, coll, o.art, gltfPage && !o.triplanar);
     matId = `${coll}/${name}`;
     artMaterial(ctx, matId, tex, oldMats[0], o.triplanar);
     const [w] = pngSize(locate(ctx.assets, "textures", tex));
@@ -211,6 +234,7 @@ export function variant(ctx: MakeCtx, src: string, id: string, o: VariantOpts) {
  *               "yaw"?, "pitch"?, "roll"?,   // degrees; a card is upright facing +Z at pitch 0, flat at pitch -90
  *               "scale"?: n | [x, y, z],
  *               "size"?: [x, y, z] (primitive) | [w, h] (card), "material"?: id, "segments"?, "shading"?, "uv"?,
+ *               "foliage"?: [normals, up], "wind"?: {mode, strength, ...}, "textureFilter"? (model parts: vegetation),
  *               "collider"?: "box" | "trimesh" | "convex" | "none", "name"? } ] }
  */
 export function compose(ctx: MakeCtx, recipeFile: string, o: { force?: boolean } = {}) {
@@ -230,7 +254,10 @@ export function compose(ctx: MakeCtx, recipeFile: string, o: { force?: boolean }
       from.push(`prefab ${p.prefab}`);
     } else if (p.model) {
       if (!fs.existsSync(locate(ctx.assets, "models", p.model))) throw Error(`part ${k}: no model ${p.model}`);
-      comps = { transform: { position: at, rotation: q, scale: sc }, mesh: { source: { kind: "asset", assetId: p.model }, ...(p.material ? { material: p.material } : {}), castShadow: true, receiveShadow: true } };
+      // vegetation keeps the scatter's foliage look as a prop: `foliage` [normals, up] reshapes the cut-out leaf cards
+      // (mesh source foliageNormals / foliageUp), `wind` moves them (meshWindSchema); both pass through unchanged
+      const leaf = Array.isArray(p.foliage) ? { foliageNormals: p.foliage[0], foliageUp: p.foliage[1] } : {};
+      comps = { transform: { position: at, rotation: q, scale: sc }, mesh: { source: { kind: "asset", assetId: p.model, ...(p.textureFilter ? { textureFilter: p.textureFilter } : {}), ...leaf, ...(p.wind ? { wind: p.wind } : {}) }, ...(p.material ? { material: p.material } : {}), castShadow: true, receiveShadow: true } };
       if ((p.collider ?? "trimesh") !== "none") comps.collider = { shape: p.collider ?? "trimesh" };
       from.push(`model ${p.model}${p.material ? ` + ${p.material}` : ""}`);
     } else if (p.primitive) {

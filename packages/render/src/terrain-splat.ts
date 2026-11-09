@@ -574,6 +574,17 @@ async function loadLayerTextures(
  */
 const packedLayerCache = new Map<string, LayerArray>();
 
+/**
+ * Arrays packed and not yet on the GPU. An array uploads on its first draw otherwise, a slice at a time in one task: the
+ * rock array's first rock came ~20 s into play and froze the game 4.5 s. The renderer uploads these on the next frame.
+ */
+const unuploaded: THREE.DataArrayTexture[] = [];
+
+/** Empties and returns the arrays waiting for their upload. */
+export function takeUnuploadedArrays(): THREE.DataArrayTexture[] {
+  return unuploaded.splice(0);
+}
+
 export function packLayerArray(
   layers: { index: number; texture: THREE.Texture }[],
   filter: TextureFilter,
@@ -586,6 +597,7 @@ export function packLayerArray(
   if (cached) return cached;
   const packed = packLayerArrayUncached(layers, filter, maxAnisotropy, paletteDepth);
   packedLayerCache.set(cacheKey, packed);
+  unuploaded.push(packed.texture);
   return packed;
 }
 

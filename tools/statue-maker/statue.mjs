@@ -11,6 +11,12 @@ const { ComponentRegistry, registerCoreComponents, createScene, applyOps, prefab
 const { partProblems, partRulesSchema } = await tsImport('../../packages/core/src/character/part-rules.ts', import.meta.url);
 const V = (...a) => new T.Vector3(...a), Q = () => new T.Quaternion();
 const safeId = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*(?:\/[a-zA-Z0-9_][a-zA-Z0-9_.-]*)*$/;
+/** The PLACEMENT SOLVER rule every statue prefab carries (@hitreg/core placeRuleSchema, t-place 2026-10-30): placed by intent
+ *  (where, facing), grounded by the solver; a statue on a pedestal stands on a foundation skirt in its own stone where the
+ *  ground falls, so a slope never shows daylight under the plinth. */
+export function statuePlaceRule(recipe) {
+  return { seat: 'foot', tolerance: { gap: 0.05, slope: 0.6, move: 1.5, yaw: 15 }, ...(recipe.pedestal && recipe.materialId ? { foundation: { material: recipe.materialId, depth: 0.3, inset: 0.03, tile: 3.2 } } : {}) };
+}
 export function assetId(id) {
   if (typeof id !== 'string' || !safeId.test(id) || id.split('/').some(p => p === '..' || p === '.')) throw new Error(`Unsafe asset ID: ${id}`);
   return id;
@@ -18,7 +24,8 @@ export function assetId(id) {
 function positive(n, label) { if (!Number.isFinite(n) || n <= 0) throw new Error(`${label} must be positive and finite`); return n; }
 function vector(a, label) { if (!Array.isArray(a) || a.length !== 3 || !a.every(Number.isFinite)) throw new Error(`${label} must be three finite numbers`); return a; }
 
-/** Strip source appearance before loading: sculpture preserves geometry, never atlas faces. */
+/** Strip source materials and textures before loading. Geometry and its UV attributes stay: a skinned statue
+ * (recipe.skin) keeps the body's own atlas UVs for a painted stone skin; a plain statue ignores them. */
 export async function loadModel(bytes) {
   bytes = Buffer.from(bytes);
   let doc, bin;
@@ -117,13 +124,14 @@ function mountMatrix(root, mount) {
   const local = new T.Matrix4().compose(V(...offset), Q().setFromEuler(new T.Euler(...rotation.map(T.MathUtils.degToRad))), V(scale,scale,scale));
   return mount.socket ? getBone(root, mount.socket).matrixWorld.clone().multiply(local) : local;
 }
-function gather(model, parts, matrix, group) {
+function gather(model, parts, matrix, group, keepUv = false) {
   const selected = selectedParts(model, parts), triangles = [], seen = new Set();
   model.scene.updateMatrixWorld(true);
   model.scene.traverse(mesh => {
     if (!mesh.isMesh) return;
-    const geometry = mesh.geometry, p = geometry.getAttribute('position'), part = geometry.getAttribute('uv1'), index = geometry.index;
+    const geometry = mesh.geometry, p = geometry.getAttribute('position'), part = geometry.getAttribute('uv1'), index = geometry.index, uv = geometry.getAttribute('uv');
     if (selected && !part) throw new Error('Named part selection requires TEXCOORD_1/uv1 part IDs');
+    if (keepUv && !uv) throw new Error('A skinned statue needs a source with TEXCOORD_0 (the atlas UVs its skin is painted on)');
     for (let k = 0; k < (index?.count ?? p.count); k += 3) {
       let ids = [0,1,2].map(j => index ? index.getX(k+j) : k+j);
       if (selected) { const id = Math.round(part.getX(ids[0])); if (!selected.includes(id)) continue; seen.add(id); }
@@ -131,9 +139,10 @@ function gather(model, parts, matrix, group) {
         const v = mesh.getVertexPosition(i, V());
         return v.applyMatrix4(mesh.matrixWorld).applyMatrix4(matrix);
       });
-      if (matrix.determinant() * mesh.matrixWorld.determinant() < 0) points.reverse();
+      const uvs = keepUv ? ids.map(i => [uv.getX(i), uv.getY(i)]) : null;
+      if (matrix.determinant() * mesh.matrixWorld.determinant() < 0) { points.reverse(); uvs?.reverse(); }
       if (points.some(p => !p.toArray().every(Number.isFinite))) throw new Error('Non-finite posed vertex');
-      triangles.push({ p: points, group, color: [177,174,158] });
+      triangles.push({ p: points, group, color: [177,174,158], ...(uvs ? { uv: uvs } : {}) });
     }
   });
   if (!triangles.length || selected?.some(id => !seen.has(id))) throw new Error('Part selection contains empty geometry');
@@ -208,8 +217,18 @@ export async function buildStatue(recipe, readModel, options = {}) {
     if (!cache.has(id)) { const bytes = await readModel(id); hashes[id] = createHash('sha256').update(bytes).digest('hex'); cache.set(id, bytes); }
     return loadModel(cache.get(id));
   }
+  // skin: the statue keeps the body's atlas UVs and is drawn with a painted stone sheet over that atlas (its material,
+  // materialId, references the sheet). size = the sheet's pixels; texelsPerMetre = the density to match (the place's
+  // stone): the report gives the density at THIS statue's size and the sheet size that would match it.
+  const skin = recipe.skin;
+  if (skin !== undefined) {
+    const size = Array.isArray(skin.size) ? skin.size : [skin.size, skin.size];
+    if (size.length !== 2 || !size.every(n => Number.isInteger(n) && n > 0 && n <= 8192)) throw new Error('skin.size must be a pixel size (n or [w, h], <= 8192)');
+    if (skin.texelsPerMetre !== undefined) positive(skin.texelsPerMetre, 'skin texelsPerMetre');
+    if (recipe.attachments?.length || recipe.sword) throw new Error('A skinned statue is one atlas: the body alone (attachments and swords carry their own sheets)');
+  }
   const body = await load(recipe.body.model), measurements = poseModel(body, recipe.pose);
-  let triangles = gather(body, recipe.body.parts, new T.Matrix4(), 'body');
+  let triangles = gather(body, recipe.body.parts, new T.Matrix4(), 'body', skin !== undefined);
   for (const [i, attachment] of (recipe.attachments ?? []).entries()) {
     const model = await load(attachment.model);
     const own = gather(model, attachment.parts, mountMatrix(body.scene, attachment.mount), `attachment-${i}`);
@@ -243,9 +262,28 @@ export async function buildStatue(recipe, readModel, options = {}) {
   const bounds = new T.Box3().setFromPoints(triangles.flatMap(t => t.p));
   const positions = new Float32Array(triangles.flatMap(t => t.p.flatMap(p => p.toArray()))), normals = new Float32Array(smoothNormals(triangles));
   const builder = new GltfBuilder('HitReg statue-maker v1: static baked sculpture');
-  const weights = new Float32Array(positions.length/3*4);
-  for(let i=0;i<positions.length/3;i++) weights.set([0,1,0,0],i*4);
-  const attributes = { POSITION: builder.pushAccessor(positions,'VEC3',{minMax:true}), NORMAL: builder.pushAccessor(normals,'VEC3'), _SPLATWEIGHT: builder.pushAccessor(weights,'VEC4') };
+  const attributes = { POSITION: builder.pushAccessor(positions,'VEC3',{minMax:true}), NORMAL: builder.pushAccessor(normals,'VEC3') };
+  let skinReport;
+  if (skin !== undefined) {
+    // a project material's map loads with flipY (three's TextureLoader default), unlike glTF's own textures: v counts from
+    // the bottom, so the atlas (glTF, v from the top) is written as 1 - v and the sheet stays as painted
+    attributes.TEXCOORD_0 = builder.pushAccessor(new Float32Array(triangles.flatMap(t => t.uv.flatMap(([u, v]) => [u, 1 - v]))), 'VEC2');
+    // texel density at the baked size: per triangle sqrt(uv area in px^2 / world area in m^2), the area-weighted median
+    const [w, h] = Array.isArray(skin.size) ? skin.size : [skin.size, skin.size], rows = [];
+    for (const t of triangles) {
+      const A = V().crossVectors(t.p[1].clone().sub(t.p[0]), t.p[2].clone().sub(t.p[0])).length() / 2;
+      const a = Math.abs((t.uv[1][0]-t.uv[0][0])*(t.uv[2][1]-t.uv[0][1]) - (t.uv[2][0]-t.uv[0][0])*(t.uv[1][1]-t.uv[0][1])) / 2 * w * h;
+      if (A > 1e-9 && a > 0) rows.push([Math.sqrt(a / A), A]);
+    }
+    rows.sort((x, y) => x[0] - y[0]); const total = rows.reduce((n, r) => n + r[1], 0); let run = 0, median = 0;
+    for (const [d, A] of rows) { run += A; if (run >= total / 2) { median = d; break; } }
+    const target = skin.texelsPerMetre, k = target ? target / median : 1;
+    skinReport = { size: [w, h], texelsPerMetre: Math.round(median * 10) / 10, ...(target ? { target, matchingSize: [Math.round(w * k), Math.round(h * k)] } : {}) };
+  } else {
+    const weights = new Float32Array(positions.length/3*4);
+    for(let i=0;i<positions.length/3;i++) weights.set([0,1,0,0],i*4);
+    attributes._SPLATWEIGHT = builder.pushAccessor(weights,'VEC4');
+  }
   builder.pushMesh({ name: recipe.name, primitives: [{attributes, mode:4}] }); builder.pushNode({name:recipe.name,mesh:0},true);
   const model = builder.finish(), offset = recipe.pedestal ? positive(recipe.pedestal.height, 'pedestal height') : 0;
   let pedestalReport;
@@ -256,11 +294,11 @@ export async function buildStatue(recipe, readModel, options = {}) {
     const baseTriangles=gather(base,undefined,new T.Matrix4(),'pedestal');
     pedestalReport={...validatePedestal(triangles,baseTriangles,offset),...pedestalContract,destinationPrefabVerified:options.pedestalSource==='asset-file'};
   }
-  const entities = { anchor: {name:recipe.name,parent:null,tags:['statue'],components:{transform:{},...(recipe.contact?{dressing:{mount:'floor',size:[bounds.max.x-bounds.min.x,bounds.max.y-bounds.min.y+offset,bounds.max.z-bounds.min.z].map(v=>Math.round(v*1000)/1000),origin:'foot',contact:recipe.contact}}:{})}}, sculpture:{name:'Sculpture',parent:'anchor',tags:[],components:{transform:{position:[0,offset,0]},mesh:{source:{kind:'asset',assetId:`${recipe.name}.gltf`},material:recipe.materialId,castShadow:true,receiveShadow:true},collider:{shape:'trimesh'}}} };
+  const entities = { anchor: {name:recipe.name,parent:null,tags:['statue'],components:{transform:{},...(recipe.contact?{dressing:{mount:'floor',size:[bounds.max.x-bounds.min.x,bounds.max.y-bounds.min.y+offset,bounds.max.z-bounds.min.z].map(v=>Math.round(v*1000)/1000),origin:'foot',contact:recipe.contact}}:{}),placeRule:statuePlaceRule(recipe)}}, sculpture:{name:'Sculpture',parent:'anchor',tags:[],components:{transform:{position:[0,offset,0]},mesh:{source:{kind:'asset',assetId:`${recipe.name}.gltf`},material:recipe.materialId,castShadow:true,receiveShadow:true},collider:{shape:'trimesh'}}} };
   if (recipe.pedestal) entities.pedestal = {name:'Pedestal',parent:'anchor',tags:[],components:{transform:{},prefab:{prefabId:assetId(recipe.pedestal.prefabId)}}};
   const registry = new ComponentRegistry(); registerCoreComponents(registry);
   const {doc} = applyOps(createScene(recipe.name), Object.entries(entities).map(([id,entity]) => ({op:'add-entity',id,entity})), registry);
   const prefab = prefabDocSchema.parse({...doc,root:'anchor',props:{}}); validatePrefab(prefab);
-  const report = {version:1,name:recipe.name,height:bounds.max.y-bounds.min.y,figureHeight:recipe.height,bounds:[bounds.min.toArray(),bounds.max.toArray()],scale,triangles:triangles.length,measurements,sword:swordReport,sourceHashes:hashes,skins:0,animations:0,shading:'smooth area-weighted welded normals; unchanged geometry',pedestal:pedestalReport??null};
+  const report = {version:1,name:recipe.name,...(skinReport?{skin:skinReport}:{}),height:bounds.max.y-bounds.min.y,figureHeight:recipe.height,bounds:[bounds.min.toArray(),bounds.max.toArray()],scale,triangles:triangles.length,measurements,sword:swordReport,sourceHashes:hashes,skins:0,animations:0,shading:'smooth area-weighted welded normals; unchanged geometry',pedestal:pedestalReport??null};
   return {model,prefab,report,triangles};
 }

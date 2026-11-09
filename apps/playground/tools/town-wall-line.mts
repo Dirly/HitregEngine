@@ -1,7 +1,7 @@
 /**
  * town-wall-line — a town wall that DEFENDS the town, in the town's masonry (tools/_town-wall-rules.mts).
  *
- *   npx tsx tools/town-wall-line.mts check --project <p> --town <name> [--json <file>]
+ *   npx tsx tools/town-wall-line.mts check --project <p> --town <name> [--json <file>] [--recipe <world.json>] [--scene <scene.json>]
  *   npx tsx tools/town-wall-line.mts draw  --project <p> --town <name> [--clear 12] [--height 6] [--out <file>] [--dry] [--machine-top]
  *
  * check (the `town <t>: wall line` row; writes authoring/towns/survey/<town>-wall-line.json, exit 1 on a fault):
@@ -20,6 +20,17 @@
  *   curtain cut there; one wall-walk stair on the town side; town masonry on every role (ashlar face, rubble footing);
  *   every curtain and the gatehouse HAND-MADE (`handmade: {}`: the top steps in short runs, a few copings dropped).
  *   --machine-top is the only opt-out (handmade: null; `check` then fails it).
+ *
+ *   npx tsx tools/town-wall-line.mts kit --line <points.json> | --circle <r>,<n>[,<cx>,<cz>] [--open] [--towers 0,3,6] [--gates 9]
+ *                                        [--y 0] [--out <placements.json>]
+ * kit (k-town2, 2026-10-30): a curtain from the KIT wall pieces (strand-town/strand-wall-run, -infill-*, -kink-in|out-*,
+ *   -corner, -tower; tools/_kit-wall.mts) along a line of [x, z] vertices: runs and binary infills fill each leg exactly,
+ *   a mitred kink (2-30 deg, 2 deg steps) or the corner piece (90 deg toward the town) turns it, towers stand on the
+ *   named vertices, a gatehouse (strand-gatehouse) is centred on each --gates vertex (a straight-through one). Writes the placements ({ prefab, position, yaw }) for an ops batch and checks them: no gap over
+ *   5 cm, no overlap (exit 1 on a finding; a turn the kit has no piece for is named, never laid with a hole). With
+ *   --project/--town it writes the town's record authoring/towns/<town>-works/kit-wall.json (line, towers, gates,
+ *   placements), which `check` then judges AS BUILT: the line re-laid joins, the scene holds exactly those placements
+ *   (tag town-wall:<town>, one level), and the overlook / road gates run on the kit pieces' tops.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -36,13 +47,39 @@ const cmd = argv[0];
 const opt = (n: string): string | undefined => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : undefined; };
 const num = (n: string, d: number) => (opt(n) !== undefined ? Number(opt(n)) : d);
 const project = opt("project"), townName = opt("town");
-if (!cmd || !["check", "draw"].includes(cmd) || !project || !townName) { console.error("usage: town-wall-line check|draw --project <p> --town <name> [...]"); process.exit(2); }
+if (cmd === "kit") {
+  const { circleLine, kitWallFindings, layKitWall } = await import("./_kit-wall.mts");
+  const closed = !argv.includes("--open");
+  const circ = opt("circle")?.split(",").map(Number);
+  const line: V2[] = circ ? circleLine(circ[0]!, circ[1]!, [circ[2] ?? 0, circ[3] ?? 0]) : JSON.parse(fs.readFileSync(opt("line") ?? "", "utf8"));
+  if (!line?.length) { console.error("kit: --line <points.json> or --circle r,n[,cx,cz]"); process.exit(2); }
+  const towers = (opt("towers") ?? "").split(",").filter(Boolean).map(Number);
+  const gates = (opt("gates") ?? "").split(",").filter(Boolean).map(Number);
+  const lay = layKitWall(line, { closed, towers, gates });
+  const findings = kitWallFindings(lay, { closed });
+  const y = num("y", 0);
+  const placements = lay.pieces.map((p) => ({ prefab: p.prefab, kind: p.kind, position: [Math.round(p.origin[0] * 1000) / 1000, y, Math.round(p.origin[1] * 1000) / 1000], yaw: Math.round(p.yaw * 1000) / 1000 }));
+  const counts = new Map<string, number>(); for (const p of lay.pieces) counts.set(p.kind, (counts.get(p.kind) ?? 0) + 1);
+  console.log(`kit wall: ${lay.pieces.length} pieces (${[...counts].map(([k, n]) => `${n} ${k}`).join(", ")}), ${closed ? "closed" : "open"} line of ${line.length} vertices`);
+  for (const n of lay.notes) console.log(`  note: ${n}`);
+  for (const f of findings) console.log(`  FAIL ${f}`);
+  // --project <p> --town <t>: the town's kit curtain record (authoring/towns/<t>-works/kit-wall.json), the one `check` judges
+  const out = opt("out") ?? (project && townName ? path.join("projects", project, "authoring", "towns", `${townName}-works`, "kit-wall.json") : undefined);
+  if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify({ line, closed, towers, gates, placements, findings, notes: lay.notes }, null, 1) + "\n"); console.log(`wrote ${out}`); }
+  console.log(findings.length ? `kit wall: ${findings.length} finding(s)` : "kit wall: OK (no gap over 5 cm, no overlap)");
+  process.exit(findings.length ? 1 : 0);
+}
+if (!cmd || !["check", "draw"].includes(cmd) || !project || !townName) { console.error("usage: town-wall-line check|draw --project <p> --town <name> [...] | kit --circle r,n | --line f [--project p --town t]"); process.exit(2); }
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
 const projectDir = path.join("projects", project);
 const towns = path.join(projectDir, "authoring", "towns");
-const tdoc = JSON.parse(fs.readFileSync(path.join(towns, `${townName}.json`), "utf8")) as { town: string; world: string };
-const recipeFile = path.join(projectDir, "assets", "worlds", `${tdoc.world}.json`);
+// the town doc names the town and its world; before the town doc exists (town-npcs writes it) the approved design does
+const tdocFile = [path.join(towns, `${townName}.json`), path.join(towns, `${townName}-design.json`)].find((f) => fs.existsSync(f));
+if (!tdocFile) throw new Error(`no ${townName}.json or ${townName}-design.json in ${towns}`);
+const tdoc = JSON.parse(fs.readFileSync(tdocFile, "utf8")) as { town: string; world: string };
+// --recipe <file>: a scratch / lab copy of the world (the town tools' convention)
+const recipeFile = opt("recipe") ? path.resolve(opt("recipe")!) : path.join(projectDir, "assets", "worlds", `${tdoc.world}.json`);
 const recipe: WorldRecipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync(recipeFile, "utf8")));
 const town = recipe.features.towns.find((t) => t.id === tdoc.town);
 if (!town) throw new Error(`no town ${tdoc.town} in ${recipeFile}`);
@@ -62,13 +99,16 @@ const H = (x: number, z: number): number => {
 const sea = recipe.seaLevel;
 
 // ---- what the wall protects: a townsman at every door and along every street
-const lanes = recipe.features.roads.filter((r) => r.id.startsWith(`${town.id}-lane-`));
+// the town's OWN streets: town-layout lanes (`<town>-lane-*`) and the from-plan cut's streets, stairs and ramps
+// (`<town>-street-*` / `-stair-*` / `-ramp-*`): townsfolk walk them (overlook targets), the curtain may run beside them
+const ownStreet = (id: string): boolean => ["lane", "street", "stair", "ramp"].some((k) => id.startsWith(`${town.id}-${k}-`));
+const lanes = recipe.features.roads.filter((r) => ownStreet(r.id));
 const targets: { name: string; at: V2 }[] = [
   ...layout.buildings.filter((b) => b.door).map((b) => ({ name: `door ${b.id}`, at: b.door! })),
   ...lanes.flatMap((r) => densify(r.points.map((p) => [p[0]!, p[1]!] as V2), 6).map((p, i) => ({ name: `${r.id.slice(town.id.length + 6)} #${i}`, at: p }))),
 ];
 const shelves = (town.terraces ?? []).map((t) => ({ groundY: t.groundY, points: t.points.map((p) => [p[0]!, p[1]!] as V2), radius: t.radius }));
-const allRoads = recipe.features.roads.filter((r) => !r.id.startsWith(`${town.id}-lane-`)).map((r) => ({ id: r.id, points: r.points.map((p) => [p[0]!, p[1]!] as V2) }));
+const allRoads = recipe.features.roads.filter((r) => !ownStreet(r.id)).map((r) => ({ id: r.id, points: r.points.map((p) => [p[0]!, p[1]!] as V2) }));
 /** the disc round a gatehouse inside which its road passes the wall (the ring's corners stand GH*sqrt2 = 5.9 m out) */
 const GATE_DISC = 8;
 const townList = recipe.features.towns.map((t) => ({ id: t.id, name: t.id === town.id ? townName : undefined, center: t.center, radius: t.radius }));
@@ -78,10 +118,10 @@ function screenOf(doc: Record<string, unknown>, rc: WorldRecipe): Screen {
   const w = buildWall(operatorParams(doc), operatorReader(rc, id), { id });
   return { id, profile: (w.report.profile as [number, number, number][]) ?? [] };
 }
-function judge(docs: Record<string, unknown>[], rc: WorldRecipe) {
+function judge(docs: Record<string, unknown>[], rc: WorldRecipe, kitScreens: Screen[] = [], kitWalls: { id: string; points: V2[] }[] = [], kitGates: V2[] = []) {
   const curtains = docs.filter((d) => d.variant !== "quay" && d.variant !== "retaining");
-  const screens = docs.map((d) => screenOf(d, rc));
-  const curtainScreens = screens.filter((s) => curtains.some((c) => c.id === s.id));
+  const screens = [...docs.map((d) => screenOf(d, rc)), ...kitScreens];
+  const curtainScreens = [...screens.filter((s) => curtains.some((c) => c.id === s.id)), ...kitScreens];
   const enclosure = hull([...targets.map((t) => t.at), ...docs.flatMap((d) => d.points as V2[])]);
   const ov = overlook({ height: H, screens: curtainScreens.length ? curtainScreens : screens, enclosure, targets, sea });
   // occluders include every town wall (the quay, the gatehouse): the overlook gate above uses the curtains as the line
@@ -89,10 +129,28 @@ function judge(docs: Record<string, unknown>[], rc: WorldRecipe) {
   const water = waterlineRuns({ height: H, screens: curtainScreens, shelves, sea });
   const material = docs.map((d) => townWallMaterialFault(d as never)).filter((x): x is string => !!x);
   const machine = docs.map((d) => townWallHandmadeFault(d as never)).filter((x): x is string => !!x);
-  const exempt = docs.filter((d) => String(d.id).endsWith("-gatehouse")).map((d) => { const p = (d.points as V2[]).slice(0, 4); return { at: [p.reduce((a, q) => a + q[0], 0) / p.length, p.reduce((a, q) => a + q[1], 0) / p.length] as V2, r: GATE_DISC }; });
-  const road = roadCrowding(curtains.filter((d) => !String(d.id).endsWith("-gatehouse")).map((d) => ({ id: String(d.id), points: d.points as V2[] })), allRoads, exempt);
+  const exempt = [...docs.filter((d) => String(d.id).endsWith("-gatehouse")).map((d) => { const p = (d.points as V2[]).slice(0, 4); return { at: [p.reduce((a, q) => a + q[0], 0) / p.length, p.reduce((a, q) => a + q[1], 0) / p.length] as V2, r: GATE_DISC }; }), ...kitGates.map((at) => ({ at, r: GATE_DISC }))];
+  const road = roadCrowding([...curtains.filter((d) => !String(d.id).endsWith("-gatehouse")).map((d) => ({ id: String(d.id), points: d.points as V2[] })), ...kitWalls], allRoads, exempt);
   return { ov, water, material, machine, road, screens };
 }
+
+// ================================================================ the kit curtain (town-wall-line kit --project --town)
+const kitFile = path.join(towns, `${townName}-works`, "kit-wall.json");
+/** Kit wall pieces' tops over their origin (the strand kit: run / infill / kink / corner 6.1 m, tower 11.25 m, gatehouse body 8 m). */
+const KIT_TOP = (prefab: string): number => (/-tower$/.test(prefab) ? 11.25 : /-gatehouse$/.test(prefab) ? 8 : 6.1);
+/**
+ * The town's kit curtain, judged as BUILT: the record's line re-laid must join (no gap over 5 cm, no overlap); the scene
+ * (assets/scenes/<world>.scene.json, or --scene) must hold every placement (prefab, x/z within 2 cm, yaw within 0.2 deg,
+ * entities tagged `town-wall:<town>`) and nothing else under that tag; all pieces on one level (2 cm: the kit's pieces
+ * are flat, a step between neighbours is a hole). Returns its screens (tops from the placed y) for the overlook gate.
+ */
+function kitCurtain(failures: string[]): { screens: Screen[]; walls: { id: string; points: V2[] }[]; gates: V2[] } | null {
+  if (!fs.existsSync(kitFile)) return null;
+  const rec = JSON.parse(fs.readFileSync(kitFile, "utf8")) as { line: V2[]; closed: boolean; towers: number[]; gates: number[]; placements: { prefab: string; kind: string; position: number[]; yaw: number }[] };
+  const sceneFile = opt("scene") ?? path.join(projectDir, "assets", "scenes", `${tdoc.world}.scene.json`);
+  return kitJudge(rec, sceneFile, failures);
+}
+const { kitJudge } = await import("./_kit-wall-judge.mts").then((m) => ({ kitJudge: (rec: never, sceneFile: string, failures: string[]) => m.judgeKitCurtain(rec, sceneFile, `town-wall:${townName}`, KIT_TOP, failures) }));
 
 // ================================================================ check
 if (cmd === "check") {
@@ -101,8 +159,9 @@ if (cmd === "check") {
   const docs = [...(recipe.features.operators ?? []).filter((o) => townOwnerOf(o as never, townList) === town.id && !draft.some((d) => d.id === o.id) && !(draft.length && /-(town-)?wall/.test(o.id))) as Record<string, unknown>[], ...draft];
   const out = opt("json") ?? path.join(towns, "survey", `${townName}-wall-line.json`);
   const failures: string[] = [];
-  if (!docs.length) failures.push(`no wall operator owned by ${townName} (named ${townName}-… or inside its radius)`);
-  const j = docs.length ? judge(docs, recipe) : null;
+  const kit = kitCurtain(failures);
+  if (!docs.length && !kit) failures.push(`no wall owned by ${townName}: no wall operator (named ${townName}-… or inside its radius) and no kit curtain (${path.relative(".", kitFile)})`);
+  const j = docs.length || kit ? judge(docs, recipe, kit?.screens ?? [], kit?.walls ?? [], kit?.gates ?? []) : null;
   if (j) {
     for (const m of j.material) failures.push(`cliff-skin: ${m}`);
     for (const m of j.machine) failures.push(`machine-top: ${m}`);

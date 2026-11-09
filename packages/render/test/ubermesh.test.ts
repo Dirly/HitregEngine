@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three/webgpu";
-import { applyModelEmissive, applyModelMap, applyModelPartMask, modelPartIndex, partMaskFromNames } from "../src/ubermesh.js";
+import { applyModelDepthPull, applyModelEmissive, applyModelMap, applyModelPartMask, modelPartIndex, partMaskFromNames } from "../src/ubermesh.js";
 
 /** Three one-triangle parts in one geometry, part index in uv1 — what unwrap-weapon writes. */
 function uberModel(indexed: boolean): { root: THREE.Group; mesh: THREE.Mesh; shared: THREE.BufferGeometry } {
@@ -47,6 +47,30 @@ describe("ubermesh looks on a single model", () => {
     });
   }
 
+  it("leaves out the triangles a shown part covers, only while it shows (the robe over the backs of the legs)", () => {
+    const { root, mesh } = uberModel(false);
+    // Blade2 (triangle 2) covers Handle's triangle (triangle 0)
+    mesh.userData["covers"] = { Blade2: [0] };
+    applyModelPartMask(root, 0b111);
+    expect(Array.from(mesh.geometry.getIndex()!.array)).toEqual([3, 4, 5, 6, 7, 8]);
+    applyModelPartMask(root, 0b011);
+    expect(Array.from(mesh.geometry.getIndex()!.array)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it("gives a model's depth-pull parts a node position once, and leaves a model without one alone", () => {
+    const plain = uberModel(false);
+    expect(applyModelDepthPull(plain.root)).toBe(0);
+    expect((plain.mesh.material as THREE.NodeMaterial).positionNode ?? null).toBeNull();
+    const { root, mesh } = uberModel(false);
+    mesh.userData["depthPull"] = { parts: ["Blade2"], cm: 3, back: [0, 0, -1], origin: [0, 0, 0] };
+    expect(applyModelDepthPull(root)).toBe(1);
+    const material = mesh.material as THREE.NodeMaterial;
+    expect(material.isNodeMaterial).toBe(true);
+    expect(material.positionNode).not.toBeNull();
+    applyModelDepthPull(root);
+    expect(mesh.material).toBe(material);
+  });
+
   it("ignores a model without a part index", () => {
     const root = new THREE.Group();
     root.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()));
@@ -91,5 +115,88 @@ describe("ubermesh looks on a single model", () => {
     expect(glowing.emissiveIntensity).toBe(0.8);
     // the shared original was never touched
     expect(original.emissive.getHexString()).toBe("c88cff");
+  });
+
+  it("steps a whole-model glow without touching the shader, or the mesh would vanish until it recompiled", () => {
+    const { root, mesh } = uberModel(true);
+    mesh.material = new THREE.MeshStandardNodeMaterial();
+    applyModelEmissive(root, { color: "#ff6020", intensity: 0.5 });
+    const glowing = mesh.material as THREE.MeshStandardNodeMaterial;
+    const version = glowing.version;
+    for (const intensity of [1, 1.5, 2]) applyModelEmissive(root, { color: "#ff6020", intensity });
+    applyModelEmissive(root, null);
+    expect(glowing.version).toBe(version);
+    expect(glowing.emissiveNode).toBeNull();
+  });
+
+  it("never gives a material already on screen a new shader: the blend goes on a fresh copy, built by a null glow too", () => {
+    const original = new THREE.MeshStandardNodeMaterial();
+    const authored = original.emissiveNode = new THREE.ConstNode(new THREE.Color("#102030"), "color");
+    const { root, mesh } = uberModel(true);
+    mesh.material = original;
+    applyModelMap(root, new THREE.Texture());
+    const drawn = mesh.material as THREE.MeshStandardNodeMaterial;
+    const version = drawn.version;
+    applyModelEmissive(root, null);
+    const warmed = mesh.material as THREE.MeshStandardNodeMaterial;
+    expect(warmed).not.toBe(drawn);
+    expect(drawn.version).toBe(version);
+    expect(drawn.emissiveNode).toBe(authored);
+    expect(warmed.emissiveNode).not.toBe(authored);
+    const warmVersion = warmed.version;
+    applyModelEmissive(root, { color: "#ffffff", intensity: 2 });
+    expect(mesh.material).toBe(warmed);
+    expect(warmed.version).toBe(warmVersion);
+    expect(warmed.emissiveIntensity).toBe(2);
+  });
+
+  it("builds an authored emissive shader's glow once, then only blends it", () => {
+    const { root, mesh } = uberModel(true);
+    const original = new THREE.MeshStandardNodeMaterial();
+    original.emissiveNode = new THREE.ConstNode(new THREE.Color("#102030"), "color");
+    mesh.material = original;
+    applyModelEmissive(root, { color: "#ff6020", intensity: 1 });
+    const glowing = mesh.material as THREE.MeshStandardNodeMaterial;
+    const blended = glowing.emissiveNode;
+    const version = glowing.version;
+    applyModelEmissive(root, { color: "#ff6020", intensity: 2 });
+    applyModelEmissive(root, null);
+    applyModelEmissive(root, { color: "#ff6020", intensity: 1 });
+    expect(glowing.emissiveNode).toBe(blended);
+    expect(glowing.version).toBe(version);
+  });
+
+  it("adds a part selector without replacing the authored shader or atlas, then restores that shader", () => {
+    const { root, mesh } = uberModel(true);
+    const original = new THREE.MeshStandardNodeMaterial();
+    const authored = original.emissiveNode = new THREE.ConstNode(new THREE.Color("#102030"), "color");
+    const atlas = original.map = new THREE.Texture();
+    original.alphaTest = 0.5;
+    original.emissive.set("#223344");
+    original.emissiveIntensity = 0.8;
+    mesh.material = original;
+    applyModelEmissive(root, { color: "#bedfff", intensity: 5, parts: ["Blade2"] });
+    const glowing = mesh.material as THREE.MeshStandardNodeMaterial;
+    expect(glowing).not.toBe(original);
+    expect(glowing.emissiveNode).not.toBe(authored);
+    expect(glowing.map).toBe(atlas);
+    expect(glowing.alphaTest).toBe(0.5);
+    expect(glowing.emissive.getHexString()).toBe("223344");
+    expect(glowing.emissiveIntensity).toBe(0.8);
+    expect(original.emissiveNode).toBe(authored);
+    applyModelEmissive(root, null);
+    expect(mesh.material).toBe(glowing);
+    expect(glowing.emissiveNode).toBe(authored);
+  });
+
+  it("owns a newly dressed shared material even when the mesh had a previous look", () => {
+    const { root, mesh } = uberModel(true);
+    applyModelEmissive(root, { color: "#ff0000", intensity: 1 });
+    const sharedAppearance = new THREE.MeshStandardNodeMaterial();
+    mesh.material = sharedAppearance;
+    applyModelEmissive(root, { color: "#bedfff", intensity: 5, parts: ["Blade2"] });
+    expect(mesh.material).not.toBe(sharedAppearance);
+    expect(sharedAppearance.emissiveNode).toBeNull();
+    expect(sharedAppearance.emissiveIntensity).toBe(1);
   });
 });

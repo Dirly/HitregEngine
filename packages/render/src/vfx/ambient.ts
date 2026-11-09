@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import { readWorldPosition, readWorldQuaternion } from "../static-transforms.js";
+import { hierarchyVisible } from "../cull-visibility.js";
 import { paletteFor, paletteFromMaterial, smokeLayers, vfxEffectSchema, type Palette, type VfxEffect } from "@hitreg/core";
 import type { VfxFrame } from "./base.js";
 import type { VfxHandle, VfxSystem } from "./system.js";
@@ -12,6 +13,14 @@ export interface AmbientVfxData {
   cullDistance: number;
   /** `vfx.smoke`: true plays the effect's smoke layers; unset/false strips them (smoke is off by default). */
   smoke?: boolean | undefined;
+  /** `vfx.standingLight`: false drops the effect's light modules (the fire's prefab carries its own light). */
+  standingLight?: boolean | undefined;
+  /** `vfx.lightGlow`: the standing light's halo + fog glow (userData `lightGlow`); unset = the default. */
+  lightGlow?: number | undefined;
+  /** `vfx.farDraw`: the play's emitters stay awake out to `cullDistance` (not the particle system's 220 m sleep). */
+  farDraw?: boolean | undefined;
+  /** `vfx.farGrow`: metres past which the play's particles grow with distance (keep their screen size); farDraw only. */
+  farGrow?: number | undefined;
   /**
    * "full" = the play takes the group's whole orientation (an item's frame:
    * emitters turn with a sword); default "yaw" = upright, facing the group's
@@ -49,6 +58,16 @@ interface Entry {
  * together"): a standing effect plays without its smoke layers (core smokeLayers: a normal-blended smoke/plume/column
  * layer, or every layer of a `smoke` effect such as env/smoke-column) unless its `vfx` component sets `smoke: true`.
  */
+/** `vfx.standingLight: false`: the effect without its light modules (cached per effect, like the smokeless copy). */
+const lightless = new WeakMap<VfxEffect, VfxEffect>();
+export function withoutLight(effect: VfxEffect): VfxEffect {
+  let out = lightless.get(effect);
+  if (!out) {
+    out = { ...effect, modules: effect.modules.filter((m) => m.kind !== "light") };
+    lightless.set(effect, out);
+  }
+  return out;
+}
 const smokeless = new WeakMap<VfxEffect, VfxEffect>();
 export function withoutSmoke(effect: VfxEffect): VfxEffect {
   let out = smokeless.get(effect);
@@ -73,13 +92,6 @@ function inScene(object: THREE.Object3D, scene: THREE.Object3D): boolean {
   let current: THREE.Object3D = object;
   while (current.parent) current = current.parent;
   return current === scene;
-}
-
-function hierarchyVisible(object: THREE.Object3D): boolean {
-  for (let current: THREE.Object3D | null = object; current; current = current.parent) {
-    if (!current.visible) return false;
-  }
-  return true;
 }
 
 /**
@@ -247,18 +259,26 @@ export class AmbientVfx {
   private start(entry: Entry): VfxHandle | null {
     const asset = this.effectOf(entry.data.effect);
     if (!asset) return null;
-    const base = entry.data.smoke ? asset : withoutSmoke(asset);
+    const smoked = entry.data.smoke ? asset : withoutSmoke(asset);
+    const base = entry.data.standingLight === false ? withoutLight(smoked) : smoked;
     if (!base.modules.length) return null;
     const size = entry.data.shapeSize;
+    // farDraw (a landmark beacon): its emitters sleep at the play's own cullDistance, not the system's 220 m
+    const awake = entry.data.farDraw
+      ? { sleepDistance: entry.data.cullDistance * CULL_HYSTERESIS, ...(entry.data.farGrow ? { farGrow: entry.data.farGrow } : {}) }
+      : null;
     // sized to what it runs along: a copy with the emitters' volume replaced
-    const effect: VfxEffect = size
-      ? {
-          ...base,
-          modules: base.modules.map((m) =>
-            m.kind === "particles" ? { ...m, emitter: { ...m.emitter, shapeSize: [size[0], size[1], size[2]] } } : m,
-          ),
-        }
-      : base;
+    const effect: VfxEffect =
+      size || awake
+        ? {
+            ...base,
+            modules: base.modules.map((m) =>
+              m.kind === "particles"
+                ? { ...m, emitter: { ...m.emitter, ...(size ? { shapeSize: [size[0], size[1], size[2]] as [number, number, number] } : {}), ...(awake ?? {}) } }
+                : m,
+            ),
+          }
+        : base;
     const onLight = this.options.onLight;
     return this.vfx.play(effect, entry.frame, {
       phaseLength: Number.POSITIVE_INFINITY,
@@ -272,6 +292,7 @@ export class AmbientVfx {
               // visible light entering the set would recompile lit materials
               light.visible = false;
               light.userData["vfx"] = true;
+              if (typeof entry.data.lightGlow === "number") light.userData["lightGlow"] = entry.data.lightGlow;
               this.vfx.root.add(light);
               onLight(light);
               return light;

@@ -9,6 +9,28 @@ through `ctx.playSound`.
 
 ## The house style is a template, not a habit
 
+For this game's audio, Derek's reference is World of Warcraft: polished,
+layered orchestral fantasy music and organic, weighty environmental/foley
+sounds, with a slightly darker, more mysterious tone where appropriate.
+Keep full-quality recordings, space and dynamic detail. The visual PSX
+direction does not apply to audio: no chiptune, bitcrushing, low-fidelity
+tracker music, crunchy console samples or deliberately retro sound effects.
+Describe instruments, sources and mood in API prompts; the franchise
+reference belongs in these authoring notes, never in a generation prompt.
+
+A dungeon normally needs exactly two score tracks: its generic exploration
+theme and its combat theme. Use the existing soundscape combat state to
+crossfade between them as the player enters/leaves combat; do not add a
+separate boss score or event music unless requested. Weeping Sun uses a
+2-second combat fade-in and a 6-second return to exploration. Environmental
+beds and sparse positional effects remain underneath both tracks.
+
+Review environmental transitions at their installed quiet gain. A bed's fade
+must still take its authored duration when its target volume is low; an absolute
+gain step makes quiet water arrive almost instantly. Check decoded loop seams
+as well as API loop flags, and keep crackles/ticks out of room tone when the
+owner asks for smooth air beneath the score.
+
 Every prompt is composed, never written whole:
 
 ```
@@ -128,7 +150,16 @@ hand plane, chisel and mallet, nail, rasp, auger, plank, axe split), plus
 `ambience` loop, `music` list and `spots`, keeping `outdoorMix` of the
 outdoors. Use it for taverns, caves, crypts and forges. A fire, torch or
 waterfall that should come from a point is an `audio` component (loop,
-positional) on that entity, not a zone.
+positional) on that entity, not a zone. Set `autoplay` and it runs on both
+hosts: it starts when the entity is built (a place's when the place streams
+in), stops when the place is freed, and holds a voice only while in earshot. A
+positional sound whose entity has no object yet does not play at all.
+
+Every sound goes through a mixer channel (`music`, `ambience`, `effects`,
+`interface`, `voice`) under the player's Master and mute: pass `channel` to
+`playSound` / `setSoundLoop`, or set it on the `audio` component. An untagged
+loop is ambience and anything else effects (`channelOf` in
+`src/audio-settings.ts`). The Audio panel is `src/audio-panel.ts`.
 
 Host hooks it relies on (all optional, so a dedicated server is silent):
 `biomeAt`, `regionAt`, `waterAt`, `hasSound`, `soundDuration`,

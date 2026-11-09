@@ -12,10 +12,11 @@
  * segment whose worst gap exceeds `maxGap` (default 0.05 m).
  */
 import {
-  buildLandmarkMesh, compileLandmarkOperator, createWorldField, fieldSolidProbe, latticeHeight, operatorParams, wallLandmarkParams, wallParamsSchema,
+  buildLandmarkMesh, compileLandmarkOperator, createWorldField, latticeHeight, operatorParams, wallLandmarkParams, wallParamsSchema,
   wallPlanCurve, type OperatorFieldReader, type WorldRecipe,
 } from "@hitreg/core";
 import { operatorReader } from "./worldgen-operators.mts";
+import { walkGround } from "./_ground.mts";
 
 export interface WallSeatSegment { from: number; to: number; at: [number, number]; gap: number; samples: number }
 export interface WallSeatReport { id: string; length: number; samples: number; segments: WallSeatSegment[]; worst: number; worstAt: [number, number] | null; bad: number; ok: boolean; maxGap: number; digest: string; stale?: string }
@@ -92,14 +93,11 @@ export function wallSeatOf(id: string, params: unknown, reader: OperatorFieldRea
   return { id, length: Math.round(L * 10) / 10, samples, segments, worst: Math.round(Math.max(worst, -99) * 100) / 100, worstAt, bad, ok: bad === 0 && samples > 0, maxGap, digest: c.compiled.digest };
 }
 
-/** The visible ground of a world: the lower of the field, the drawn lattice and the real solid under it (cuts, carves). */
+/** The visible ground of a world: the lower of the drawn lattice and the WALKED ground (tools/_ground.mts: the carved
+ *  solid, so a cut, a carve or a cave mouth reads its floor). */
 export function visibleWorldGround(recipe: WorldRecipe): (x: number, z: number) => number {
-  const field = createWorldField(recipe), probe = fieldSolidProbe(field);
-  return (x, z) => {
-    const h = Math.min(field.height(x, z), latticeHeight(field, x, z));
-    const solid = probe.floor(x, z, h + 2, h - 30);
-    return solid === null ? h : Math.min(h, solid);
-  };
+  const field = createWorldField(recipe), walk = walkGround(field);
+  return (x, z) => Math.min(walk(x, z), latticeHeight(field, x, z));
 }
 
 /** The gate on an installed wall operator, rebuilt as the bake builds it, placed at its recipe landmark piece. */

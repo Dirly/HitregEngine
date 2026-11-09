@@ -31,6 +31,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import { killTree } from "./_kill-tree.mts";
 import { fileURLToPath } from "node:url";
 // @ts-expect-error plain JS module
 import { loadPlaywright as loadPlaywrightModule } from "./_playwright.mjs";
@@ -92,7 +93,8 @@ function sampleRoutes(): Sample[] {
     }
   } else if (fs.existsSync(walkFile)) {
     const w = JSON.parse(fs.readFileSync(walkFile, "utf8"));
-    for (const l of w.legs ?? []) if (l.from && (l.end ?? l.to)) raw.push({ leg: String(l.id), a: l.from as V3, b: (l.end ?? l.to) as V3, known: true });
+    // a walk report keeps its legs in `legs` or, when `legs` is the count, in `legDetail` (mesh-dungeon prove.mts)
+    for (const l of (Array.isArray(w.legs) ? w.legs : w.legDetail ?? [])) if (l.from && (l.end ?? l.to)) raw.push({ leg: String(l.id), a: l.from as V3, b: (l.end ?? l.to) as V3, known: true });
   } else { console.error(`STOP: no route — pass --route <walk-route.json> or run the walk gate first (${walkFile})`); process.exit(2); }
   for (const s of raw) {
     const len = Math.hypot(s.b[0] - s.a[0], s.b[1] - s.a[1], s.b[2] - s.a[2]);
@@ -148,7 +150,7 @@ async function loadPlaywright(): Promise<any> {
 }
 let vite: ReturnType<typeof spawn> | null = null;
 let base = arg("url").replace(/\/$/, "");
-const stopVite = () => { if (vite?.pid) { try { process.platform === "win32" ? spawn("taskkill", ["/pid", String(vite.pid), "/t", "/f"]) : process.kill(vite.pid); } catch { /* gone */ } } };
+const stopVite = () => killTree(vite?.pid); // synchronous: an async taskkill raced process.exit and leaked vite
 process.on("exit", stopVite);
 const t0 = Date.now();
 if (!base) {
@@ -185,7 +187,7 @@ const BOOT_MS = (() => { const i = argv.indexOf("--boot-timeout"); const v = i >
 async function waitFor(cond: () => Promise<boolean>, ms: number, what: string) { const t = Date.now(); while (Date.now() - t < ms) { if (await cond().catch(() => false)) return; await sleep(300); } throw new Error(`timed out waiting for ${what}`); }
 const cmd = (line: string) => page.evaluate((line: string) => { const f = document.querySelector(".hitreg-console-field") as HTMLInputElement | null; if (!f) return "! no console"; f.value = line; f.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); return "sent"; }, line) as Promise<string>;
 
-type Hole = { sample: number; leg: string; view: string; eye: V3; dir: V3; pixels: number; clusterPixels: number; bbox: number[]; size: number; cause: string; entities: string[]; at: V3 | null; depth: number | null; crop?: string };
+type Hole = { sample: number; leg: string; view: string; eye: V3; dir: V3; pixels: number; clusterPixels: number; bbox: number[]; size: number; cause: string; entities: string[]; at: V3 | null; depth: number | null; crop?: string; apart?: true };
 const holes: Hole[] = [];
 let done = 0;
 try {
@@ -315,16 +317,21 @@ const parts = Array.from({ length: BATCH_N }, (_, k) => partFile(k + 1)).map((f)
 // --merge: merge the parts present even if an input changed between batches (a scene edited live); recorded as mixedInputs
 const MERGE = argv.includes("--merge");
 if (parts.every((p) => p && (p.inputsHash === inputsHash || MERGE))) {
-  const all: Hole[] = parts.flatMap((p) => p.holes);
+  // sky framed by pieces that never meet (probe framesApart, r-found2 2026-10-31) is listed as `framesApart`, never counted
+  const every: Hole[] = parts.flatMap((p) => p.holes), all = every.filter((h) => !h.apart);
   // one physical hole is seen from many samples and faces: group by its world estimate (1.5 m), else by sample+view
   type Site = { id: number; at: V3 | null; cause: string; causes: Record<string, number>; entities: string[]; views: number; maxPixels: number; worst: Hole };
-  const sites: Site[] = [];
-  for (const h of all.sort((a, b) => b.pixels - a.pixels)) {
-    const s = h.at ? sites.find((q) => q.at && Math.hypot(q.at[0] - h.at![0], q.at[1] - h.at![1], q.at[2] - h.at![2]) < 1.5) : undefined;
-    if (s) { s.views++; s.causes[h.cause] = (s.causes[h.cause] ?? 0) + 1; for (const e of h.entities) if (!s.entities.includes(e)) s.entities.push(e); continue; }
-    sites.push({ id: sites.length + 1, at: h.at ? h.at.map((v) => +v.toFixed(2)) as V3 : null, cause: h.cause, causes: { [h.cause]: 1 }, entities: [...h.entities], views: 1, maxPixels: h.pixels, worst: h });
-  }
-  for (const s of sites) s.cause = Object.entries(s.causes).sort((a, b) => b[1] - a[1])[0]![0];
+  const group = (list: Hole[]): Site[] => {
+    const out: Site[] = [];
+    for (const h of [...list].sort((a, b) => b.pixels - a.pixels)) {
+      const s = h.at ? out.find((q) => q.at && Math.hypot(q.at[0] - h.at![0], q.at[1] - h.at![1], q.at[2] - h.at![2]) < 1.5) : undefined;
+      if (s) { s.views++; s.causes[h.cause] = (s.causes[h.cause] ?? 0) + 1; for (const e of h.entities) if (!s.entities.includes(e)) s.entities.push(e); continue; }
+      out.push({ id: out.length + 1, at: h.at ? h.at.map((v) => +v.toFixed(2)) as V3 : null, cause: h.cause, causes: { [h.cause]: 1 }, entities: [...h.entities], views: 1, maxPixels: h.pixels, worst: h });
+    }
+    for (const s of out) s.cause = Object.entries(s.causes).sort((a, b) => b[1] - a[1])[0]![0];
+    return out;
+  };
+  const sites = group(all), apartSites = group(every.filter((h) => h.apart));
   // world meshes far outside the place (a scatter tree 60-100 m off) are listed, not counted
   const sceneIds = new Set(Object.keys(doc.entities));
   const away = MODE_CMD === "scene" ? sites.filter((s) => outOfPlace(s, samples, sceneIds, WITHIN)) : [];
@@ -337,6 +344,7 @@ if (parts.every((p) => p && (p.inputsHash === inputsHash || MERGE))) {
   for (const s of sites) counts[s.cause] = (counts[s.cause] ?? 0) + 1;
   if (away.length) counts["outOfPlace"] = away.length;
   if (ropes.length) counts["ropeRailOpenings"] = ropes.length;
+  if (apartSites.length) counts["framesApart"] = apartSites.length;
   const report = {
     tool: "see-through", scene: SCENE, mode: MODE_CMD, rule: MODE_CMD === "prop" ? "enclosed" : RULE_MODE, entity: ENTITY || undefined, at: new Date().toISOString(), inputsHash,
     ok: sites.length === 0, passed: sites.length === 0, counts, ...(parts.some((p) => p.inputsHash !== inputsHash) ? { mixedInputs: parts.map((p) => p.inputsHash) } : {}), samples: parts.reduce((s, p) => s + p.samples, 0), seconds: parts.reduce((s, p) => s + p.seconds, 0),
@@ -344,6 +352,7 @@ if (parts.every((p) => p && (p.inputsHash === inputsHash || MERGE))) {
     sites: sites.map((s) => ({ id: s.id, cause: s.cause, causes: s.causes, entities: s.entities.map((e) => `${e}${names(e) !== e ? ` (${names(e)})` : ""}`), at: s.at, views: s.views, maxPixels: s.maxPixels,
       worst: { sample: s.worst.sample, leg: s.worst.leg, view: s.worst.view, eye: s.worst.eye.map((v) => +v.toFixed(2)), dir: s.worst.dir.map((v) => +v.toFixed(3)), depth: s.worst.depth && +s.worst.depth.toFixed(2), crop: s.worst.crop } })),
     outOfPlace: away.map((s) => ({ id: s.id, cause: s.cause, entities: s.entities, at: s.at, views: s.views, maxPixels: s.maxPixels, routeDistanceM: +routeDistanceXZ(s.at!, samples).toFixed(1), withinM: WITHIN })),
+    framesApart: apartSites.map((s) => ({ id: s.id, entities: s.entities, at: s.at, views: s.views, maxPixels: s.maxPixels, worst: { sample: s.worst.sample, view: s.worst.view, eye: s.worst.eye.map((v) => +v.toFixed(2)), depth: s.worst.depth && +s.worst.depth.toFixed(2), crop: s.worst.crop } })),
     sheet: sites.length ? path.relative(path.dirname(OUT), path.join(OUT_DIR, "sheet.png")).replace(/\\/g, "/") : null,
   };
   // the contact sheet: the 24 worst sites, labelled
@@ -363,6 +372,7 @@ if (parts.every((p) => p && (p.inputsHash === inputsHash || MERGE))) {
   fs.writeFileSync(OUT, JSON.stringify(report, null, 1));
   for (let k = 1; k <= BATCH_N; k++) fs.rmSync(partFile(k), { force: true });
   console.log(`see-through ${SCENE}: ${report.ok ? "ok" : "FAILED"} — ${sites.length} hole site(s) from ${all.length} hole views over ${report.samples} samples; ${JSON.stringify(counts)}  ${OUT}`);
+  for (const s of report.framesApart) console.log(`  frames apart (not counted): ${s.maxPixels} px at ${JSON.stringify(s.at)} on ${s.entities.slice(0, 3).join(" | ")}`);
   for (const s of report.outOfPlace) console.log(`  out of place (not counted): ${s.cause} ${s.maxPixels} px at ${JSON.stringify(s.at)} on ${s.entities.slice(0, 2).join(" | ")}, ${s.routeDistanceM} m from the route (${s.routeDistanceM > s.withinM ? `> ${s.withinM}` : "a cutout on world meshes only"})`);
   for (const s of report.sites.slice(0, 8)) console.log(`  #${s.id} ${s.cause.padEnd(12)} ${String(s.maxPixels).padStart(5)} px x${s.views}  at ${JSON.stringify(s.at)}  ${s.entities.slice(0, 3).join(" | ")}`);
   process.exitCode = report.ok ? 0 : 1;

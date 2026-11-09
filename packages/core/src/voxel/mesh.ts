@@ -441,6 +441,7 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
     },
   );
   if (result.triangleCount === 0) return EMPTY_MESH;
+  if (mesher === "mc" && wallFootSnap.enabled) squareWallFeet(field, result, block, x0, z0, recipe.cellSize);
 
   const interleaved = result.attributes["surface"];
   const stride = surfaceCount + 3;
@@ -513,6 +514,97 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
     triangleCount: skirted.triangleCount,
   };
   return recipeSplatIndexed(recipe) ? reduceSplatTop4(mesh, { roleGroup: roleGroupsOf(recipe) }) : mesh;
+}
+
+/** Coarse-to-fine: land is found on a lattice this many steps wide before the fine grid is sampled. */
+const HORIZON_BLOCK = 4;
+
+/**
+ * The whole world's land as ONE heightfield mesh: the tier past the streamed rings, so a mountain across the island
+ * is on screen for one draw instead of hundreds of far cells (docs/voxel-worlds.md "Seeing far"). World-space
+ * positions; the same splat and tint streams as a cell, so it draws with the terrain's own material and colours.
+ * Open sea is left out (the ocean plane is there). A heightfield has no overhangs, which nobody can read from a
+ * kilometre off. Slow by frame standards (a biome evaluation per vertex): it runs in the voxel worker, disk-cached.
+ */
+export function buildHorizonMesh(field: WorldField, step: number): VoxelMesh {
+  const recipe = field.recipe;
+  const limit = recipe.bounds?.limit ?? 4096;
+  const sea = recipe.seaLevel ?? 0;
+  const n = Math.ceil((2 * limit) / step) + 1;
+  const at = (i: number): number => -limit + i * step;
+  const heights = new Float32Array(n * n).fill(NaN);
+  const heightOf = (i: number, j: number): number => {
+    const k = j * n + i;
+    let h = heights[k]!;
+    if (Number.isNaN(h)) h = heights[k] = field.height(at(i), at(j));
+    return h;
+  };
+  // land blocks, grown by one so a thin cape between two lattice points survives
+  const blocks = Math.ceil((n - 1) / HORIZON_BLOCK);
+  const landBlock = new Uint8Array(blocks * blocks);
+  for (let bj = 0; bj < blocks; bj++) for (let bi = 0; bi < blocks; bi++) {
+    const i = Math.min(n - 1, bi * HORIZON_BLOCK), j = Math.min(n - 1, bj * HORIZON_BLOCK);
+    if (heightOf(i, j) <= sea) continue;
+    for (let dj = -2; dj <= 1; dj++) for (let di = -2; di <= 1; di++) {
+      const x = bi + di, z = bj + dj;
+      if (x >= 0 && z >= 0 && x < blocks && z < blocks) landBlock[z * blocks + x] = 1;
+    }
+  }
+  const vertexOf = new Int32Array(n * n).fill(-1);
+  const corners: number[] = [];
+  const quads: number[] = [];
+  const vertex = (i: number, j: number): number => {
+    const k = j * n + i;
+    if (vertexOf[k]! < 0) {
+      vertexOf[k] = corners.length;
+      corners.push(k);
+    }
+    return vertexOf[k]!;
+  };
+  for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) {
+    if (!landBlock[Math.floor(j / HORIZON_BLOCK) * blocks + Math.floor(i / HORIZON_BLOCK)]) continue;
+    if (Math.max(heightOf(i, j), heightOf(i + 1, j), heightOf(i, j + 1), heightOf(i + 1, j + 1)) <= sea) continue;
+    const a = vertex(i, j), b = vertex(i + 1, j), c = vertex(i, j + 1), d = vertex(i + 1, j + 1);
+    quads.push(a, c, b, b, c, d);
+  }
+  const surfaceCount = recipe.surfaces.length;
+  const stride = surfaceCount + 3;
+  const count = corners.length;
+  const positions = new Float32Array(count * 3);
+  const normals = new Float32Array(count * 3);
+  const splat = new Float32Array(count * surfaceCount);
+  const tint = new Float32Array(count * 3);
+  const sample = new Float32Array(stride);
+  let minY = Infinity, maxY = -Infinity;
+  for (let v = 0; v < count; v++) {
+    const k = corners[v]!;
+    const i = k % n, j = (k - i) / n;
+    const h = heightOf(i, j);
+    const hx = heightOf(Math.min(n - 1, i + 1), j) - heightOf(Math.max(0, i - 1), j);
+    const hz = heightOf(i, Math.min(n - 1, j + 1)) - heightOf(i, Math.max(0, j - 1));
+    const nx = -hx, ny = 4 * step / 2, nz = -hz; // central differences span two steps
+    const length = Math.hypot(nx, ny, nz) || 1;
+    positions[v * 3] = at(i);
+    positions[v * 3 + 1] = h;
+    positions[v * 3 + 2] = at(j);
+    normals[v * 3] = nx / length;
+    normals[v * 3 + 1] = ny / length;
+    normals[v * 3 + 2] = nz / length;
+    if (h < minY) minY = h;
+    if (h > maxY) maxY = h;
+    field.surfaceAt(at(i), h, at(j), ny / length, sample, 0);
+    for (let s = 0; s < surfaceCount; s++) splat[v * surfaceCount + s] = sample[s]!;
+    tint[v * 3] = sample[surfaceCount]!;
+    tint[v * 3 + 1] = sample[surfaceCount + 1]!;
+    tint[v * 3 + 2] = sample[surfaceCount + 2]!;
+  }
+  if (count === 0) return EMPTY_MESH;
+  const result: VoxelMesh = {
+    positions, normals, indices: Uint32Array.from(quads), splat, surfaceCount, tint,
+    min: [-limit, minY, -limit], max: [limit, maxY, limit],
+    vertexCount: count, triangleCount: quads.length / 3,
+  };
+  return recipeSplatIndexed(recipe) ? reduceSplatTop4(result, { roleGroup: roleGroupsOf(recipe) }) : result;
 }
 
 const roleGroupCache = new WeakMap<object, Int8Array>();
@@ -602,6 +694,71 @@ function flatCellMesh(field: WorldField, block: SampledBlock): MarchResult | nul
  *   with the lattice (fixed in sampleBlock: coarse blocks read the full-detail planar function), not skirt depth.
  * Meshes are cached by source, so flip these before meshing, not between.
  */
+/**
+ * Square every terrace / kit wall FOOT in marching-cubes cells (e-paving, 2026-11-02). A wall's face cut meets its
+ * floor in a sharp concave corner, but MC can only draw it as one chamfer across the lattice cell holding the corner:
+ * a dirt fillet up to a voxel high and a voxel deep in front of every retaining wall (~1 m at 0.25 m out on a 2 m
+ * lattice: Bell Strand's "red mounds" along every close wall), while the field (`height`, `surfaceCast`) is sharp.
+ * The pass moves each vertex in the foot band (less than a lattice diagonal in front of the cut's back plane and less
+ * than one step above its floor) onto the back plane, and a FLOOR vertex (one on a vertical lattice edge) down onto
+ * the floor: the chamfer becomes the face, hidden in the wall body, and the floor runs flat to the wall. Pure function
+ * of world position (chunks agree; physics meshes the same cells); a vertex on the cell's side plane slides along that
+ * plane so the skirts and the neighbour still meet it. Off = the old mesh (`wall-foot.mts --compare`).
+ */
+export const wallFootSnap: { enabled: boolean } = { enabled: true };
+
+function squareWallFeet(field: WorldField, result: MarchResult, block: SampledBlock, x0: number, z0: number, size: number): number {
+  if (!field.terraceFacesIn(x0, z0, x0 + size, z0 + size)) return 0;
+  const { positions, normals, vertexCount } = result;
+  const { origin, step } = block;
+  // a diagonal wall's corner cell reaches a lattice diagonal (step * sqrt 2) in front of the plane; the band is a step high
+  const reach = step * Math.SQRT2 * 1.001, rise = step * 1.001;
+  const onLattice = (v: number, o: number): boolean => { const t = (v - o) / step; return Math.abs(t - Math.round(t)) < 1e-4; };
+  const eps = 1e-4;
+  let moved = 0;
+  for (let i = 0; i < vertexCount; i++) {
+    let x = positions[i * 3]!, y = positions[i * 3 + 1]!, z = positions[i * 3 + 2]!;
+    const cuts = field.terraceFacesNear(x, z);
+    if (cuts.length === 0) continue;
+    // a vertex on a VERTICAL lattice edge is a floor crossing; one on a horizontal edge is a face crossing
+    const vertical = onLattice(x, origin[0]) && onLattice(z, origin[2]) && !onLattice(y, origin[1]);
+    const onX = Math.abs(x - x0) < eps || Math.abs(x - (x0 + size)) < eps;
+    const onZ = Math.abs(z - z0) < eps || Math.abs(z - (z0 + size)) < eps;
+    if (onX && onZ) continue; // a cell corner column: fixed, every neighbour shares it
+    let floor = false, hit = false;
+    for (const c of cuts) {
+      const rx = x - c.ox, rz = z - c.oz;
+      const sAlong = rx * c.dx + rz * c.dz, n = -rx * c.dz + rz * c.dx;
+      if (sAlong < c.s0 || sAlong > c.s1) continue;
+      const dn = n - c.n0;
+      if (dn <= 1e-5 || dn > reach || y < c.y0 - 1e-3 || y > c.y0 + rise) continue;
+      // onto the back plane (n = n0): along -n, or along the cell's side plane the vertex lies on
+      let tx = x + dn * c.dz, tz = z - dn * c.dx;
+      if (onX) {
+        if (Math.abs(c.dx) < 0.3) continue;
+        tx = x;
+        tz = c.oz + (c.n0 + rx * c.dz) / c.dx;
+      } else if (onZ) {
+        if (Math.abs(c.dz) < 0.3) continue;
+        tz = z;
+        tx = c.ox + (rz * c.dx - c.n0) / c.dz;
+      }
+      if (Math.hypot(tx - x, tz - z) > 2 * reach) continue;
+      x = tx;
+      z = tz;
+      hit = true;
+      if (vertical) { y = c.y0; floor = true; }
+    }
+    if (!hit) continue;
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+    if (floor) { normals[i * 3] = 0; normals[i * 3 + 1] = 1; normals[i * 3 + 2] = 0; }
+    moved++;
+  }
+  return moved;
+}
+
 export const dualMeshExperiment: { seams: "clip" | "own"; crease: number; hermiteSteps: number; hermiteGate: number; skirtMin: number; skirtSection: boolean } = { seams: "clip", crease: 0.6, hermiteSteps: 3, hermiteGate: -2, skirtMin: 0, skirtSection: true };
 
 /** Skirt depth in lattice steps: a full-detail cell drops 6 m, an HLOD cell (4x lattice) 24 m. */

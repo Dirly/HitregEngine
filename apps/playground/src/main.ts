@@ -1,4 +1,5 @@
 import { assetFileUrl } from "./asset-url.js";
+import { installShadowWatch } from "./shadow-watch.js";
 import { mountVolumePaint } from './volume-paint.js';
 import { startFramePump } from "./frame-pump.js";
 import { GroundLoadHold } from "./ground-load-hold.js";
@@ -82,7 +83,23 @@ import {
   detachPhysicsDebug,
   detachLightDebug,
   BillboardSystem,
-  batchStaticMeshes,
+  shadowMerge,
+  HorizonTerrain,
+  HORIZON_STEP,
+  hlodMaterial,
+  PropSheets,
+  AdaptiveResolution,
+  cascadeStagger,
+  bloomCadence,
+  setWeatherParticleScale,
+  setWeatherViewCull,
+  renderScaleFromSearch,
+  FirstDrawWarm,
+  shadowSunStep,
+  asyncPipelines,
+  SHADER_BUILD_BUDGET_MS,
+  makeMaterial,
+  setSunShadowQuality,
   freezeStaticSubtree,
   refreshStaticSubtree,
   thawStaticSubtree,
@@ -111,6 +128,7 @@ import {
   makeMeshGeometryProvider,
   ParticleSystem,
   patchMaterial,
+  invalidateModelRenderCaches,
   setFoliageFade,
   pathGeometry,
   reconcileScene,
@@ -129,9 +147,6 @@ import {
   type RigVec3,
   type AmbientVfx,
   CullingSystem,
-  cullRootIndex,
-  cullRootsOf,
-  registerCullRoots,
   type CullUnit,
 } from "@hitreg/render";
 
@@ -146,6 +161,8 @@ const CULL_MIN_SCREEN_PX = 1.5;
 type CameraComponentData = ReturnType<typeof cameraSchema.parse>;
 type CameraRigData = NonNullable<CameraComponentData["rig"]>;
 import { AudioSystem, type AudioComponentData } from "./audio-system.js";
+import { listenForAudioPanel } from "./audio-panel.js";
+import { AudioSettingsController } from "./audio-settings.js";
 import { createAmbientVfx, createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 import { initPhysics, Layers, PhysicsSim } from "@hitreg/physics";
 import {
@@ -163,7 +180,7 @@ import {
 } from "@hitreg/scripting";
 import { createModelLooks } from "./model-looks.js";
 import { createFaceShotHost } from "./face-shot-host.js";
-import { mountLoadScreen } from "./load-screen.js";
+import { mountLoadScreen, wantsWorldEntry } from "./load-screen.js";
 import {
   createAssetSelection,
   createContextMenu,
@@ -198,6 +215,7 @@ import {
 import { buildStarterDoc } from "./starter-scene.js";
 import { ChunkManager } from "./chunk-manager.js";
 import { SubsceneManager, type SubsceneInstance } from "./subscene-manager.js";
+import { placeInteriorRoot } from "./place-streamer.js";
 import { BridgePlayerDataBackend } from "./player-data-bridge.js";
 import { loadingArtOf, mountPortalCurtain } from "./portal-curtain.js";
 import { NetPresence, type NetReplica } from "./net-presence.js";
@@ -217,6 +235,8 @@ import {
 } from "./net-client.js";
 import { loadAssets, loadedProjectScope } from "./asset-loader.js";
 import { saveAsset, clientLog } from "./dev-log.js";
+import { createSceneSaver } from "./scene-save.js";
+import { firstClearPose, type SightPose } from "./line-of-sight.js";
 import { applyBodyState } from "./physics-sync.js";
 import { bakeImpostorAtlas } from "./impostor-bake.js";
 import { renderThumbnails } from "./thumbnails.js";
@@ -229,14 +249,21 @@ import {
   voxelChunkProvider,
   voxelMeshViaWorker,
   voxelSupercellViaWorker,
+  voxelHorizonViaWorker,
   voxelDiskCacheStats,
+  startScatterMaterials,
+  warnTerrainPalette,
 } from "./voxel-world.js";
 import { createPinStore } from "./pins.js";
 import { installCameraBridge, postContext, publishEngineSpec } from "./dev-bridge.js";
 import { openProfilerWindow } from "./profiler-window.js";
 import { createSocketPreview } from "./socket-preview.js";
 import { foliageSink, syncWorldCover, voxelGroundProbes } from "./voxel-ground.js";
-import { parseSceneScope, scopeStreamer } from "./scene-scope.js";
+import { parseSceneScope, playerFraming, scopeStreamer } from "./scene-scope.js";
+import { browserStorage, createGraphics } from "./graphics-settings.js";
+import { listenForGraphicsPanel } from "./graphics-panel.js";
+import { createPlacedBatcher, createStillness } from "./placed-batch.js";
+import { createPlaceRuntime } from "./place-runtime.js";
 /** ?at= / ?streamRadius= (scene-scope.ts): a place-scoped load of a streamed world. */
 const sceneScope = parseSceneScope(globalThis.location?.search ?? "");
 
@@ -302,6 +329,20 @@ async function main(): Promise<void> {
   const profiler = new Profiler({ historyFrames: 900 });
   profiler.enabled = true;
 
+  // Graphics/physics need the canvas, not the asset library. Start both while
+  // scene and library reads are in flight; still wait before building anything.
+  // Keep this after character selection so sign-in never starts a world device.
+  const renderer = new EngineRenderer(canvas, { reversedDepth: new URLSearchParams(location.search).get("reversedDepth") !== "0" });
+  renderer.setScopeSink({
+    begin: (name) => profiler.begin(name),
+    end: () => profiler.end(),
+  });
+  clientLog("boot: initializing graphics and physics");
+  const runtimeReady = Promise.all([renderer.init(), initPhysics()]);
+  // An early rejection remains observable at the await below, without an
+  // unhandled rejection while the independent asset reads finish.
+  void runtimeReady.catch(() => undefined);
+
   // Anything that blocks the main thread for >50ms, whatever it was — a GC
   // pause, shader compilation, a promise continuation parsing a chunk, an
   // extension. The profiler's own scopes only see inside the frame callback,
@@ -339,7 +380,6 @@ async function main(): Promise<void> {
   // system and gets updated from the same camera each frame
   const foliageLod = new FoliageLodSystem();
   /** The tree switch with no streamed ring to fit (and its ceiling with one): see chunkManager.configure below. */
-  const FOLIAGE_LOD_DISTANCE = 170;
   // streamed cells share one set of instanced batches per model (prop-pool.ts)
   // instead of one per cell — the cell count stops multiplying the draw count
   const propPool = new InstancedPropPool(foliageLod);
@@ -569,6 +609,23 @@ async function main(): Promise<void> {
   rememberLastScene(store.doc.name);
 
   let lastWrittenScene = loadedSceneContent;
+  // a save that had to rebase onto another writer's text hands that text to live-sync (installed further down), which
+  // merges it into the open doc the same three-way way
+  let adoptSceneText: ((file: string, content: string) => void) | null = null;
+  const sceneSaver = createSceneSaver({
+    registry,
+    post: async (body) => {
+      const res = await fetch("/__hitreg/write-asset", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: await res.json().catch(() => ({})) };
+    },
+    onSaved: (save, outcome) => {
+      if (outcome.rebased && outcome.disk != null) adoptSceneText?.(save.file, outcome.disk);
+    },
+  });
   const sceneList = observable<string[]>([]);
   try {
     const index = (await fetch("/__hitreg/assets-index?kinds=scenes").then((r) => r.json())) as {
@@ -737,8 +794,11 @@ async function main(): Promise<void> {
     if (store.doc.name === PREFAB_EDIT_SCENE || store.doc.name === CHUNK_EDIT_SCENE) return;
     const content = JSON.stringify(store.doc, null, 2);
     if (content === lastWrittenScene) return;
+    // `base` is what this client last knew to be on disk: the server refuses the write when another writer changed
+    // the file since, and the saver rebases our edits onto theirs (src/scene-save.ts)
+    const base = lastWrittenScene;
     lastWrittenScene = content;
-    saveAsset(`scenes/${store.doc.name}.scene.json`, content, currentProject);
+    void sceneSaver.save({ file: `scenes/${store.doc.name}.scene.json`, content, base, project: currentProject });
   }
   if (seeded) persistScene();
   let sceneSaveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1031,6 +1091,11 @@ async function main(): Promise<void> {
       multiSelection.set([]);
       lastWrittenScene = content;
       store.replace({ ...parsed.data, name }); // the file is the identity (see initial load)
+      // open the new scene at its player, as the boot does without ?at (a portal trip frames its own arrival)
+      if (!portalSwitching) {
+        const framed = playerFraming(store.doc);
+        if (framed) void controls.setLookAt(framed.eye.x, framed.eye.y, framed.eye.z, framed.target.x, framed.target.y, framed.target.z, false);
+      }
       currentProject = sceneMenuProjectOf(sceneMenu.get(), name)?.name ?? null;
       rememberLastScene(name);
       void pinStore.load(name);
@@ -1246,11 +1311,19 @@ async function main(): Promise<void> {
    */
   let staticBatch: StaticBatchHandle | null = null;
   let staticBatchPending = false;
-  /** Side of the square world cells that POI-tagged static meshes merge within (metres). */
-  const STATIC_BATCH_CELL = 256;
+  /** The doc the base scene was built from: lastExpanded minus streamed places (place-streamer.ts). */
+  let lastBaseDoc: SceneDoc | null = null;
+  /** Parent of every streamed place's group, inside the built scene. */
+  const placesRoot = new THREE.Group();
+  placesRoot.name = "places";
+  placesRoot.userData["editorOverlay"] = false;
+  // Runtime prop atlas (prop-sheet.ts): props on different atlas pages merge into one draw. `?sheets=0` turns it off
+  // for an A/B.
+  const propSheets = new URLSearchParams(location.search).get("sheets") === "0" ? undefined : new PropSheets();
   let staticBatchPendingSince: number | null = null;
   /** The scene the last whole-scene precompile ran on (see rebuildStaticBatch). */
   let precompiledScene: THREE.Scene | null = null;
+  const batchPlacedContent = createPlacedBatcher({ culling, sheets: propSheets, subtreeStill: (id) => subtreeStill(id) });
   const rebuildStaticBatch = (): void => {
     staticBatchPending = false;
     for (const unit of baseCullUnits) culling.unregister(unit);
@@ -1258,54 +1331,15 @@ async function main(): Promise<void> {
     staticBatch?.dispose();
     staticBatch = null;
     if (!built) return;
-    // a `culling` or `landmark` entity's meshes merge apart from the rest, so it can hide (and fog) alone
-    const cullRoots = lastExpanded ? cullRootsOf(lastExpanded) : [];
-    const cullRootOf = cullRootIndex(cullRoots);
-    // Merge groups. An AUTHORED culling unit (a `culling` component: an
-    // interior, a clutter set) keeps its own merge so it can hide alone. A
-    // unit that exists only because its entity is tagged `poi` (every town
-    // building) only ever hid behind the horizon — and one unit per building
-    // left every material of every house as its own draw (~110 of a town's
-    // 240 main-pass draws). Those merge by STATIC_BATCH_CELL instead: a few draws per
-    // cell, still frustum- and screen-size-culled cell by cell.
-    const cullRootById = new Map(cullRoots.map((root) => [root.id, root]));
-    const authoredUnit = (rootId: string | undefined): string | undefined => {
-      for (let root = rootId ? cullRootById.get(rootId) : undefined; root; root = root.parent ? cullRootById.get(root.parent) : undefined) {
-        const components = lastExpanded.entities[root.id]?.components;
-        if (components?.["culling"] || components?.["landmark"]) return root.id;
-      }
-      return undefined;
-    };
-    // A mesh wider than a batch cell (an ocean plane) does not stand on any one cell's ground: it merges apart, in
-    // `wide`, which the ground gate below leaves alone.
-    const cellOf = (mesh: THREE.Mesh): string => {
-      if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
-      const radius = (mesh.geometry.boundingSphere?.radius ?? 0) * mesh.matrixWorld.getMaxScaleOnAxis();
-      if (radius > STATIC_BATCH_CELL) return "wide";
-      const e = mesh.matrixWorld.elements;
-      return `cell:${Math.floor(e[12]! / STATIC_BATCH_CELL)},${Math.floor(e[14]! / STATIC_BATCH_CELL)}`;
-    };
-    staticBatch = batchStaticMeshes(built.scene, {
-      groupOf: (mesh: THREE.Mesh) => authoredUnit(cullRootOf.get(mesh.userData["entityId"] as string)) ?? cellOf(mesh),
-      // entity groups whose whole subtree is merged and still: hide them so no
-      // pass walks a town of empty groups (see batchStaticMeshes)
-      prunable: (node) => {
-        const id = node.userData["entityId"] as string | undefined;
-        return !!id && built.objects.get(id) === node && subtreeStill(id);
-      },
-    });
-    // Base-scene content stands on STREAMED ground: every unit (POIs, dressings, and each batch cell's merged town
-    // buildings, stairs and structures) is hidden while the terrain under it has not streamed in, so nothing hangs
-    // over unloaded cells kilometres off (docs/culling.md, "Over unloaded ground"). Judged on chunk load/unload only.
-    baseCullUnits = registerCullRoots(culling, cullRoots, built.objects, staticBatch, { grounded: true });
-    for (const [key, group] of staticBatch?.groups ?? []) {
-      if (key.startsWith("cell:")) baseCullUnits.push(culling.register({ name: `static-${key}`, objects: [group], grounded: true }));
-    }
-    // placed creatures (populate's `npc` roots) stand on the same streamed ground; they move, so no horizon test
-    for (const [id, entity] of Object.entries(lastExpanded?.entities ?? {})) {
-      if (entity.parent !== null || cullRootOf.has(id) || !entity.tags?.includes("npc")) continue;
-      const object = built.objects.get(id);
-      if (object) baseCullUnits.push(culling.register({ name: id, objects: [object], grounded: true, occlusion: false }));
+    // streamed places batch on their own (buildPlace): keep their meshes out of the base merge
+    const placesShown = placesRoot.visible;
+    placesRoot.visible = false;
+    try {
+      const done = batchPlacedContent(built.scene, lastBaseDoc, built.objects);
+      staticBatch = done.batch;
+      baseCullUnits = done.units;
+    } finally {
+      placesRoot.visible = placesShown;
     }
     // Build every pipeline the level needs now rather than on first sight of
     // each object. WebGPU compiles per material/geometry pair on first DRAW, so
@@ -1454,6 +1488,7 @@ async function main(): Promise<void> {
     return voxelCover.sampleCover(x, z, data);
   }
   /** World cover (`recipe.cover`) registered on `grass`, as `cover:<id>`. */
+  let horizon: HorizonTerrain | null = null;
   const worldCoverIds = new Set<string>();
   /** Identity-transform parent for world cover: the layers are world-space. */
   const worldCoverRoot = new THREE.Group();
@@ -1568,6 +1603,21 @@ async function main(): Promise<void> {
   // only a generated world can say "not here" for a whole disc; heightmap
   // tiles keep walking theirs
   grass.regionTest = (x0, z0, x1, z1, data) => !activeVoxelWorld || voxelCover.regionTest(x0, z0, x1, z1, data);
+  const adaptiveResolution = new AdaptiveResolution();
+  // the player's Graphics settings (graphics-settings.ts); the HUD asks for the panel by event (graphics-panel.ts)
+  const graphics = createGraphics({
+    renderer,
+    adaptive: adaptiveResolution,
+    urlRenderScale: renderScaleFromSearch(location.search),
+    setSunShadows: setSunShadowQuality,
+    setWeatherScale: setWeatherParticleScale,
+    grass,
+    foliageLod,
+    chunks: chunkManager,
+    culling,
+    horizon: () => horizon,
+  }, location.search, browserStorage());
+  listenForGraphicsPanel(graphics);
   const pathPointsInverse = new THREE.Matrix4();
   const pathPointScratch = new THREE.Vector3();
   /** entity id -> its last-applied LOCAL points, so a near-static rope (the
@@ -1842,62 +1892,11 @@ async function main(): Promise<void> {
    * Anything not listed (script, rigidbody, animator, billboards…)
    * counts as possibly moving.
    */
-  const STILL_COMPONENTS = new Set([
-    "transform", "mesh", "collider", "dressing", "culling", "light", "audio", "decal",
-    "visibility", "spawnArea", "portalAnchor", "prefab", "tags", "lod",
-    // fog data only (landmark-fog): the batcher already merges a landmark apart so its unit can fog it
-    "landmark",
-    // effects read their entity's position and draw from their own batches;
-    // they never move it (a lamp's flame must not make its post unbatchable)
-    "vfx", "particles",
-  ]);
+  // still-components.ts: every component classified (a new one must be), authoring metadata such as placeRule still
   // a script that declares it never moves its entity with these params (Script.stillWith); the registry is created
   // further down, so this reads it through a late-bound lookup
   let stillScriptClass: ((name: string) => { stillWith?: (params: Record<string, unknown>) => boolean } | undefined) | null = null;
-  const scriptKeepsStill = (data: unknown): boolean => {
-    const script = data as { name?: string; params?: Record<string, unknown> } | undefined;
-    if (!script?.name || !stillScriptClass) return false;
-    return stillScriptClass(script.name)?.stillWith?.(script.params ?? {}) === true;
-  };
-  let autoStaticDoc: SceneDoc | null = null;
-  const autoStaticMemo = new Map<string, boolean>();
-  const isAutoStatic = (id: string): boolean => {
-    if (autoStaticDoc !== lastExpanded) {
-      autoStaticDoc = lastExpanded;
-      autoStaticMemo.clear();
-    }
-    const known = autoStaticMemo.get(id);
-    if (known !== undefined) return known;
-    const entity = lastExpanded?.entities[id];
-    let still = !!entity && Object.keys(entity.components).every((k) => STILL_COMPONENTS.has(k) || (k === "script" && scriptKeepsStill(entity.components[k])));
-    if (still && entity!.parent) still = isAutoStatic(entity!.parent);
-    autoStaticMemo.set(id, still);
-    return still;
-  };
-
-  /** Is this entity AND everything under it still (see isAutoStatic)? Memoized per expansion. */
-  let subtreeStillDoc: SceneDoc | null = null;
-  const subtreeStillMemo = new Map<string, boolean>();
-  let entityChildren = new Map<string, string[]>();
-  const subtreeStill = (id: string): boolean => {
-    if (subtreeStillDoc !== lastExpanded) {
-      subtreeStillDoc = lastExpanded;
-      subtreeStillMemo.clear();
-      entityChildren = new Map();
-      for (const [childId, entity] of Object.entries(lastExpanded?.entities ?? {})) {
-        if (!entity.parent) continue;
-        const list = entityChildren.get(entity.parent);
-        if (list) list.push(childId);
-        else entityChildren.set(entity.parent, [childId]);
-      }
-    }
-    const known = subtreeStillMemo.get(id);
-    if (known !== undefined) return known;
-    let still = isAutoStatic(id);
-    if (still) for (const child of entityChildren.get(id) ?? []) if (!subtreeStill(child)) { still = false; break; }
-    subtreeStillMemo.set(id, still);
-    return still;
-  };
+  const { isAutoStatic, isShadowless, subtreeStill } = createStillness(() => lastExpanded, (name) => stillScriptClass?.(name));
 
   /**
    * Play mode freezes every authored subtree that is still all the way down
@@ -1953,6 +1952,7 @@ async function main(): Promise<void> {
   // `built`/`lastExpanded` at call time, so one options object serves both
   const sceneBuildOptions: BuildOptions = {
     autoStatic: isAutoStatic,
+    shadowless: isShadowless,
     movingInstances,
     resolveModel: (assetId) => assets.getModel(assetId)?.url,
     resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
@@ -1988,7 +1988,7 @@ async function main(): Promise<void> {
       // Initial batching precedes asynchronous model arrival. Coalesce loads
       // into one rebuild instead of permanently leaving fixed props unbatched
       // (or rebuilding the whole level once for every individual prop).
-      if (lastExpanded.entities[entityId] && ((entity?.components["mesh"] as { static?: boolean } | undefined)?.static || isAutoStatic(entityId))) {
+      if (lastExpanded.entities[entityId] && !placeStreamer.placeOf(entityId) && ((entity?.components["mesh"] as { static?: boolean } | undefined)?.static || isAutoStatic(entityId))) {
         staticBatchPending = true;
       }
       const animator = entity?.components["animator"] as AnimatorData | undefined;
@@ -2042,6 +2042,44 @@ async function main(): Promise<void> {
     },
   };
 
+  // -- places stream in by distance (place-streamer.ts, docs/culling.md "Places stream") --------------------------
+  const { placeStreamer, batchPlace, placeBuildOptions } = createPlaceRuntime({
+    placesRoot,
+    batch: batchPlacedContent,
+    culling,
+    foliageLod,
+    clusterLod,
+    buildOptions: () => sceneBuildOptions,
+    objects: () => built.objects,
+    precompile: (group) => void renderer.precompileGroup(group, camera, built.scene),
+    onBuilt: (doc, objects) => {
+      if (playMode.get() !== "edit") {
+        for (const [id, entity] of Object.entries(doc.entities)) {
+          if (!subtreeStill(id) || (entity.parent && subtreeStill(entity.parent))) continue;
+          const object = objects.get(id);
+          if (!object) continue;
+          freezeStaticSubtree(object);
+          frozenEntityRoots.add(object);
+        }
+      }
+      scripts?.addEntities(doc, objects);
+      if (playMode.get() !== "edit") audio.startAutoplay(doc.entities, objects);
+    },
+    onFreed: (objects) => {
+      if (playMode.get() !== "edit") audio.stopAutoplay(objects.keys());
+      for (const [id, object] of objects) {
+        frozenEntityRoots.delete(object);
+        animations.unregister(id);
+        cloth.unregister(id);
+        particles.unregister(id);
+        billboards.unregister(id);
+        grass.unregister(id);
+        ambientVfx?.unregister(id);
+      }
+      scripts?.removeEntities([...objects.keys()]);
+    },
+  });
+
   /**
    * Rebuild the whole runtime scene from the document.
    *
@@ -2062,7 +2100,10 @@ async function main(): Promise<void> {
     frozenEntityRoots.clear(); // the old objects go with the old scene
     releaseSceneLods();
     try {
-      built = buildScene(lastExpanded, sceneBuildOptions);
+      // streamed places (place-streamer.ts) are left out of the base build; attach() below builds the near ones
+      lastBaseDoc = placeStreamer.plan(lastExpanded);
+      built = buildScene(lastBaseDoc, sceneBuildOptions);
+      built.scene.add(placesRoot);
     } finally {
       endBuild();
     }
@@ -2124,19 +2165,28 @@ async function main(): Promise<void> {
     // because a generated world has no chunk files for the file path to find.
     const voxelWorld = resolveVoxelWorld(expanded);
     chunkManager.setProvider(voxelWorld ? voxelChunkProvider(voxelWorld, assets) : null);
-    if (voxelWorld) streamer = voxelWorld.streamer;
+    if (voxelWorld) {
+      streamer = voxelWorld.streamer;
+      warnTerrainPalette(voxelWorld.field, assets);
+      startScatterMaterials(voxelWorld.field, assets, (data) => makeMaterial(data, sceneBuildOptions));
+    }
     activeVoxelWorld = voxelWorld?.data.world ?? null;
     activeWorldHasWater = worldHasWater(voxelWorld?.field ?? null);
     // ?streamRadius=<m> (scene-scope.ts): every ring clamped, so a place shot loads only its chunks
-    streamer = scopeStreamer(streamer, sceneScope.streamRadius);
+    // and the player's draw distance on top; `graphics` also sets the foliage LOD switch from these rings
+    streamer = graphics.scaleStreamer(scopeStreamer(streamer, sceneScope.streamRadius));
     void chunkManager.configure(streamer, built.scene);
-    // The instanced trees' mesh->impostor switch sits inside the full-detail ring's guaranteed reach (fullRender
-    // cells less half a cell's diagonal: 110 m on a 48 m grid with fullRender 3). Beyond it the cells are HLOD
-    // proxies whose trees can ONLY be impostors, so a farther switch just made loaded cells' trees switch late
-    // and unloaded ones never — measured 2026-10-22 at no frame cost either way.
-    {
-      const rings = streamer?.rings;
-      foliageLod.setLodDistance(rings && streamer ? Math.min(FOLIAGE_LOD_DISTANCE, Math.max(40, rings.fullRender * streamer.cellSize - streamer.cellSize / Math.SQRT2)) : FOLIAGE_LOD_DISTANCE);
+    // the island past the streamed rings, one draw (`?horizon=0` is the A/B)
+    horizon?.dispose();
+    horizon = null;
+    if (streamer?.rings && voxelWorld && new URLSearchParams(location.search).get("horizon") !== "0") {
+      const land = new HorizonTerrain(streamer.rings.farTerrain * streamer.cellSize, streamer.cellSize);
+      horizon = land;
+      built.scene.add(land.root);
+      const recipeMaterial = voxelWorld.field.recipe.material;
+      void voxelHorizonViaWorker(HORIZON_STEP)?.then((mesh) => {
+        if (mesh && horizon === land) land.setMesh(mesh, hlodMaterial(recipeMaterial, sceneBuildOptions));
+      }, (error: unknown) => console.warn("[horizon] failed:", error));
     }
     // subscene components: whole scene files composed additively at runtime
     const subscenes: SubsceneInstance[] = [];
@@ -2202,6 +2252,7 @@ async function main(): Promise<void> {
       }
     }
     subsceneManager.configure(store.doc.name, subscenes, built.scene);
+    placeStreamer.attach();
     for (const sceneCam of built.cameras.values()) {
       sceneCam.aspect = (canvas.clientWidth || 1) / (canvas.clientHeight || 1);
       sceneCam.updateProjectionMatrix();
@@ -2220,21 +2271,13 @@ async function main(): Promise<void> {
     // they all meet.
     if (!sim) return;
     if (opts.docChanged) startPlaySession();
-    else startScripts();
+    else {
+      startScripts();
+      audio.rebindAutoplay(built.objects);
+    }
   }
 
-  // ?reversedDepth=0: standard depth buffer, for diagnosing depth-related looks
-  const renderer = new EngineRenderer(canvas, { reversedDepth: new URLSearchParams(location.search).get("reversedDepth") !== "0" });
-  // Let the renderer break its own scope down. `render` is almost always the
-  // biggest number in a profile and it is the one number that names nothing:
-  // the scene's per-frame lighting work, a postfx graph rebuild and the draw
-  // itself all land in it, and they have completely different fixes.
-  renderer.setScopeSink({
-    begin: (name) => profiler.begin(name),
-    end: () => profiler.end(),
-  });
-  clientLog("boot: initializing graphics and physics");
-  const [backend] = await Promise.all([renderer.init(), initPhysics()]);
+  const [backend] = await runtimeReady;
   clientLog(`boot: graphics and physics ready (${backend})`);
   // unit-frame face pictures (ctx.faceShot): shot once per look through this renderer, cached
   const faceShots = createFaceShotHost({
@@ -2269,8 +2312,12 @@ async function main(): Promise<void> {
   const editorFocus = new THREE.Vector3();
   // ?at=x,z[,y] (scene-scope.ts): start the editor camera, i.e. the edit-mode streaming focus, at that place
   {
+    // ?at wins; else the scene's player (its spawn: behind it, looking along its facing, so entering play does not spin);
+    // else the origin (scene-scope.ts playerFraming)
     const at = sceneScope.at;
+    const framed = at ? null : playerFraming(store.doc);
     if (at) controls.setLookAt(at.x + 18, (at.y ?? 0) + 12, at.z + 22, at.x, (at.y ?? 0) + 1, at.z, false);
+    else if (framed) controls.setLookAt(framed.eye.x, framed.eye.y, framed.eye.z, framed.target.x, framed.target.y, framed.target.z, false);
     else controls.setLookAt(18, 12, 22, 0, 1, 0, false);
   }
 
@@ -2352,6 +2399,13 @@ async function main(): Promise<void> {
   // -- editor ----------------------------------------------------------------
 
   const selection = createSelection();
+  // selecting a streamed place's entity (outliner, pick) builds that place and keeps it built while selected
+  selection.subscribe(() => {
+    const id = selection.get();
+    placeStreamer.pin(null);
+    const place = id ? placeStreamer.placeOf(id) : undefined;
+    if (place) placeStreamer.pin(place);
+  });
   const multiSelection = createMultiSelection();
   // attention signals — what the cursor is over and what a drag has hold of.
   // Published to the AI context bridge so "this one" resolves to an entity and
@@ -2819,6 +2873,8 @@ async function main(): Promise<void> {
   animations.skip = skipMobPose;
 
   function localPlayerId(): string | null {
+    // Load-screen callbacks can run before the first scene build has finished.
+    if (!lastExpanded || !built) return null;
     if (netWorld.selfId && built.objects.has(netWorld.selfId)) return netWorld.selfId;
     if (cachedPlayerId !== null && lastExpanded.entities[cachedPlayerId]?.tags.includes("player")) return cachedPlayerId;
     cachedPlayerId = null;
@@ -3103,7 +3159,8 @@ async function main(): Promise<void> {
     creation: () => findCreation(assets),
     textureUrl: (id) => assets.getTexture(id)?.url,
     signals: {
-      wanted: () => playMode.get() === "playing" && (!netGateway || (gatewayFlow?.grant() ?? null) !== null),
+      wanted: () => wantsWorldEntry(playMode.get() === "playing", netServerUrl !== null, localPlayerId() !== null) &&
+        (!netGateway || (gatewayFlow?.grant() ?? null) !== null),
       connected: () => !netServerUrl || netPresence.serverLink().phase === "connected",
       hasBody: () => {
         const id = netServerUrl ? netWorld.selfId : localPlayerId();
@@ -3116,6 +3173,7 @@ async function main(): Promise<void> {
         return !!position && chunkManager.isArrivalReady(position[0], position[2]) &&
           (!!activeVoxelWorld || gltfLoadingCount() === 0) && subsceneManager.stats.loading === 0;
       },
+      finishing: () => gltfLoadingCount() > 0 || staticBatchPending || firstDraws.busy || renderer.pipelinesPending > 0,
       switching: () => sceneSwitchPending,
       place: () => {
         const id = netServerUrl ? netWorld.selfId : localPlayerId();
@@ -3543,8 +3601,10 @@ async function main(): Promise<void> {
   }
 
   const audio = new AudioSystem(camera, (soundId) => assets.getSound(soundId)?.url);
+  // the player's Audio settings; the HUD asks for the panel by event, as for Graphics (audio-panel.ts)
+  listenForAudioPanel(new AudioSettingsController({ setMix: (mix) => audio.setMix(mix), voice: () => comms.voice }, browserStorage()));
   // spell/effect `sound` modules: a one-shot at the module's anchor, in whatever scene is built now
-  vfx.resolvers.playSound = (soundId, at, volume) => void audio.playAt(built.scene, at, soundId, { volume });
+  vfx.resolvers.playSound = (soundId, at, volume) => void audio.playAt(built.scene, at, soundId, { volume, channel: "effects" });
   const playerDataBackend = new BridgePlayerDataBackend();
 
   let followTargetId: string | null = null;
@@ -3670,11 +3730,8 @@ async function main(): Promise<void> {
     startScripts();
     animations.setRunning(true);
 
-    // autoplay audio components (music, ambience)
-    for (const [id, entity] of Object.entries(lastExpanded.entities)) {
-      const comp = entity.components["audio"] as AudioComponentData | undefined;
-      if (comp?.autoplay) void audio.play(built.objects.get(id) ?? null, comp.src, comp);
-    }
+    // autoplay audio components (music, ambience): what is built now; a place starts its own as it streams in
+    audio.startAutoplay(lastExpanded.entities, built.objects);
   }
 
   /**
@@ -3927,16 +3984,51 @@ async function main(): Promise<void> {
       dataOnly.add("rigidbody").add("collider").add("joint");
     }
     const expanded = expandForRuntime();
+    const beforeRender = placeStreamer.renderDoc() ?? lastExpanded;
+    // streamed places (place-streamer.ts): an edit inside an unbuilt place has nothing to patch; one inside a built
+    // place patches its objects with that place's merge undone, then re-merges it
+    const builtChanged: string[] = [];
+    const touchedPlaces = new Set<string>();
+    for (const id of result.changedEntities) {
+      const place = placeStreamer.placeOf(id);
+      if (place && !placeStreamer.isLoaded(place)) continue;
+      if (place) touchedPlaces.add(place);
+      builtChanged.push(id);
+    }
+    if (!placeStreamer.replan(expanded)) return false; // an edit moved an entity between places: rebuild
+    // Fixed batches live beside their source entities with world-baked matrices.
+    // Moving an ancestor or rebuilding one source's visuals cannot repair that batch in place.
+    if (placeStreamer.requiresRebuildForInstanceEdits(beforeRender, result.changedEntities)) return false;
+    const afterRender = placeStreamer.renderDoc() ?? expanded;
+    // A room may stream independently of its building. Its render root holds a world transform, so moving the
+    // building also moves/rebatches that root; authored hierarchy and physics remain parented normally.
+    for (const id of placeStreamer.movedRoots(beforeRender)) {
+      if (!builtChanged.includes(id)) builtChanged.push(id);
+      touchedPlaces.add(id);
+    }
+    for (const id of touchedPlaces) {
+      const place = placeStreamer.builtOf(id);
+      if (!place) continue;
+      for (const unit of place.units) culling.unregister(unit);
+      place.units = [];
+      place.batch?.dispose();
+      place.batch = null;
+    }
     // reconcile writes transforms into objects a frozen subtree would not
     // re-read; thaw first, refreeze below once the batch is rebuilt
     thawStaticEntities();
     const ok = reconcileScene(
       built,
-      lastExpanded,
-      expanded,
-      result.changedEntities,
+      beforeRender,
+      afterRender,
+      builtChanged,
       sceneBuildOptions,
       {
+        buildOptionsFor: (id) => {
+          const placeId = placeStreamer.placeOf(id);
+          const place = placeId ? placeStreamer.builtOf(placeId) : undefined;
+          return placeId && place ? placeBuildOptions(placeId, place) : undefined;
+        },
         onEntityReset: (id) => {
           animations.unregister(id);
           cloth.unregister(id);
@@ -3952,8 +4044,15 @@ async function main(): Promise<void> {
         dataOnlyComponents: dataOnly,
       },
     );
-    if (!ok) return false;
+    if (!ok) return false; // the full rebuild that follows re-plans and rebuilds every place
     lastExpanded = expanded;
+    lastBaseDoc = placeStreamer.baseDoc();
+    for (const id of touchedPlaces) {
+      const place = placeStreamer.builtOf(id);
+      if (!place) continue;
+      place.doc = placeStreamer.docOf(id) ?? place.doc;
+      batchPlace(place);
+    }
     refreshCameraColliders(); // static-tagged scenery may have moved or changed
     // Re-merge: reconcile may have moved, retextured or replaced a mesh that is
     // baked into a batch, and a batch bakes world transforms into its vertices.
@@ -4401,6 +4500,7 @@ async function main(): Promise<void> {
   // shader builds for that scene's context). Not while the world is loading in: a request made then is held and
   // baked once the load screen is down and the first stream has settled (see the frame loop).
   let thumbnailsDue = false;
+  const firstDraws = new FirstDrawWarm();
   const thumbnailsDeferred = () => initialStreamPending || loadScreen.showing();
   const refreshThumbnails = () => {
     if (thumbnailsDeferred()) {
@@ -4434,8 +4534,8 @@ async function main(): Promise<void> {
     return true;
   }
 
-  flushDeferredSceneEdit = installLiveSync({
-    isPlaying: () => playMode.get() === "playing",
+  const liveSync = installLiveSync({
+    isPlaying: () => playMode.get() !== "edit",
     assets,
     registry,
     store,
@@ -4446,13 +4546,20 @@ async function main(): Promise<void> {
     editingPrefab,
     assetsVersion,
     patchMaterialLive,
+    onBinaryAssetsChanged: (changes) => {
+      invalidateModelRenderCaches(changes.models);
+      movingInstances.invalidateModels(changes.models);
+      modelLooks.invalidateAssets(changes);
+    },
     onVfxAssetChanged: (id) => ambientVfx?.reloadEffect(id),
     getLastWrittenScene: () => lastWrittenScene,
     setLastWrittenScene: (content) => {
       lastWrittenScene = content;
     },
     getLastWrittenPrefab: () => lastWrittenPrefab,
-  }).flushDeferred;
+  });
+  flushDeferredSceneEdit = liveSync.flushDeferred;
+  adoptSceneText = liveSync.adoptSceneText;
 
   const devBridgeDeps = {
     registry,
@@ -4477,6 +4584,7 @@ async function main(): Promise<void> {
     modelBones,
     chunkManager,
     subsceneManager,
+    placeStreamer,
     billboards,
     scriptRegistry,
     seeded,
@@ -4735,11 +4843,29 @@ async function main(): Promise<void> {
    * profiling session driving this page from outside can read timings but
    * never the cause. Stripped from production builds by the DEV guard.
    */
+  if (new URLSearchParams(location.search).get("shadowStagger") === "0") cascadeStagger.enabled = false;
+  if (new URLSearchParams(location.search).get("asyncPipelines") === "0") asyncPipelines.enabled = false;
+  if (new URLSearchParams(location.search).get("sunStep") === "0") shadowSunStep.enabled = false;
+  // ?shadowWatch=1: F8 sends the last 3 s of shadow casters that left the cascades and skipped cover draws (shadow-watch.ts)
+  if (new URLSearchParams(location.search).get("shadowWatch") === "1") installShadowWatch((renderer.renderer as unknown as { backend: Parameters<typeof installShadowWatch>[0] }).backend, () => camera);
+  if (new URLSearchParams(location.search).get("bloomEvery") === "1") bloomCadence.every = 1;
+  if (new URLSearchParams(location.search).get("shadowMerge") === "0") shadowMerge.enabled = false;
+  if (new URLSearchParams(location.search).get("rainCull") === "0") setWeatherViewCull(false);
+  const debugHandles: { adaptiveResolution?: AdaptiveResolution } = {};
   if (import.meta.env.DEV) {
     (window as unknown as { __hitreg?: unknown }).__hitreg = {
+      debugHandles,
+      graphics,
+      setWeatherParticleScale,
+      devCommand: (name: string, args: string[]) => devConsole?.command(name, args) ?? false,
+      coverUp: () => loadScreen.showing(),
+      firstDraws,
+      horizon: () => horizon,
       renderer,
       chunkManager,
+      placeStreamer,
       propPool,
+      propSheets,
       voxelCache: voxelDiskCacheStats,
       foliageLod,
       culling,
@@ -4834,6 +4960,12 @@ async function main(): Promise<void> {
       // the local body and a dev fast-travel to an exact point (map travel with a given height): tools/portal-play.mts
       playerId: () => localPlayerId(),
       object: (id: string) => built.objects.get(id) ?? null,
+      // The resolved visible parts and per-part sheets, including mounted equipment.
+      modelLook: (id: string): unknown => {
+        const key = modelLooks.lookKey(id);
+        return key ? JSON.parse(key) : null;
+      },
+      modelTables: (id: string) => modelLooks.tables(id),
       travelTo: (x: number, y: number, z: number): string => {
         const id = localPlayerId();
         if (playMode.get() !== "playing" || netServerUrl || !sim || !id) return "not in local play";
@@ -4847,6 +4979,14 @@ async function main(): Promise<void> {
       // the painted load-in screen is still up (world streaming / frame rate settling): the body is held meanwhile
       loading: () => loadScreen.showing(),
       scene: () => built.scene,
+      // the first pose (in the order given) whose view of its target is not blocked by drawn geometry — terrain,
+      // scene meshes, vegetation instances (src/line-of-sight.ts); light-shots moves batch cameras out of canopy/rock
+      firstClearPose: (poses: SightPose[], ignoreIds: string[] = []) => {
+        const skip = new Set(ignoreIds.map((id) => built.objects.get(id)).filter(Boolean));
+        const player = localPlayerId();
+        if (player && built.objects.get(player)) skip.add(built.objects.get(player)!);
+        return firstClearPose(built.scene, poses, { ignore: (o) => skip.has(o) });
+      },
       // submit an ops batch exactly as the inspector does — a probe can then
       // test an edit's real path (live script-param patching during play)
       apply: (ops: Parameters<typeof store.apply>[0]) => store.apply(ops),
@@ -5126,6 +5266,12 @@ async function main(): Promise<void> {
         }
       }
       profiler.end(); // interpolate
+      // Before everything that reads a body this frame. Sockets, worn gear (late scripts -> moving batches) and the
+      // contact patch copy the root as they run, but a skinned body takes it at the draw: placed after them, every piece
+      // of gear drew one frame behind its own body, and a body that jumped left all of it behind for that frame.
+      profiler.begin("net");
+      netPresence?.update(dt); // remote bodies and creatures take this frame's snapshot sample
+      profiler.end();
       profiler.begin("follow-cam");
       // One rig for both modes. It writes `camera` directly — pivot, orbit,
       // boom and collision resolved together against a single origin — and
@@ -5233,6 +5379,7 @@ async function main(): Promise<void> {
           profiler.end();
           profiler.begin("subscenes");
           subsceneManager.update(p.x, p.z);
+          placeStreamer.update(p.x, p.z);
         } else {
           // The editor camera ORBITS, so its position sweeps a circle around
           // whatever it is looking at. Using that position as the streaming
@@ -5250,6 +5397,7 @@ async function main(): Promise<void> {
           profiler.end();
           profiler.begin("subscenes");
           subsceneManager.update(focus.x, focus.z);
+          placeStreamer.update(focus.x, focus.z);
         }
         profiler.end();
       }
@@ -5308,12 +5456,13 @@ async function main(): Promise<void> {
         const scene = built.scene;
         vfxWarming = vfxWarming.then(() => {
           if (playMode.get() !== "playing" || built.scene !== scene) return;
-          return warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, camera, scene), camera);
+          return warmVfx(vfx, assets, (group, collected) => renderer.precompileGroup(group, camera, scene, collected), camera);
         }).catch(() => undefined);
       }
       // standing effects start/stop/follow before the plays step, and before
       // the light budget re-aims its slots at their lights
       modelLooks.update(); // item effects placed once their model has loaded
+      horizon?.update(renderCamera.position.x, renderCamera.position.z);
       ambientVfx?.update(renderCamera, built.scene);
       vfx.update(dt, renderCamera, built.scene);
       profiler.end();
@@ -5362,9 +5511,9 @@ async function main(): Promise<void> {
       // while the camera stays inside it (see scene-builder.ts's buildSkyDome)
       if (skyDomeMesh) skyDomeMesh.position.copy(renderCamera.getWorldPosition(foliageLodCameraPos));
       profiler.begin("net");
-      netPresence?.update(dt); // remote avatars lerp toward their snapshot targets
       commsListenerCamera = renderCamera;
       comms.update(); // voice: gate outgoing tracks, VAD, spatial gains
+      if (!loadScreen.showing()) audio.update(); // the world starts sounding when the player can see it
       profiler.end();
       profiler.end(); // update
       // render sits OUTSIDE "update", at the top level: it is the one scope
@@ -5419,6 +5568,9 @@ async function main(): Promise<void> {
       }
       profiler.begin("render");
       vfx.applyShake(renderCamera); // camera shake lives only inside the draw
+      renderer.shaderBudgetMs = playMode.get() === "playing" && !loadScreen.showing() ? SHADER_BUILD_BUDGET_MS : Infinity;
+      if (playMode.get() === "playing") firstDraws.step(built.scene, loadScreen.showing());
+      else firstDraws.returnLent();
       renderer.render(built.scene, renderCamera); // sub-scopes itself, see setScopeSink
       vfx.restoreShake(renderCamera);
       profiler.end();
@@ -5518,7 +5670,17 @@ async function main(): Promise<void> {
       `mode: ${mode}  ·  ${hint}  ·  Shift+P profiler`;
   }, 500);
 
-  startFramePump((callback) => requestAnimationFrame(callback), (t) => loop.tick(t), profiler);
+  // Play backs its render scale off on a GPU that cannot keep up; the editor stays at full resolution.
+  // `?renderScale=0.75` pins it, `?renderScale=1` turns the backing-off off.
+  // The player's Graphics panel can pin it too (graphics-settings.ts), in play only.
+  const pinnedRenderScale = renderScaleFromSearch(location.search);
+  if (pinnedRenderScale !== null) renderer.setRenderScale(pinnedRenderScale);
+  debugHandles.adaptiveResolution = adaptiveResolution;
+  startFramePump((callback) => requestAnimationFrame(callback), (t) => {
+    const started = performance.now();
+    loop.tick(t);
+    graphics.frame(t, performance.now() - started, gltfLoadingCount() > 0 || (chunkManager?.stats.loading ?? 0) > 0, playMode.get() === "playing");
+  }, profiler);
 
   // The authoritative sim must NOT pause when this window is hidden or fully
   // occluded — browsers stop rAF there, which froze the whole world for every

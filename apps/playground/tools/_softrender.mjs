@@ -47,10 +47,11 @@ export function renderStrip(frames, views, texture, tile = 340, bg = 0x18) {
       const oy = vi * tile;
       const zbuf = new Float32Array(tile * tile).fill(Infinity);
       for (const tri of frame.tris) {
+        if (tri.hideFrom && view.f.dot(tri.hideFrom) < 0) continue; // `hideFrom`: not drawn while the camera is on that side
         const proj = tri.p.map((p) => ({
           x: tile / 2 + (p.dot(view.r) - cx) * scale,
           y: tile / 2 - (p.dot(view.u) - cy) * scale,
-          z: p.dot(view.f),
+          z: p.dot(view.f) - (tri.bias ?? 0), // a triangle's `bias`: drawn that much nearer (a depth pull)
         }));
         const [a, b, c] = proj;
         const area = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);

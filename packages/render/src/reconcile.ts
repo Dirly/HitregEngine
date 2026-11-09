@@ -25,6 +25,8 @@ import { reprojectDecalsAround } from "./decals.js";
  */
 
 export interface ReconcileHooks {
+  /** Scoped callbacks/registries for an entity owned by an independently built subtree. */
+  buildOptionsFor?(entityId: string): BuildOptions | undefined;
   /** Fired before an entity's visuals are rebuilt in place — unregister it
    * from animation/particle/billboard systems so repopulation re-registers
    * cleanly instead of stacking entries. */
@@ -113,15 +115,16 @@ export function reconcileScene(
   const materialCache = built.materials;
   for (const { id, action, after } of plan) {
     const group = built.objects.get(id)!;
+    const entityOptions = hooks.buildOptionsFor?.(id) ?? options;
     group.name = after.name;
     if (action === "transform") {
       applyEntityTransform(group, after);
       // geometry moved under any nearby projected decals — re-fit them
       // (no-op when the scene has no decals)
-      reprojectDecalsAround(built.scene, id, group, options);
+      reprojectDecalsAround(built.scene, id, group, entityOptions);
     } else if (action === "visuals") {
       hooks.onEntityReset?.(id);
-      rebuildEntityVisuals(built, id, after, options, materialCache);
+      rebuildEntityVisuals(built, id, after, entityOptions, materialCache);
     }
   }
   return true;

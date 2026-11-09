@@ -368,7 +368,10 @@ export function zoneTexturesStageCheck(recipe: WorldRecipe, project: string, ass
       const towns = recipe.regions.filter((r) => r.within === row.zone && r.tags.includes("town")).map((r) => r.landmarks[0]).filter(Boolean);
       for (const town of towns) {
         const streets = recipe.features.roads.filter((r) => r.id.startsWith(`${town}-street-`));
-        if (streets.length > 0 && streets.some((r) => r.role !== "paving")) problems.push(`${town} streets unpaved (town-ground paving --town <name>)`);
+        // e-paving / i-town 2026-11-02: a designed town's own stone (design.paving) lays its intramural streets with
+        // role "none" in the same surface its plan paving paints: those are paved too
+        const ownStone = new Set((recipe.features.groundPaints ?? []).filter((g) => g.id.startsWith(`${town}-plan-paving-`)).map((g) => g.surface));
+        if (streets.length > 0 && streets.some((r) => r.role !== "paving" && !(r.role === "none" && ownStone.has(r.surface!)))) problems.push(`${town} streets unpaved (town-ground paving --town <name>)`);
       }
     }
   }

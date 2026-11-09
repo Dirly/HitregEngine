@@ -47,6 +47,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodePng, encodePng } from "./_png.mjs";
 import { SS, downsample, outline, groundMask, iconFromPixels, writeContactSheet, backdrop, contrastTint, seedOf } from "./_icon.mjs";
+import { iconPartGlow, iconLitChannel } from "./_item-icon-glow.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PLAYGROUND = path.resolve(here, "..");
@@ -222,6 +223,7 @@ function renderItem(model, look, frame) {
   const zbuf = new Float32Array(W * H).fill(Infinity);
 
   for (const t of shown) {
+    const emission = iconPartGlow(look.glow, parts, t.part);
     const s = t.p.map((p) => [(dot(p, right) - x0) * k + SS, (y1 - dot(p, up)) * k + SS, dot(p, f)]);
     const area = (s[1][0] - s[0][0]) * (s[2][1] - s[0][1]) - (s[2][0] - s[0][0]) * (s[1][1] - s[0][1]);
     if (Math.abs(area) < 1e-9) continue;
@@ -254,7 +256,7 @@ function renderItem(model, look, frame) {
           c = [tex.data[o], tex.data[o + 1], tex.data[o + 2], 255];
         }
         zbuf[at] = z;
-        for (let q = 0; q < 3; q++) rgba[at * 4 + q] = Math.min(255, c[q] * lit);
+        for (let q = 0; q < 3; q++) rgba[at * 4 + q] = iconLitChannel(c[q] * lit, emission?.[q]);
         rgba[at * 4 + 3] = 255;
       }
   }

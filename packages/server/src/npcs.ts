@@ -48,7 +48,7 @@ export interface NpcRecord {
 export const PREFAB_TEMPLATE = "prefab:";
 
 export interface NpcManagerOptions {
-  /** Seconds a dead combatant lies before respawning; 0 disables. Default 20. */
+  /** Default respawn delay for roots without npcRespawn; 0 disables those respawns. Default 20. */
   respawnSeconds?: number;
   /** Register every scene subtree whose root carries one of these tags as both a template and a managed NPC. Default ["npc"]. */
   npcTags?: string[];
@@ -327,9 +327,11 @@ export class NpcManager {
         }
       }
     }
-    if (this.respawnTicks === 0) return;
     for (const record of this.npcs.values()) {
       if (record.noRespawn) continue; // a pet or a summon: whoever spawned it removes it
+      const policy = world.entities.get(record.id)?.components["npcRespawn"] as { seconds?: number } | undefined;
+      const delay = typeof policy?.seconds === "number" ? Math.ceil(policy.seconds / world.fixedDt) : this.respawnTicks;
+      if (delay === 0) continue;
       if (this.server.paused.has(record.id)) continue; // a sleeping pack respawns when it wakes
       const dead = world.netState.get(`combat/${record.id}.dead`) === true;
       if (!dead) {
@@ -340,7 +342,7 @@ export class NpcManager {
         record.deadSince = tick;
         continue;
       }
-      if (tick - record.deadSince < this.respawnTicks) continue;
+      if (tick - record.deadSince < delay) continue;
       if (!this.groundReady(record.spawnAt)) continue; // its spawn point's cells are on their way
       if (this.respawnHook?.(record)) continue;
       this.respawn(record);

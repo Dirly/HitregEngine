@@ -11,6 +11,19 @@ test, exceptions, porting), `tools/dungeon-room-kit/README.md` (room JSON, stair
 Workflow skill: `hitreg-dungeon-authoring`. Design rules: `dungeon-standards`. Light: `dungeon-lighting`.
 Doors: `portals`.
 
+Placement quality and self-review: [the Weeping Sun lessons](../dungeon-standards/references/placement-review.md).
+The current recipe still has legacy minimum prop/type and built-piece counts. They are not placement targets:
+review purposeful sparse dressing and use scoped, justified exceptions for those count failures. Decals are
+optional. Keep contact, traversal, material, lighting and encounter failures actionable. Shared replacement checks
+are proposed in that reference; they are not implemented merely by adding the notes.
+
+Boss arenas: use the reusable `boss-gate` builtin documented in
+`tools/dungeon-pipeline/README.md` → "Reusable boss arena gates". Entrance gates
+close on actual boss aggro, not room entry; side/progression gates and the
+entrance open on the same stable boss actor's defeat. Include non-aggro entry,
+each boss alternative, wipe/evade recovery, late joins and physical clearance
+in the gameplay proof. Parameter truth remains in the generated spec.
+
 ## Commands
 ```
 node authoring/pipeline.mjs [--next] [--json]                     # from projects/<id>: ok|STALE|FAILED|MISSING per stage
@@ -24,6 +37,7 @@ dress maps, scene, portals, lighting, recipe, culling, walk, fight, views, reada
 portal play. A FAILED gate blocks `--next` and shows on the dungeon's `zonegen status` row.
 
 ## Gates: failure -> fix (numbers: `thresholds.json`, never edited for one dungeon)
+- `scale` (before export, `tools/dungeon-pipeline/concept-scale.mjs`): a painted room built off its painting by more than ±15% (column height, span, ceiling, door) -> resize the plan/kit to `authoring/concept-sizes.json`. Measure each painting with its figure as a 1.8 m ruler (`authoring/concept/<painting>.marks.json`), LOOK at the overlays, and shoot compare frames with the person in the grey box (`paintingCamera` + spot `figure`), never a capsule.
 - `thin-walls` (pre-bake, `tools/mesh-dc/thin-walls.mjs <stamp> --plan authoring/plan.json`): a SHELL wall (one side looks out of the map) under 3 DC voxels -> the bake perforates it; thicken the source (room kit: `MIN_SHELL_VOXELS`, barrel lunettes closed, `JOINT_VOXELS` lap at open sides) or bake finer. Planks/hulls/decals/flat-art are exempt by name or `dc_thin_ok`; never exempt a shell.
 - `noise`: no `authoring/noise.json`, stamp not embedding it, < 90% natural triangles noised, flat-slab roofs, box
   `rock` lumps -> write the role table (defaults in `docs/blender-dc-authoring.md` "DC role noise"), re-export; replace
@@ -66,6 +80,10 @@ only (a tomb over the bone cap, an intended ice shine, a passage lit only by the
 - Water is ONE still level at the bottom (owner 2026-10-25): one surface height, no dry floor under it, nothing moving (no falls, cascades, curtains, channels; a fall is mist/vfx). The `water` gate's three checks cannot be excepted.
 - Water fills to its walls: author a pool/channel as a rough rect at its level, then `tools/water-edges.mts scene <id> --fix` re-cuts it to the walls and puts a dark card / drain where it really goes on; the `water-edges` stage must pass (no edge in open air).
 - No holes you can see through the map: the `see-through` stage (`tools/see-through.mts scene <id> --batch k/3`) draws the shipped scene with a magenta sentinel from eye height along the walk route and must pass; a hole's cause comes with it (thin DC shell: thicken the source wall to >= 3 voxels, `tools/mesh-dc/thin-walls.mjs` finds them before the bake; seam: overlap the groups; single-sided: close or double-side; culled: raise `cullingProfile.interiorReveal`). Real openings go in `authoring/see-through-openings.json` (docs/see-through.md).
+- No faces seen from BEHIND (inverted normals, missing closing faces): `tools/backfaces.mts <project> --eyes <floor grid>` casts rays from a grid over every room and names each piece and local triangle that shows its back; see-through misses these wherever another wall stands behind the culled face. A hand-built mesh kit runs it as a pipeline stage (weeping-sun-tombs: `authoring/eyes.mjs` + an `insert` after zfight). Double-sided materials are skipped.
+- No floor sheet hung over water: a walk floor (ledge, island, landing, platform) whose side stands over a pool needs a face under that side down into the basin, and the decks meeting it must touch it with no gap. See-through and backfaces miss this because the water fills the view below. weeping-sun-tombs gates it with `authoring/mesh-gates.mjs edges` and closes the sides with the kit's `ledge-edge` run.
+- No floor you can fall through: `tools/fall-holes.mts <project> --eyes <floor grid>` floods the drawn floors a body can reach (floor grid, walk route, climbing out of the pools; walls block, wall cavities excluded) and fails every reached floor with no collider under it (FALL) and lists decor drawn without one (ghost: a plinth, a parapet, a sill). Natural rock (caverns) needs a mesh collider, not a box at its foot.
+- A placed point light with no flame of its own (fill, face, rim, stall, lava stand-in) sets `glow: 0`: its default halo hangs as a floating orange ball in mid-air. Dressing hugs corners and walls, the floor stays clear; candles at statue feet, not a brazier at every spot.
 - Scale to the creature: giant halls take a coarser voxel; ramps (<= 20 %) where risers would hit the autostep limit.
 - No stacked fight floors (combat finds ground with a ray straight down): storeys side by side, joined by stairs.
 - Noised caves have no straight wall spans: wall-backed props cannot go there; light them with posted lights.

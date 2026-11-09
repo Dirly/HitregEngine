@@ -84,6 +84,13 @@ test("gateFaults: a landmark request is built at full height, never a small prop
   // concept first (c-props 2026-10-29): a request's concept frame is attached and named in the brief
   assert.match(writeBrief({ request: req({ landmark: 36, concept: "projects/x/authoring/concept-design/props/the-needle.png" }), name: "the-needle", scale: human }), /Concept frame[\s\S]*context\/the-needle\.png/);
   assert.doesNotMatch(writeBrief({ request: req({}), name: "x", scale: human }), /Concept frame/);
+  // w-temple4 2026-11-02: a temple longer than it is tall declares its plan; two frames are both named, the first as MAIN
+  const temple: GeometryRecord = { ...good, size: [24.5, 18, 28.3], triangles: 2000 };
+  assert.match(gateFaults(temple, lm, scales).join(" | "), /size: 28.30 m on its largest side/, "no footprint: capped at 1.1 x the height");
+  assert.deepEqual(gateFaults(temple, { ...lm, footprint: [24, 28] }, scales), [], "a declared 24 x 28 m plan allows its 28.3 m side");
+  const two = writeBrief({ request: req({ landmark: 18, footprint: [24, 28], concept: "p/front.png,p/sea.png" }), name: "t", scale: human });
+  assert.match(two, /24 m wide x 28 m deep/);
+  assert.match(two, /`context\/front\.png` is this piece's MAIN[\s\S]*`context\/sea\.png` is a further view/);
 });
 
 test("gateFaults: a sound design passes; each rule refuses its fault", () => {
@@ -199,4 +206,19 @@ test("paint gen names the tint tile as the third reference and lets it own the s
     assert.equal(designConcept(wk, "ring", root), path.resolve(root, "frame.png"));
     assert.equal(designTint(wk, "other", root), undefined);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("gateFaults: a walkable top wound upside down (build.py invertedTops) is refused", () => {
+  assert.deepEqual(gateFaults({ ...good, invertedTops: 0 }, job, scales), []);
+  assert.match(gateFaults({ ...good, invertedTops: 15 }, job, scales).join(" | "), /inverted tops: 15 horizontal face\(s\) point down/);
+});
+
+test("a painted culture set packs on its own atlas; landmarks and other painted props keep theirs", async () => {
+  const { atlasFor, PAINTED_ATLAS, LANDMARK_ATLAS, SET_ATLASES, PAINTED_ATLASES } = await import("../tools/prop-codex/pack.mts");
+  const croc = SET_ATLASES["crocodile-kin"]!.atlas;
+  assert.equal(atlasFor({ name: "reed-wallow-nest", paint: {}, cultures: ["crocodile-kin"] }), croc);
+  assert.equal(atlasFor({ name: "sun-stele", paint: {}, cultures: ["sacred"] }), PAINTED_ATLAS);
+  assert.equal(atlasFor({ name: "croc-gate", paint: {}, cultures: ["crocodile-kin"] }, new Set(["croc-gate"])), LANDMARK_ATLAS);
+  assert.equal(atlasFor({ name: "plain-crate", cultures: ["crocodile-kin"] }), "town-craft");
+  assert.ok(PAINTED_ATLASES().includes(croc));
 });

@@ -30,6 +30,8 @@ export interface FogSettings {
   heightFalloff: number;
   /** height only */
   baseHeight: number;
+  /** exponential/height: the most the fog ever hides, 0..1 (default 1). Below 1, far land stays a hazy shape. */
+  maxOpacity?: number;
   /** exponential/height: glow toward the sun (0 = off — and then not in the shader at all). */
   sunScatter?: number;
   sunScatterPower?: number;
@@ -93,6 +95,15 @@ export function heightFogAttenuation(
  * `distance` is the camera-to-fragment distance for the exponential/height
  * modes and view-space depth for linear, matching three's `rangeFogFactor`.
  */
+/** Past the land the ceiling lifts, so the sea plane's end still dissolves into the sky rather than showing an edge. */
+const FOG_CEILING_LIFT: readonly [number, number] = [3600, 5600];
+
+/** The fog ceiling at a distance: `maxOpacity` out to the far land, rising to 1 beyond it. */
+export function fogCeilingAt(maxOpacity: number, distance: number): number {
+  const t = THREE.MathUtils.smoothstep(distance, FOG_CEILING_LIFT[0], FOG_CEILING_LIFT[1]);
+  return maxOpacity + (1 - maxOpacity) * t;
+}
+
 export function fogFactor(
   settings: FogSettings,
   distance: number,
@@ -106,7 +117,8 @@ export function fogFactor(
   const base = settings.mode === "height" ? settings.baseHeight : 0;
   const attenuation = heightFogAttenuation(falloff, base, cameraY, fragmentY);
   const opticalDepth = Math.max(0, settings.density * distance * attenuation);
-  return 1 - Math.exp(-opticalDepth);
+  const ceiling = fogCeilingAt(settings.maxOpacity ?? 1, distance);
+  return Math.min(1 - Math.exp(-opticalDepth), ceiling);
 }
 
 interface FogNodeState {
@@ -114,6 +126,7 @@ interface FogNodeState {
   density: THREE.UniformNode<"float", number>;
   heightFalloff: THREE.UniformNode<"float", number>;
   baseHeight: THREE.UniformNode<"float", number>;
+  maxOpacity: THREE.UniformNode<"float", number>;
   /** Which optional terms are compiled in — see FogFeatures. */
   features: string;
   node: THREE.Node<"vec4">;
@@ -226,6 +239,7 @@ export class FogSystem {
     state.density.value = settings.density;
     state.heightFalloff.value = falloff;
     state.baseHeight.value = base;
+    state.maxOpacity.value = settings.maxOpacity ?? 1;
     // `scene.fogNode` wins over `scene.fog` in three's node pipeline. The
     // FogExp2 alongside it is a descriptor, not a second renderer: consumers
     // that only want the atmosphere colour (far-plane tint, HLOD fade) read
@@ -325,6 +339,7 @@ function buildHeightFogNode(features: FogFeatures = { scatter: false, mist: fals
   const density = uniform(0.015);
   const heightFalloff = uniform(0);
   const baseHeight = uniform(0);
+  const maxOpacity = uniform(1);
 
   const dy = positionWorld.y.sub(cameraPosition.y);
   const kdy = heightFalloff.mul(dy);
@@ -350,7 +365,9 @@ function buildHeightFogNode(features: FogFeatures = { scatter: false, mist: fals
     const below: any = clamp(fogMist.top.sub(positionWorld.y).div(fogMist.thickness), 0, 1);
     opticalDepth = opticalDepth.add(fogMist.amount.mul(fogMist.scale).mul(patch.mul(0.75).add(0.25)).mul(below).mul(distance.min(400)).mul(0.02));
   }
-  const factor = opticalDepth.negate().exp().oneMinus();
+  // the ceiling: thick air near, but a mountain across the island stays a shape in the haze (fogCeilingAt)
+  const ceiling: any = mix(maxOpacity, float(1), smoothstep(FOG_CEILING_LIFT[0], FOG_CEILING_LIFT[1], distance));
+  const factor = opticalDepth.negate().exp().oneMinus().min(ceiling);
   let fogColor: any = color;
   if (features.scatter) {
     // Looking into the sun the haze is lit by it; looking away it keeps the
@@ -394,6 +411,7 @@ function buildHeightFogNode(features: FogFeatures = { scatter: false, mist: fals
     density,
     heightFalloff,
     baseHeight,
+    maxOpacity,
     features: key,
     node,
   };

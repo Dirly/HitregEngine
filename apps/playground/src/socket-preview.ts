@@ -157,13 +157,18 @@ export function createSocketPreview(deps: SocketPreviewDeps) {
 
   /** The item a socket shows: see the header. */
   function itemFor(socket: SocketEntity, selected: string | null, holstered: boolean) {
-    if (!socket.model) return undefined;
+    if (!socket.model || !socket.lookId) return undefined;
+    const fixed = socket.lookParams["item"];
+    if (typeof fixed === "string" && fixed) {
+      const item = deps.item(fixed);
+      return item?.appearance?.model === socket.model ? item : undefined;
+    }
     const slot = slotOf(socket);
     const fits = startingOf(socket).filter((s) => s.item?.appearance?.model === socket.model && (s.item.slots ?? []).includes(slot));
     const chosen = isSelected(socket, selected);
     // a held item being placed has its hand to itself
     if (!chosen && !holstered) {
-      const placing = sockets.find((o) => o !== socket && o.parent === socket.parent && isSelected(o, selected));
+      const placing = sockets.find((o) => o !== socket && o.lookId !== null && o.parent === socket.parent && isSelected(o, selected));
       if (placing && slotOf(placing) === slot) return undefined;
       // ...and a two-hander being placed has both hands to itself
       if (placing && itemFor(placing, selected, holstered)?.twoHanded) return undefined;
@@ -214,7 +219,9 @@ export function createSocketPreview(deps: SocketPreviewDeps) {
       looksHolstered = holstered;
       if (relook) stance = stanceFor(selected, holstered);
       for (const socket of sockets) {
-        if (relook) {
+        // A plain socket (hair, a decoration) already has its authored look.
+        // Only equipment-look sockets represent slots that can be empty.
+        if (relook && socket.lookId !== null) {
           const look = lookFor(socket, selected, holstered);
           const key = JSON.stringify(look);
           if (shown.get(socket.id) !== key) {

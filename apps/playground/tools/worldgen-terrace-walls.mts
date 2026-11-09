@@ -131,7 +131,7 @@ export function loadTerraceKit(project: string, log: (s: string) => void = conso
         if (!lookup.styles || !lookup.pieces) throw new Error(`${shelfFile} is not a planTerrace lookup (styles + pieces)`);
         return { lookup, key: Object.keys(lookup.styles).includes("natural") ? "natural" : Object.keys(lookup.styles)[0]! };
       }
-      return { lookup: masonry, key: style === "masonry-stone" ? "stone" : "common" };
+      return { lookup: masonry, key: masonryKey(style) };
     },
     ensureHeight(style, height) {
       // `make` builds + catalogues the height, then prints a demo plan of --length; a plan too short for the height's
@@ -156,7 +156,7 @@ export function loadTerraceKit(project: string, log: (s: string) => void = conso
         run("npx", ["tsx", "tools/props.mts", "index", "--project", shelfProject]);
         return;
       }
-      const key = style === "masonry-stone" ? "stone" : "common";
+      const key = masonryKey(style);
       log(`  building retaining-wall slices at ${height} m (build.mts make; both styles)`);
       const made = run("npx", ["tsx", path.relative(PLAYGROUND, path.join(dir, "build.mts")), "make", "--style", key, "--height", String(height), "--length", "24"], false);
       if (!has(lookupFile, key)) throw new Error(`build.mts make --height ${height} did not add it:\n${made.stdout}\n${made.stderr}`);
@@ -571,7 +571,7 @@ export function fitTerraceWall(recipe: WorldRecipe, input: TerraceWallDoc, kit: 
   const banks: { e: Edge; from: number; dirSign: 1 | -1; run: number }[] = [];
   // Kit role per insert. Natural rock has one way up (rock-steps) and no masonry details.
   const kitRole = (x: TerraceWallDoc["inserts"][number]): string | null => {
-    if (style === "natural") return x.role === "stair" || x.role === "stair-turn" || x.role === "ramp" ? "rock-steps" : null;
+    if (style === "natural") return x.role === "stair" || x.role === "stair-turn" || x.role === "stair-axial" || x.role === "ramp" ? "rock-steps" : null;
     return x.role === "drain" || x.role === "buttress" ? `straight-${x.run}-${x.role}` : x.role;
   };
   if (style === "natural") {
@@ -660,7 +660,10 @@ export function fitTerraceWall(recipe: WorldRecipe, input: TerraceWallDoc, kit: 
       const front = Math.max(0, ...(info.plan ?? []).map((q) => q[1]!));
       // stairs, ramps and the dog-leg stand on low ground in front of the face: level their footprint + 1 m (a rock
       // face's lean at the foot is not a footprint: the ordinary strip covers it)
-      if (front > 1 && front + 1 > strip) stairStrips.push({ e, s0: s, s1: s + info.run, depth: tread ? Math.min(front + 1, strip) : front + 1 });
+      // an AXIAL flight is approached head-on and its cheeks stand on the low ground: 2 m more level foot each side of
+      // it (k-town5), so the cheek ends stand on flat ground and a body beside them is on a plain wall foot
+      const wing = p.role === "stair-axial" ? 2 : 0;
+      if (front > 1 && front + 1 > strip) stairStrips.push({ e, s0: s - wing, s1: s + info.run + wing, depth: tread ? Math.min(front + 1, strip) : front + 1 });
       if (p.role === "end-l") banks.push({ e, from: s, dirSign: 1, run: info.run });
       if (p.role === "end-r") banks.push({ e, from: s + info.run, dirSign: -1, run: info.run });
     }
@@ -950,7 +953,7 @@ export function terraceGates(recipe: WorldRecipe, doc: TerraceWallDoc, opts: { f
   }
   // seated: the foot strip at baseY, sampled through the DENSITY (the cut is a 3D carve that latticeHeight cannot
   // see: the heightfield holds a berm on the face line that the cut removes)
-  const foot = { gap: 0, clip: 0 }, pad = { gap: 0, clip: 0 };
+  const foot = { gap: 0, clip: 0 }, pad = { gap: 0, clip: 0 }; let footAt = "";
   const stairy = s.pieces.filter((p) => /stair|ramp|door/.test(p.role));
   const strip = Math.min(doc.strip, 2.5);
   for (const f of s.faces) {
@@ -960,6 +963,7 @@ export function terraceGates(recipe: WorldRecipe, doc: TerraceWallDoc, opts: { f
       for (let d = 0.4; d < strip; d += 0.6) {
         const g = field.surfaceCast(f.a[0] + dir[0] * t + f.normal[0] * d, f.a[1] + dir[1] * t + f.normal[1] * d, s.topY + 4, s.baseY - 3);
         if (g === null) continue;
+        if (r2(s.baseY - g) > foot.gap) footAt = `${r2(f.a[0] + dir[0] * t + f.normal[0] * d)},${r2(f.a[1] + dir[1] * t + f.normal[1] * d)}`;
         foot.gap = Math.max(foot.gap, r2(s.baseY - g)); foot.clip = Math.max(foot.clip, r2(g - s.baseY));
       }
     }
@@ -1017,7 +1021,7 @@ export function terraceGates(recipe: WorldRecipe, doc: TerraceWallDoc, opts: { f
   const seatOk = foot.gap <= 0.25 && foot.clip <= 0.6 && pad.gap <= 0.25 && pad.clip <= 0.6;
   const riserOk = riser.gutter <= 0.25 && riser.against <= 0.3;
   lines.push(`  lips   ${lipsOk ? "ok  " : "FAIL"} alias ${lips.alias}, step ${lips.step}, lip ${lips.lip}${lips.worst ? `; worst ${lips.worst} m` : ""}`);
-  lines.push(`  seated ${seatOk ? "ok  " : "FAIL"} foot gap ${foot.gap} / clip ${foot.clip} m; pad gap ${pad.gap} / clip ${pad.clip} m (limits 0.25 / 0.6)`);
+  lines.push(`  seated ${seatOk ? "ok  " : "FAIL"} foot gap ${foot.gap} / clip ${foot.clip} m; pad gap ${pad.gap} / clip ${pad.clip} m (limits 0.25 / 0.6)${foot.gap > 0.25 && footAt ? `; worst foot gap at ${footAt}` : ""}`);
   lines.push(`  riser  ${riserOk ? "ok  " : "FAIL"} gutter behind the coping ${riser.gutter} m${riser.gutter > 0.25 ? ` @ ${worstAt.gutter}` : ""} (<= 0.25), ground against the face ${riser.against} m${riser.against > 0.3 ? ` @ ${worstAt.against}` : ""} (<= 0.3)`);
   if (stale) lines.push(`  STALE  the ground under it changed since the fit: worldgen terrace-place --refit --id ${doc.id}`);
   return { id: doc.id, ok: lipsOk && seatOk && riserOk && !stale, lips, seated: { foot, pad }, riser, stale, lines };
@@ -1538,15 +1542,61 @@ export function townShelfOutlines(
   return out;
 }
 
-export interface TownRiserLink { k: number; kind: "ramp" | "stair"; at: V2; roads: string[] }
+export interface TownRiserLink { k: number; kind: "ramp" | "stair"; at: V2; roads: string[]; form?: "along" | "axial" }
 
-/** The retaining-wall style for a town: its building system (capitals and cities build in dressed stone), or a `walls:<style>` tag. */
-export function townWallStyle(town: { tier?: string; tags: string[] }): "masonry-common" | "masonry-stone" {
+/** A masonry style's key in the retaining-wall kit lookup (`masonry-strand` -> `strand`). */
+export function masonryKey(style: string): string { return style.startsWith("masonry-") ? style.slice(8) : style; }
+export type TownMasonry = "masonry-common" | "masonry-stone" | "masonry-strand";
+/**
+ * TOWN PALETTES (k-town2, Derek 2026-10-30: "why is there grey brick below the chapel, why is it not the same stone found
+ * in the region? Same with the small stuff"): the retaining-wall masonry each building kit style is built in, and the
+ * zone stone (a region's `ground.cliff` surface) each palette answers to. A town's walls are its own stone; the grey
+ * generic (brinehold common / stone) only where no palette claims the town.
+ */
+export const MASONRY_PALETTES: { masonry: TownMasonry; kitStyles: string[]; cliffs: RegExp; about: string }[] = [
+  {
+    masonry: "masonry-strand",
+    kitStyles: ["strand-lime", "strand-rubble", "strand-timber", "badland-stone", "badland-render"],
+    cliffs: /^redstrand-/,
+    about: "Redstrand red rubble (badland-stone Stone / LargeStone): the plinths, hovels and curtain of the strand-lime town kit",
+  },
+];
+/**
+ * The retaining-wall style for a town, first match wins:
+ *  1. a `walls:<style>` tag (`walls:stone`, `walls:masonry-strand`, ...);
+ *  2. the town's KIT palette: a `kit:<style>` tag, else the most common `request.style` of its buildings (`kitStyles`,
+ *     from its design) -> MASONRY_PALETTES;
+ *  3. the ZONE's stone: the cliff surface of the region it stands in (`zoneCliff`) -> MASONRY_PALETTES;
+ *  4. its building system: capitals and cities build in dressed stone, the rest in common rubble.
+ */
+export function townWallStyle(town: { tier?: string; tags: string[] }, ctx: { kitStyles?: readonly (string | undefined)[]; zoneCliff?: string } = {}): TownMasonry {
   const tag = town.tags.find((t) => t.startsWith("walls:"))?.slice(6);
-  if (tag === "stone" || tag === "masonry-stone") return "masonry-stone";
-  if (tag === "common" || tag === "masonry-common") return "masonry-common";
+  if (tag) {
+    const m = (tag.startsWith("masonry-") ? tag : `masonry-${tag}`) as TownMasonry;
+    if (m === "masonry-stone" || m === "masonry-common" || MASONRY_PALETTES.some((p) => p.masonry === m)) return m;
+  }
+  const counts = new Map<string, number>();
+  const kitTag = town.tags.find((t) => t.startsWith("kit:"))?.slice(4);
+  for (const s of kitTag ? [kitTag] : ctx.kitStyles ?? []) if (s) counts.set(s, (counts.get(s) ?? 0) + 1);
+  const kit = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const byKit = kit ? MASONRY_PALETTES.find((p) => p.kitStyles.includes(kit)) : undefined;
+  if (byKit) return byKit.masonry;
+  const byZone = ctx.zoneCliff ? MASONRY_PALETTES.find((p) => p.cliffs.test(ctx.zoneCliff!)) : undefined;
+  if (byZone) return byZone.masonry;
   const tier = town.tier ?? (town.tags.includes("capital") ? "capital" : "town");
   return tier === "capital" || tier === "city" ? "masonry-stone" : "masonry-common";
+}
+/** The cliff surface of the region a point stands in (the innermost region with a `ground.cliff`). */
+export function zoneCliffAt(recipe: { regions?: { polygon?: readonly (readonly number[])[]; ground?: { cliff?: string } | null }[] }, at: readonly number[]): string | undefined {
+  const inside = (poly: readonly (readonly number[])[], x: number, z: number) => {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const [xi, zi] = poly[i]!, [xj, zj] = poly[j]!; if ((zi! > z) !== (zj! > z) && x < ((xj! - xi!) * (z - zi!)) / (zj! - zi!) + xi!) c = !c; }
+    return c;
+  };
+  const hits = (recipe.regions ?? []).filter((r) => r.ground?.cliff && r.polygon && inside(r.polygon, at[0]!, at[1]!));
+  // the smallest region (the innermost: a place inside a zone)
+  const area = (p: readonly (readonly number[])[]) => Math.abs(p.reduce((a, q, i) => { const r = p[(i + 1) % p.length]!; return a + q[0]! * r[1]! - r[0]! * q[1]!; }, 0)) / 2;
+  return hits.sort((a, b) => area(a.polygon!) - area(b.polygon!))[0]?.ground?.cliff;
 }
 
 /** Deepest a town pad's open edge may be cut into the natural hill beside it (m). */
@@ -1656,7 +1706,7 @@ export function townTerraceWalls(
   face: "rule" | "kit" = "rule",
 ): { dropRoads: string[]; fits: TerraceFit[] } {
   removeTownTerraceWalls(recipe, town.id);
-  const style = townWallStyle(town);
+  const style = townWallStyle(town, { zoneCliff: zoneCliffAt(recipe as never, town.center) });
   // the stage's link roads come off BEFORE the fits (the walls carry the stairs instead, and a road removed after a
   // fit would change the ground it was fitted on); one whose insert finds no wall goes back at the end
   const linkRoads = new Map(recipe.features.roads.filter((r) => links.some((l) => l.roads.includes(r.id))).map((r) => [r.id, r]));
@@ -1884,7 +1934,7 @@ export function townTerraceWalls(
         const runOf = (role: string) => pieceOf(role)?.run ?? Infinity;
         const frontOf = (role: string) => Math.max(0, ...(pieceOf(role)?.plan ?? []).map((q) => q[1]!));
         // the stage's kind first, then whatever else fits: a straight stair or a ramp before giving the riser up
-        const choices = (link.kind === "ramp" ? ["ramp", "stair", "stair-turn"] : ["stair-turn", "stair", "ramp"]).filter((role) => frontOf(role) <= maxFront + 1e-9).map((role) => ({ role, run: runOf(role) }));
+        const choices = (link.form === "axial" ? ["stair-axial", "stair", "stair-turn", "ramp"] : link.kind === "ramp" ? ["ramp", "stair", "stair-turn"] : ["stair-turn", "stair", "ramp"]).filter((role) => frontOf(role) <= maxFront + 1e-9).map((role) => ({ role, run: runOf(role) }));
         const near = (i: number) => segDist(link.at[0], link.at[1], es[i]!.a, es[i]!.b).d;
         for (const i of s.runs.flatMap((r) => r.edges).sort((p, q) => near(p) - near(q))) {
           const e = es[i]!;

@@ -113,7 +113,7 @@ export async function run(ctx: Ctx): Promise<number> {
     // on peak-3, so trail-peak-3 was never cut again and two reservations named it). The primary `approach` is never
     // pruned (a place must be reached from something: re-plan it). Writes reservations.json, schema-validated.
     if (ctx.flag("prune-approaches")) {
-      const base = (id: string) => id.replace(/(\.s?\d+)+$/, "");
+      const base = (id: string) => id.replace(/(\.[sj]?\d+)+$/, "");
       const exists = (from: string) =>
         roads.some((x) => x.id === from || base(x.id) === base(from)) || rivers.some((x) => x.id === from) || towns.some((t) => t.id === from) ||
         pois.has(from) || res.reservations.some((x) => x.location === from) || locations.has(from);
@@ -157,7 +157,7 @@ export async function run(ctx: Ctx): Promise<number> {
       // path-town-1-site-crown.s3, and no flag could rename it, so the owner had to ask the coordinator): an approach
       // naming a road PIECE that no longer exists is re-pointed at the piece of the same road nearest the reservation
       // (the leg that runs into the place); a secondary that then repeats another approach of the same reservation goes
-      const pieceBase = (id: string) => id.replace(/(\.s?\d+)+$/, "");
+      const pieceBase = (id: string) => id.replace(/(\.[sj]?\d+)+$/, "");
       for (const r of res.reservations) {
         for (const a of [r.approach, ...r.approaches]) {
           if (roads.some((x) => x.id === a.from) || rivers.some((x) => x.id === a.from)) continue;
@@ -248,8 +248,8 @@ export async function run(ctx: Ctx): Promise<number> {
         const exact = roads.find((x) => x.id === from) ?? rivers.find((x) => x.id === from);
         // a road PIECE id (`path-a-b.s3`) is renumbered whenever the road is re-cut upstream: when the exact piece is gone,
         // the road's other pieces answer for it (2026-10-28 s1e: re-siting Saltharrow renumbered path-town-1-site-crown)
-        const base = from.replace(/(\.s?\d+)+$/, "");
-        const pieces = exact ? [] : roads.filter((x) => x.id.replace(/(\.s?\d+)+$/, "") === base);
+        const base = from.replace(/(\.[sj]?\d+)+$/, "");
+        const pieces = exact ? [] : roads.filter((x) => x.id.replace(/(\.[sj]?\d+)+$/, "") === base);
         const line = exact ?? (pieces.length > 0 ? { id: from, points: pieces.flatMap((x) => x.points) } : undefined);
         if (!exact && pieces.length > 0) warn(f, "approach-renumbered", `${ref}: approach "${from}" is no longer a piece id; measured on ${base}'s ${pieces.length} piece(s) — rename it to one of ${pieces.map((x) => x.id).join(", ")}`, ref);
         const town = towns.find((t) => t.id === from);

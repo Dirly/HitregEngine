@@ -2,13 +2,15 @@ import * as THREE from "three/webgpu";
 import { patchShadowPassAlphaTest } from "./shadow-pass-material.js";
 import { GpuUploadProbe } from "./gpu-uploads.js";
 import { cacheUniformUploads } from "./uniform-upload-cache.js";
+import { guardUninitializedBindingDisposal, type BindingManagerLike } from "./binding-lifetime.js";
 import { PRECOMPILE_SAFE } from "./precompile-safe.js";
 import { retainBuilderStates, type BuilderStateRetention, type NodeManagerLike } from "./builder-state-retention.js";
 import { trackRenderObjects, type RenderObjectSweep } from "./render-object-sweep.js";
 import { materialMapsLoading } from "./material-maps.js";
 import { beginSkinnedBoundsFrame, endSkinnedBoundsFrame } from "./skinned-bounds.js";
 import { beginSkinnedShadowFrame, DEFAULT_SKINNED_SHADOW_DISTANCE, endSkinnedShadowFrame } from "./skinned-shadows.js";
-import { hideNonRenderingBranches, restoreNonRenderingBranches } from "./empty-batches.js";
+import { hideNonRenderingBranches, hideVisible, restoreNonRenderingBranches } from "./empty-batches.js";
+import { takeUnuploadedArrays } from "./terrain-splat.js";
 import {
   PostChain,
   needsPipeline,
@@ -25,6 +27,7 @@ import {
 } from "./post.js";
 import { volumetricPlanKey, type VolumetricRequest } from "./atmosphere.js";
 import { sceneLighting, type SceneLighting } from "./scene-lighting.js";
+import { deferDrawPipelines, spreadShaderBuilds, type PipelineGate } from "./async-pipelines.js";
 import { flipDepthBiasForReversedDepth, keepRenderOrderUnderReversedDepth, matchViewportDepthTexture } from "./depth.js";
 
 /**
@@ -49,6 +52,13 @@ interface RenderObjectLike {
   group: unknown;
   dispose(): void;
 }
+interface PrecompileContext {
+  context: unknown;
+  pass: PostChain["scenePass"];
+  objects: Set<RenderObjectLike>;
+  users: number;
+}
+const PRECOMPILE_CANCELLED = Symbol("retired precompile context");
 /** three's RenderContext, as far as the precompile reads it: which target and MRT it was last rendered into. */
 interface RenderContextLike {
   id?: number;
@@ -57,10 +67,17 @@ interface RenderContextLike {
 }
 
 interface RendererInternals {
+  _bindings?: BindingManagerLike;
   _renderContexts?: { get: (rt: unknown, mrt: unknown, depth?: number) => unknown; _renderContexts?: Record<string, RenderContextLike> };
   _createObjectPipeline?: (...args: unknown[]) => void;
   _objects?: { get: (...args: unknown[]) => RenderObjectLike };
-  _nodes?: { getForRender: (renderObject: unknown) => unknown; getForRenderAsync?: (renderObject: unknown) => Promise<unknown> };
+  _nodes?: {
+    getForRender: (renderObject: unknown) => unknown;
+    getForRenderAsync?: (renderObject: unknown) => Promise<unknown>;
+    get?: (renderObject: unknown) => { nodeBuilderState?: unknown };
+    getForRenderCacheKey?: (renderObject: unknown) => unknown;
+    nodeBuilderCache?: Map<unknown, unknown>;
+  };
   _pipelines?: { get: (renderObject: unknown) => { pipeline?: unknown } | undefined };
   _currentRenderContext?: unknown;
   backend?: { get: (object: unknown) => { error?: boolean } | undefined };
@@ -172,6 +189,8 @@ export class EngineRenderer {
    */
   skinnedShadowDistance = DEFAULT_SKINNED_SHADOW_DISTANCE;
   private readonly shadowEye = new THREE.Vector3();
+  /** What the current shadow pass hid from the skip list, and so what it puts back. */
+  private readonly shadowHidden: THREE.Object3D[] = [];
   readonly renderer: THREE.WebGPURenderer;
   uploadProbe: GpuUploadProbe | null = null;
   uniformUploadStats: ReturnType<typeof cacheUniformUploads> | null = null;
@@ -179,6 +198,7 @@ export class EngineRenderer {
   renderObjectSweep: RenderObjectSweep | null = null;
 
   private postFxData: PostFxData | null = null;
+  private aoOn = true;
   private fx: ResolvedPostFx = resolvePostFx(null);
   /** A live adjustment over the authored grade (a zone's mood) — see setGradeMood. */
   private gradeMood: { saturation: number; contrast: number; temperature: number } | null = null;
@@ -219,6 +239,7 @@ export class EngineRenderer {
   private viewport: { width: number; height: number; pixelRatio: number } | null = null;
   /** The pixelate settings the canvas currently reflects (see applySize). */
   private pixelateKey = "";
+  private scaleOfRender = 1;
 
   private pipeline: THREE.RenderPipeline | null = null;
   private chain: PostChain | null = null;
@@ -282,13 +303,26 @@ export class EngineRenderer {
     this.renderer.render = ((scene: THREE.Object3D, camera: THREE.Camera) => {
       const skip = this.shadowless;
       if (!this.skipShadowless || skip.length === 0 || !scene.name.startsWith("Shadow Map [")) return draw(scene, camera);
-      for (const object of skip) object.visible = false;
+      // The list is last frame's walk: anything hidden since must stay hidden. Restoring it would show it for the next
+      // walk too, and it would never go away (the spell warm-up's meshes, 200 draws a frame, did exactly that).
+      const hidden = hideVisible(skip, this.shadowHidden);
       try {
         return draw(scene, camera);
       } finally {
-        for (const object of skip) object.visible = true;
+        for (const object of hidden) object.visible = true;
       }
     }) as typeof this.renderer.render;
+  }
+
+  private pipelineGate: PipelineGate = { active: false, pending: 0, buildMs: 0, budgetMs: Infinity };
+  /** Shader generation allowed per frame (ms): SHADER_BUILD_BUDGET_MS while the player can see the frame, else Infinity. */
+  set shaderBudgetMs(ms: number) {
+    this.pipelineGate.budgetMs = ms;
+  }
+
+  /** Pipelines of drawn meshes still compiling: those meshes are not on screen yet (async-pipelines.ts). */
+  get pipelinesPending(): number {
+    return this.pipelineGate.pending;
   }
 
   async init(): Promise<Backend> {
@@ -299,8 +333,11 @@ export class EngineRenderer {
       matchViewportDepthTexture(true);
       keepRenderOrderUnderReversedDepth(this.renderer as never);
     }
+    this.pipelineGate = deferDrawPipelines(this.renderer.backend as never);
+    if (backend.isWebGPUBackend) spreadShaderBuilds(this.renderer as never, this.pipelineGate);
     this.uploadProbe = new GpuUploadProbe(backend);
     this.uniformUploadStats = cacheUniformUploads(backend);
+    guardUninitializedBindingDisposal((this.renderer as unknown as RendererInternals)._bindings);
     this.renderObjectSweep = trackRenderObjects(this.renderer);
     // generated shader states outlive their last render object (see builder-state-retention.ts)
     const nodes = (this.renderer as unknown as { _nodes?: NodeManagerLike<unknown> })._nodes;
@@ -319,6 +356,17 @@ export class EngineRenderer {
    * setting lowers the ratio below that so the frame renders at a fixed line
    * count and the canvas scales it up — see {@link pixelateRatio}.
    */
+  /** Share of the requested pixel ratio actually rendered (adaptive-resolution.ts); the browser upscales the canvas. */
+  get renderScale(): number {
+    return this.scaleOfRender;
+  }
+
+  setRenderScale(scale: number): void {
+    if (scale === this.scaleOfRender) return;
+    this.scaleOfRender = scale;
+    this.applySize();
+  }
+
   setSize(width: number, height: number, pixelRatio = 1): void {
     this.viewport = { width, height, pixelRatio };
     this.applySize();
@@ -333,7 +381,7 @@ export class EngineRenderer {
     const viewport = this.viewport;
     if (!viewport) return;
     const { pixelate } = this.fx;
-    const ratio = pixelateRatio(this.fx, viewport.height, viewport.pixelRatio);
+    const ratio = pixelateRatio(this.fx, viewport.height, viewport.pixelRatio * this.renderScale);
     this.renderer.setPixelRatio(ratio);
     // updateStyle=false: the host app owns canvas CSS (docked editor layout)
     this.renderer.setSize(viewport.width, viewport.height, false);
@@ -437,6 +485,21 @@ export class EngineRenderer {
   setPostFx(data: PostFxData | null): void {
     this.postFxData = data;
     this.applyPostFxState();
+  }
+
+  /**
+   * Ambient occlusion belongs to the world, not to a scene: it is on everywhere unless the player's Graphics setting turns
+   * it off, whatever a scene's `postfx.ao.enabled` says (its intensity, radius and the rest still come from the scene).
+   */
+  set ambientOcclusion(on: boolean) {
+    if (this.aoOn === on) return;
+    this.aoOn = on;
+    this.applyPostFxState();
+  }
+
+  private resolvedPostFx(): ResolvedPostFx {
+    const fx = resolvePostFx(this.postFxData);
+    return this.withGradeMood({ ...fx, ao: { ...fx.ao, enabled: this.aoOn } });
   }
 
   /**
@@ -564,7 +627,7 @@ export class EngineRenderer {
    */
   setGradeMood(mood: { saturation?: number; contrast?: number; temperature?: number } | null): void {
     this.gradeMood = mood ? { saturation: mood.saturation ?? 1, contrast: mood.contrast ?? 1, temperature: mood.temperature ?? 0 } : null;
-    this.fx = this.withGradeMood(resolvePostFx(this.postFxData));
+    this.fx = this.resolvedPostFx();
     this.chain?.retune(this.fx, this.volumetric?.settings ?? null);
   }
 
@@ -583,7 +646,7 @@ export class EngineRenderer {
   }
 
   private applyPostFxState(): void {
-    this.fx = this.withGradeMood(resolvePostFx(this.postFxData));
+    this.fx = this.resolvedPostFx();
     // pixelate is not a pass — it is the backing-store size — so it is applied
     // here and never enters the pipeline signature
     const { pixelate } = this.fx;
@@ -714,8 +777,10 @@ export class EngineRenderer {
     group: THREE.Object3D,
     camera: THREE.Camera,
     targetScene: THREE.Scene,
+    /** Called once the group's draw list is collected: the group no longer has to be visible for its shaders to build. */
+    collected?: () => void,
   ): Promise<void> {
-    await this.compileInSceneContext(group, camera, targetScene);
+    await this.compileInSceneContext(group, camera, targetScene, collected);
   }
 
   /**
@@ -742,8 +807,8 @@ export class EngineRenderer {
   private chainRendered = false;
   /** Precompiles waiting for the chain's first frame. */
   private renderWaiters: Array<() => void> = [];
-  /** The scene pass's RenderContext as last borrowed by a precompile (see guardAsyncBuilds). */
-  private sceneContext: { context: unknown; pass: PostChain["scenePass"] } | null = null;
+  /** Concurrent compiles keep their own pass until their async work has settled. */
+  private precompileContexts = new Map<unknown, PrecompileContext>();
   private asyncBuildsGuarded = false;
   private shaderBuildTail: Promise<void> = Promise.resolve();
   private shaderBuildTime = 0;
@@ -794,7 +859,8 @@ export class EngineRenderer {
    * ("Color target has no corresponding fragment stage output ... targets[1]")
    * for vfx cards, decals, particles, impostors alike — they then never draw.
    * Build those render objects synchronously inside the scene pass's target
-   * and MRT, exactly as the borrowed window does for the prologue.
+   * and MRT, exactly as the borrowed window does for the prologue. Work that
+   * outlives its pass is cancelled instead of building for the canvas.
    */
   private guardAsyncBuilds(internals: RendererInternals): void {
     const nodes = internals._nodes;
@@ -804,11 +870,15 @@ export class EngineRenderer {
     const self = this;
     const renderer = this.renderer;
     nodes.getForRenderAsync = function (this: NonNullable<RendererInternals["_nodes"]>, renderObject: unknown) {
+      // Capture ownership before queueing: a newer compile may borrow another
+      // pass while this job waits for its shader-build slice.
+      const scene = self.precompileContexts?.get((renderObject as { context?: unknown }).context);
       return self.enqueueShaderBuild(() => {
-        const scene = self.sceneContext;
-        if (!scene || self.chain?.scenePass !== scene.pass || (renderObject as { context?: unknown }).context !== scene.context) {
-          return original.call(this, renderObject);
-        }
+        if (!scene) return original.call(this, renderObject);
+        if (self.chain?.scenePass !== scene.pass) throw PRECOMPILE_CANCELLED;
+        // Three reacquires this object in the async half and may replace the
+        // one observed during projection after a fog/light/material change.
+        scene.objects.add(renderObject as RenderObjectLike);
         const target = scene.pass.renderTarget;
         const mrtNode = scene.pass.getMRT();
         const previousTarget = renderer.getRenderTarget();
@@ -882,6 +952,7 @@ export class EngineRenderer {
     root: THREE.Object3D,
     camera: THREE.Camera,
     targetScene: THREE.Scene,
+    collected?: () => void,
   ): Promise<void> {
     const renderer = this.renderer;
     const internals = renderer as unknown as RendererInternals;
@@ -897,6 +968,7 @@ export class EngineRenderer {
         // render() owns the failure path (it retires the pass and reports)
       }
     }
+    const passForCompile = wantsChain ? this.chain?.scenePass : null;
     // The scene pass finishes configuring its render target (MSAA sample
     // count, lazily added MRT textures) on its first frame, and that state is
     // part of the RenderContext key. A whole-scene precompile at load runs
@@ -906,6 +978,7 @@ export class EngineRenderer {
     if (wantsChain && this.chain && !this.chainRendered) {
       await new Promise<void>((resolve) => this.renderWaiters.push(resolve));
     }
+    if (passForCompile && this.chain?.scenePass !== passForCompile) return;
     // compileAsync runs the normal projection pass, which frustum-culls — and
     // a just-streamed cell is usually off-screen, which is the entire case
     // being solved here. Clear culling for the pass, restore it after.
@@ -970,6 +1043,15 @@ export class EngineRenderer {
     const originalCreate = internals._createObjectPipeline;
     /** Every render object the synchronous shader build touched — see the heal below. */
     const handed: RenderObjectLike[] = [];
+    const borrowedContexts = new Set<PrecompileContext>();
+    const releaseContexts = (): void => {
+      for (const borrowed of borrowedContexts) {
+        borrowed.users--;
+        if (borrowed.users === 0 && this.precompileContexts.get(borrowed.context) === borrowed) {
+          this.precompileContexts.delete(borrowed.context);
+        }
+      }
+    };
     let undo: () => void = () => undefined;
     if (
       scenePass !== null &&
@@ -994,7 +1076,16 @@ export class EngineRenderer {
         if (rt === scenePass.renderTarget) {
           // the pass's own context when a frame has shown it (scenePassContext); the depth guess only before that
           const context = live && live.renderTarget === rt && live.mrt === mrt ? live.context : originalGet.call(this, rt, mrt, depth);
-          self.sceneContext = { context, pass: scenePass };
+          self.precompileContexts ??= new Map();
+          let borrowed = self.precompileContexts.get(context);
+          if (!borrowed || borrowed.pass !== scenePass) {
+            borrowed = { context, pass: scenePass, objects: new Set(), users: 0 };
+            self.precompileContexts.set(context, borrowed);
+          }
+          if (!borrowedContexts.has(borrowed)) {
+            borrowedContexts.add(borrowed);
+            borrowed.users++;
+          }
           return context;
         }
         return originalGet.call(this, rt, mrt, depth);
@@ -1041,6 +1132,9 @@ export class EngineRenderer {
       // to hold for that prologue, and must be undone before the frame loop
       // renders again.
       pending = renderer.compileAsync(root, camera, this.compileTarget(targetScene));
+    } catch (error) {
+      releaseContexts();
+      throw error;
     } finally {
       undo();
       // compileAsync collects its render list synchronously, before its first
@@ -1051,12 +1145,13 @@ export class EngineRenderer {
       for (const object of restore) object.frustumCulled = true;
       for (const object of hidden) object.visible = true;
       for (const object of lightsHidden) object.visible = true;
+      collected?.();
     }
     try {
       await pending;
     } catch (error) {
       // an optimisation, never a correctness requirement
-      console.warn("[render] pipeline precompile failed:", error);
+      if (error !== PRECOMPILE_CANCELLED) console.warn("[render] pipeline precompile failed:", error);
     }
     // A pipeline that fails validation off-frame stays null in three's cache
     // and the object is then never drawn in this context — a silent hole, not
@@ -1066,13 +1161,25 @@ export class EngineRenderer {
     // real frame rebuilds them exactly as it would have without a precompile.
     const pipelines = internals._pipelines;
     const backend = internals.backend;
-    if (handed.length > 0 && pipelines && typeof pipelines.get === "function" && backend && typeof backend.get === "function") {
+    const actualObjects = new Set(handed);
+    for (const borrowed of borrowedContexts) for (const object of borrowed.objects) actualObjects.add(object);
+    if (actualObjects.size > 0 && pipelines && typeof pipelines.get === "function" && backend && typeof backend.get === "function") {
       let healed = 0;
-      for (const renderObject of handed) {
+      for (const renderObject of actualObjects) {
         const pipeline = pipelines.get(renderObject)?.pipeline;
         if (!pipeline) continue;
         if (backend.get(pipeline)?.error === true) {
+          // Retention deliberately preserves generated states on disposal.
+          // A shader built against the wrong MRT must not survive that way;
+          // remove only the exact state still owned by this cache entry.
+          const nodes = internals._nodes;
+          const state = nodes?.get?.(renderObject).nodeBuilderState;
+          if (state !== undefined && nodes?.getForRenderCacheKey && nodes.nodeBuilderCache) {
+            const key = nodes.getForRenderCacheKey(renderObject);
+            if (nodes.nodeBuilderCache.get(key) === state) nodes.nodeBuilderCache.delete(key);
+          }
           renderObject.dispose();
+          for (const borrowed of borrowedContexts) borrowed.objects.delete(renderObject);
           healed += 1;
         }
       }
@@ -1083,6 +1190,7 @@ export class EngineRenderer {
         console.info(`[render] precompile: ${healed} pipeline(s) failed validation off-frame and will build on first draw instead`);
       }
     }
+    releaseContexts();
   }
 
   /** Report render sub-scopes to a profiler. Pass null to stop reporting. */
@@ -1093,6 +1201,7 @@ export class EngineRenderer {
   render(scene: THREE.Scene, camera: THREE.Camera): void {
     const scopes = this.scopes;
     this.renderObjectSweep?.tick();
+    for (const texture of takeUnuploadedArrays()) this.renderer.initTexture(texture);
     scopes?.begin("lighting");
     // Cascade refits, the shared IBL seam and the volumetric light query all
     // key off the render camera and off WHICH scene is actually being drawn,
@@ -1135,7 +1244,13 @@ export class EngineRenderer {
     }
     const emptyBranches = hideNonRenderingBranches(scene, this.shadowless, cull);
     try {
-      this.renderPreparedScene(scene, camera);
+      this.pipelineGate.active = true;
+      this.pipelineGate.buildMs = 0;
+      try {
+        this.renderPreparedScene(scene, camera);
+      } finally {
+        this.pipelineGate.active = false;
+      }
     } finally {
       this.shadowless.length = 0;
       restoreNonRenderingBranches(emptyBranches);

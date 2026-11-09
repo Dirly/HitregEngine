@@ -31,6 +31,7 @@ import {
 import type { WorldRecipe } from "./recipe.js";
 import "./operators-terrace.js";
 import "./operators-cave.js";
+import "./operators-cave-link.js";
 import "./operators-ledges.js";
 import "./operators-landmark.js";
 import "./operators-paint.js";
@@ -38,6 +39,7 @@ import "./operators-scree.js";
 import "./operators-riverbank.js";
 import "./operators-wall.js";
 import "./operators-cliff-path.js";
+import "./operators-island.js";
 
 export * from "./operator-registry.js";
 

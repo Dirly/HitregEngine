@@ -25,7 +25,7 @@ test("a reservation smaller than its tier is refused; approaches count", () => {
   assert.match(reservationTierFault("large", { radius: 100, approaches: 3 }), /large place needs 300-600 m across; the reservation is 200 m/);
   assert.match(reservationTierFault("large", { radius: 200, approaches: 1 }), /3\+ distinct approaches/);
   assert.equal(reservationTierFault("large", { radius: 200, approaches: 3 }), null);
-  assert.match(reservationTierFault("small", { radius: 30 }), /small place needs 100-150 m/);
+  assert.match(reservationTierFault("small", { radius: 25 }), /small place needs 60-150 m/);
   assert.equal(reservationTierFault("pinpoint", { radius: 15 }), null);
 });
 
@@ -85,4 +85,12 @@ test("crossing tier: a bridge job is judged by span, seating, both approach read
   assert.match(tierTargetsText("crossing"), /span >= 60 m.*read-\* view >= 300 m/);
   assert.equal(reservationTierFault("crossing", { radius: 60, approaches: 2 }), null);
   assert.match(reservationTierFault("crossing", { radius: 60, approaches: 1 }), /2\+ distinct approaches/);
+});
+
+// L (coordinator 2026-10-31, Redcup Camp 87 m): pinpoint stopped at 60 m and small started at 100 m, so a 60-100 m place fit
+// NO tier. The footprint bands are contiguous: each tier's minimum is the one below's maximum (usable-area floors unchanged).
+test("the footprint tiers are contiguous: no diameter falls between two tiers", () => {
+  const order = SIZE_NAMES.map((n) => tierFor(n));
+  for (let i = 1; i < order.length; i++) assert.equal(order[i].footprintDiameterM.min, order[i - 1].footprintDiameterM.max, `${order[i].id} starts where ${order[i - 1].id} ends`);
+  assert.equal(tierFor("small").minUsableAreaM2, 3500);
 });

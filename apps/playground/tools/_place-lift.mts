@@ -25,6 +25,7 @@ import path from "node:path";
 import { applyOps, applyRecipeEdits, ComponentRegistry, createWorldField, registerChunkComponents, registerCoreComponents, worldRecipeSchema } from "@hitreg/core";
 import { findAsset, PROJECTS } from "./_closure.mjs";
 import { prefabGeometry } from "./_prop-geometry.mts";
+import { walkGround } from "./_ground.mts";
 
 type V2 = [number, number];
 type V3 = [number, number, number];
@@ -399,7 +400,7 @@ export async function liftCommand(argv: string[]): Promise<void> {
     };
     const field = createWorldField(worldRecipeSchema.parse(read(WF)));
     const obstacles = sceneObstacles(read(SF), spec.top, Math.hypot(spec.bottom[0] - spec.top[0], spec.bottom[1] - spec.top[1]) + 30, id);
-    const plan = planLift(project, spec, (x, z) => field.height(x, z), (x, y, z) => field.density(x, y, z) < 0, obstacles);
+    const plan = planLift(project, spec, walkGround(field), (x, y, z) => field.density(x, y, z) < 0, obstacles);
     write(file("spec"), spec);
     write(file("ops"), plan.ops);
     write(file("world-ops"), plan.worldOps);
@@ -540,7 +541,13 @@ async function rideGate(world: string, project: string, ops: any[], worldOps: an
       if (Math.hypot(p[0] - dp[0], p[2] - dp[2]) > plan.spec.deck.width / 2 + 0.3) { faults.push(`${leg}: the body left the deck mid-ride at ${JSON.stringify(p.map(r2))}`); break; }
     }
     for (let i = 0; i < 20; i++) sb.stepWith([0, 0], false);
-    const walked = walkTo(off[0], off[2], 0.6, plan.spec.dwell - 2);
+    // the body must be OFF the deck within the dwell; the rest of the walk (a long gangway to the entry) may take longer
+    // (o-coast2 2026-10-31: sunwine-hold's 6.6 m gangway walk ran out of dwell 1.3 m short of the entry, on solid ground)
+    const offDeck = (): boolean => {
+      const p = sb.feet(), dp = deckPos(), rx = p[0] - dp[0], rz = p[2] - dp[2];
+      return Math.abs(rx * f[0] + rz * f[1]) > plan.spec.deck.depth / 2 + 0.3 || Math.abs(rx * f[1] - rz * f[0]) > plan.spec.deck.width / 2 + 0.3;
+    };
+    const walked = walkTo(off[0], off[2], 0.6, plan.spec.dwell - 2) || (offDeck() && walkTo(off[0], off[2], 0.6, 10));
     for (let i = 0; i < 30; i++) sb.stepWith([0, 0], false);
     const end = sb.feet();
     const ok = walked && worst < 0.35 && Math.abs(end[1] - off[1]) < 0.8 && Math.hypot(end[0] - off[0], end[2] - off[2]) < 1.2;

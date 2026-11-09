@@ -62,10 +62,13 @@ export function pixelRay(cam: ScaleCamera, zoom = 1): (px: number, py: number) =
 /** Where a ray first meets the ground (height(x, z)), or null within maxT metres (1 m march, then bisection). */
 export function groundHit(eye: V3, dir: V3, height: (x: number, z: number) => number, maxT = 2500): V3 | null {
   const at = (t: number): V3 => [eye[0] + dir[0] * t, eye[1] + dir[1] * t, eye[2] + dir[2] * t], under = (p: V3) => p[1] <= height(p[0], p[2]);
+  // the hit is the ray's first CROSSING of the ground: from above it (the usual eye), or, for an eye UNDER a level plane
+  // (`planeY` over a camera that stands below the place's apron: L o-gates 2026-10-30, every hit landed on the eye), up through it
+  const start = under(eye);
   let prev = 0;
   for (let t = 1; t <= maxT; t += 1) {
-    if (!under(at(t))) { prev = t; continue; }
-    let a = prev, b = t; for (let i = 0; i < 24; i++) { const m = (a + b) / 2; if (under(at(m))) b = m; else a = m; }
+    if (under(at(t)) === start) { prev = t; continue; }
+    let a = prev, b = t; for (let i = 0; i < 24; i++) { const m = (a + b) / 2; if (under(at(m)) === start) a = m; else b = m; }
     return at(b);
   }
   return null;
@@ -103,7 +106,11 @@ const rnd = (v: number, k = 1) => Math.round(v * k) / k;
  *  right axis) more than `tol` SHORT fails (a city bigger than painted is fine); depth is reported (foreshortened: the
  *  painting cannot say it to 15 %). */
 export function compareExtent(ext: ConceptExtent, cam: ScaleCamera, zoom: number, height: (x: number, z: number) => number, structureXZ: ArrayLike<number>, tol = SCALE_TOL): ExtentReport {
-  const ray = pixelRay(cam, zoom), h = ext.planeY != null ? () => ext.planeY! : height, hitOf = (p: [number, number]) => groundHit(cam.eye, ray(p[0], p[1]), h);
+  // a painted outline point lies within twice the painting's own camera-to-target distance: a ray grazing a level plane
+  // (`planeY`, the eye under the apron) otherwise lands kilometres behind the cliff and the painted city balloons (the
+  // Moon 2026-10-31: one point 1.4 km out, painted 49043 m2 vs 5135). Past it the point misses, as one off the ground does.
+  const reachT = 2 * Math.hypot(cam.target[0] - cam.eye[0], cam.target[1] - cam.eye[1], cam.target[2] - cam.eye[2]);
+  const ray = pixelRay(cam, zoom), h = ext.planeY != null ? () => ext.planeY! : height, hitOf = (p: [number, number]) => groundHit(cam.eye, ray(p[0], p[1]), h, reachT);
   const outline = ext.outline.map((p) => ({ px: [...p], world: hitOf(p) })), poly = outline.filter((o) => o.world).map((o) => [o.world![0], o.world![2]] as [number, number]);
   const ax = groundAxes(cam), cells = builtDistrict(structureXZ, ext.reach);
   const painted = { area: rnd(polyArea(poly)), width: rnd(span(poly, ax.right)), depth: rnd(span(poly, ax.fwd)) };

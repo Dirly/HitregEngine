@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
 import { writeImpostorSlot, type ImpostorInstanceData } from "./impostor.js";
 import type { InstancedProps } from "./instancing.js";
+import { isLodFadeable, setLodFadeBand } from "./lod-fade.js";
 
 /**
  * One (assetId, node) group's near (real geometry, one mesh per submesh),
@@ -97,6 +98,20 @@ const UNSET = 0;
 const NEAR = 1;
 const MID = 2;
 const FAR = 3;
+/** Added to a NEAR/MID decision: the instance is inside the crossfade band and sits in the far tier as well. */
+const ALSO_FAR = 4;
+
+/**
+ * The mesh -> impostor crossfade band, as a fraction of the far distance (lod-fade.ts): 110 m fades from 88 m.
+ * Wide enough that a walking player crosses it over several seconds.
+ */
+const FADE_BAND_FRACTION = 0.2;
+/**
+ * Metres a crossfading instance stays in a tier past where the shader has finished with it. Membership has to cover
+ * the band or a half-stippled tree shows holes, so this slack stands in for the hysteresis the hard swap uses, and
+ * it must outrun the moving sweep: at a sprint, three frames is under a metre.
+ */
+const FADE_SLACK = 4;
 
 /** Floor on the error-driven near→mid distance: whatever the numbers say, a
  * prop the camera is practically touching shows its real geometry. */
@@ -115,6 +130,12 @@ const DEFAULT_FOV_DEGREES = 50; // three's PerspectiveCamera default
 interface BatchState {
   tier: Uint8Array;
   slot: Int32Array;
+  /** Slot in the FAR tier, separate from `slot` because a crossfading instance holds both. */
+  farSlot: Int32Array;
+  /** 1 = this instance sits in the far tier (always, when `tier` is FAR). */
+  inFar: Uint8Array;
+  /** All tiers can stipple (lod-fade.ts): this batch crossfades instead of swapping. */
+  fades: boolean;
   slotToIndex: [Int32Array, Int32Array, Int32Array];
   counts: [number, number, number];
   cursor: number;
@@ -157,14 +178,15 @@ function removeFromTier(state: BatchState, batch: InstancedPropBatch, tierNum: n
   const arrIdx = (tierNum - 1) as 0 | 1 | 2;
   const slotToIndex = state.slotToIndex[arrIdx];
   const lastSlot = state.counts[arrIdx] - 1;
-  const mySlot = state.slot[i]!;
+  const slots = tierNum === FAR ? state.farSlot : state.slot;
+  const mySlot = slots[i]!;
   const lastIndex = slotToIndex[lastSlot]!;
   const meshes = tierMeshes(batch, tierNum);
   if (lastIndex !== i) {
     // the last active slot's occupant moves into the freed slot, keeping
     // [0, count) fully packed with no gaps
     slotToIndex[mySlot] = lastIndex;
-    state.slot[lastIndex] = mySlot;
+    slots[lastIndex] = mySlot;
     for (let k = 0; k < meshes.length; k++) {
       const mesh = meshes[k]!;
       mesh.setMatrixAt(mySlot, slotMatrix(batch, tierNum, k, lastIndex));
@@ -183,7 +205,7 @@ function addToTier(state: BatchState, batch: InstancedPropBatch, tierNum: number
   const arrIdx = (tierNum - 1) as 0 | 1 | 2;
   const slot = state.counts[arrIdx];
   state.slotToIndex[arrIdx][slot] = i;
-  state.slot[i] = slot;
+  (tierNum === FAR ? state.farSlot : state.slot)[i] = slot;
   state.counts[arrIdx] = slot + 1;
   const meshes = tierMeshes(batch, tierNum);
   for (let k = 0; k < meshes.length; k++) {
@@ -245,6 +267,10 @@ export class FoliageLodSystem {
   private tanHalfFov = Math.tan((DEFAULT_FOV_DEGREES * Math.PI) / 360);
   /** Runtime A/B switch: false = the old fixed 200-slots-per-tick sweep (empty slots counted, no moving boost). */
   movingSweep = true;
+  /** See `setLodScale`. */
+  private lodScale = 1;
+  /** See `setCrossfade`. */
+  private crossfade = true;
 
   constructor(
     /** far threshold: past this, everything collapses to the billboard/box proxy.
@@ -287,6 +313,33 @@ export class FoliageLodSystem {
     this.refreshThresholds();
   }
 
+  /**
+   * One scalar over every mesh -> impostor distance, default and per-asset alike: the graphics-quality knob.
+   * 1 is the set distance, 0.5 half of it. Past the `fullRender` ring a cell has no meshes to show, so raising
+   * this beyond the ring (main.ts sets the base just inside it) needs a bigger ring to mean anything.
+   */
+  setLodScale(scale: number): void {
+    if (!(scale > 0) || scale === this.lodScale) return;
+    this.lodScale = scale;
+    this.refreshThresholds();
+  }
+
+  getLodScale(): number {
+    return this.lodScale;
+  }
+
+  /** On by default; off restores the hard swap, for A/B shots. */
+  setCrossfade(enabled: boolean): void {
+    if (enabled === this.crossfade) return;
+    this.crossfade = enabled;
+    this.refreshThresholds();
+  }
+
+  /** Where `batch` hands over to its impostor, metres. */
+  farDistanceFor(batch: InstancedPropBatch): number {
+    return (batch.lodDistance ?? this.lodDistance) * this.lodScale;
+  }
+
   setNearDistance(distance: number): void {
     this.nearDistance = distance;
     this.refreshThresholds();
@@ -316,7 +369,7 @@ export class FoliageLodSystem {
     if (!state || error === undefined || !(error > 0)) return this.nearDistance;
     const worldError = error * state.maxInstanceScale;
     const distance = (worldError * this.viewportHeight) / (2 * this.tanHalfFov * this.screenErrorPx);
-    return Math.min(Math.max(distance, MIN_NEAR_DISTANCE), batch.lodDistance ?? this.lodDistance);
+    return Math.min(Math.max(distance, MIN_NEAR_DISTANCE), this.farDistanceFor(batch));
   }
 
   private applyThreshold(batch: InstancedPropBatch, state: BatchState): void {
@@ -326,6 +379,11 @@ export class FoliageLodSystem {
     const cull = this.cullDistanceFor(batch);
     state.cullSq = cull * cull;
     state.cullHystSq = (cull * this.hysteresis) ** 2;
+    const far = this.farDistanceFor(batch);
+    const fading = state.fades && this.crossfade;
+    for (const mesh of [...batch.near, ...(batch.mid ?? []), batch.far]) {
+      setLodFadeBand(mesh, fading ? far * (1 - FADE_BAND_FRACTION) : 0, fading ? far : 0);
+    }
   }
 
   private refreshThresholds(): void {
@@ -339,6 +397,10 @@ export class FoliageLodSystem {
     const state: BatchState = {
       tier: new Uint8Array(n),
       slot: new Int32Array(n),
+      farSlot: new Int32Array(n),
+      inFar: new Uint8Array(n),
+      fades: !batch.alwaysNear && !!batch.impostor && isLodFadeable(batch.far.material)
+        && [...batch.near, ...(batch.mid ?? [])].every((mesh) => isLodFadeable(mesh.material)),
       slotToIndex: [new Int32Array(n), new Int32Array(n), new Int32Array(n)],
       counts: [0, 0, 0],
       cursor: 0,
@@ -378,7 +440,10 @@ export class FoliageLodSystem {
         placed = 0;
         for (let i = 0; i < state.live.length; i++) placed += state.live[i]!;
       }
-      counts.culled += placed - state.counts[0] - state.counts[1] - state.counts[2];
+      // a crossfading instance counts in both of its tiers but is one placed instance
+      let doubled = 0;
+      if (state.fades) for (let i = 0; i < state.inFar.length; i++) if (state.inFar[i] && state.tier[i] !== FAR) doubled++;
+      counts.culled += placed - state.counts[0] - state.counts[1] - state.counts[2] + doubled;
     }
     return counts;
   }
@@ -393,7 +458,8 @@ export class FoliageLodSystem {
     // back inside the hysteresis distance
     if (distSq > (prevTier === UNSET ? state.cullHystSq : state.cullSq)) return UNSET;
     if (batch.alwaysNear) return NEAR;
-    const farDistance = batch.lodDistance ?? this.lodDistance;
+    const farDistance = this.farDistanceFor(batch);
+    if (state.fades && this.crossfade) return this.decideFading(batch, state, i, distSq, farDistance);
     const midFarThresholdSq = farDistance * farDistance;
     const midFarHystSq = (farDistance * this.hysteresis) ** 2;
     const hasMid = !!batch.mid && batch.mid.length > 0;
@@ -410,12 +476,41 @@ export class FoliageLodSystem {
     return !isMidOrCloser ? FAR : isNearSide ? NEAR : MID;
   }
 
-  private place(batch: InstancedPropBatch, state: BatchState, i: number, wantTier: number): void {
+  /**
+   * `decide` for a crossfading batch. Membership must COVER the band: the shader stipples by exact distance, so a
+   * mesh that left early would be a hole, not a pop. An instance enters a tier `FADE_SLACK` before the band needs
+   * it and leaves another `FADE_SLACK` beyond that, which also keeps a boundary from flip-flopping.
+   */
+  private decideFading(batch: InstancedPropBatch, state: BatchState, i: number, distSq: number, far: number): number {
     const prevTier = state.tier[i]!;
-    if (prevTier === wantTier) return;
-    if (prevTier !== UNSET) removeFromTier(state, batch, prevTier, i);
-    if (wantTier !== UNSET) addToTier(state, batch, wantTier, i);
+    const start = far * (1 - FADE_BAND_FRACTION);
+    const meshReach = far + (prevTier === NEAR || prevTier === MID ? 2 * FADE_SLACK : FADE_SLACK);
+    if (distSq >= meshReach * meshReach) return FAR;
+    const farReach = Math.max(0, start - (state.inFar[i] ? 2 * FADE_SLACK : FADE_SLACK));
+    const alsoFar = distSq > farReach * farReach ? ALSO_FAR : 0;
+    if (!batch.mid || batch.mid.length === 0) return NEAR | alsoFar;
+    const isNearSide = prevTier === NEAR ? distSq < state.nearMidThresholdSq : distSq < state.nearMidHystSq;
+    return (isNearSide ? NEAR : MID) | alsoFar;
+  }
+
+  private place(batch: InstancedPropBatch, state: BatchState, i: number, want: number): void {
+    const wantTier = want & 3;
+    const wantFar = wantTier === FAR || (want & ALSO_FAR) !== 0 ? 1 : 0;
+    const prevTier = state.tier[i]!;
+    const prevFar = state.inFar[i]!;
+    if (prevTier === wantTier && prevFar === wantFar) return;
+    const prevMesh = prevTier === FAR ? UNSET : prevTier;
+    const wantMesh = wantTier === FAR ? UNSET : wantTier;
+    if (prevMesh !== wantMesh) {
+      if (prevMesh !== UNSET) removeFromTier(state, batch, prevMesh, i);
+      if (wantMesh !== UNSET) addToTier(state, batch, wantMesh, i);
+    }
+    if (prevFar !== wantFar) {
+      if (wantFar) addToTier(state, batch, FAR, i);
+      else removeFromTier(state, batch, FAR, i);
+    }
     state.tier[i] = wantTier;
+    state.inFar[i] = wantFar;
   }
 
   /**
@@ -446,6 +541,7 @@ export class FoliageLodSystem {
     if (!state.live[i]) state.liveCount++;
     state.live[i] = 1;
     state.tier[i] = UNSET;
+    state.inFar[i] = 0;
     // units already hiding its owner (a model that finished loading after
     // its cell went behind a ridge) — see InstancedPropPool.setHidden
     state.hidden[i] = hidden;
@@ -467,9 +563,7 @@ export class FoliageLodSystem {
   removeInstance(batch: InstancedPropBatch, i: number): void {
     const state = this.stateByBatch.get(batch);
     if (!state?.live || !state.live[i]) return;
-    const tier = state.tier[i]!;
-    if (tier !== UNSET) removeFromTier(state, batch, tier, i);
-    state.tier[i] = UNSET;
+    this.place(batch, state, i, UNSET);
     state.live[i] = 0;
     state.liveCount--;
     state.hidden[i] = 0;

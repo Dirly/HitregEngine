@@ -2,7 +2,7 @@ import { z } from "zod";
 import { fallSiteSchema } from "./fall-sites.js";
 import { hexColor, meshWindSchema, spawnAreaSchema, MAX_SPLAT_LAYERS, grassSchema, vegetationTintSchema } from "../components/core.js";
 import { regionSchema } from "./regions.js";
-import { clearingSchema } from "./vegetation.js";
+import { clearingSchema, fieldSchema } from "./vegetation.js";
 import { NATURAL_SURFACE_ROLES } from "./roles.js";
 import { terraceWallSchema } from "./terrace-walls.js";
 import { dcRiserSchema } from "./dc-risers.js";
@@ -616,6 +616,10 @@ export const groundNeedSchema = z.object({
       height: z.number().describe("cliff-face: face height made; walled-neck: the pad's top Y."),
       patch: z.string().describe("The height patch id written (`need-<id>`)."),
       raised: z.number().describe("Most metres the patch lifts the ground."),
+      rock: z
+        .tuple([z.number(), z.number()])
+        .optional()
+        .describe("cliff-face: the rock block's reach in its own frame, [metres back from the foot, metres each side of the foot's centre]. Inside it the lips gate allows the cliff's own near-vertical walls (worldgen-lips NEED_ROCK_MAX_SLOPE)."),
       ran: z.string().describe("ISO time it was solved."),
     })
     .optional()
@@ -1343,6 +1347,25 @@ export type ScatterClumpDoc = z.infer<typeof scatterClumpSchema>;
 export const coverLayerSchema = grassSchema.extend({
   id: z.string().describe("Stable name; the host registers the layer as `cover:<id>`."),
   note: z.string().optional().describe("Why this layer exists / where it is meant to read. Ignored by the engine."),
+  fields: z
+    .boolean()
+    .optional()
+    .describe(
+      "A CROP layer (wheat, grain): grows only inside the world's declared fields (`features.fields`, a farm's " +
+        "strips) and nowhere else, whatever its biomes. Owner ruling 2026-10-30: wild land never grows crop-looking cover.",
+    ),
+  regions: z
+    .array(z.string().min(1))
+    .optional()
+    .describe(
+      "Region ids (`regions[].id`) this layer grows in, nested regions included; nowhere else. With `exceptRegions` " +
+        "it splits one layer per zone so each copy carries its zone's ground-tile tint (owner ruling 2026-10-30: grass " +
+        "matches its ground tile). Written by `worldgen flora` (the colour fit), not by hand.",
+    ),
+  exceptRegions: z
+    .array(z.string().min(1))
+    .optional()
+    .describe("Region ids this layer never grows in (nested regions included): the zones a per-zone copy of it covers."),
 });
 
 export type CoverLayerDoc = z.infer<typeof coverLayerSchema>;
@@ -2760,6 +2783,13 @@ export const worldRecipeSchema = z.object({
           "Patches kept clear of scatter and/or ground cover (a site's footprint, a hall pad, a town's building plots, " +
             "streets and door paths), feathered at the edge. Terrain is untouched. Written by `worldgen vegetation " +
             "--clearings <file>`; see docs/voxel-worlds.md section 31.",
+        ),
+      fields: z
+        .array(fieldSchema)
+        .optional()
+        .describe(
+          "Declared fields (a farm's strips): the only ground crop cover (`cover[].fields: true`) grows on. Written by " +
+            "`worldgen vegetation --fields <file>`; see docs/voxel-worlds.md section 31.",
         ),
       camps: z
         .array(campSchema)

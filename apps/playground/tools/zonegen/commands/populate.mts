@@ -39,16 +39,21 @@ import {
   polygonEdgeDistance,
   registerChunkComponents,
   registerCoreComponents,
+  resolveMobBehavior,
+  mobBehaviorOverride,
   sanctuariesFromPois,
   worldRecipeSchema,
   type Op,
   type SanctuaryCircle,
+  type MobBehaviorArchetype,
+  type MobBehaviorInput,
 } from "@hitreg/core";
 import { digest, digestMatches, exists, readJson, writeJson, type Ctx, type Finding } from "../lib.mts";
 import { HABITATS, castSchema, type Bestiary, type Creature } from "../schemas.mts";
 import { loadZonePlan, type ZonePlan } from "./_zone.mts";
 import { DISPOSITIONS, fodderLevel, starterDisposition, starterMixFindings, type Shares, WANDER_RULES, loadWanderers, longestRun, nameSlug, offsetLine, resample, routeLength, wandererFindings, wanderersFile, type WandererArea } from "./_wanderers.mts";
 import { checkHumanSubtree, dressFor, humanConfigFile, humanTemplateOps, loadHumanKit, type HumanDress, type HumanKit } from "./_human-template.mts";
+import {loadPopulationLoot,mergePopulationLoot,populationLootFile} from './_population-loot.mts';
 
 type Habitat = (typeof HABITATS)[number];
 type Role = "melee" | "ranged" | "caster" | "swarm" | "brute" | "skirmisher" | "support" | "elite" | "boss";
@@ -82,7 +87,7 @@ const CAPSULE: Record<string, [number, number, number]> = { human: [0.8, 1.8, 0.
 const REASON = ["ok", "outside zone", "sanctuary/town", "road", "water", "steep", "reserved POI", "unreachable"] as const;
 const BORDER_BAND = 20;
 
-interface Spawn { template: string; count: number; spread: number }
+interface Spawn { template: string; count: number; spread: number; temperament?: "hostile" | "territorial" | "passive"; behaviorArchetype?: MobBehaviorArchetype }
 export interface Area {
   id: string;
   kind: "camp" | "group" | "rare" | "wildlife" | "fill" | "wanderer";
@@ -108,6 +113,7 @@ export interface Area {
   spawns: Spawn[];
   /** A starter zone's wildlife: its disposition as a mob-brain temperament (and wary metres). */
   temperament?: "hostile" | "territorial" | "passive";
+  behaviorArchetype?: MobBehaviorArchetype;
   territory?: number;
   /** spawnArea.rares rows: a site pack's named leader behind its members' slots (placeholder rare). */
   rares?: Record<string, unknown>[];
@@ -145,6 +151,10 @@ export interface Template {
   /** body "human": the look picked from the creation options. */
   appearance?: Record<string, string>;
   standsAt?: string;
+  /** Authored only so the area's conditional/roaming table can clone it; the server holds this body back. */
+  templateOnly?: boolean;
+  /** Mood on the first fixed slot consumed by the authored standing body. */
+  standingBehavior?: MobBehaviorInput;
   /** Body size multiplier (bestiary `scale`); absent = 1. */
   scale?: number;
 }
@@ -179,9 +189,10 @@ interface SitePack {
   y?: number;
   faction: string;
   level: number;
-  members: { creature: string; theme?: string; role: Role; count: number; scale?: number }[];
+  members: { creature: string; theme?: string; role: Role; count: number; scale?: number; behaviorArchetype?: MobBehaviorArchetype }[];
   /** The pack's mob-brain temperament (default hostile): a camp by a road that only fights who comes in is territorial. */
   temperament?: "hostile" | "territorial" | "passive";
+  behaviorArchetype?: MobBehaviorArchetype;
   /** The leader. With `chance` it is a placeholder RARE (spawnArea.rares on the members' slots, `lockout` [min, max] s),
    *  never always up (RARE_RULES); without it the leader stands with the pack. L (o-small2 dropped-hour 2026-10-30: a site
    *  pack could only name an always-up leader). */
@@ -191,7 +202,7 @@ interface SitePack {
 /** The files whose content decides the population: the status row re-digests them. */
 export function populateInputs(ctx: Ctx, zone: string): string[] {
   const p = ctx.paths;
-  return [p.zoneBestiary(zone), p.reservations(zone), p.quests(zone), p.brief(zone), p.bestiary, p.recipe, humanConfigFile(p.projectDir), sitePacksFile(ctx, zone), wanderersFile(ctx, zone)].filter((x) => x.endsWith("site-packs.json") || x.endsWith("wanderers.json") ? exists(x) : true);
+  return [p.zoneBestiary(zone), p.reservations(zone), p.quests(zone), p.brief(zone), p.bestiary, p.recipe, humanConfigFile(p.projectDir), sitePacksFile(ctx, zone), wanderersFile(ctx, zone),populationLootFile(p.projectDir,ctx.world,zone)].filter((x) => /(?:site-packs|wanderers|loot)\.json$/.test(x) ? exists(x) : true);
 }
 
 export async function run(ctx: Ctx): Promise<number> {
@@ -234,7 +245,7 @@ export async function run(ctx: Ctx): Promise<number> {
   console.log(`  coverage: ${Math.round(cov.coveredShare * 100)}% of wilderness within ${cov.gap} m of an area (${Math.round(cov.coverableShare * 100)}% coverable by a legal site; ${cov.budgetSkips} fill sites refused by the view budget); largest empty stretch ~${cov.largestEmptyAcross} m across`);
   for (const x of f) console.log(`  ${x.level === "error" ? "ERROR" : "warn "} ${x.code}: ${x.message}`);
   if (ctx.flag("dry")) {
-    for (const a of areas) console.log(`    ${a.id.padEnd(26)} ${a.kind.padEnd(8)} [${Math.round(a.x)}, ${Math.round(a.z)}] lv ${a.level} ${[...templates.filter((t) => t.standsAt === a.id).map((t) => `1x ${t.id} (the template itself)`), ...a.spawns.map((s) => `${s.count}x ${s.template}`)].join(" + ") || "(disabled)"}`);
+    for (const a of areas) console.log(`    ${a.id.padEnd(26)} ${a.kind.padEnd(8)} [${Math.round(a.x)}, ${Math.round(a.z)}] lv ${a.level} ${[...templates.filter((t) => t.standsAt === a.id).map((t) => t.templateOnly ? `${t.id} (held template)` : `1x ${t.id} (the template itself)`), ...a.spawns.map((s) => `${s.count}x ${s.template}`)].join(" + ") || "(disabled)"}`);
     console.log("--dry: nothing written");
     return f.some((x) => x.level === "error") ? 1 : 0;
   }
@@ -391,7 +402,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     f.push({ level: "error", code: "no-region", message: `the recipe has no region ${zone}` });
     return null;
   }
-  const townZones = recipe.regions.filter((r) => r.within === zone);
+  const townZones = recipe.regions.filter((r) => r.within === zone && (r.tags.includes("town") || r.tags.includes("safe")));
   const [lo, hi] = plan.brief.level;
   let starter = ctx.flag("starter");
   if (!starter && exists(p.cast)) {
@@ -406,7 +417,11 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     f.push({ level: "warn", code: "starter-no-livestock", message: `starter zone: ${zb.wildlife.filter((w) => !wildlife.includes(w)).map((w) => w.creature).join(", ")} not placed as wildlife (birds and livestock never wander a starter zone)` });
   const wanderers = loadWanderers(ctx, zone, f);
   const hubTown = recipe.features.towns.find((t) => t.id === plan.brief.hub);
-  const hub: [number, number] = hubTown ? [hubTown.center[0], hubTown.center[1]] : [region.hub[0], region.hub[1]];
+  if (!hubTown && !region.hub) {
+    f.push({ level: "error", code: "hub-missing", message: `${zone}: population needs its hub town or a region hub to measure walking levels` });
+    return null;
+  }
+  const hub: [number, number] = hubTown ? [hubTown.center[0], hubTown.center[1]] : region.hub!;
 
   // ---- sanctuaries, exactly as serve() / quest-play publish them
   const sanct: SanctuaryCircle[] = sanctuariesFromPois(recipe.features.pois);
@@ -627,6 +642,8 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   // an item the plan sources from a creature drops from every template of that creature (60% a kill)
   const lootOf = new Map<string, string>();
   for (const it of plan.graph.items) if (it.source?.type === "creature") lootOf.set(it.source.ref, [lootOf.get(it.source.ref), it.id + ":1:0.6"].filter(Boolean).join(","));
+  const authoredLoot=loadPopulationLoot(populationLootFile(p.projectDir,ctx.world,zone));
+  const dropsFor=(specific:string,base:string)=>mergePopulationLoot(authoredLoot.get(specific)??authoredLoot.get(base),lootOf.get(specific)??lootOf.get(base));
   // prefabs resolve through the project's dependsOn closure (a world's mob bodies live in foundation)
   const prefabExists = (id: string): boolean => findAsset(p.projectDir, `prefabs/${id}.json`) !== null;
   const readyPrefab = (c: Creature, theme: string): string | null => {
@@ -658,7 +675,10 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     // a wanderer row's own '<Kin> <Role>' name (Bandit Cutpurse) is its own template: the id says the name
     const slug = rare ? rare.id : nameAs ? nameSlug(nameAs) : `${c.id}${theme && theme !== "base" ? `-${theme}` : ""}`;
     // an oversized body is its own template (its own size, reach and gait)
-    const id = `pop-${slug}${scale !== 1 ? `-x${scale}` : ""}-l${levels[0]}${levels[1] !== levels[0] ? `-${levels[1]}` : ""}`;
+    const baseId = `pop-${slug}${scale !== 1 ? `-x${scale}` : ""}-l${levels[0]}${levels[1] !== levels[0] ? `-${levels[1]}` : ""}`;
+    // A nest guard and peaceful forager may share skin/level, but must not silently share the first faction cached.
+    const first = templates.get(baseId);
+    const id = first && first.faction !== faction ? `${baseId}-f-${nameSlug(faction) || 'none'}` : baseId;
     const have = templates.get(id);
     if (have) return have;
     const themeRow = c.themes.find((t) => t.id === theme);
@@ -684,7 +704,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
           t.standIns = [...dress.standIns];
           t.art = `stand-ins: ${dress.standIns.join("; ")}`;
         }
-        t.loot = lootOf.get(t.creature) ?? lootOf.get(c.id) ?? "";
+        t.loot = dropsFor(t.creature,c.id);
         if (scale !== 1) t.scale = scale;
         templates.set(id, t);
         return t;
@@ -728,7 +748,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       ...(paint ? { material: paint } : {}),
       abilities: c.abilities.length ? c.abilities : ["strike"],
     };
-    t.loot = lootOf.get(t.creature) ?? lootOf.get(c.id) ?? "";
+    t.loot = dropsFor(t.creature,c.id);
     if (scale !== 1) t.scale = scale;
     templates.set(id, t);
     return t;
@@ -760,7 +780,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     // one template id may serve two members (two roles of one body): one spawn entry each
     const merged: Spawn[] = [];
     for (const s of area.spawns) {
-      const m = merged.find((x) => x.template === s.template);
+      const m = merged.find((x) => x.template === s.template && x.temperament === s.temperament && x.behaviorArchetype === s.behaviorArchetype);
       if (m) {
         m.count += s.count;
         m.spread = Math.max(m.spread, s.spread);
@@ -833,7 +853,9 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     const c = creatures.get(creature)!;
     const role = (c.roles[0] ?? "melee") as Role;
     const level = levelAt(i);
-    const t = templateFor(creature, c.themes.find((th) => th.status === "ready")?.id ?? c.themes[0]?.id ?? "base", role, level, "wild");
+    const wildlifeRow = wildlife.find(w => w.creature === creature);
+    const scale = wildlifeRow?.scale ?? 1;
+    const t = templateFor(creature, c.themes.find((th) => th.status === "ready")?.id ?? c.themes[0]?.id ?? "base", role, level, wildlifeRow?.faction ?? "wild", undefined, scale);
     if (!t) return null;
     const pk = PACK[role];
     return addArea({
@@ -841,6 +863,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       leash: pk.leash, roam: pk.roam, spawns: [{ template: t.id, count: packCount(role, `${creature}:${i}`, density), spread: pk.spread }],
       // a starter zone's wildlife is mostly not hostile on sight (starterDisposition): wary wolves, neutral rats
       ...(starter ? (() => { const d = starterDisposition(c.family, `${creature}:${i}`); return { temperament: DISPOSITIONS[d], ...(d === "wary" ? { territory: WANDER_RULES.waryMetres } : {}) }; })() : {}),
+      ...(wildlifeRow?.behaviorArchetype ? {behaviorArchetype:wildlifeRow.behaviorArchetype,temperament:resolveMobBehavior({behaviorArchetype:wildlifeRow.behaviorArchetype}).temperament}:{}),
       ...extra,
     });
   };
@@ -896,6 +919,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   const groupArea = (gid: string, location: string, i: number, extra: Partial<Area> = {}): Area | null => {
     const g = zb.groups.find((x) => x.id === gid);
     if (!g) return null;
+    const behavior = g.behaviorAt?.[location];
     // a place a quest sends the player to is as hard as the EASIEST quest that acts there, not as hard as its distance
     // from town says (the first quest of the arc held a causeway of level 5 dead at level 2)
     const level = questLevel.get(location) ?? levelAt(i);
@@ -904,16 +928,16 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     let roam = 0;
     for (const [k, m] of g.members.entries()) {
       const role = m.role as Role;
-      const t = templateFor(m.creature, m.theme, role, level, g.faction || g.id, undefined, m.scale);
+      const t = templateFor(m.creature, m.theme, role, level, behavior?.faction ?? (g.faction || g.id), undefined, m.scale);
       if (!t) continue;
       const pk = PACK[role];
       // a group is a mixed pack: the first member at full role size, the rest at their minimum
-      spawns.push({ template: t.id, count: k === 0 ? packCount(role, `${gid}:${location}:${i}`, "common") : pk.min, spread: Math.max(...g.members.map((mm) => PACK[mm.role as Role].spread)) });
+      spawns.push({ template: t.id, count: k === 0 ? packCount(role, `${gid}:${location}:${i}`, "common") : pk.min, spread: Math.max(...g.members.map((mm) => PACK[mm.role as Role].spread)), ...(m.behaviorArchetype?{behaviorArchetype:m.behaviorArchetype}: {}) });
       leash = Math.max(leash, pk.leash);
       roam = Math.max(roam, pk.roam);
     }
     if (!spawns.length) return null;
-    return addArea({ kind: "group", x: r2(cx(i)), z: r2(cz(i)), level, creature: g.members[0]!.creature, group: gid, location, habitats: habitatsOf(i), leash, roam, spawns, ...extra });
+    return addArea({ kind: "group", x: r2(cx(i)), z: r2(cz(i)), level, creature: g.members[0]!.creature, group: gid, location, habitats: habitatsOf(i), leash, roam, spawns, ...(behavior?.temperament ? {temperament:behavior.temperament}:{}), ...(behavior?.behaviorArchetype?{behaviorArchetype:behavior.behaviorArchetype}:{}), ...extra });
   };
   for (const camp of zoneCamps) {
     const c0 = cellOf(camp.center[0], camp.center[1]);
@@ -957,7 +981,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
         const r = reason[jz * nx + jx]!;
         if (r && Math.hypot(dx, dz) < bd) {
           bd = Math.hypot(dx, dz);
-          best = REASON[r];
+          best = REASON[r] ?? "forbidden ground";
         }
       }
     return best || "forbidden ground";
@@ -1093,7 +1117,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
         if (!t) continue;
         const pk = PACK[m.role];
         // a pack in a clearing of 8 m (or a cave chamber) keeps to it: half the open-ground spread
-        spawns.push({ template: t.id, count: m.count, spread: Math.min(pk.spread, 5) });
+        spawns.push({ template: t.id, count: m.count, spread: Math.min(pk.spread, 5), ...(m.behaviorArchetype?{behaviorArchetype:m.behaviorArchetype}: {}) });
         leash = Math.max(leash, pk.leash);
         roam = Math.max(roam, sp.y !== undefined ? Math.min(pk.roam, 4) : pk.roam);
       }
@@ -1110,7 +1134,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
         } else f.push({ level: "warn", code: "site-pack-named", message: `site pack ${sp.id}: named base ${sp.named.base} not in the catalogue` });
       }
       if (!spawns.length) continue;
-      const a = addArea({ id: `pop-${zone}-site-${sp.id}`, kind: sp.members.length ? "group" : "rare", x: sp.at[0], z: sp.at[1], yAt: sp.y, level: sp.level, creature: sp.members[0]?.creature ?? sp.named!.id, location: sp.site, habitats: i >= 0 ? habitatsOf(i) : [], leash: leash || PACK.elite.leash, roam, spawns, ...(sp.temperament ? { temperament: sp.temperament } : {}), ...(rares.length ? { rares } : {}) });
+      const a = addArea({ id: `pop-${zone}-site-${sp.id}`, kind: sp.members.length ? "group" : "rare", x: sp.at[0], z: sp.at[1], yAt: sp.y, level: sp.level, creature: sp.members[0]?.creature ?? sp.named!.id, location: sp.site, habitats: i >= 0 ? habitatsOf(i) : [], leash: leash || PACK.elite.leash, roam, spawns, ...(sp.temperament ? { temperament: sp.temperament } : {}), ...(sp.behaviorArchetype?{behaviorArchetype:sp.behaviorArchetype}:{}), ...(rares.length ? { rares } : {}) });
       row.areas += 1;
       row.creatures += a.spawns.reduce((n, x) => n + x.count, 0);
     }
@@ -1207,37 +1231,38 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       const c = creatures.get(cid);
       return !c || c.kind === "wildlife" ? "wild" : c.family === "human" ? "bandits" : c.family;
     };
-    const tplOf = (m: { creature: string; theme: string; name?: string; role?: string }, lv = level): string | null => {
+    const tplOf = (m: { creature: string; theme: string; name?: string; role?: string; scale?: number; faction?: string }, lv = level): string | null => {
       const c = creatures.get(m.creature);
       if (!c) {
         f.push({ level: "error", code: "unknown-creature", message: `${w.id}: ${m.creature} is not in the catalogue bestiary` });
         return null;
       }
-      const t = templateFor(m.creature, m.theme, (m.role ?? c.roles[0] ?? "melee") as Role, lv, faction(m.creature), undefined, 1, m.name);
+      const t = templateFor(m.creature, m.theme, (m.role ?? c.roles[0] ?? "melee") as Role, lv, m.faction ?? faction(m.creature), undefined, m.scale ?? 1, m.name);
       if (!t) return null;
       if (!wanderTemplates.has(t.id)) wanderTemplates.set(t.id, `pop-${zone}-wander-${w.id}`);
       return t.id;
     };
     const mix: Array<Record<string, unknown>> = [];
     for (const m of w.mix) {
-      const dispFirst = m.disposition ?? w.disposition ?? (m.temperament || w.temperament ? undefined : starter ? starterDisposition(familyOf(m.creature), `${w.id}:${m.creature}`) : undefined);
+      const profile = m.behaviorArchetype ?? (m.temperament || m.disposition ? undefined : w.behaviorArchetype);
+      const dispFirst = profile && profile !== 'inherit' ? (resolveMobBehavior({behaviorArchetype:profile}).temperament === 'passive' ? 'neutral' : 'aggressive') : m.disposition ?? w.disposition ?? (m.temperament || w.temperament ? undefined : starter ? starterDisposition(familyOf(m.creature), `${w.id}:${m.creature}`) : undefined);
       // fodder (passive) stands 1-3 levels under where it lives; aggressive kinds at level; rares above (their own level)
       const t = tplOf(m, dispFirst && DISPOSITIONS[dispFirst] === "passive" ? fodderLevel(level, `${w.id}:${m.creature}:${m.theme}`) : level);
       if (!t) continue;
-      const withT = m.with.map(tplOf).filter((x): x is string => !!x);
+      const withT = m.with.map(companion => tplOf(companion)).filter((x): x is string => !!x);
       // disposition: the row's, else the area's, else (starter zone) the family default; wary = territorial within waryMetres
       const disp = m.disposition ?? w.disposition ?? (m.temperament || w.temperament ? undefined : starter ? starterDisposition(familyOf(m.creature), `${w.id}:${m.creature}`) : undefined);
-      const temper = disp ? DISPOSITIONS[disp] : m.temperament;
-      mix.push({ template: t, weight: m.weight, count: m.count, ...(temper ? { temperament: temper } : {}), near: w.placement === "route" ? 3 : 4, ...(withT.length ? { with: withT } : {}) });
+      const temper = profile && profile !== 'inherit' ? resolveMobBehavior({behaviorArchetype:profile}).temperament : disp ? DISPOSITIONS[disp] : m.temperament;
+      mix.push({ template: t, weight: m.weight, count: m.count, ...(temper ? { temperament: temper } : {}), ...(profile ? {behaviorArchetype:profile}:{}), near: w.placement === "route" ? 3 : 4, ...(withT.length ? { with: withT } : {}) });
     }
     const rares: Array<Record<string, unknown>> = [];
     for (const r of w.rares) {
       if (!creatures.get(r.creature)) continue;
-      const t = templateFor(r.creature, r.theme, (r.role ?? "elite") as Role, r.level, faction(r.creature), { id: r.id, name: r.name, level: r.level, title: r.title }, r.scale);
+      const t = templateFor(r.creature, r.theme, (r.role ?? "elite") as Role, r.level, r.faction ?? faction(r.creature), { id: r.id, name: r.name, level: r.level, title: r.title }, r.scale);
       if (!t) continue;
       if (!wanderTemplates.has(t.id)) wanderTemplates.set(t.id, `pop-${zone}-wander-${w.id}`);
       named.push({ template: t.id, name: r.name, kind: "rare" });
-      rares.push({ template: t.id, chance: r.chance, lockout: r.lockout, id: r.id, temperament: "hostile" });
+      rares.push({ template: t.id, chance: r.chance, lockout: r.lockout, id: r.id, temperament: r.behaviorArchetype && r.behaviorArchetype !== 'inherit' ? resolveMobBehavior({behaviorArchetype:r.behaviorArchetype}).temperament : r.disposition ? DISPOSITIONS[r.disposition] : r.temperament ?? "hostile", ...(r.behaviorArchetype?{behaviorArchetype:r.behaviorArchetype}:{}) });
     }
     if (!mix.length) return null;
     const y = r2(field.surfaceCast(mid[0], mid[1]) ?? ground[oi] ?? 0);
@@ -1248,12 +1273,13 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       mix,
       population: w.population,
       respawn: w.solo ? [60, 120] : [90, 180],
-      hiddenFrom: w.solo ? 45 : 60,
+      hiddenFrom: w.hiddenFrom ?? (w.solo ? 45 : 60),
       // a solo walks its own short wander loop round where it rose; a roamer ranges wider
-      ...(w.placement === "route" ? { patrol, ...(loop ? { loop: true } : {}) } : { roamRange: w.solo ? [8, 20] : [25, 60] }),
+      ...(w.placement === "route" ? { patrol, ...(loop ? { loop: true } : {}) } : { roamRange: w.roamRange ?? (w.solo ? [8, 20] : [25, 60]) }),
       territory: WANDER_RULES.waryMetres,
       ...(w.hours ? { hours: w.hours } : {}),
       ...(w.disposition ? { temperament: DISPOSITIONS[w.disposition] } : w.temperament ? { temperament: w.temperament } : {}),
+      ...(w.behaviorArchetype?{behaviorArchetype:w.behaviorArchetype}:{}),
       ...(rares.length ? { rares } : {}),
     };
     const a = addArea({
@@ -1283,6 +1309,10 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       continue;
     }
     const centres: Array<[number, number]> = [];
+    if (w.at) {
+      const c = anchorOf(w.at, w.id);
+      if (c) centres.push(c);
+    }
     for (const pl of w.places ?? []) {
       const c = anchorOf({ near: pl }, w.id);
       if (c) centres.push(c);
@@ -1409,19 +1439,8 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
 
   // ---- templates stand somewhere: NpcManager adopts every npc-tagged scene subtree as a template AND a live NPC, so
   // each one stands in the first area that spawns it, as one of that pack (its count drops by one)
-  for (const t of templates.values()) {
-    const a = areas.find((x) => x.spawns.some((s) => s.template === t.id));
-    if (!a) continue;
-    t.standsAt = a.id;
-    const s = a.spawns.find((x) => x.template === t.id)!;
-    s.count -= 1;
-    if (s.count <= 0) a.spawns = a.spawns.filter((x) => x !== s);
-  }
-  for (const [tid, aid] of wanderTemplates) {
-    const t = templates.get(tid);
-    if (t && !t.standsAt) t.standsAt = aid;
-  }
-  const used = [...templates.values()].filter((t) => t.standsAt);
+  const used = placePopulationTemplates(templates, areas, wanderTemplates);
+  f.push(...populationTemplateFindings(areas, used.map((t) => t.id)));
 
   // ---- alive in view (the cap's measure): the worst circle of WANDER_RULES.viewRadius over every standing point
   let aliveWorst = { count: 0, at: [0, 0] as number[] };
@@ -1436,7 +1455,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
 
   // ---- numbers
   // a wanderer's creatures are its population (its templates are held back by the server, never standing extra)
-  const countOf = (a: Area): number => (a.life ? (a.alive ?? 0) : a.spawns.reduce((n, s) => n + s.count, 0) + used.filter((t) => t.standsAt === a.id).length);
+  const countOf = (a: Area): number => (a.life ? (a.alive ?? 0) : a.spawns.reduce((n, s) => n + s.count, 0) + used.filter((t) => t.standsAt === a.id && !t.templateOnly).length);
   const wildKm2 = (wild.length * step * step) / 1e6;
   const total = areas.reduce((n, a) => n + countOf(a), 0);
   const byCreature: Record<string, { areas: number; creatures: number; perKm2: number; placeholder: boolean; templates: string[] }> = {};
@@ -1451,7 +1470,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     }
   for (const t of used) {
     const row = (byCreature[t.creature] ??= { areas: 1, creatures: 0, perKm2: 0, placeholder: t.placeholder, templates: [] });
-    row.creatures += 1;
+    if (!t.templateOnly) row.creatures += 1;
     if (!row.templates.includes(t.id)) row.templates.push(t.id);
   }
   // a row is a placeholder when any template it shows is (a rare's area spawns nothing but its standing template)
@@ -1538,7 +1557,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
     if (mixBad.length || dispositionShares.aggressive > 0.25) {
       // name who carries the aggressive share, so the fix is a table edit, not a hunt
       const agg = lived.map((a) => ({ id: a.id, n: Math.round(sharesOf([a.data]).aggressive * lifeOf(a.data).alive) })).filter((x) => x.n > 0).sort((x, y) => y.n - x.n).slice(0, 8);
-      mixBad.push({ level: "info", code: "starter-mix-aggressive", message: `most aggressive alive: ${agg.map((x) => `${x.id} ${x.n}`).join(", ")}` });
+      console.log(`  most aggressive alive: ${agg.map((x) => `${x.id} ${x.n}`).join(", ")}`);
     }
     f.push(...mixBad);
     console.log(`  dispositions (alive): passive ${Math.round(dispositionShares.passive * 100)}%, wary ${Math.round(dispositionShares.wary * 100)}%, aggressive ${Math.round(dispositionShares.aggressive * 100)}%`);
@@ -1614,9 +1633,9 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       fills,
       templates: used.length,
       placeholderTemplates: placeholders.length,
-      placeholderCreatures: areas.reduce((n, a) => n + a.spawns.filter((s) => templates.get(s.template)?.placeholder).reduce((m, s) => m + s.count, 0), 0) + placeholders.length,
+      placeholderCreatures: areas.reduce((n, a) => n + a.spawns.filter((s) => templates.get(s.template)?.placeholder).reduce((m, s) => m + s.count, 0), 0) + placeholders.filter((t) => !t.templateOnly).length,
       artTemplates: artRows.length,
-      artCreatures: areas.reduce((n, a) => n + a.spawns.filter((s) => templates.get(s.template)?.art).reduce((m, s) => m + s.count, 0), 0) + artRows.length,
+      artCreatures: areas.reduce((n, a) => n + a.spawns.filter((s) => templates.get(s.template)?.art).reduce((m, s) => m + s.count, 0), 0) + artRows.filter((t) => !t.templateOnly).length,
       aliveInView: { ...aliveWorst, radius: WANDER_RULES.viewRadius, cap: WANDER_RULES.viewCap, how: "every area by its alive share inside the circle: a pack at its origin, an anywhere/solo disc spread over its land cells, a route over its points; time-gated areas (night extras) counted as out" },
       worstInView: { count: worst, at: worstAt, p95, view, budget, overShare: r2(over / Math.max(1, views.length)), how: "every standing point of the zone grid (incl. roads and towns); every area whose origin lies within view + its spread + roam counts with its whole pack, as if woken and alive; all directions, no occlusion or frustum" },
       coverage: { gap, coveredShare: r2(covered / Math.max(1, wild.length)), coverableShare: r2(coverable / Math.max(1, wild.length)), largestEmptyAcross: Math.round(largest * 2), budgetSkips },
@@ -1654,6 +1673,36 @@ export interface NamedTemplate { template: string; name: string; kind: "rare" | 
 /** One `spawnArea.rares` row of the live scene inside the zone. */
 export interface RareEntry { area: string; template: string; chance: number }
 
+/** Keep conditional rare bodies available without taking an ordinary pack slot or making the rare always up. */
+export function placePopulationTemplates(templates: ReadonlyMap<string, Template>, areas: Area[], wanderTemplates: ReadonlyMap<string, string> = new Map()): Template[] {
+  for (const t of templates.values()) {
+    const a = areas.find((x) => x.spawns.some((s) => s.template === t.id));
+    if (a) {
+      t.standsAt = a.id;
+      const s = a.spawns.find((x) => x.template === t.id)!;
+      t.standingBehavior = mobBehaviorOverride(s, a);
+      s.count -= 1;
+      if (s.count <= 0) a.spawns = a.spawns.filter((x) => x !== s);
+    } else {
+      const heldAt = areas.find((x) => x.rares?.some((r) => r["template"] === t.id))?.id ?? wanderTemplates.get(t.id);
+      if (heldAt) { t.standsAt = heldAt; t.templateOnly = true; }
+    }
+  }
+  return [...templates.values()].filter((t) => t.standsAt);
+}
+
+/** A schema-valid area still cannot spawn a scene template the batch omitted. */
+export function populationTemplateFindings(areas: readonly Area[], emitted: readonly string[]): Finding[] {
+  const ids = new Set(emitted), findings: Finding[] = [];
+  for (const a of areas) {
+    const mix = (a.life?.["mix"] ?? []) as Array<{ template: string; with?: string[] }>;
+    const rares = [...(a.rares ?? []), ...((a.life?.["rares"] ?? []) as Record<string, unknown>[])];
+    const refs = [...a.spawns.map((s) => s.template), ...mix.flatMap((m) => [m.template, ...(m.with ?? [])]), ...rares.map((r) => String(r["template"]))];
+    for (const id of new Set(refs)) if (!ids.has(id)) findings.push({ level: "error", code: "missing-spawn-template", message: `${a.id}: spawn table references ${id}, but its NPC template is not emitted` });
+  }
+  return findings;
+}
+
 /** The placeholder-rare lint: rares / named creatures no area rolls (always up), and chances that make one nearly always up. */
 export function rareFindings(named: readonly NamedTemplate[], entries: readonly RareEntry[]): Finding[] {
   const f: Finding[] = [];
@@ -1681,12 +1730,12 @@ export function rareFindings(named: readonly NamedTemplate[], entries: readonly 
  */
 export const STARTER_LIFE = { perKm2: 25, hostileShare: 0.5, ambientMax: 2 } as const;
 
-type MixLike = { template: string; weight?: number; count?: [number, number]; temperament?: string };
+type MixLike = { template: string; weight?: number; count?: [number, number]; temperament?: string; behaviorArchetype?: MobBehaviorArchetype };
 export interface LifeArea {
   id: string;
   /** Ambient life (wildlife, fill, an `anywhere` area), as opposed to a camp or a site's pack. */
   ambient: boolean;
-  data: { spawns?: Array<{ template: string; count?: number }>; mix?: MixLike[]; placement?: string; population?: number; unique?: boolean; temperament?: string };
+  data: { spawns?: Array<{ template: string; count?: number; temperament?: string; behaviorArchetype?: MobBehaviorArchetype }>; mix?: MixLike[]; placement?: string; population?: number; unique?: boolean; temperament?: string; behaviorArchetype?: MobBehaviorArchetype };
 }
 
 /** Creatures alive at once, and how many of them attack on sight (spawnArea semantics, as SpawnAreaManager's populationOf). */
@@ -1698,9 +1747,9 @@ export function lifeOf(d: LifeArea["data"]): { alive: number; hostile: number } 
     placement === "route" ? (d.unique ? 1 : (d.population ?? 1))
     : placement === "anywhere" ? (d.population ?? (mix.length ? 6 : counted))
     : counted + (mix.length ? (d.population ?? mix.length) : 0);
-  const hostileOf = (t: string | undefined): boolean => (t ?? d.temperament ?? "hostile") === "hostile";
+  const hostileOf = (row: MobBehaviorInput): boolean => resolveMobBehavior(mobBehaviorOverride(row, d)).temperament === "hostile";
   // the table a roll draws from: the mix by weight, else the spawns by count
-  const rows = mix.length ? mix.map((m) => ({ w: m.weight ?? 1, hostile: hostileOf(m.temperament) })) : (d.spawns ?? []).map((s) => ({ w: s.count ?? 1, hostile: hostileOf(undefined) }));
+  const rows = mix.length ? mix.map((m) => ({ w: m.weight ?? 1, hostile: hostileOf(m) })) : (d.spawns ?? []).map((s) => ({ w: s.count ?? 1, hostile: hostileOf(s) }));
   const total = rows.reduce((n, r) => n + r.w, 0);
   const share = total > 0 ? rows.reduce((n, r) => n + (r.hostile ? r.w : 0), 0) / total : 1;
   return { alive, hostile: alive * share };
@@ -1713,7 +1762,7 @@ export function sharesOf(areas: ReadonlyArray<LifeArea["data"]>): Shares {
     const { alive } = lifeOf(d);
     const mix = d.mix ?? [];
     // the table a roll draws from, as lifeOf: the mix by weight, else the spawns by count
-    const rows = mix.length ? mix.map((m) => ({ w: m.weight ?? 1, t: m.temperament ?? d.temperament ?? "hostile" })) : (d.spawns ?? []).map((sp) => ({ w: sp.count ?? 1, t: d.temperament ?? "hostile" }));
+    const rows = mix.length ? mix.map((m) => ({ w: m.weight ?? 1, t: resolveMobBehavior(mobBehaviorOverride(m,d)).temperament })) : (d.spawns ?? []).map((sp) => ({ w: sp.count ?? 1, t: resolveMobBehavior(mobBehaviorOverride(sp,d)).temperament }));
     const total = rows.reduce((n, r) => n + r.w, 0) || 1;
     for (const r of rows) sum[r.t === "passive" ? "passive" : r.t === "territorial" ? "wary" : "aggressive"] += (alive * r.w) / total;
   }
@@ -1756,7 +1805,7 @@ function baseScene(ctx: Ctx, zone: string): { doc: { entities: Record<string, { 
   return { doc: applyOps(live, readJson(inv) as never, reg).doc as never, file, undone: true };
 }
 
-function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], disabledCamps: string[], kit: HumanKit | null, f: Finding[]): Op[] {
+export function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], disabledCamps: string[], kit: HumanKit | null, f: Finding[]): Op[] {
   const ops: Op[] = [];
   // a body prefab that declares a `level` prop gets the template's (combat-actor level: armour and crit maths)
   const hasLevelProp = (id: string): boolean => {
@@ -1838,11 +1887,12 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
     const k = mates.indexOf(t);
     const ring = mates.length > 1 ? 2.2 : 0;
     const at = [r2(a.x + Math.cos((k / mates.length) * Math.PI * 2) * ring), r2(a.y + 1.2), r2(a.z + Math.sin((k / mates.length) * Math.PI * 2) * ring)];
-    const brain = { faction: t.faction, hostileTo: "player", speed: t.role === "swarm" ? 5 : 4.6, aggroRange: pk.aggro, deaggroRange: pk.aggro * 2, attackInterval: t.role === "elite" ? 2.4 : 1.8, alertRadius: 12 };
+    const standingBehavior = t.standingBehavior ?? mobBehaviorOverride(a);
+    const brain = { faction: t.faction, hostileTo: "player", speed: t.role === "swarm" ? 5 : 4.6, aggroRange: pk.aggro, deaggroRange: pk.aggro * 2, attackInterval: t.role === "elite" ? 2.4 : 1.8, alertRadius: 12, ...standingBehavior };
     if (t.body === "human" && kit && t.dress) {
       const built = humanTemplateOps(kit, {
         id: t.id, label, tags, at, faction: t.faction, level: t.level, hp, xp, abilities: t.abilities, dress: t.dress, loot: t.loot ?? "", pin: kit.cfg.looks?.[t.creature],
-        brain: { hostileTo: brain.hostileTo, speed: brain.speed, aggroRange: brain.aggroRange, deaggroRange: brain.deaggroRange, attackInterval: brain.attackInterval, alertRadius: brain.alertRadius, leash: a.leash, roam: a.roam },
+        brain: { hostileTo: brain.hostileTo, speed: brain.speed, aggroRange: brain.aggroRange, deaggroRange: brain.deaggroRange, attackInterval: brain.attackInterval, alertRadius: brain.alertRadius, leash: a.leash, roam: a.roam, ...standingBehavior },
       });
       t.appearance = built.appearance;
       // the same contract as a prefab mob: brain + caster + actor, and every id/actor on the <root>-<part> pattern
@@ -1854,7 +1904,11 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
     }
     if (t.body !== "capsule") {
       const paintOv = t.material ? meshKeys(t.body).map((key) => ({ path: `${key}/components/mesh/material`, value: t.material })) : [];
-      const ov = [...(t.loot ? [{ path: "combat/components/script/params/loot", value: t.loot }] : []), ...(t.scale ? sizeOverrides(t.body, t.scale) : []), ...paintOv];
+      // The one standing authored common needs the area's mood too; SpawnAreaManager supplies it to later clones.
+      const moodOv = Object.keys(standingBehavior).length ? Object.entries((JSON.parse(fs.readFileSync(assetPath(ctx.paths.projectDir, `prefabs/${t.body}.json`), "utf8")) as {entities:Record<string,{components?:{script?:{name:string}}}>}).entities)
+        .filter(([,e])=>e.components?.script?.name === "mob-brain")
+        .flatMap(([key])=>Object.entries(standingBehavior).map(([param,value])=>({path:`${key}/components/script/params/${param}`,value}))) : [];
+      const ov = [...(t.loot ? [{ path: "combat/components/script/params/loot", value: t.loot }] : []), ...(t.scale ? sizeOverrides(t.body, t.scale) : []), ...paintOv, ...moodOv];
       ops.push({ op: "add-entity", id: t.id, entity: { name: label, parent: null, tags, components: { transform: { position: at, ...(t.scale ? { scale: [t.scale, t.scale, t.scale] } : {}) }, prefab: { prefabId: t.body, props: { actor: t.id, faction: t.faction, maxHp: hp, xpValue: xp, ...(hasLevelProp(t.body) ? { level: t.level } : {}), aggroRange: brain.aggroRange, deaggroRange: brain.deaggroRange }, ...(ov.length ? { overrides: ov } : {}) } } } as never });
       continue;
     }
@@ -1886,7 +1940,7 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
     if (t.scale) sizeOps(t.id, ops.slice(capsuleStart) as never, t.scale);
   }
   for (const a of areas) {
-    const spawnArea = { radius: a.radius, sleepRadius: a.sleepRadius, idleSeconds: a.idleSeconds, spawns: a.spawns, leash: a.leash, roam: a.roam, ...(a.temperament ? { temperament: a.temperament } : {}), ...(a.territory ? { territory: a.territory } : {}), ...(a.rares?.length ? { rares: a.rares } : {}), ...(a.life ?? {}) };
+    const spawnArea = { radius: a.radius, sleepRadius: a.sleepRadius, idleSeconds: a.idleSeconds, spawns: a.spawns, leash: a.leash, roam: a.roam, ...(a.temperament ? { temperament: a.temperament } : {}), ...(a.behaviorArchetype?{behaviorArchetype:a.behaviorArchetype}:{}), ...(a.territory ? { territory: a.territory } : {}), ...(a.rares?.length ? { rares: a.rares } : {}), ...(a.life ?? {}) };
     const tags = ["populate", `zone:${zone}`, `pop:${a.kind}`, `creature:${a.creature}`, ...(a.group ? [`group:${a.group}`] : []), ...(a.location ? [`location:${a.location}`] : []), `level:${a.level}`];
     if (a.camp) {
       const prev = doc.entities[a.camp]?.tags ?? ["camp", `zone:${zone}`];

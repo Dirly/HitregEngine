@@ -473,5 +473,9 @@
       "maxBlocked": 0.1,
       "maxEmpty": 0.25
     }
+  },
+  "scale": {
+    "about": "concept-scale.mjs gate: every painted size (authoring/concept-sizes.json, measured through the painting's camera with its figure as a 1.8 m ruler) must be built within +-tolerance (Moon-Deep 2026-11-01: the rooms were a third of the painted size)",
+    "tolerance": 0.15
   }
 }

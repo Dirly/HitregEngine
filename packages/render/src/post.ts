@@ -1,7 +1,6 @@
 import * as THREE from "three/webgpu";
 import {
   Fn,
-  convertToTexture,
   cos,
   dot,
   emissive,
@@ -897,6 +896,9 @@ const BLOOM_INPUT_CEILING = 4;
  */
 const BLOOM_RESOLUTION_SCALE = 0.35;
 
+/** The bloom chain renders every `every`th frame; the frames between reuse its output. `?bloomEvery=1` is the A/B. */
+export const bloomCadence = { every: 2 };
+
 /**
  * GTAO at full resolution is the most expensive thing in this stack by a wide
  * margin, and its output is a low-frequency occlusion term that survives
@@ -1057,9 +1059,15 @@ export class PostChain {
     // spare emissive surfaces below, and keeping it fixed means a pass added
     // later can never accidentally reintroduce the bug by taking full colour
     // from the wrong place. Anything needing the whole frame takes `output`.
-    const mrtTargets: Record<string, Tsl> = { output, emissive };
+    // Match the colour attachment's coverage and blending. A vec3 emission
+    // target acquires alpha 1, and Three defaults extra MRT attachments to
+    // NoBlending: transparent ray/particle cards then overwrite whole rectangles
+    // which AO adds back as opaque emission, even where their alpha map is zero.
+    const mrtTargets: Record<string, Tsl> = { output, emissive: vec4(emissive, output.a) };
     if (has("motionBlur")) mrtTargets["velocity"] = velocity;
-    scenePass.setMRT(mrt(mrtTargets));
+    const sceneMrt = mrt(mrtTargets);
+    sceneMrt.setBlendMode("emissive", sceneMrt.getBlendMode("output"));
+    scenePass.setMRT(sceneMrt);
 
     const sceneColor = scenePass.getTextureNode("output") as Tsl;
     const emissiveColor = scenePass.getTextureNode("emissive") as Tsl;
@@ -1131,12 +1139,10 @@ export class PostChain {
       this.uwWobble = uniform(uw.wobble);
       this.uwWobbleSpeed = uniform(uw.wobbleSpeed);
       this.uwWobbleScale = uniform(uw.wobbleScale);
-      // Re-sampling the picture at a swayed uv needs a TEXTURE, and by here
-      // the colour is a chain of nodes — so the sway (and only the sway) costs
-      // the copy `convertToTexture` makes. wobble 0 skips it entirely, which
-      // is why it is part of the pipeline signature.
-      const swayed = uw.wobble > 0 ? (convertToTexture(color) as Tsl) : null;
-      if (swayed) this.disposables.push(swayed as unknown as Disposable);
+      // Re-sampling the picture at a swayed uv needs a TEXTURE, and by here the colour is a chain of nodes. Copying it
+      // (`convertToTexture`) was a full-screen pass on EVERY frame for a sway only seen under water, so a submerged
+      // camera samples the scene pass's own colour instead: it loses AO and sun shafts, which water has hidden anyway.
+      const swayed: Tsl = uw.wobble > 0 ? sceneColor : null;
       const viewZ = scenePass.getViewZNode() as Tsl;
       const amount = this.uwAmount;
       const density = this.uwDensity;
@@ -1159,7 +1165,7 @@ export class PostChain {
           sin(screenUV.y.mul(wobbleScale).add(t) as Tsl),
           sin(screenUV.x.mul(wobbleScale).add(t.mul(1.37)) as Tsl),
         ).mul(wobble.mul(amount));
-        base = swayed.sample(screenUV.add(sway)) as Tsl;
+        base = amount.greaterThan(0).select(swayed.sample(screenUV.add(sway)), color) as Tsl;
       }
       // Absorption: everything fades toward the water's colour with the
       // distance its light travelled through the water. Depth comes from the
@@ -1267,6 +1273,11 @@ export class PostChain {
       const bloomInput = tslMin(emissiveColor, BLOOM_INPUT_CEILING) as Tsl;
       const bloomPass = bloom(bloomInput, fx.bloom.strength, fx.bloom.radius, fx.bloom.threshold);
       bloomPass.setResolutionScale(BLOOM_RESOLUTION_SCALE);
+      // The blur chain is 12 render passes. A glow is low-frequency and its strength here small, so every other frame
+      // adds the last frame's result: half the passes, and nothing to see (`bloomCadence`).
+      const renderBloom = bloomPass.updateBefore.bind(bloomPass);
+      let bloomFrame = 0;
+      bloomPass.updateBefore = (frame) => (bloomFrame++ % bloomCadence.every === 0 ? renderBloom(frame) : undefined);
       this.bloomNode = bloomPass;
       this.disposables.push(bloomPass as unknown as Disposable);
       // additive bloom in working space
@@ -1405,7 +1416,9 @@ export class PostChain {
       this.sharpenAmount = uniform(sharpenSharpness(fx.sharpen.amount));
       const sharpenPass = sharpenNode(color, this.sharpenAmount);
       this.disposables.push(sharpenPass as unknown as Disposable);
-      color = sharpenPass;
+      // Its own texture, not the node: FXAA samples a texture, and handed the node it copies it into another full-screen
+      // render target first.
+      color = sharpenPass.getTextureNode();
     }
 
     if (has("fxaa")) {

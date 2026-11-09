@@ -3,6 +3,28 @@ import fs from "node:fs";
 import path from "node:path";
 
 interface Change { project: string | null; file: string; content: string | null }
+export const isBinaryAsset = (file: string): boolean => /^(models\/.*\.(glb|gltf)|textures\/.*\.(png|jpe?g|webp))$/i.test(file.replaceAll("\\", "/"));
+
+/** Binary saves carry only an index-invalidation notice, never binary bytes over WebSocket. */
+export function binaryAssetChangePublisher(publish: (root: string, file: string) => void) {
+  const pending = new Map<string, ReturnType<typeof setTimeout>>(), versions = new Map<string, string>();
+  let closed = false;
+  return {
+    enqueue(root: string, file: string): void {
+      if (closed || !isBinaryAsset(file)) return;
+      const full = path.join(root, file); clearTimeout(pending.get(full));
+      pending.set(full, setTimeout(() => {
+        pending.delete(full);
+        void fs.promises.stat(full).then(stat => {
+          const version = `${stat.mtimeMs}:${stat.size}`;
+          if (closed || versions.get(full) === version) return;
+          versions.set(full, version); publish(root, file);
+        }).catch(() => { /* A removed/incomplete file remains at its last valid registered revision. */ });
+      }, 40));
+    },
+    close(): void { closed = true; for (const timer of pending.values()) clearTimeout(timer); pending.clear(); },
+  };
+}
 
 /** Filter before WebSocket serialization: an unrelated world save can be 17 MB. */
 export function scopedAssetChange(change: Change, scope: ReadonlySet<string> | null | undefined): Change | null {

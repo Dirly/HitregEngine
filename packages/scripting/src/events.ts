@@ -35,6 +35,7 @@ export class EventBus {
   private queue: Array<{ name: string; payload: unknown; remote?: boolean; from?: string }> = [];
   private readonly handlers = new Map<string, Set<EventHandler>>();
   private readonly warnedUnregistered = new Set<string>();
+  private readonly reportedUnheard = new Set<string>();
   private readonly traceBuffer: TraceEntry[] = [];
   private outboxBuffer: Array<{ name: string; payload: unknown }> = [];
   private commandBuffer: Array<{ name: string; payload: unknown }> = [];
@@ -143,6 +144,24 @@ export class EventBus {
     return () => {
       set.delete(cb);
     };
+  }
+
+  /** How many handlers are subscribed to `name` right now. */
+  listenerCount(name: string): number {
+    return this.handlers.get(name)?.size ?? 0;
+  }
+
+  /**
+   * True the FIRST time it is asked about a `name` nobody listens to, false
+   * after (per bus) and whenever someone does listen. An emitter whose event
+   * is a request another script must answer (mob-brain's `mob.attack`) uses
+   * it to warn once that the answer is missing from the scene, instead of the
+   * request vanishing silently on every swing.
+   */
+  firstUnheard(name: string): boolean {
+    if (this.listenerCount(name) > 0 || this.reportedUnheard.has(name)) return false;
+    this.reportedUnheard.add(name);
+    return true;
   }
 
   /** Subscribe for a single delivery. Returns the unsubscribe function. */

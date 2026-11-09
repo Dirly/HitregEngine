@@ -59,6 +59,11 @@ not whether every enemy or object is magical.
 
 ## Names and quests follow the adventure
 
+Before assigning a character, deity or named creature a name, use
+[the name registry](../name-registry.md) to look up its identity and reserve the
+chosen name. Keep aliases attached to the same identity, and check dungeon and
+town names together in the owning game's shared namespace.
+
 Name a place for its memorable feature, creature, event or mystery. A player
 should be able to distinguish it from the next stop and remember why they went
 there. Adding Black, Blood, Hollow, Cursed or Forsaken to a trade is insufficient.

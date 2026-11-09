@@ -1,8 +1,10 @@
 // One command: build a deployable, self-contained game bundle.
 //   node tools/publish.mjs <project> <entryScene> [--console|--no-console]
-//                          [--gateway <url> | --server <ws-url>] [--out <dir>]
+//                          [--gateway <url> | --server <ws-url>] [--out <dir>] [--no-compress]
 //   → dist/<project>/  (index.html + assets/js + content/ + manifest.json)
 // Drop the folder on ANY static host (Cloudflare R2, itch, Netlify, …).
+// The bundle is compressed without changing a pixel or a vertex (tools/publish-compress.mjs, docs/hosting.md →
+// "What publish compresses"); --no-compress leaves it as exported, for an A/B. Source projects are never written.
 //
 // The developer console (/time, /weather, …) is STRIPPED by default: the
 // module is never compiled into the bundle, so a published game has no console
@@ -35,7 +37,7 @@ for (let i = 0; i < args.length; i++) {
 }
 const [project, entry] = positional;
 if (!project || !entry) {
-  console.error("usage: node tools/publish.mjs <project> <entryScene.scene.json> [--console|--no-console] [--gateway <url> | --server <ws-url>] [--out <dir>]");
+  console.error("usage: node tools/publish.mjs <project> <entryScene.scene.json> [--console|--no-console] [--gateway <url> | --server <ws-url>] [--out <dir>] [--no-compress]");
   process.exit(1);
 }
 if (values.gateway && !/^https?:\/\//.test(values.gateway)) {
@@ -64,7 +66,7 @@ if ((values.gateway || values.server) && mode !== "server") {
   process.exit(1);
 }
 const out = values.out ?? `dist/${project}`;
-console.log("1/3 content + manifest…");
+console.log("1/4 content + manifest…");
 execFileSync(process.execPath, ["tools/export-game.mjs", project, entry, out], { stdio: "inherit" });
 {
   // the multiplayer half of the manifest: what export-game cannot know
@@ -80,13 +82,22 @@ execFileSync(process.execPath, ["tools/export-game.mjs", project, entry, out], {
   };
   writeFileSync(file, JSON.stringify(manifest, null, 2));
 }
-console.log("2/3 building editor-free runtime…");
+console.log("2/4 building editor-free runtime…");
 const require = createRequire(import.meta.url);
 const vite = join(dirname(require.resolve("vite/package.json")), "bin/vite.js");
 execFileSync(process.execPath, [vite, "build"], { stdio: "inherit", env: { ...process.env, GAME: "1", HITREG_PROJECT: project, HITREG_CONSOLE: withConsole ? "1" : "0" } });
-console.log("3/3 assembling bundle…");
+console.log("3/4 assembling bundle…");
 cpSync("dist-game/play.html", `${out}/index.html`);
 cpSync("dist-game/assets", `${out}/assets`, { recursive: true });
+if (flags.has("--no-compress")) console.log("4/4 compression skipped (--no-compress)");
+else {
+  console.log("4/4 compressing (lossless)…");
+  const { compressBundle } = await import("./publish-compress.mjs");
+  const { models, images, png, sidecars, verified } = await compressBundle(out);
+  const mb = (n) => `${(n / 1e6).toFixed(1)} MB`;
+  console.log(`  models ${mb(models.before)} → ${mb(models.after)} (${verified} proven equal to source, ${models.kept} shipped as they came)`);
+  console.log(`  ${images.shared} shared images in content/shared, ${mb(images.stored)}; loose PNGs ${mb(png.before)} → ${mb(png.after)}; ${sidecars.files} sidecars, ${mb(sidecars.bytes)}`);
+}
 console.log(`\n✅ ${out}/  — serve on any static host for a playable URL.`);
 console.log(`   see it as players will: pnpm -F playground preview:game ${out}  → http://localhost:4180/${mode === "server" ? "?server=ws://127.0.0.1:8787  (with: pnpm -F @hitreg/server serve --scene <scene>)" : ""}`);
 console.log(withConsole ? "   developer console: INCLUDED (--no-console to strip it)" : "   developer console: stripped");

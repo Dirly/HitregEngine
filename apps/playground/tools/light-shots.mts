@@ -17,6 +17,8 @@
  *     [--no-refs]               clean frames: the reference characters and the grey sphere are hidden (read shots,
  *                               loading art); their brightness numbers are then meaningless
  *     [--url http://localhost:<p>] use a running dev app; otherwise starts its own vite (agent-test config) on --port
+ *     [--webgl]                 exercise Three's WebGL2 fallback in this private browser
+ *     [--sync-pipelines]        compare the supported synchronous renderer path (precompile=0, asyncPipelines=0)
  *     [--port 5291]             (default 5291) and stops it by PID afterwards. Never point --url at a server you
  *                               do not own: the page blocks every dev-server write, but it still loads the scene.
  *     [--distance 4] [--gap 2]  camera-to-characters metres, metres between the two characters
@@ -24,13 +26,26 @@
  *                               scenes: the rig camera gave black frames against static massing boxes); a fixed camera
  *                               under the ground is refused (exit 2) on every run
  *     [--keep-mobs] [--headed] [--pick-only]   (--pick-only: write the auto spots and stop)
+ *     [--no-clear-view]         skip the clear-view step (tools/_clear-view.mts): by default a fixed camera (or a spot with
+ *                               "aim" [x,y,z], the place centre) is tested for a clear line of sight through the drawn
+ *                               world (terrain, meshes, vegetation instances) and moved to the nearest clear pose
+ *                               (orbit round the aim, lift, pull in); none clear: `NO CLEAR VIEW spot <name>`, record clearView.blocked
  *     [--spot-timeout 90]       seconds one spot may take; a stalled spot prints `TIMEOUT spot <name>` and is skipped
  *     [--ab]                    per spot, time the cheap world extras OFF vs ON in the same session (vsync off)
  *     [--diag]                  print each phase as it starts, dev-server error lines and the browser processes every 2 s
+ *     [--places all]            the dev app's place streaming (?places=all|none|stream; default stream): `all` builds every
+ *                               installed place at load, so far and iso views show whole places (place-build render-batch)
  *     [--scope [250]]           scene-scoped load (a place shot on a big world): the dev app opens with ?at=<first spot>
  *                               &streamRadius=<m> (src/scene-scope.ts: every streaming ring clamped to that many metres)
  *                               and the served scene's player spawn moved to the first spot, so boot loads only the
  *                               place's chunks (the whole skelmorrow world timed out at 240 s headless)
+ *     [--settle-max 120]        seconds a settle waits at most for the world to go still (draw calls steady, nothing
+ *                               loading); render-batch passes 45 (t-batch 2026-10-31: away from the spawn the live world
+ *                               never went still and every spot sat out two full 120 s settles, ~250 s a spot; t-batch2:
+ *                               that was the body left behind — see below — and travelling never ending)
+ *   After travel the body must stand within 4 m of the spot (travelled once more, else the spot fails and is retried on
+ *   a fresh session); the record's spots[].timing has travel / settle / frames / total seconds and any settle that hit
+ *   --settle-max (with why: travelling, loading, draw calls changing). The log line per spot carries the same.
  *     [--watchdog-min 10]       exit 3 (browser + own vite killed) when no frame lands within this many minutes of the start
  *                               or of a spot's start (a hung browser once held a heavy slot 61 min with 0 frames)
  * spots.json: [{ "name": "zone-3", "x": 1200, "z": -1500, "facing": 180 }]  (optional "pitch" radians and "distance" m — past the rig's zoom cap = an aerial, the cap is widened for the run;
@@ -39,6 +54,13 @@
  *   noon the sun, whose arc leans north, lights the characters' faces). Optional "y" for interiors (floor height).
  *   Optional "camera" [x,y,z] + "target" [x,y,z]: a FIXED camera (a contract shot list): the body still stands at x/z
  *   (streaming centre), the rig is held off and the camera put at "camera" looking at "target" for the spot.
+ *   Optional "figure" [x,y,z] (feet) + "figureFacing" (compass deg the figure looks, default 0): a PERSON IN THE GREY BOX:
+ *   the dark-gear reference (the real human body model, idle pose, never a capsule) stands exactly there, the other
+ *   references hidden, shown even with --no-refs (tools/dungeon-pipeline/concept-scale.mjs paintingCamera writes both).
+ *   Optional "fov" (vertical degrees, fixed cameras only: a narrow near-isometric overview), "times" [12] (the hours this
+ *   spot is shot at, a subset of --times) and "review": true (a review-only overview, place-build's iso-* views: shot and
+ *   on the sheet, never judged by the wash band or the far-fire read, no light-layer frames, drawn with the atmospheric fog off, and
+ *   its body kept at x/z: never moved to the camera by the cut-out rule).
  *
  * Out: <out>/<scene>[-<label>]-sheet.png (rows = spots, columns = times; each tile labelled with the clock and the
  * luma read off it), every frame as <scene>[-<label>]/<spot>-<hh>.png, and <scene>[-<label>].json with per frame:
@@ -62,9 +84,10 @@ import { createWorldField, worldRecipeSchema, regionAt, type WorldField, type Wo
 import { loadPlaywright as loadPlaywrightModule } from "./_playwright.mjs";
 import { READ_ONLY_POSTS } from "./_readonly-posts.mjs";
 import { frameWatchdog } from "./_frame-watchdog.mts";
+import { CLEAR_RIG_MIN_M, clearViewCandidates, sightRays, type ClearViewRecord } from "./_clear-view.mts";
 import { SHOT_SPOT_TIMEOUT_S, withSpotTimeout } from "./_run-capped.mts";
 import { changedShare, showVerdict, type ShowRect, type ShowResult } from "./_shot-shows.mts";
-import { FAR_FIRE_M, judgeFrame, layerDelta, washRun, type FireSpot } from "./_light-wash.mts";
+import { isFarFire, judgeFrame, layerDelta, washRun, type FireSpot } from "./_light-wash.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -105,7 +128,7 @@ const W = 1280, H = 720;
 const stem = `${SCENE}${LABEL ? `-${LABEL}` : ""}`;
 fs.mkdirSync(path.join(OUT, stem), { recursive: true });
 
-type Spot = { name: string; x: number; z: number; facing?: number; y?: number; pitch?: number; distance?: number; camera?: [number, number, number]; target?: [number, number, number]; shows?: string[] };
+type Spot = { name: string; x: number; z: number; facing?: number; y?: number; pitch?: number; distance?: number; camera?: [number, number, number]; target?: [number, number, number]; shows?: string[]; fov?: number; times?: number[]; review?: boolean; figure?: [number, number, number]; figureFacing?: number; aim?: [number, number, number] };
 type V3 = [number, number, number];
 
 // -- scene + world (read-only) -------------------------------------------------------------------
@@ -208,7 +231,10 @@ let spots: Spot[];
 /** --scope [m]: scene-scoped load radius in metres (null = the whole world as authored). */
 const SCOPE: number | null = (() => { const i = argv.indexOf("--scope"); if (i < 0) return null; const v = Number(argv[i + 1]); return Number.isFinite(v) && v > 0 ? v : 250; })();
 /** The dev-app query for a scene-scoped load (src/scene-scope.ts), or "". */
-const scopeQuery = (): string => (SCOPE !== null && spots[0] ? `&at=${Math.round(spots[0].x)},${Math.round(spots[0].z)}&streamRadius=${SCOPE}` : "");
+const scopeQuery = (): string => (SCOPE !== null && spots[0] ? `&at=${Math.round(spots[0].x)},${Math.round(spots[0].z)}&streamRadius=${SCOPE}` : "") + placesQuery() + (argv.includes('--sync-pipelines') ? '&precompile=0&asyncPipelines=0' : '');
+// --places all|none|stream: the dev app's place streaming (src/place-streamer.ts `?places=`). A batch that hops over places
+// far apart passes `all`: streamed, a far view shows only the landmark subtrees (i-drafts2 2026-11-03)
+const placesQuery = (): string => { const v = arg("places"); return v === "all" || v === "none" || v === "stream" ? `&places=${v}` : ""; };
 const spotsArg = arg("spots");
 if (spotsArg) spots = JSON.parse(fs.readFileSync(spotsArg, "utf8")) as Spot[];
 else {
@@ -254,12 +280,15 @@ const fullRenderM: number = (() => {
   return SCOPE !== null ? Math.min(m, Math.max(1, Math.ceil(SCOPE / cell)) * cell) : m;
 })();
 const cutoutFree = (sp: Spot): number => (sp.camera ? fullRenderM - Math.hypot(sp.camera[0] - sp.x, sp.camera[2] - sp.z) : fullRenderM);
+// a REVIEW overview (iso-*: a camera hundreds of metres up, nothing near it) is exempt: its body must stay at the place,
+// or the place itself streams as HLOD / out of the --scope ring (r-found2 2026-10-31: Red Dial's live iso frames were haze
+// and sky, the body moved 450 m to the camera)
 spots = spots.map((sp) => {
-  if (!sp.camera || sp.y !== undefined || cutoutFree(sp) >= CUTOUT_FREE_M) return sp;
+  if (!sp.camera || sp.y !== undefined || sp.review || cutoutFree(sp) >= CUTOUT_FREE_M) return sp;
   console.log(`  ${sp.name}: streams from the camera (the spot stood ${Math.round(Math.hypot(sp.camera[0] - sp.x, sp.camera[2] - sp.z))} m off it; full meshes reach ${fullRenderM} m)`);
   return { ...sp, x: Math.round(sp.camera[0]), z: Math.round(sp.camera[2]) };
 });
-const cutoutFaults = spots.filter((sp) => cutoutFree(sp) < CUTOUT_FREE_M);
+const cutoutFaults = spots.filter((sp) => !sp.review && cutoutFree(sp) < CUTOUT_FREE_M);
 if (cutoutFaults.length) { console.error(`FAIL cut-outs: impostor cut-outs would draw within ${CUTOUT_FREE_M} m of the camera at ${cutoutFaults.map((sp) => `${sp.name} (full meshes end ${Math.round(cutoutFree(sp))} m out)`).join(", ")}`); process.exitCode = 1; }
 // under the heavy-lock wrapper (it exports HEAVY_LOCK): the slot's label carries the spot count, so `heavy status` shows the size of the run
 if (process.env.HEAVY_LOCK) {
@@ -419,6 +448,7 @@ const { chromium } = await loadPlaywright();
 const AB = argv.includes("--ab");
 /** --no-refs: hide the reference characters and sphere (clean read shots / loading art; the frame then has no ref numbers). */
 const NO_REFS = argv.includes("--no-refs");
+const NO_CLEAR_VIEW = argv.includes("--no-clear-view");
 /** --layers [halos,pools,fog,shading,bloom]: per frame, one more frame with each point-light contribution OFF
  *  (<spot>-<hh>-no-<layer>.png) and one with halos+pools+fog+shading all off (-no-lights): what each adds to the frame. */
 const LAYERS = argv.includes("--layers") ? (arg("layers", "").startsWith("--") || !arg("layers") ? "halos,pools,fog,shading,bloom" : arg("layers")).split(",").filter(Boolean) : [];
@@ -467,14 +497,16 @@ export const removeStyle = (id) => { styles.get(id)?.remove(); styles.delete(id)
 export const injectQuery = (url) => url;
 export class ErrorOverlay extends HTMLElement {}
 ` }));
-await ctx.addInitScript(() => {
+await ctx.addInitScript(({ webgl }: { webgl: boolean }) => {
   (window as any).__name = (f: unknown) => f;
+  // A private capture can exercise Three's supported fallback without changing the user's browser.
+  if (webgl) Object.defineProperty(navigator, 'gpu', { get: () => undefined });
   try {
     const k = "hitreg-editor-settings";
     const cur = JSON.parse(localStorage.getItem(k) || "{}");
     localStorage.setItem(k, JSON.stringify({ ...cur, showStats: false, showGizmos: false, grid: false, showPhysics: false, showLights: false, showSkeletons: false }));
   } catch { /* private */ }
-});
+}, { webgl: argv.includes('--webgl') });
 let page: any = null;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const H_ = <T,>(fn: (h: any, ...a: any[]) => T, ...a: unknown[]) => page.evaluate(([src, args]: [string, unknown[]]) => {
@@ -541,10 +573,14 @@ const cmd = (line: string) => page.evaluate((line: string) => {
 }, line) as Promise<string>;
 
 /** Streaming done and the draw count steady for 3 s (min `minMs`). */
-async function settle(minMs: number) {
+const SETTLE_MAX_S = Math.max(5, Number(arg("settle-max", "120")) || 120);
+/** How far (m, horizontal) the body may stand from its spot after travel before the spot is travelled again / failed. */
+const ARRIVE_TOL_M = 4;
+/** Returns the seconds it waited and whether it gave up at --settle-max (the world never went still, and why). */
+async function settle(minMs: number): Promise<{ s: number; capped: boolean; why?: string }> {
   const t = Date.now();
-  let last = -1, still = 0;
-  for (let i = 0; i < 120; i++) {
+  let last = -1, still = 0, why = "";
+  for (let i = 0; i < SETTLE_MAX_S; i++) {
     await sleep(1000);
     const [n, loading, travelling] = await H_((h) => {
       let d = 0, l = 0;
@@ -553,9 +589,11 @@ async function settle(minMs: number) {
       return [d, l, h.travelling()];
     });
     still = n === last && loading === 0 && !travelling ? still + 1 : 0;
+    why = travelling ? "travelling" : loading ? `loading ${loading}` : n !== last ? "draw calls changing" : "";
     last = n;
-    if (Date.now() - t >= minMs && still >= 3) break;
+    if (Date.now() - t >= minMs && still >= 3) return { s: Math.round((Date.now() - t) / 1000), capped: false };
   }
+  return { s: Math.round((Date.now() - t) / 1000), capped: true, why };
 }
 
 console.log(`light-shots: ${SCENE} — ${spots.length} spots x ${TIMES.length} times`);
@@ -564,9 +602,10 @@ let backend = "?", hasClock = false;
 async function openSession(): Promise<void> {
 if (page) await page.close().catch(() => {});
 page = await ctx.newPage();
-page.on("pageerror", (e: Error) => logs.push("pageerror: " + e.message));
+page.on("pageerror", (e: Error) => { logs.push("pageerror: " + e.message); if (DIAG) console.error("  pageerror:", e.message); });
 page.on("crash", () => { logs.push("page crashed"); console.error("  PAGE CRASHED (renderer process died) during: " + lastStep); });
-page.on("console", (m: any) => { if (m.type() === "error") logs.push("console: " + String(m.text()).slice(0, 300)); });
+page.on("console", (m: any) => { if (m.type() === "error" || m.type() === "warning") { const line = String(m.text()); logs.push(`${m.type()}: ` + line.slice(0, 3000)); if (DIAG) console.error(`  ${m.type()}:`, line); } });
+page.on("response", (response: any) => { if (response.status() >= 400) { const line = `HTTP ${response.status()}: ${response.url()}`; logs.push(line); if (DIAG) console.error("  " + line); } });
 // L (place-build batch 2026-10-20: 4 of 6 shot runs died "timed out waiting for the dev app" with nothing said): a boot
 // that never brings __hitreg up prints the page's errors and a screenshot, and is retried once on a fresh load
 step("boot: load the dev app");
@@ -634,13 +673,69 @@ await openSession();
 const times = hasClock ? TIMES : [NaN];
 
 type Box = { x0: number; y0: number; x1: number; y1: number };
-type Shot = { fires?: FireSpot[]; layers?: Record<string, string>; rig?: unknown; spot: string; row: string; weather: string; weatherLine: string; time: number | null; clock: string; mood: string; file: string; boxes: Record<string, Box | null>; render?: { drawCalls: number; triangles: number }; camera: { pos: V3; target: V3; distance: number }; shows?: ShowResult[] };
+type Shot = { review?: boolean; fires?: FireSpot[]; layers?: Record<string, string>; rig?: unknown; spot: string; row: string; weather: string; weatherLine: string; time: number | null; clock: string; mood: string; file: string; boxes: Record<string, Box | null>; render?: { drawCalls: number; triangles: number }; camera: { pos: V3; target: V3; distance: number }; shows?: ShowResult[]; clearView?: ClearViewRecord };
 const shots: Shot[] = [];
 const spotInfo: Array<Record<string, unknown>> = [];
 
+/** Hold the camera at a FIXED pose where the renderer reads it (see the call in shootSpot). Called again while held,
+ *  it only moves the pose (the clear-view step). */
+const holdCamera = (c: V3, t: V3, fov: number, noFog: boolean) => H_((h, c: V3, t: V3, fov: number, noFog: boolean) => {
+  const cam = h.camera;
+  if (cam.__lsUmw) { cam.__lsPose = { c, t }; return; }
+  const orig = cam.updateMatrixWorld, sc = h.scene?.();
+  const lighting: any = sc ? Object.values(sc.userData ?? {}).find((v: any) => typeof v?.fog?.retune === "function") : null;
+  cam.__lsUmw = orig;
+  cam.__lsPose = { c, t };
+  if (fov > 0) cam.__lsFov = cam.fov;
+  if (noFog && lighting && sc.fog && cam.__lsFogD === undefined) cam.__lsFogD = sc.fog.density ?? null;
+  cam.updateMatrixWorld = function (force: boolean) {
+    const p = this.__lsPose;
+    this.position.set(p.c[0], p.c[1], p.c[2]); this.lookAt(p.t[0], p.t[1], p.t[2]);
+    if (fov > 0 && this.fov !== fov) { this.fov = fov; this.updateProjectionMatrix(); }
+    if (noFog && lighting && sc.fog && sc.fog.density !== 0) lighting.fog.retune(sc, { density: 0 });
+    return orig.call(this, force);
+  };
+}, c, t, fov, noFog);
+
+/** CLEAR VIEW (tools/_clear-view.mts): a fixed camera must see its target, a spot with `aim` (render-batch: the place
+ *  centre) must see that; blocked by drawn geometry, the camera moves to the nearest clear pose, else it is reported. */
+async function clearView(spot: Spot): Promise<ClearViewRecord | null> {
+  if (spot.y !== undefined || NO_CLEAR_VIEW) return null; // interiors: walls and pillars are the view
+  const aim = (spot.target ?? spot.aim) as V3 | undefined; // a fixed view must see what it was aimed at
+  if (!aim) return null;
+  const now = await H_((h) => { const c = h.camera; c.updateMatrixWorld(true); const d = c.getWorldDirection(c.position.clone()); return { pos: [c.position.x, c.position.y, c.position.z], dir: [d.x, d.y, d.z], fov: c.fov }; }) as { pos: V3; dir: V3; fov: number };
+  const camera = (spot.camera as V3 | undefined) ?? now.pos;
+  const reach = Math.hypot(aim[0] - camera[0], aim[1] - camera[1], aim[2] - camera[2]);
+  if (!spot.camera) {
+    // a rig view checks the place centre only when it looks AT it from outside (a read view): a close view stands in the
+    // place, framed on one part of it, and its walls are the subject, not an obstruction
+    const cos = ((aim[0] - camera[0]) * now.dir[0] + (aim[1] - camera[1]) * now.dir[1] + (aim[2] - camera[2]) * now.dir[2]) / (reach || 1);
+    if (reach < CLEAR_RIG_MIN_M || Math.acos(Math.min(1, cos)) > ((now.fov || 50) * Math.PI) / 180) return null;
+  }
+  const target = (spot.target as V3 | undefined) ?? ([camera[0] + now.dir[0] * reach, camera[1] + now.dir[1] * reach, camera[2] + now.dir[2] * reach] as V3);
+  const cands = clearViewCandidates(camera, target, aim, field ? { groundAt } : {});
+  if (!cands.length) return null;
+  const fov = spot.fov ?? now.fov;
+  const verdict = await H_((h, poses: { camera: V3; rays: V3[] }[], ignore: string[]) => h.firstClearPose ? h.firstClearPose(poses, ignore) : null,
+    cands.map((c) => ({ camera: c.camera, rays: sightRays(c.camera, aim, fov) })), ["lightref-light", "lightref-dark", "lightref-grey"]) as { clear: number; tried: { blocked: number; first: { d: number; what: string } | null }[] } | null;
+  if (!verdict) { console.warn(`  ${spot.name}: the dev app has no firstClearPose (an older build): view not checked`); return null; }
+  const first = verdict.tried[0]?.first;
+  if (verdict.clear === 0) return { ok: true, checked: verdict.tried[0]?.blocked ?? 0 };
+  if (verdict.clear < 0) {
+    console.warn(`NO CLEAR VIEW spot ${spot.name}: blocked ${first ? `by ${first.what} at ${first.d} m` : ""}; ${verdict.tried.length} poses tried (orbit ±45°, lift 18°, pull in to 55 %) — shot as given`);
+    return { blocked: true, by: first?.what ?? "?", atM: first?.d ?? 0, tried: verdict.tried.length };
+  }
+  const pick = cands[verdict.clear]!;
+  await holdCamera(pick.camera, pick.target, spot.fov ?? 0, !!spot.review);
+  console.log(`  ${spot.name}: view blocked by ${first?.what ?? "?"} at ${first?.d ?? "?"} m — camera moved ${pick.dYawDeg}° round, ${pick.dElevDeg}° up, pull ${pick.pull} (${pick.camera.map(Math.round).join(", ")})`);
+  return { moved: true, from: camera, to: pick.camera, target: pick.target, dYawDeg: pick.dYawDeg, dElevDeg: pick.dElevDeg, pull: pick.pull, blockedBy: first?.what ?? "?", blockedAtM: first?.d ?? 0 };
+}
+
 async function shootSpot(spot: Spot): Promise<void> {
+  const ts = Date.now(), tm: Record<string, number | string> = {};
   // a fixed-camera spot holds the rig off; every spot first gives it back
-  await H_((h) => { const c = h.camera; if (c.__lsUmw) { c.updateMatrixWorld = c.__lsUmw; delete c.__lsUmw; } });
+  await H_((h) => { const c = h.camera; if (c.__lsUmw) { c.updateMatrixWorld = c.__lsUmw; delete c.__lsUmw; } if (c.__lsFov) { c.fov = c.__lsFov; delete c.__lsFov; c.updateProjectionMatrix(); }
+    if (c.__lsFogD !== undefined) { const sc = h.scene?.(), l: any = sc ? Object.values(sc.userData ?? {}).find((v: any) => typeof v?.fog?.retune === "function") : null; if (l && typeof c.__lsFogD === "number") l.fog.retune(sc, { density: c.__lsFogD }); delete c.__lsFogD; } });
   const facing = spot.facing ?? (spot.camera && spot.target ? (Math.atan2(spot.target[0] - spot.camera[0], -(spot.target[2] - spot.camera[2])) * 180) / Math.PI : 180);
   const [dx, dz] = lookDir(facing);
   const groundGuess = spot.y ?? (field ? field.height(spot.x, spot.z) : spawnAt[1] - 0.9);
@@ -649,7 +744,22 @@ async function shootSpot(spot: Spot): Promise<void> {
   if (travel !== "ok") { console.warn(`  ${spot.name}: travel refused (${travel})`); return; }
   await sleep(1500);
   step(`${spot.name}: settle after travel`);
-  await settle(4000);
+  const travelSettle = await settle(4000);
+  tm.travelS = Math.round((Date.now() - ts) / 1000); if (travelSettle.capped) tm.travelCapped = travelSettle.why || "unsettled";
+  // the body must STAND at the spot before anything is shot (t-batch2 2026-10-31: after one fixed-camera spot the scene
+  // object stopped following travel — the physics body moved, the object and the streaming focus stayed — and every
+  // later camera-less view shot Red Dial). Off by more than ARRIVE_TOL_M: travel once more, then fail the spot (the
+  // caller reopens the session and retries it once).
+  const bodyAt = () => H_((h) => { const id = h.playerId(), o = id ? h.object(id) : null; const p = o?.getWorldPosition(o.position.clone()); let s: number[] | null = null; try { s = h.sim?.getPosition?.(id) ?? null; } catch { /* */ } return { obj: p ? [p.x, p.y, p.z] : null, sim: s, travelling: !!h.travelling() }; }) as Promise<{ obj: number[] | null; sim: number[] | null; travelling: boolean }>;
+  const offBy = (b: { obj: number[] | null }) => (b.obj ? Math.hypot(b.obj[0]! - spot.x, b.obj[2]! - spot.z) : Infinity);
+  let arrived = await bodyAt();
+  if (offBy(arrived) > ARRIVE_TOL_M) {
+    console.warn(`  ${spot.name}: body ${offBy(arrived).toFixed(1)} m from the spot after travel (object ${JSON.stringify(arrived.obj?.map(Math.round))}, physics ${JSON.stringify(arrived.sim?.map(Math.round))}, travelling ${arrived.travelling}); travelling again`);
+    await H_((h, p: V3) => h.travelTo(p[0], p[1], p[2]), [spot.x, groundGuess + 1.5, spot.z] as V3);
+    await sleep(1500); await settle(4000);
+    arrived = await bodyAt();
+    if (offBy(arrived) > ARRIVE_TOL_M) throw new Error(`body ${offBy(arrived).toFixed(1)} m from the spot after two travels (object ${JSON.stringify(arrived.obj?.map(Math.round))}, physics ${JSON.stringify(arrived.sim?.map(Math.round))}): not shooting someone else's place`);
+  }
   // hide the player, aim the rig along `facing` at head height
   await H_((h, yaw: number, dist: number, pitch: number) => {
     const o = h.object(h.playerId());
@@ -662,14 +772,13 @@ async function shootSpot(spot: Spot): Promise<void> {
   }, Math.atan2(dx, dz) + Math.PI, spot.distance ?? DIST, spot.pitch ?? 0.03);
   // the pose is forced where the renderer reads it (camera.updateMatrixWorld, before every draw), whatever drove the
   // camera this frame (the rig, camera-controls): a patched rig.update alone did not hold (HERO-BRIDGE 2026-10-21)
-  if (spot.camera && spot.target) await H_((h, c: V3, t: V3) => {
-    const cam = h.camera, orig = cam.updateMatrixWorld;
-    cam.__lsUmw = orig;
-    cam.updateMatrixWorld = function (force: boolean) { this.position.set(c[0], c[1], c[2]); this.lookAt(t[0], t[1], t[2]); return orig.call(this, force); };
-  }, spot.camera, spot.target);
+  // A REVIEW spot draws with the atmospheric fog off (t-iso 2026-10-31: zone-1's mood fog 0.0024 hid ~2/3 of Red Dial
+  // from its 450 m iso camera): the scene lighting's fog density uniform is held at 0 before every draw (a uniform write,
+  // no shader rebuild) and given back at the next spot.
+  if (spot.camera && spot.target) await holdCamera(spot.camera, spot.target, spot.fov ?? 0, !!spot.review);
   await sleep(2500);
   // stand the references in front of the camera, on the ground, facing it
-  const placed = await H_((h, gap: number, useField: boolean, hide: boolean) => {
+  const placed = await H_((h, gap: number, useField: boolean, hide: boolean, figure: V3 | null, figureFacing: number) => {
     const o = h.object(h.playerId());
     const p = o.getWorldPosition(o.position.clone());
     const c = h.camera.position;
@@ -705,12 +814,24 @@ async function shootSpot(spot: Spot): Promise<void> {
     });
     // --no-refs: a CLEAN frame (a read shot, loading art): the references stay placed for the numbers' bookkeeping but draw nothing
     if (hide) for (const id of ["lightref-light", "lightref-dark", "lightref-grey"]) { const e = h.object(id); if (e) e.visible = false; }
+    // a person in the grey box (spot.figure): one real body where the painting's figure stands, facing into the room
+    for (const id of ["lightref-light", "lightref-dark", "lightref-grey"]) { const e = h.object(id); if (e && !hide) e.visible = true; }
+    if (figure) {
+      const c = (figureFacing * Math.PI) / 180, fy = Math.atan2(Math.sin(c), -Math.cos(c));
+      put("lightref-dark", figure[0], figure[2], figure[1] + 0.9);
+      const e = h.object("lightref-dark"); e.quaternion.set(0, Math.sin(fy / 2), 0, Math.cos(fy / 2)); e.updateMatrix(); e.updateMatrixWorld(true); e.visible = true;
+      for (const id of ["lightref-light", "lightref-grey"]) { const o2 = h.object(id); if (o2) o2.visible = false; }
+    }
     return { pivot: [p.x, p.y, p.z], cam: [c.x, c.y, c.z], feet, dist: h.cameraRig.distance };
-  }, GAP, !!field, NO_REFS);
+  }, GAP, !!field, NO_REFS, spot.figure ?? null, spot.figureFacing ?? 0);
   await sleep(1500);
-  await settle(field ? 8000 : 2000); // zone mood eases in over ~6 s after arrival
+  const tp = Date.now(), placeSettle = await settle(field ? 8000 : 2000); // zone mood eases in over ~6 s after arrival
+  tm.placeSettleS = Math.round((Date.now() - tp) / 1000); if (placeSettle.capped) tm.placeCapped = placeSettle.why || "unsettled";
+  const cv = await clearView(spot);
+  if (cv && "moved" in cv) { await sleep(1500); await settle(4000); }
+  const tf = Date.now();
   const region = regionOf(placed.pivot[0], placed.pivot[2]);
-  spotInfo.push({ ...spot, facing, region, pivot: placed.pivot, camera: placed.cam, cameraDistance: placed.dist, fullMeshesPastCameraM: Math.round(cutoutFree(spot)) });
+  spotInfo.push({ ...spot, facing, region, pivot: placed.pivot, camera: placed.cam, cameraDistance: placed.dist, fullMeshesPastCameraM: Math.round(cutoutFree(spot)), ...(cv ? { clearView: cv } : {}), timing: tm });
   for (const weatherName of WEATHERS) {
   let weatherLine = "";
   if (MULTI_WEATHER) {
@@ -720,6 +841,7 @@ async function shootSpot(spot: Spot): Promise<void> {
   }
   const row = MULTI_WEATHER ? `${spot.name} · ${weatherName}` : spot.name;
   for (const hour of times) {
+    if (spot.times && Number.isFinite(hour) && !spot.times.includes(hour)) continue; // a spot shot at some hours only
     let clock = "";
     if (Number.isFinite(hour)) { clock = await cmd(`/time ${hour}`); await sleep(2200); }
     const mood = field ? await cmd("/mood") : "";
@@ -770,7 +892,7 @@ async function shootSpot(spot: Spot): Promise<void> {
         if (!o.isPointLight || !(o.userData?.vfx || o.userData?.lightFlicker) || !on(o)) return;
         o.getWorldPosition(v); const d = v.distanceTo(cp); v.project(cam);
         if (v.z < -1 || v.z > 1 || Math.abs(v.x) > 1 || Math.abs(v.y) > 1) return;
-        out.push({ x: Math.round((v.x * 0.5 + 0.5) * innerWidth), y: Math.round((-v.y * 0.5 + 0.5) * innerHeight), d: Math.round(d) });
+        out.push({ x: Math.round((v.x * 0.5 + 0.5) * innerWidth), y: Math.round((-v.y * 0.5 + 0.5) * innerHeight), d: Math.round(d), ...(o.color && o.color.b > o.color.r ? { cold: true } : {}) });
       });
       out.sort((a, b) => a.d - b.d);
       return out.filter((f, i) => !out.slice(0, i).some((g) => Math.abs(g.x - f.x) < 4 && Math.abs(g.y - f.y) < 4));
@@ -786,7 +908,7 @@ async function shootSpot(spot: Spot): Promise<void> {
     };
     for (const l of LAYERS) await layerShot(`no-${l}`, [l]);
     if (LAYERS.length) await layerShot("no-lights", ["halos", "pools", "fog", "shading"]);
-    if (WASH) {
+    if (WASH && !spot.review) {
       await layerShot("no-veil", ["halos", "fog"]);
       // the layers back on, once more: the wash gate counts only what both on-frames agree the veil adds (a cloud shadow
       // drifting between the frames is not a halo)
@@ -797,10 +919,11 @@ async function shootSpot(spot: Spot): Promise<void> {
     // the frame's render cost (Red Dial 2026-10-30: draw calls + triangles per evidence view, the far-frame HLOD rule in
     // docs/performance-lessons.md): the renderer's last-frame counters as the picture was taken
     const render = await H_((h) => { try { const r = h.info().render ?? {}; return { drawCalls: r.drawCalls ?? r.calls ?? -1, triangles: r.triangles ?? -1 }; } catch { return { drawCalls: -1, triangles: -1 }; } }) as { drawCalls: number; triangles: number };
-    shots.push({ fires, ...(Object.keys(layerFiles).length ? { layers: layerFiles } : {}), spot: spot.name, row, weather: weatherName, weatherLine, time: Number.isFinite(hour) ? hour : null, clock, mood, rig, file, boxes, render, camera: { pos: cam as V3, target: placed.pivot as V3, distance: placed.dist }, ...(shows ? { shows } : {}) });
+    shots.push({ ...(spot.review ? { review: true } : {}), fires,...(Object.keys(layerFiles).length ? { layers: layerFiles } : {}), spot: spot.name, row, weather: weatherName, weatherLine, time: Number.isFinite(hour) ? hour : null, clock, mood, rig, file, boxes, render, camera: { pos: cam as V3, target: placed.pivot as V3, distance: placed.dist }, ...(cv && !("ok" in cv) ? { clearView: cv } : {}), ...(shows ? { shows } : {}) });
   }
   }
-  console.log(`  ${spot.name} (${region?.zone ?? "-"}${region?.place ? `/${region.place}` : ""}): ${times.length * WEATHERS.length} frames, camera ${placed.dist.toFixed(1)} m — ${((Date.now() - t0) / 1000).toFixed(0)} s`);
+  tm.framesS = Math.round((Date.now() - tf) / 1000); tm.totalS = Math.round((Date.now() - ts) / 1000);
+  console.log(`  ${spot.name} (${region?.zone ?? "-"}${region?.place ? `/${region.place}` : ""}): ${times.length * WEATHERS.length} frames, camera ${placed.dist.toFixed(1)} m — ${((Date.now() - t0) / 1000).toFixed(0)} s (spot ${tm.totalS} s: travel ${tm.travelS}${tm.travelCapped ? ` CAPPED (${tm.travelCapped})` : ""}, settle ${tm.placeSettleS}${tm.placeCapped ? ` CAPPED (${tm.placeCapped})` : ""}, frames ${tm.framesS})`);
   if (AB) await abSpot(spot.name);
 }
 
@@ -918,15 +1041,17 @@ const result = await sheetPage.evaluate(async ({ tiles, rowsNames, colTimes, tit
   return { png: cv.toDataURL("image/png"), measures };
 }, { tiles: tiles.map(({ url, spot, row, time, boxes, mood }) => ({ url, spot, row, time, boxes, mood })), rowsNames, colTimes, title: `${SCENE}${LABEL ? ` · ${LABEL}` : ""} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} · left = light gear, right = dark gear, sphere = mid grey` });
 // the wash band and the far fires (tools/_light-wash.mts), every frame; with --layers, what each light layer adds
+// review-only spots (`review`: place-build's iso-* overviews) are not player-height evidence: never judged (null keeps the index)
 const washFrames: any[] = [];
 for (const s of shots) {
+  if (s.review) { washFrames.push(null); continue; }
   const f: any = await judgeFrame(s.file, s.spot, s.time, s.fires ?? []);
   if (s.layers) f.layers = Object.fromEntries(await Promise.all(Object.entries(s.layers).filter(([k]) => k !== "no-veil-on").map(async ([k, lf]) => [k, await layerDelta(s.file, lf)])));
   if (s.layers?.["no-veil"]) f.veil = f.layers["no-veil"] = await layerDelta(s.file, s.layers["no-veil"], s.layers["no-veil-on"]);
   washFrames.push(f);
 }
-const washVerdictRun = washRun(washFrames, shots.some((s) => (s.fires ?? []).some((f) => f.d >= FAR_FIRE_M)));
-for (const f of washFrames) console.log(`  wash ${f.washOk ? "ok  " : "FAIL"} ${(f.spot + "@" + (f.time ?? "-")).padEnd(26)} ${f.washWhy}${f.fires ? ` · far fires ${f.fires.read}/${f.fires.far}` : ""}${f.layers ? " · " + Object.entries(f.layers).map(([k, d]: any) => `${k} -${d.luma} (${(d.lit * 100).toFixed(1)} %)`).join(" ") : ""}`);
+const washVerdictRun = washRun(washFrames.filter(Boolean), shots.some((s) => !s.review && (s.fires ?? []).some(isFarFire)));
+for (const f of washFrames.filter(Boolean)) console.log(`  wash ${f.washOk ? "ok  " : "FAIL"} ${(f.spot + "@" + (f.time ?? "-")).padEnd(26)} ${f.washWhy}${f.fires ? ` · far fires ${f.fires.read}/${f.fires.far}` : ""}${f.layers ? " · " + Object.entries(f.layers).map(([k, d]: any) => `${k} -${d.luma} (${(d.lit * 100).toFixed(1)} %)`).join(" ") : ""}`);
 console.log(`wash: ${washVerdictRun.ok ? "ok" : "FAIL"} — ${washVerdictRun.ok ? washVerdictRun.fireLine : washVerdictRun.faults.slice(0, 4).join(" | ")}`);
 const sheetFile = path.join(OUT, `${stem}-sheet.png`);
 fs.writeFileSync(sheetFile, Buffer.from(result.png.split(",")[1]!, "base64"));
@@ -937,9 +1062,10 @@ const report = {
   spots: spotInfo,
   weathers: MULTI_WEATHER ? WEATHERS : null,
   ...(abResults.length ? { ab: abResults } : {}),
-  shots: shots.map((s, i) => ({ spot: s.spot, weather: s.weather, weatherLine: s.weatherLine, time: s.time, clock: s.clock, mood: s.mood, rig: s.rig, file: path.relative(OUT, s.file).replace(/\\/g, "/"), camera: s.camera, boxes: s.boxes, render: s.render, ...(s.shows ? { shows: s.shows } : {}), fires: s.fires ?? [], ...(s.layers ? { layers: Object.fromEntries(Object.entries(s.layers).map(([k, f]) => [k, path.relative(OUT, f).split(path.sep).join("/")])) } : {}), ...result.measures[i], ...(washFrames[i] ? { wash: washFrames[i] } : {}) })),
+  shots: shots.map((s, i) => ({ ...(s.review ? { review: true } : {}), spot: s.spot, weather: s.weather, weatherLine: s.weatherLine, time: s.time, clock: s.clock, mood: s.mood, rig: s.rig, file: path.relative(OUT, s.file).replace(/\\/g, "/"), camera: s.camera, boxes: s.boxes, render: s.render, ...(s.clearView ? { clearView: s.clearView } : {}), ...(s.shows ? { shows: s.shows } : {}), fires: s.fires ?? [], ...(s.layers ? { layers: Object.fromEntries(Object.entries(s.layers).map(([k, f]) => [k, path.relative(OUT, f).split(path.sep).join("/")])) } : {}), ...result.measures[i], ...(washFrames[i] ? { wash: washFrames[i] } : {}) })),
   ...(washVerdictRun ? { washVerdict: washVerdictRun } : {}),
-  pageErrors: logs.slice(0, 20),
+  pageErrors: logs.filter((line) => /^(error:|console:|pageerror:|HTTP |dev-server:)/.test(line)).slice(-40),
+  consoleDiagnostics: logs.slice(-100),
 };
 fs.writeFileSync(path.join(OUT, `${stem}.json`), JSON.stringify(report, null, 1) + "\n");
 console.log(`saved ${sheetFile}\nsaved ${path.join(OUT, `${stem}.json`)} — ${shots.length} frames in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
@@ -958,6 +1084,8 @@ const BLACK_DETAIL_MIN = 0.02;
 const flat = (m: any) => typeof m.detail === "number" ? m.detail < BLACK_DETAIL_MIN : m.frame < NIGHT_BLACK_LUMA;
 const black = shots.map((s, i) => ({ s, m: result.measures[i] })).filter(({ s, m }) => typeof m?.frame === "number" && m.frame < BLACK_FRAME_LUMA
   && (!nightHour(s.time as number | null) || flat(m)));
+// the report names the failed frames too, so a gate reading the json never judges a blank picture as a dark wash
+if (black.length) fs.writeFileSync(path.join(OUT, `${stem}.json`), JSON.stringify({ ...report, blackFrames: black.map(({ s }) => `${s.spot}${s.time === null ? "" : `@${s.time}`}`) }, null, 1) + "\n");
 if (black.length) { console.error(`STOP: ${black.length} black frame(s) (luma < ${BLACK_FRAME_LUMA}: a failed render, not a dark scene): ${black.map(({ s, m }) => `${s.spot}${s.time === null ? "" : `@${s.time}`} (${m.frame.toFixed(0)})`).join(", ")} — re-run those spots`); process.exitCode = 1; }
 // a spot that must SHOW an entity (`shows`): every such spot needs at least one frame where each id passes (day frames
 // carry it; a dark veil in a dark night recess may change too few pixels), else the run exits 1 naming it
@@ -975,4 +1103,6 @@ if (showFails.length) { console.error(`STOP: ${showFails.length} shot(s) do not 
   await browser.close().catch(() => {});
   stopVite();
 }
-process.exit(0);
+// L (o-fill2 2026-10-31: salt-wagon-halt drew 18 flat luma-14 frames, printed STOP and exited 0, so place-build recorded the
+// shots as passed and its wash gate judged blank pictures as a dark scene): the exit code carries the STOP lines
+process.exit(typeof process.exitCode === "number" ? process.exitCode : 0);

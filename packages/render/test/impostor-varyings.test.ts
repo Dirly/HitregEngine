@@ -63,9 +63,9 @@ describe("impostor shaders fit WebGPU's inter-stage limit", () => {
     it(`${name}: per-instance terms are packed, no stray attribute reaches the fragment stage`, () => {
       const { varyings, strayAttributes } = fragmentLocations(material);
       expect(strayAttributes).toEqual([]);
-      // 5 packed vec4s (two frame offsets + weights, rotation, two tint/inner-uv) — the
+      // 5 packed vec4s (two frame offsets + weights, rotation, two tint/inner-uv) and the fade amount: the
       // lit material's own varyings bring the total to ~8 of 16
-      expect(varyings).toBeLessThanOrEqual(5);
+      expect(varyings).toBeLessThanOrEqual(6);
     });
   }
 });

@@ -180,8 +180,8 @@ mesh is untouched. Fields → the spec; judgment:
 what the schema can't describe: `setAnimation(clip, fade, { loop })` —
 `loop: false` plays once then emits the local `animation.completed`
 `{ entityId, clip }` (attack/emote → idle chaining); `playSound(id?, { volume?,
-positional?, refDistance?, playbackRate? })`; and
-`setSoundLoop(slot, id?, { volume?, positional?, refDistance? })` for a
+positional?, refDistance?, playbackRate?, channel? })`; and
+`setSoundLoop(slot, id?, { volume?, positional?, refDistance?, channel? })` for a
 script-owned loop whose gain changes without restarting it (omit `id` to stop
 that slot),
 `setActiveCamera(id)`, `viewForward()`, sim velocity APIs; `ctx.after(s, cb)` /

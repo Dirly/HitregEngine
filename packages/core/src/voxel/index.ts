@@ -35,12 +35,14 @@ export {
 export {
   regionVegetationSchema,
   clearingSchema,
+  fieldSchema,
   vegetationIndex,
   coverVegetationRejects,
   VegetationIndex,
   CLEARING_PAD,
   type RegionVegetation,
   type ClearingDoc,
+  type FieldDoc,
   type VegetationPlan,
   type VegetationRecipe,
   type CoverVegetationLayer,
@@ -128,6 +130,8 @@ export {
   type CsgMeshSource,
   type Volume,
 } from "./csg.js";
+
+export { terrainMaterialDoc, terrainPaletteFaults, type TerrainPaletteFault } from "./terrain-material.js";
 
 export {
   worldRecipeSchema,
@@ -248,6 +252,7 @@ export {
   RIVER_FALL_MIN,
   RIVER_RUN_GRADE,
   type WorldField,
+  type TerraceFaceCut,
   type RiverFall,
   type SurfaceSample,
   type BiomeSample,
@@ -260,7 +265,9 @@ export {
 export {
   voxelMesh,
   buildVoxelMesh,
+  buildHorizonMesh,
   dualMeshExperiment,
+  wallFootSnap,
   primeVoxelMesh,
   registerVoxelWorld,
   registerVoxelField,
@@ -335,6 +342,7 @@ export {
   terraceWallEntities,
   terraceWallFeatureId,
   TERRACE_WALL_STYLES,
+  TERRACE_MASONRY_STYLES,
   TERRACE_WALL_INSERTS,
   type TerraceWallDoc,
   type TerraceWallSolved,
@@ -383,13 +391,14 @@ export { terraceOperatorSchema, type TerraceOperatorParams } from "./operators-t
 export { paintOperatorSchema, type PaintOperatorParams } from "./operators-paint.js";
 export { screeOperatorSchema, fanSurface, type ScreeOperatorParams } from "./operators-scree.js";
 export { riverbankOperatorSchema, riverbankStations, type RiverbankOperatorParams } from "./operators-riverbank.js";
-export { groundPaintSchema, groundPaintBounds, createGroundPainter, type GroundPaintDoc, type GroundPainter } from "./ground-paint.js";
+export { groundPaintSchema, groundPaintBounds, createGroundPainter, fringeWeight, type GroundPaintDoc, type GroundPainter } from "./ground-paint.js";
 export { rockSetSchema, rockSetBounds, type RockSetDoc } from "./rock-sets.js";
 export * from "./floaters.js";
 export * from "./white-water.js";
 export * from "./kit-walls.js";
 export * from "./ledge-landmark.js";
 export { caveOperatorSchema, caveRoutes, type CaveOperatorParams } from "./operators-cave.js";
+export { islandOperatorSchema, islandShape, islandBounds, type IslandOperatorParams, type IslandShape } from "./operators-island.js";
 export { cliffPathOperatorSchema, solveCliffPath, type CliffPathParams, type CliffPathSolution, type CliffPathPoint } from "./operators-cliff-path.js";
 export { ledgesOperatorSchema, landmarkOptions, landmarkPrefabId, solveLedges, type LedgesOperatorParams } from "./operators-ledges.js";
 export { rockCover, routeCover } from "./cave-route.js";

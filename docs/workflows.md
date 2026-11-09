@@ -19,8 +19,18 @@ PSX art is the shared default across environments, structures and assets. Plan t
 painted finish along with the structural forms, and review a textured sample
 before repeating a style or major asset group.
 
+**Spider habitats and asset placement** (woodland, abandoned buildings, caves and
+dungeons): read [spider-habitats.md](spider-habitats.md) alongside the relevant
+location workflow below. It carries shared placement rules, implementation
+references and the limits of current outdoor automation.
+
 ## Dungeons
 
+- **Prop placement and self-review:** Weeping Sun Tombs is the current owner-approved quality bar (2026-11-08).
+  Read [the shared skill reference](../.claude/skills/dungeon-standards/references/placement-review.md) for selective
+  dressing, protected fight/travel space, a removal pass and checks drawn from its corrections. Both Claude and
+  Codex route there. Legacy recipe prop/type count floors must not cause filler; use the documented scoped
+  exceptions until the shared gate is revised. This direction does not authorize reworking other dungeons.
 - **Dungeon rooms and tunnels are modeled in Blender** (Blender MCP) and imported
   through the `tools/mesh-dc` bridge; read `docs/blender-dc-authoring.md` first. The
   DC construction tools carve, add stairs and fit portals inside imported stamps.
@@ -42,6 +52,13 @@ before repeating a style or major asset group.
 
 ## Zones, POIs and towns
 
+- **A new world's scene is playable through its game shell:** the player prefab, third-person camera rig,
+  HUD, inventory, NPC talk, name tags, telegraph and fx pools, soundscape, combat audio and ambient
+  particles, defined once as game data in `foundation/assets/game-shell.json`. `worldgen init --scene` /
+  `worldgen scene` build the scene with it when the project `dependsOn` foundation; an older or capsule
+  scene gets it from `npx tsx tools/game-shell.mts <world> --project <world>` (`--check` lists gaps,
+  one applyOps batch, `--uninstall` from the saved inverse). `worldgen status` has a `game-shell` row.
+  Creatures are not the shell (`zonegen populate`), nor are town NPCs (`town-npcs`).
 - **Before reworking any world, town, POI or dungeon tool for the next world:** read
   `docs/postmortems/skelmorrow.md` (fault → check table). Every row is a check to build into the named
   tool, not a line for a brief; a tool rework that leaves its rows unbuilt is not done.
@@ -106,6 +123,9 @@ before repeating a style or major asset group.
   every outcome is decided by the `npc` builtin on the server. Quest/NPC text never
   contains a hand-written compass word: it names places (`{dir:id}`) resolved
   from the world (north is -Z); the tool's lint refuses anything else.
+- **Character, boss, rare and deity names:** use `docs/name-registry.md` before
+  choosing or reusing a name. Look up identities, atomically reserve new names,
+  and validate recorded labels against the owning game's shared database.
 
 ## Worlds and water
 
@@ -135,6 +155,9 @@ before repeating a style or major asset group.
   `node node_modules/tsx/dist/cli.mjs tools/zonegen.mts concept <world> --project <p> --zone <z> --poi <id>` (apps/playground; `--town <name>` for a town) renders the site,
   repaints it through `image-request.mjs gen-set --paint` and prints the fit numbers beside the frames
   (`concept/<id>-sheet.png`). Rule and check: `tools/poi-review/concept-site.mjs`.
+  When what counts as ground changes (never when the ground moved), `npx tsx tools/concept-site.mts restamp <id>.site.json
+  --ruling "<dated ruling>"` rewrites the stamp without re-rendering; it refuses unless the place's `bare-renders` stage is ok.
+  Stamps carry `fingerprintParts`, so a gate-16 refusal names which part moved (global ground fields or features under the reservation).
   A town also gets the NEAR set (gate 40-70 m out on the main road, street just inside the gate, square), at player
   height on a plan staked from the site (wall ring + gatehouse where the road crosses it, street, square, chapel lot,
   street lots, drawn over the bare render for scale; `stakes` in `<id>.site.json`). `--views gate,street,square`
@@ -144,6 +167,11 @@ before repeating a style or major asset group.
   (the unwrap-to-atlas process, what each recipe setting is for, and the prompt
   rules that make artwork land) and `docs/weapon-atlas.md` for a modular
   weapon ubermesh. The `weapon-unwrap` skill wraps both for Claude sessions.
+- **Ghosts and spectral creatures:** read `docs/ghost-authoring.md` before
+  choosing their wardrobe or effects. Reuse the shared restrained ghost surface,
+  smooth foot fade and rectangular eyes, with measured fitting for each rig and
+  clothing/equipment designed for the location. The `ghost-authoring` skill
+  wraps this for Claude; `hitreg-ghost-authoring` is the Codex entry point.
 - **Player armor sets** (body + helm + shoulder art, then items per slot): ONE command from
   one brief, `node --import tsx tools/armor.mts run <set-id> --project foundation` (`armor brief
   new <id>` first; `armor status`; `armor queue <ids…>` for several). Read `docs/armor-sets.md`

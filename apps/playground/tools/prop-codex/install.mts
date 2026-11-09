@@ -14,7 +14,7 @@ import { runBlender } from "../../../../tools/blender-lock.mjs";
 import { applyOps, createScene, ComponentRegistry, registerCoreComponents, dressingSchema, prefabFromSubtree, mergeVocabulary, type Op } from "@hitreg/core";
 import { BLENDER, blenderBuild, gateFaults, type GeometryRecord } from "./check.mts";
 import {paintingStatus} from './paint.mts';
-import {packBuiltProps, PAINTED_ATLAS, LANDMARK_ATLAS, atlasFor} from './pack.mts';
+import {packBuiltProps, PAINTED_ATLASES, atlasFor} from './pack.mts';
 import {assertDesignReuse,readReusePolicy} from '../_prop-reuse.mts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -26,7 +26,9 @@ const write = (p: string, x: unknown) => { fs.mkdirSync(path.dirname(p), { recur
 /** What filled each prop: the request it answers (authoring/codex-craft/requests.json, written when a design lands). */
 export interface Origin { request: string; project: string; for: string; culture: string; scale: string; tokens?: number | null; seconds?: number; attempts?: number; at?: string;
   /** the request's landmark height, kept here so the install gate survives the request project being archived */
-  landmark?: number }
+  landmark?: number;
+  /** the landmark's declared plan [w, d], m (request `footprint`) */
+  footprint?: [number, number] }
 export const dir = (worldKit: string) => path.join(worldKit, "authoring", COLLECTION);
 export function readOrigins(worldKit: string): Record<string, Origin> {
   const f = path.join(dir(worldKit), "requests.json");
@@ -56,10 +58,22 @@ export function declaration(g: GeometryRecord, o: Origin) {
   });
 }
 
+/**
+ * Hand declarations a design cannot say (a nightstand's candle top socket, `against: "wall"`, its rooms):
+ * authoring/codex-craft/dressing-overrides.json { props: { <id>: {...} } } merged over the built declaration, so a re-install keeps them.
+ */
+let overrides: Record<string, any> | null = null;
+function withOverride(id: string, d: ReturnType<typeof declaration>) {
+  overrides ??= (() => { const f = path.join(OVERRIDE_ROOT!, "authoring", COLLECTION, "dressing-overrides.json"); return fs.existsSync(f) ? readJson(f).props ?? {} : {}; })();
+  return overrides![id] ? dressingSchema.parse({ ...d, ...overrides![id] }) : d;
+}
+let OVERRIDE_ROOT: string | null = null;
+
 export interface InstallResult { built: GeometryRecord[]; failed: GeometryRecord[]; cards: string[]; sheet?: string; packLog: string }
 
 export function install(worldKit: string, opts: { cards?: string[]; sheet?: string; sheetLabels?: string[]; log?: (s: string) => void } = {}): InstallResult {
   const log = opts.log ?? (() => {});
+  OVERRIDE_ROOT = worldKit; overrides = null;
   const D = dir(worldKit), designs = path.join(D, "designs"), source = path.join(D, "source");
   const files = fs.readdirSync(designs).filter((f) => f.endsWith(".py")).sort().map((f) => path.join(designs, f));
   if (!files.length) throw Error(`no designs in ${designs}`);
@@ -92,8 +106,8 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
     if(!origin||!scale)throw Error(`${g.name}: missing source origin or scale`);
     // a LANDMARK request (request add --landmark <m>) is gated at its full height, as its design run was (L KNUCKLECROWN 2026-10-28: a 24 m finger-pillar designed as a landmark was refused at install as a 20 m giant-scale prop)
     // c-props 2026-10-29: firstshore was archived (HitRegStudios/projects-archive) and its 24 m finger-pillar fell back to the 20 m giant cap, failing EVERY install: the origin carries the height now, the archive is the legacy fallback
-    const reqFile=[path.join(worldKit,'..',origin.project),path.resolve(worldKit,'../../../../../projects-archive',origin.project)].map(p=>path.join(p,'authoring/dressing/prop-requests.json')).find(f=>fs.existsSync(f)),reqs=reqFile?readJson(reqFile):[],lm=origin.landmark??(Array.isArray(reqs)?reqs:reqs.requests??[]).find((r:any)=>r?.id===origin.request)?.landmark;
-    const faults=gateFaults(g,{name:g.name,culture:origin.culture,scale:{id:scale.id,height:scale.height},worldKit,...(lm?{landmark:lm}:{})},scales);
+    const reqFile=[path.join(worldKit,'..',origin.project),path.resolve(worldKit,'../../../../../projects-archive',origin.project)].map(p=>path.join(p,'authoring/dressing/prop-requests.json')).find(f=>fs.existsSync(f)),reqs=reqFile?readJson(reqFile):[],req=(Array.isArray(reqs)?reqs:reqs.requests??[]).find((r:any)=>r?.id===origin.request),lm=origin.landmark??req?.landmark,fp=origin.footprint??req?.footprint;
+    const faults=gateFaults(g,{name:g.name,culture:origin.culture,scale:{id:scale.id,height:scale.height},worldKit,...(lm?{landmark:lm}:{}),...(fp?{footprint:fp}:{})},scales);
     if(faults.length)throw Error(`${g.name}: ${faults.join('; ')}`);
     if(lm)landmarks.add(g.name);
   }
@@ -116,7 +130,7 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
   const rows: any[] = [], assets: any[] = [], sidecar: any = { version: 1, props: {} };
   for (const g of built) {
     const o = origins[g.name]; if (!o) throw Error(`${g.name}: no request origin in ${COLLECTION}/requests.json`);
-    const id = `${COLLECTION}/${g.name}`, model = `${id}.gltf`, d = declaration(g, o);
+    const id = `${COLLECTION}/${g.name}`, model = `${id}.gltf`, d = withOverride(id, declaration(g, o));
     const mesh: any = { transform: {}, mesh: { source: { kind: "asset", assetId: model, textureFilter: "nearest" }, castShadow: true, receiveShadow: true, static: true, renderMode: "instanced", lod: false } };
     if (g.solid) mesh.collider = { shape: "trimesh", friction: 0.7 };
     const ops: Op[] = [
@@ -141,16 +155,19 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
       recipe: "apps/playground/tools/prop-codex/build.py (town-craft helpers + role sheet)", sourceModel: `authoring/${COLLECTION}/source/${g.name}.glb`, sourceModelSha256: sha(path.join(source, g.name + ".glb")),
       request: o.request, requestProject: o.project, for: o.for, design: g.design, size: g.size,
       frame: `glTF Y-up metres; ${g.mount === "wall" ? "wall-contact rear, vertically centred" : "bottom-centre foot"} root; front +Z`,
-      parts: g.parts, textureRoles: [...new Set((g.parts ?? []).map((p) => p.role))].sort(), triangles: g.triangles, materials: 1, atlas: atlasFor(g, landmarks), filter: "nearest",
+      parts: g.parts, textureRoles: [...new Set((g.parts ?? []).map((p) => p.role))].sort(), triangles: g.triangles, materials: (g as any).paint?.surfaces?.some((s: any) => s.glow) ? 2 : 1, // 2: a paint glow surface (self-lit art, same page)
+       atlas: atlasFor(g, landmarks), filter: "nearest",
       ...(g.paint?{painting:{guide:`authoring/${COLLECTION}/paint/${g.name}/key.png`,layout:`authoring/${COLLECTION}/paint/${g.name}/layout.json`,art:`authoring/${COLLECTION}/paint/${g.name}/art.png`,receipt:`authoring/${COLLECTION}/paint/${g.name}/receipt.json`,geometrySha256:g.paint.geometrySha256,artSha256:g.paint.artSha256,atlasSha256:g.paint.atlasSha256,surfaces:g.paint.surfaces.map(({name,part,projection,detail,metres,pixels,texel})=>({name,part,projection,detail,metres,pixels,texel}))}}:{}),
       texelsPerMetre: g.texel, alpha: "opaque; openings are actual geometry", instancing: "one body mesh/material, static instancing", lod: "none",
       collision: g.solid ? "exact static trimesh from published model" : "none (soft)", ...(g.water ? { water: `engine water disc r ${g.water.radius} m, depth ${g.water.depth} m (${POOL_WATER})` } : {}), behavior: "Static decoration; no gameplay.", effects: [],
+      // a revision under a new id: dressing-overrides `supersededBy` lands on the row, so menus offer only the successor (props.mts)
+      ...(typeof overrides?.[id]?.supersededBy === "string" ? { supersededBy: overrides[id].supersededBy } : {}),
       review: `authoring/${COLLECTION}/reports/prop-${g.name}.png`, madeBy: "Codex design via props codex (tools/prop-codex)", sha256: sha(file),
     });
     assets.push({ id: model, path: `assets/models/${model}`, sha256: sha(runtime), source: `authoring/${COLLECTION}/source/${g.name}.glb` });
   }
   if (anyWater) assets.push({ id: POOL_WATER, path: `assets/materials/${POOL_WATER}.json`, sha256: sha(path.join(worldKit, "assets/materials", POOL_WATER + ".json")), source: "tools/prop-codex/install.mts (engine water shader, calm pool)" });
-  for(const atlas of [PAINTED_ATLAS,LANDMARK_ATLAS]){
+  for(const atlas of PAINTED_ATLASES()){
     if(!built.some(g=>atlasFor(g,landmarks)===atlas))continue;
     const layout=readJson(path.join(worldKit,`assets/textures/atlas/${atlas}.atlas.json`));
     for(let i=0;i<layout.pages;i++){const p=`assets/textures/atlas/${atlas}-${i}.png`;assets.push({id:p,path:p,sha256:sha(path.join(worldKit,p)),source:'tools/prop-codex/pack.mts'});}

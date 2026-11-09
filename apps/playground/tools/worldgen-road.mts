@@ -15,6 +15,13 @@
  *   (0.6) and cross-slopes over 1.1 are walls, grade over --route-grade (0.15) costs, the line is pulled toward the
  *   anchor polyline) and rounded; the dense route is then graded as above. `--avoid f.json` = { discs: [[x,z,r]],
  *   polys: [[[x,z],..]] } (built places, a protected corridor). A leg the caps cannot route fails the command.
+ *   --join start|end|both (with --route): the road SETS OFF from the network: the nearest point of an existing road (town
+ *   streets and `--avoid` areas left out) becomes the first/last anchor, so a track never starts in a field.
+ *   Every road is folded into the network (tools/_road-network.mts mergeIntoNetwork, Derek 2026-10-31 "criss-crossing
+ *   and overlapping"): a stretch within 15 m of an existing road for over 40 m is that road's already and is dropped, the
+ *   line is cut into the pieces the network lacks (<id>, <id>.j2, ...) and each piece ends ON the road it meets, its
+ *   tread pinned to that road's; a free end within 25 m of a road is snapped onto it. --keep-parallel turns it off (a
+ *   place's own designed avenue, which the paths then fold into).
  *   --role road|paving|none: the zone ground role the tread paints with (RoadDoc.role). Class by traffic: a trunk
  *   `paving`, a place road the zone `road`, a footpath `none` + --surface dirt.
  *
@@ -28,6 +35,7 @@ import path from "node:path";
 import { applyRecipeEdits, createWorldField, type RecipeEdit, type RoadDoc, type BridgeDoc, type WorldField, type WorldRecipe } from "@hitreg/core";
 import { sideDir } from "./worldgen-operators.mts";
 import { lakeToll, routeBetween, smoothRoute, type RouteGrid } from "./worldgen-routing.mts";
+import { connectedRoads, isNetworkRoad, mergeIntoNetwork, resample, type NetRoad } from "./_road-network.mts";
 
 export interface RoadGradeOptions {
   width: number;
@@ -226,15 +234,41 @@ export function commandRoad(host: RoadHost): void {
   if (stagePiece) { if (!STAGE_OWNED.test(id) || !existing) fail(`road: --stage-piece wants an existing path-/trail- piece id, not "${id}"`); }
   else if (!id.startsWith("road-") || STAGE_OWNED.test(id)) fail(`road: id "${id}" must start with road- (path-/trail-/barrier-/pass- are rewritten by their stages)`);
   const drawn = parsePoints(opt(argv, "points") ?? fail('road: --points "x,z;x,z;..."'));
-  if (drawn.length < 2 || drawn.some((p) => !Number.isFinite(p[0]) || !Number.isFinite(p[1]))) fail("road: --points needs at least two x,z pairs");
+  if (drawn.length < (argv.includes("--join") ? 1 : 2) || drawn.some((p) => !Number.isFinite(p[0]) || !Number.isFinite(p[1]))) fail("road: --points needs at least two x,z pairs (one with --route --join)");
   // graded (and measured) on the ground WITHOUT this road's last run, so a re-run gives the same road
   const own = (fid: string): boolean => fid === id || (!stagePiece && fid.startsWith(`${id}.`));
   const ground: WorldRecipe = { ...recipe, features: { ...recipe.features, roads: recipe.features.roads.filter((r) => !own(r.id)) } };
   const field = host.field?.(ground) ?? createWorldField(ground);
   let line: [number, number][] = drawn;
+  // the network this road joins: every other road but a town's own streets
+  const townIds = recipe.features.towns.map((t) => t.id);
+  const network: NetRoad[] = ground.features.roads.filter((r) => isNetworkRoad(r, townIds));
   if (argv.includes("--route")) {
     const avoidFile = opt(argv, "avoid");
     const avoid = avoidFile ? (JSON.parse(fs.readFileSync(avoidFile, "utf8")) as RouteAvoid) : undefined;
+    const joinAt = opt(argv, "join");
+    if (joinAt !== undefined) {
+      if (!["start", "end", "both"].includes(joinAt)) fail(`road: --join start|end|both, not ${joinAt}`);
+      const nearestNet = (p: readonly [number, number]): [number, number] | null => {
+        let best: [number, number] | null = null, bd = Infinity;
+        // only the network CONNECTED to a settlement (a track that itself stops in a field is no place to join)
+        const towns = recipe.features.towns.filter((t) => !t.tags.includes("site"));
+        const joinable = towns.length ? connectedRoads(network, towns.map((t) => ({ x: t.center[0], z: t.center[1], reach: t.radius + t.falloff + 30 }))) : network;
+        for (const r of joinable) for (const q of resample(r.points, 4)) {
+          if (inAvoid(avoid, q.p[0], q.p[1])) continue;
+          const d = Math.hypot(q.p[0] - p[0], q.p[1] - p[1]);
+          if (d < bd) { bd = d; best = q.p; }
+        }
+        return best;
+      };
+      for (const which of joinAt === "both" ? ["start", "end"] : [joinAt]) {
+        const end = which === "start" ? drawn[0]! : drawn[drawn.length - 1]!;
+        const at = nearestNet(end) ?? fail(`road: --join ${which}: no network road to join`);
+        console.log(`  joins the network at [${at.map(Math.round).join(", ")}] (${Math.round(Math.hypot(at[0] - end[0], at[1] - end[1]))} m from the ${which})`);
+        if (which === "start") drawn.unshift([Math.round(at[0] * 100) / 100, Math.round(at[1] * 100) / 100]);
+        else drawn.push([Math.round(at[0] * 100) / 100, Math.round(at[1] * 100) / 100]);
+      }
+    }
     const wet = (x: number, z: number) => { const w = field.waterY(x, z); return w != null && w > field.ground(x, z) - 0.1; };
     // the lake toll reads the ground WITHOUT any road: a neighbouring road's own fill along a shore otherwise lifts that
     // shore out of the toll and the two roads keep each other on it
@@ -249,7 +283,37 @@ export function commandRoad(host: RoadHost): void {
     const routeOut = opt(argv, "route-out");
     if (routeOut) fs.writeFileSync(routeOut, `${JSON.stringify(line)}\n`);
   }
-  const points = densify(line, num(argv, "step") ?? 2);
+  // fold into the network: the pieces it lacks, each ending on the road it meets
+  const pieces = argv.includes("--keep-parallel")
+    ? [{ points: line, pinStart: undefined as number | undefined, pinEnd: undefined as number | undefined }]
+    : (() => {
+        const merged = mergeIntoNetwork(line, network);
+        if (merged.absorbed > 0 || merged.pieces.some((p) => p.start || p.end)) {
+          console.log(`  network: ${merged.absorbed} m run beside existing roads dropped; ${merged.pieces.length} piece(s)${merged.pieces.map((p) => ` [${p.start ? `joins ${p.start.road}` : "free"} -> ${p.end ? `joins ${p.end.road}` : "free"}, ${Math.round(p.length)} m]`).join("")}`);
+        }
+        return merged.pieces.map((p) => ({
+          points: [...(p.start ? [p.start.at] : []), ...line.slice(p.from, p.to + 1), ...(p.end ? [p.end.at] : [])] as [number, number][],
+          pinStart: p.start?.y ?? undefined,
+          pinEnd: p.end?.y ?? undefined,
+        }));
+      })();
+  if (pieces.length === 0) {
+    console.log(`  ${id}: the network already carries this line - nothing new to cut`);
+    const edits = roadEdits(recipe, id, [], [], stagePiece);
+    if (dry) {
+      const out = opt(argv, "out");
+      if (out) fs.writeFileSync(out, `${JSON.stringify({ roads: [], bridges: [] }, null, 1)}
+`);
+      return;
+    }
+    if (edits.length) {
+      const res = applyRecipeEdits(recipe, edits);
+      const inv = keep(file, recipe, `road-${id}`, res.inverse, opt(argv, "inverse"));
+      host.writeRecipe(res.recipe, file);
+      console.log(`  removed the old ${id}; inverse: ${inv}`);
+    }
+    return;
+  }
   const paint = host.surfaces?.(recipe);
   const options: RoadGradeOptions = {
     width: num(argv, "width") ?? (stagePiece ? existing!.width : 6),
@@ -262,7 +326,19 @@ export function commandRoad(host: RoadHost): void {
     surface: opt(argv, "surface") ?? paint?.surface,
     surfaceByBiome: paint?.surfaceByBiome,
   };
-  const built = host.grade(id, points, field, options);
+  const built: { roads: RoadDoc[]; bridges: BridgeDoc[] } = { roads: [], bridges: [] };
+  pieces.forEach((piece, k) => {
+    const pid = k === 0 ? id : `${id}.j${k + 1}`;
+    const first = k === 0 && pieces[0]!.points[0] === line[0], last = k === pieces.length - 1;
+    const one = host.grade(pid, densify(piece.points, num(argv, "step") ?? 2), field, {
+      ...options,
+      // an end on another road takes that road's tread height (a level junction); a free end keeps --pin-start/--pin-end
+      pinStart: piece.pinStart ?? (first ? options.pinStart : undefined),
+      pinEnd: piece.pinEnd ?? (last ? options.pinEnd : undefined),
+    });
+    built.roads.push(...one.roads);
+    built.bridges.push(...one.bridges);
+  });
   if (!built.roads.length) fail(`road: ${id} graded to nothing`);
   const treadCut = num(argv, "tread-cut"), treadFill = num(argv, "tread-fill");
   const keepLandforms = argv.includes("--keep-landforms");

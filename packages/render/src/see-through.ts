@@ -19,7 +19,7 @@
  * docs/see-through.md; the tool is apps/playground/tools/see-through.mts.
  */
 import * as THREE from "three/webgpu";
-import { ownerOfFace } from "./static-batch.js";
+import { STATIC_BATCH_FLAG, ownerOfFace } from "./static-batch.js";
 import { ClusteredMesh } from "./clustered-mesh.js";
 
 export type V3 = [number, number, number];
@@ -193,6 +193,33 @@ export function gapBetweenDepths(rimDepths: readonly (number | null)[]): boolean
   return far >= 3 * near && far - near >= 20;
 }
 
+/** Metres two framing pieces may stand apart and still MEET at a seam: the larger of this and FRAME_TOUCH_SHARE of the
+ *  frame's median depth (framesApart). */
+export const FRAME_TOUCH_M = 4;
+export const FRAME_TOUCH_SHARE = 0.15;
+
+/**
+ * Outdoor: a sentinel pocket framed by two or more pieces that never come near each other is sky between separate
+ * things, not a seam: a seam's two sides sit a pixel or two apart (about 1 m at 46 m). Every pair of frame entities
+ * must keep their nearest frame hits more than max(FRAME_TOUCH_M, FRAME_TOUCH_SHARE x median frame depth) apart in 3D;
+ * any pair within that may meet, and the pocket stays a hole. A frame of one entity is never excused here.
+ * L (r-found2 2026-10-31, Red Dial): sky through a gate's arch passage seen 51 deg oblique at 46 m, its bottom closed by
+ * the top of an avenue wall 21 m in front and 17.7 m from the gate, read as a 6 px "seam"; gapBetweenDepths (far >= 3x
+ * near) did not cover 21 vs 49 m. Pure.
+ */
+export function framesApart(rim: readonly (Pick<RayHit, "entity" | "mesh" | "point" | "distance"> | null)[]): boolean {
+  const hits = rim.filter((h): h is Pick<RayHit, "entity" | "mesh" | "point" | "distance"> => !!h);
+  const by = new Map<string, V3[]>();
+  for (const h of hits) { const k = h.entity ?? h.mesh; const g = by.get(k); if (g) g.push(h.point); else by.set(k, [h.point]); }
+  if (by.size < 2) return false;
+  const d = hits.map((h) => h.distance).sort((a, b) => a - b);
+  const touch = Math.max(FRAME_TOUCH_M, FRAME_TOUCH_SHARE * d[d.length >> 1]!), t2 = touch * touch;
+  const groups = [...by.values()];
+  for (let i = 0; i < groups.length; i++) for (let j = i + 1; j < groups.length; j++)
+    for (const a of groups[i]!) for (const b of groups[j]!) if ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2 <= t2) return false;
+  return true;
+}
+
 /** Distance along the ray to the first field solid within `reach`, or null: the ray crosses only air. */
 export function solidAlong(eye: V3, d: V3, solid: (x: number, y: number, z: number) => boolean, reach: number, step = 0.5): number | null {
   for (let t = step; t <= reach; t += step) if (solid(eye[0] + d[0] * t, eye[1] + d[1] * t, eye[2] + d[2] * t)) return t;
@@ -326,6 +353,28 @@ export async function sentinelViews(engine: RendererLike, scene: THREE.Scene, sh
   const inIsolate = new Set<THREE.Object3D>();
   if (opts.isolate) opts.isolate.traverse((o) => inIsolate.add(o));
   const excluded = notMapObjects(scene, opts.exclude ?? []);
+  const aim = (s: SentinelShot) => {
+    cam.fov = s.fov ?? 90;
+    cam.updateProjectionMatrix();
+    cam.position.set(s.eye[0], s.eye[1], s.eye[2]);
+    cam.up.set(s.view.up[0], s.view.up[1], s.view.up[2]);
+    cam.lookAt(s.eye[0] + s.view.dir[0], s.eye[1] + s.view.dir[1], s.eye[2] + s.view.dir[2]);
+    cam.updateMatrixWorld(true);
+  };
+  // Pipelines are keyed on the render context, and these targets are not the play view's: a material's first draw
+  // into them only STARTS its async pipeline and draws nothing, which read as a hole (the static batch holding the
+  // strand-town window glass showed sky through every pane it had not drawn here before; Bell Strand 10-30). Compile
+  // for each target first, before the sentinel switch, so no game frame sees the sentinel while this awaits.
+  if (typeof (renderer as unknown as { compileAsync?: unknown }).compileAsync === "function") {
+    try {
+      for (let k = 0; k < shots.length; k++) {
+        aim(shots[k]!);
+        clusterCutFor(scene, cam, opts.lodHeight ?? 1080);
+        renderer.setRenderTarget(rts[k]!);
+        await renderer.compileAsync(scene, cam);
+      }
+    } finally { renderer.setRenderTarget(keepTarget); }
+  }
   try {
     scene.traverse((o) => {
       if (!o.visible || o === scene) return;
@@ -336,12 +385,7 @@ export async function sentinelViews(engine: RendererLike, scene: THREE.Scene, sh
     (scene as unknown as { backgroundNode: unknown }).backgroundNode = null;
     renderer.setClearColor(SENTINEL_HEX, 1);
     shots.forEach((s, k) => {
-      cam.fov = s.fov ?? 90;
-      cam.updateProjectionMatrix();
-      cam.position.set(s.eye[0], s.eye[1], s.eye[2]);
-      cam.up.set(s.view.up[0], s.view.up[1], s.view.up[2]);
-      cam.lookAt(s.eye[0] + s.view.dir[0], s.eye[1] + s.view.dir[1], s.eye[2] + s.view.dir[2]);
-      cam.updateMatrixWorld(true);
+      aim(s);
       clusterCutFor(scene, cam, opts.lodHeight ?? 1080);
       renderer.setRenderTarget(rts[k]!);
       renderer.clear();
@@ -399,12 +443,22 @@ function entityOf(o: THREE.Object3D, faceIndex: number | undefined): string | nu
 }
 
 /**
- * The surfaces a probe may hit: meshes that are not sky, particles or collider proxies (hidden ones included), and
- * not in `skip` (notMapObjects: the player, characters and creatures).
+ * A source mesh a static batch merged and hid (static-batch.ts): the batch draws its faces (and names their owner), so
+ * the hidden copy is not a surface. Cast too, it lay at the batch's own depth, and when it sorted first a hole beside
+ * a merged house was reported "culled" on that house (Bell Strand 10-30: 7 such sites, none real).
+ */
+export function batchedSource(o: THREE.Object3D): boolean {
+  return (o as THREE.Mesh).isMesh === true && o.userData[STATIC_BATCH_FLAG] === true && !o.visible;
+}
+
+/**
+ * The surfaces a probe may hit: meshes that are not sky, particles or collider proxies (hidden ones included, except
+ * the sources a static batch draws in their place), and not in `skip` (notMapObjects: the player, characters and
+ * creatures).
  */
 export function surfaceMeshes(root: THREE.Object3D, skip?: ReadonlySet<THREE.Object3D>): THREE.Mesh[] {
   const out: THREE.Mesh[] = [];
-  root.traverse((o) => { if ((o as THREE.Mesh).isMesh && !backgroundish(o) && !skip?.has(o)) out.push(o as THREE.Mesh); });
+  root.traverse((o) => { if ((o as THREE.Mesh).isMesh && !backgroundish(o) && !skip?.has(o) && !batchedSource(o)) out.push(o as THREE.Mesh); });
   return out;
 }
 
@@ -502,6 +556,8 @@ export interface ProbeHole {
   at: V3 | null;
   depth: number | null;
   crop?: string;
+  /** Framed by pieces that never meet (framesApart): sky between separate things, LISTED by the tool, never counted. */
+  apart?: true;
 }
 
 function cropOf(rgba: Uint8Array, size: number, c: SentinelCluster): string | undefined {
@@ -566,9 +622,10 @@ export async function probeSeeThrough(engine: RendererLike, scene: THREE.Scene, 
         if (counted.length < minPx) continue;
       }
       if (opts.rule.mode === "outdoor" && gapBetweenDepths(rim.map((h) => (h ? h.distance : null)))) continue;
+      const apart = opts.rule.mode === "outdoor" && framesApart(rim);
       const why = classifyHole(centre, rim);
       holes.push({ view: shot.view.name, eye: shot.eye, dir, pixels: counted.length, clusterPixels: c.members.length, bbox: [c.minX, c.minY, c.maxX, c.maxY], size,
-        ...why, ...(opts.crop !== false ? { crop: cropOf(rgba, size, c) } : {}) });
+        ...why, ...(apart ? { apart: true as const } : {}), ...(opts.crop !== false ? { crop: cropOf(rgba, size, c) } : {}) });
     }
   }
   return holes;

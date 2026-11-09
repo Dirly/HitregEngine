@@ -41,6 +41,8 @@ export interface ModelLooks {
   update(): void;
   /** `ctx.modelTables`: a model's parts/tiles/rules extras, loaded once (null when unknown). */
   tables(assetId: string): Promise<ModelTables | null>;
+  /** Forget tables and texture lookups whose registered binary URLs were replaced. */
+  invalidateAssets(changes: { models: readonly string[]; textures: readonly string[] }): void;
   /**
    * A portrait of a character (its body cloned into a private scene) lacks the
    * pieces drawn by the moving batches — the head, hair, helm, pads. Seat a
@@ -383,6 +385,13 @@ export function createModelLooks(opts: {
 
   return {
     tables,
+    invalidateAssets({ models, textures: changedTextures }) {
+      for (const id of models) tableCache.delete(id);
+      for (const id of changedTextures) {
+        textures.delete(id);
+        warned.delete(`tex:${id}`);
+      }
+    },
     dressPortrait,
     lookKey,
     set(entityId, look) {

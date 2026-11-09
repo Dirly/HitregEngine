@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   declaredNetwork, goalSurface, declaredRoutes, derivedRoutes, descendants, networkPath, dropHoldFault, entityTargets, fileTargets, highestWalkable, judgeLeg, landmarkToWorld, nearestRoutePoint, oneWayFaults,
-  fellJustNow, portalSentAfterReach, reverseRoute, shadowFaults, sortOps, uncoveredPoints, worstDrop, type EntityView, type Sample,
+  fellJustNow, portalSentAfterReach, portalWalkInPoint, reverseRoute, shadowFaults, sortOps, uncoveredPoints, worstDrop, type EntityView, type Sample,
 } from "../tools/_poi-walk-lib.mts";
 
 const near = (a: readonly (number | null)[], b: readonly number[], eps = 1e-6): void => {
@@ -109,6 +109,12 @@ test("entityTargets: portals (interact or trigger) and quest objects within thei
   assert.equal(t[1]!.portal!.sealed, undefined, "a portal with no scene and no refusal is no sealed door");
   const sealed = entityTargets([{ id: "k", parent: null, tags: [], position: [0, 0, 0], quaternion: [0, 0, 0, 1], components: { script: { name: "portal", params: { mode: "trigger", scene: "", refusal: "Barred." } } } }]);
   assert.equal(sealed[0]!.portal!.sealed, "Barred.", "a sealed keep door (no scene, a refusal) is judged by its refusal (ravenstacks 2026-10-21)");
+  // a fitted box behind its anchor (offset z -1.5 under a 0.88 scale, turned 180 deg): reach the anchor, walk in to the box centre
+  const fitted = entityTargets([{ id: "f", parent: null, tags: [], position: [10, 5, 10], quaternion: [0, 1, 0, 0], scale: [0.88, 0.88, 0.88], components: { script: { name: "portal", params: { mode: "trigger", scene: "x", halfExtents: [2.85, 2.77, 0.85], offset: [0, 0.87, -1.5] } } } }]);
+  assert.deepEqual(fitted[0]!.at, [10, 5, 10]);
+  assert.deepEqual(fitted[0]!.portal!.box!.map((v) => (v === null ? null : Math.round(v * 100) / 100)), [10, null, 11.32], "Weeping Stair 2026-11-01: the box stood 0.65-2.35 m behind the anchor");
+  assert.equal(Math.round(fitted[0]!.portal!.half! * 1000) / 1000, 0.748);
+  assert.equal(t[1]!.portal!.box, undefined, "a box on its anchor keeps the plane walk-in");
   assert.equal(t[2]!.tolXZ, 3);
   assert.deepEqual(t[2]!.at, [9, null, 9]);
 });
@@ -353,4 +359,30 @@ test("declaredFloorKind: a declared floor deep under the ground is a cave, a cle
   assert.equal(declaredFloorKind(0, 50, 1.6, 148), "cave", "the tide cave under the heath");
   assert.equal(declaredFloorKind(20, 50, 2, 0.5), "built", "a deck over the water");
   assert.equal(declaredFloorKind(0, 50, 146, 147.5), "ground");
+});
+test("entityTargets: a catalogued building's door marker is walked in from 4 m outside to 2.5 m inside, never jumping", () => {
+  const s = Math.SQRT1_2; // turned +90 deg about y: local +z (the door's way out) -> world +x
+  const views: EntityView[] = [
+    { id: "farm-core-house", parent: "poi-farm", tags: ["prefab"], position: [200, 105, 300], quaternion: [0, 0, 0, 1], components: {} },
+    { id: "farm-core-house:shell", parent: "farm-core-house", tags: ["static"], position: [200, 105, 300], quaternion: [0, s, 0, s], components: { mesh: { source: { kind: "asset", assetId: "strand-town/strand-house-s.glb" } } } },
+  ];
+  const t = entityTargets(views, (asset) => (asset === "strand-town/strand-house-s.glb" ? [{ id: "door-1", position: [-1.6, 0, 4.36], yaw: 0 }] : []));
+  assert.equal(t.length, 1);
+  assert.equal(t[0]!.kind, "door");
+  assert.equal(t[0]!.noJump, true);
+  near(t[0]!.at, [204.36, 105, 301.6]);
+  near(t[0]!.from!, [208.36, 105, 301.6]);
+  near(t[0]!.through!, [201.86, 105, 301.6]);
+  assert.equal(entityTargets(views).length, 0); // without a marker reader: no door targets (old callers unchanged)
+});
+
+test("portalWalkInPoint: a trigger portal's walk-in stops just inside the box's near face, toward where it came from", () => {
+  // moon 2026-10-31: box half 0.75 m, the walk from 20 m out along -z; the stop is 0.5 m in front of the anchor
+  near(portalWalkInPoint([10, 4, 30], [10, 4, 10], 0.75) as number[], [10, 4, 29.5]);
+  // no box size, or a box thinner than the margin: the anchor itself
+  near(portalWalkInPoint([10, 4, 30], [10, 4, 10], undefined) as number[], [10, 4, 30]);
+  near(portalWalkInPoint([10, 4, 30], [10, 4, 10], 0.2) as number[], [10, 4, 30]);
+  // y may be null (a target at no fixed height)
+  assert.equal(portalWalkInPoint([0, null, 0], [3, null, 4], 1.25)[1], null);
+  near([portalWalkInPoint([0, null, 0], [3, null, 4], 1.25)[0], portalWalkInPoint([0, null, 0], [3, null, 4], 1.25)[2]] as number[], [0.6, 0.8]);
 });

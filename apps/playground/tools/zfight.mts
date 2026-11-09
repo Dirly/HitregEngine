@@ -194,6 +194,17 @@ export function staticSoup(project: string, assets: string, doc: SceneDoc, skip:
   return { meshes, soup, owners, labels, passThrough };
 }
 
+/** Each mesh's lowest y. */
+export function meshBottoms(meshes: { id: string; positions: ArrayLike<number> }[]): Map<string, number> {
+  const out = new Map<string, number>(); for (const m of meshes) { let lo = Infinity; for (let i = 1; i < m.positions.length; i += 3) lo = Math.min(lo, m.positions[i]!); out.set(m.id, lo); } return out;
+}
+/** A down-facing cluster at the BOTTOM of both (non-terrain) meshes: two pieces' base planes where they overlap, facing
+ *  the ground they stand on (never seen). L (o-gates 2026-10-30). */
+export function isBaseOnBase(c: { a: { mesh: string }; b: { mesh: string }; normal: number[]; centre: number[] }, bottoms: Map<string, number>, tol = 0.05): boolean {
+  if (c.normal[1]! > -0.95 || c.a.mesh.startsWith("voxel:") || c.b.mesh.startsWith("voxel:")) return false;
+  return [c.a.mesh, c.b.mesh].every((m) => { const lo = bottoms.get(m); return lo !== undefined && c.centre[1]! <= lo + tol; });
+}
+
 function exceptions(projectDir: string, gate: string): { check: string; why: string }[] {
   try {
     const j = readJson(path.join(projectDir, "authoring/quality-exceptions.json"));
@@ -272,8 +283,11 @@ export function main(argv: string[]): void {
     const r = findZFights(soup.meshes, { maxGap: gap, maxAngleDeg: angle, minArea });
     const ex = exceptions(dir, "zfight");
     const exFor = (a: string, b: string) => ex.find((e) => e.check === "*" || e.check === `${a}|${b}` || e.check === `${b}|${a}`);
-    const failures = r.clusters.filter((c) => c.area >= T.failClusterArea && !exFor(c.a.mesh, c.b.mesh));
-    const excepted = r.clusters.filter((c) => c.area >= T.failClusterArea && exFor(c.a.mesh, c.b.mesh)).length;
+    // L (o-gates 2026-10-30, the Moon: pylons overlapping the gate block): two pieces' BASE planes (down-facing, at the
+    // bottom of both meshes) coincide where they overlap; they face the ground they stand on and are never seen. Not charged.
+    const bottom = meshBottoms(soup.meshes), baseOnBase = (c: (typeof r.clusters)[number]) => isBaseOnBase(c, bottom);
+    const failures = r.clusters.filter((c) => c.area >= T.failClusterArea && !exFor(c.a.mesh, c.b.mesh) && !baseOnBase(c));
+    const excepted = r.clusters.filter((c) => c.area >= T.failClusterArea && (exFor(c.a.mesh, c.b.mesh) || baseOnBase(c))).length;
     const totalArea = r3(r.clusters.reduce((t, c) => t + c.area, 0));
     const report = {
       gate: "zfight", passed: failures.length === 0, at: new Date().toISOString(), scene: sceneId,

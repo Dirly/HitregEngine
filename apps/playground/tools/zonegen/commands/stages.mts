@@ -12,6 +12,10 @@
  *   stages <world> --project <p> --done status-clean [--allow row,row --ruling "YYYY-MM-DD ..."]
  *                                                           runs `worldgen status`; records it only when every non-optional row is ok
  *   stages <world> --project <p> --rehash-ground <was.json>   move records hashed with whole road docs to the road-segment scheme, on the recipe they were made on
+ *   stages <world> --project <p> --road-trim <id,id> --by <who> [--note ..]   record a road trim (worldgen road-net --fold does it itself):
+ *                                                           only TRIM_STAGES (sited, installed) re-check; nothing is redone
+ *   stages <world> --project <p> --recheck <place> --by <who>   after seated / float / lips pass: re-hash the trim-covered records (times kept)
+ *   stages <world> --project <p> --ground-ruling "YYYY-MM-DD <who>: <why>" --place <id>   accept the place's current ground diff by ruling
  *   stages <world> --project <p> --freeze --by <who>        world-frozen (needs status-clean + siting ok). From here every worldgen
  *                                                           write that changes the world refuses without --unfreeze "<dated ruling>"
  *   stages <world> --project <p> --done <stage> --place <id> --evidence <file> --by <who> [--note ..]
@@ -26,7 +30,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import {
-  MANUAL_STAGES, REVIEW_STAGES, parseRecipe, rehashGround, artOf, catalogueDesignFaults, currentSite, groundRecord, currentWorldHash, evaluate, evidenceSha, fileSha, isDatedRuling, loadStages, nextOf, reviewVerdict, saveStages, short, stagesFile,
+  MANUAL_STAGES, REVIEW_STAGES, parseRecipe, rehashGround, recordRoadTrim, recheckTrim, localGround, artOf, catalogueDesignFaults, currentSite, groundRecord, currentWorldHash, evaluate, evidenceSha, fileSha, isDatedRuling, loadStages, nextOf, reviewVerdict, saveStages, short, stagesFile,
   stagesOf, worldStagesSchema, type StageState, type WorldStages,
 } from "../../world-order.mts";
 
@@ -141,6 +145,39 @@ export async function run(ctx: Ctx): Promise<number> {
     return 0;
   }
 
+  // ---- road trims and ground rulings (tools/world-order.mts groundRulings) ----
+  if (ctx.opt("road-trim") || ctx.opt("recheck") || ctx.opt("ground-ruling")) {
+    const recipe = parseRecipe(JSON.parse(fs.readFileSync(path.join(projectDir, "assets", "worlds", `${doc.world}.json`), "utf8")));
+    if (ctx.opt("road-trim")) {
+      if (!by) { console.error("zonegen stages --road-trim <ids> --by <who>"); return 2; }
+      const parts = recordRoadTrim(doc, recipe, ctx.opt("road-trim").split(",").map((x) => x.trim()).filter(Boolean), ctx.opt("note") || `road-net --fold ${ctx.opt("road-trim")}`, by);
+      saveStages(projectDir, doc);
+      console.log(`road trim recorded: ${Object.keys(parts).length} part(s) (${Object.keys(parts).join(", ") || "none moved"})`);
+      return 0;
+    }
+    if (ctx.opt("recheck")) {
+      if (!by) { console.error("zonegen stages --recheck <place> --by <who>"); return 2; }
+      const done = recheckTrim(doc, recipe, ctx.opt("recheck"));
+      saveStages(projectDir, doc);
+      console.log(`${ctx.opt("recheck")}: re-hashed ${done.length} trim-covered record(s) (${done.join(", ") || "none"})`);
+      return 0;
+    }
+    const ruling = ctx.opt("ground-ruling"), placeId = ctx.opt("place");
+    if (!isDatedRuling(ruling) || !placeId) { console.error('zonegen stages --ground-ruling "YYYY-MM-DD <who>: <why>" --place <id>'); return 2; }
+    const p = doc.places.find((x) => x.id === placeId);
+    if (!p) { console.error(`no place ${placeId}`); return 2; }
+    const parts: Record<string, string[]> = {};
+    for (const r of Object.values(p.stages)) {
+      if (!r.ground) continue;
+      const g = localGround(recipe, r.ground.footprint, doc.places.map((x) => x.id));
+      for (const k of Object.keys({ ...r.ground.parts, ...g.parts })) if (r.ground.parts[k] !== g.parts[k]) { const h = g.parts[k] ?? ""; if (!(parts[k] ??= []).includes(h)) parts[k]!.push(h); }
+    }
+    (doc.groundRulings ??= []).push({ at: now(), ...(by ? { by } : {}), kind: "ruling", ruling, place: placeId, parts });
+    saveStages(projectDir, doc);
+    console.log(`ground ruling recorded for ${placeId}: ${Object.keys(parts).length} part(s)`);
+    return 0;
+  }
+
   // ---- rehash-ground: move records made under the whole-doc road hash to the segment scheme, on the world they were made on ----
   if (ctx.opt("rehash-ground")) {
     const was = parseRecipe(JSON.parse(fs.readFileSync(path.resolve(ctx.opt("rehash-ground")), "utf8")));
@@ -187,8 +224,10 @@ export async function run(ctx: Ctx): Promise<number> {
     }
     // L (Red Dial 2026-10-30: re-recording an unchanged design.json STALEd its design-review): the same evidence recorded
     // again (same bytes, or the same design with only ruling fields changed) is a no-op: the record and its time stay
+    // L (o-smalls 2026-10-30: a design gone STALE because the ground moved or bare-renders were redone could never be
+    // re-recorded — the unchanged design.json was a no-op — so the place was stuck): the no-op holds only while the record is ok
     const prior = p.stages[stage];
-    if (prior?.evidenceSha && (prior.evidenceSha === fileSha(file) || prior.evidenceSha === evidenceSha(file))) {
+    if (rows[i]?.state === "ok" && prior?.evidenceSha && (prior.evidenceSha === fileSha(file) || prior.evidenceSha === evidenceSha(file))) {
       console.log(`${p.id} ${stage}: evidence unchanged since ${prior.at} — no-op (the stages after it stay as they are)`);
       return 0;
     }

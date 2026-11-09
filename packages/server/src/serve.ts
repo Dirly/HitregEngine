@@ -59,7 +59,7 @@ export interface ServeOptions {
   host?: string;
   fixedHz?: number;
   snapshotEvery?: number;
-  /** NPC respawn delay in seconds; 0 disables. Default 20. */
+  /** Default NPC respawn delay; npcRespawn on a root overrides it. 0 disables unconfigured respawns. Default 20. */
   respawnSeconds?: number;
   terrainRadius?: number;
   maxPlayers?: number;

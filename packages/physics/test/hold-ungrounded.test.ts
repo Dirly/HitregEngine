@@ -116,6 +116,29 @@ describe("PhysicsSim.states(true) — the readback set", () => {
     sim.free();
   });
 
+  it("a sleeping body teleported into a cell with no ground is reported at its new place (t-batch2 fast travel)", () => {
+    // asleep on the ground, its two asleep reports spent; then fast-travelled far off where nothing is simulated yet:
+    // the hold sleeps it again before the readback, and the readback must still carry the move (the host's streaming
+    // focus follows the scene object; an unreported move never loads the ground that would release the hold)
+    const sim = new PhysicsSim(scene([ground, crate("p", [0, 2, 0])]));
+    for (let i = 0; i < 60 * 4; i++) { sim.step(1 / 60); sim.holdUngrounded(() => true); }
+    sim.states(true); sim.states(true);
+    expect(sim.states(true).has("p")).toBe(false);
+    const far = (x: number) => x < 50;
+    let seen: number[] | null = null;
+    for (let i = 0; i < 30; i++) {
+      sim.setPosition("p", [300, 40, -200]); // the travel hold re-asserts the target every frame
+      sim.step(1 / 60);
+      sim.holdUngrounded(far);
+      const s = sim.states(true).get("p");
+      if (s) seen = s.position;
+    }
+    expect(seen).not.toBeNull();
+    expect(seen![0]).toBeCloseTo(300, 1);
+    expect(seen![2]).toBeCloseTo(-200, 1);
+    sim.free();
+  });
+
   it("a held ungrounded body is reported while it is put back, then skipped", () => {
     const sim = new PhysicsSim(scene([crate("far", [100, 5, 100])]));
     let reported = 0;

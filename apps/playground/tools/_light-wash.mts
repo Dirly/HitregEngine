@@ -32,9 +32,16 @@ export const WASH_BAND = {
   veilMaxNight: 0.12,
 };
 export const FAR_FIRE_M = 300;
+/** past this a standing fire's flame is not drawn (the vfx `cullDistance` the city-fires and torch prefabs set): its
+ *  night light still projects, but no flame can read there, so it is not judged (Weeping Sun 2026-10-30: 7 of 15 "far
+ *  fires" were other places' lights 1.9-2.4 km out) */
+export const FAR_FIRE_MAX_M = 1200;
+export const isFarFire = (f: { d: number }) => f.d >= FAR_FIRE_M && f.d <= FAR_FIRE_MAX_M;
 /** a far fire reads when its flame peak is this much over the ring around it (luma) and warm (r - b) */
 export const FIRE_CONTRAST = 25;
 export const FIRE_WARM = 12;
+/** a pixel with every channel at or over this is the clipped white core of a cold flame: it carries no hue */
+export const COLD_WHITE = 200;
 /** the ring falls back to within this of the background: the glow's edge */
 export const GLOW_EDGE = 10;
 /** the median glow radius (px, 720p frame) of the far fires that read — a flame with a modest glow, never a halo */
@@ -43,7 +50,8 @@ export const FAR_GLOW_PX_MAX = 9;
 export const FIRE_READ_MIN_SHARE = 0.75;
 
 export type WashMetrics = { luma: number; lower: number; clip: number; glare: number };
-export type FireSpot = { x: number; y: number; d: number; id?: string };
+/** `cold`: the fire's light is blue-white (b > r: a spirit fire, the Moon's): its flame is judged by its own hue, b - r */
+export type FireSpot = { x: number; y: number; d: number; id?: string; cold?: boolean };
 export type FireRead = FireSpot & { reads: boolean; peak: number; bg: number; glowPx: number; why: string };
 
 export type Raw = { data: Buffer; w: number; h: number; ch: number };
@@ -94,9 +102,25 @@ export function fireRead(r: Raw, f: FireSpot): FireRead {
   const far: number[] = []; for (let rad = 60; rad <= 80; rad += 5) far.push(ringMean(rad));
   const bg = far.sort((a, b) => a - b)[far.length >> 1]!;
   let glowPx = 0; for (let rad = 1; rad <= 60; rad++) { if (ringMean(rad) <= bg + GLOW_EDGE) { glowPx = rad; break; } glowPx = rad; }
-  const i = (py * r.w + px) * r.ch, warm = r.data[i]! - r.data[i + 2]!;
+  const i = (py * r.w + px) * r.ch;
+  // a cold (spirit) flame burns WHITE at its core (Moon 2026-10-30: 214,214,214 inside a blue 156,181,206 rim): its hue is
+  // the mean b - r of the flame's own coloured pixels round the peak, its lit (>= bg + FIRE_CONTRAST) and unclipped (some
+  // channel under COLD_WHITE) ones in a 7x7. Moon 2026-10-31: a farGrow flame's white core filled the old 3x3 while a 2-3 px
+  // blue rim (b - r +25..+58) sat round it. A warm flame keeps the peak pixel's own r - b.
+  let coldHue = 0;
+  if (f.cold) {
+    let n = 0;
+    for (let y = py - 3; y <= py + 3; y++) for (let x = px - 3; x <= px + 3; x++) {
+      if (!inside(x, y)) continue;
+      const j = (y * r.w + x) * r.ch, R = r.data[j]!, G = r.data[j + 1]!, B = r.data[j + 2]!;
+      if (lumaAt(r, x, y) < bg + FIRE_CONTRAST || Math.min(R, G, B) >= COLD_WHITE) continue;
+      coldHue += B - R; n++;
+    }
+    coldHue = n ? coldHue / n : 0;
+  }
+  const warm = f.cold ? coldHue : r.data[i]! - r.data[i + 2]!;
   const reads = peak - bg >= FIRE_CONTRAST && warm >= FIRE_WARM;
-  return { ...f, reads, peak: Math.round(peak), bg: Math.round(bg), glowPx, why: reads ? `flame ${Math.round(peak)} over ${Math.round(bg)}, glow ${glowPx} px` : peak - bg < FIRE_CONTRAST ? `flame ${Math.round(peak)} only ${Math.round(peak - bg)} over the ground` : "not warm (no flame there)" };
+  return { ...f, reads, peak: Math.round(peak), bg: Math.round(bg), glowPx, why: reads ? `flame ${Math.round(peak)} over ${Math.round(bg)}, glow ${glowPx} px` : peak - bg < FIRE_CONTRAST ? `flame ${Math.round(peak)} only ${Math.round(peak - bg)} over the ground` : f.cold ? "not cold (no spirit flame there)" : "not warm (no flame there)" };
 }
 
 /** What a light layer adds: the frame minus the same frame with the layer off — mean luma added, and the net share of
@@ -133,7 +157,7 @@ export type FrameWash = { spot: string; time: number | null; wash: WashMetrics; 
 export async function judgeFrame(file: string, spot: string, time: number | null, fires: FireSpot[] = []): Promise<FrameWash> {
   const r = await readRaw(file);
   const wash = washMetrics(r), v = washVerdict(wash, time);
-  const far = oneLightPerFire(fires.filter((f) => f.d >= FAR_FIRE_M), r.h);
+  const far = oneLightPerFire(fires.filter(isFarFire), r.h);
   const out: FrameWash = { spot, time, wash, washOk: v.ok, washWhy: v.why };
   if (far.length) {
     const rows = far.map((f) => fireRead(r, f));
@@ -171,20 +195,25 @@ export function washRun(frames: FrameWash[], wantFireRead: boolean): { ok: boole
   return { ok: !faults.length, faults, fireLine, veilLine };
 }
 
-/** Judge a light-shots run (its <stem>.json beside the frames) or a folder of <spot>-<hh>.png frames. */
+/** A REVIEW-ONLY view or shot record (Derek 2026-10-31: place-build's iso-* overviews, high cameras showing the whole
+ *  place): flagged `review: true` (light-shots copies a spot's flag onto its records) or named iso-*. Never judged by the
+ *  wash band, the far-fire read, the failed-render or the missing-view checks. */
+export const isReviewShot = (s: { review?: unknown; spot?: unknown; name?: unknown }) => s.review === true || /^iso-/.test(String(s.spot ?? s.name ?? ""));
+/** Judge a light-shots run (its <stem>.json beside the frames) or a folder of <spot>-<hh>.png frames (iso-* skipped). */
 export async function judgeRun(target: string): Promise<{ frames: FrameWash[]; wantFireRead: boolean }> {
   const fs = await import("node:fs"), path = await import("node:path");
   const frames: FrameWash[] = [];
   if (target.endsWith(".json")) {
     const run = JSON.parse(fs.readFileSync(target, "utf8"));
     for (const s of run.shots ?? []) {
+      if (isReviewShot(s)) continue; // a review-only overview (iso-*): not player-height evidence
       const file = path.join(path.dirname(target), s.file), f = await judgeFrame(file, s.spot, s.time ?? null, s.fires ?? []);
       if (s.layers?.["no-veil"]) f.veil = await layerDelta(file, path.join(path.dirname(target), s.layers["no-veil"]), s.layers["no-veil-on"] ? path.join(path.dirname(target), s.layers["no-veil-on"]) : undefined);
       frames.push(f);
     }
-    return { frames, wantFireRead: (run.shots ?? []).some((s: any) => (s.fires ?? []).some((f: FireSpot) => f.d >= FAR_FIRE_M)) };
+    return { frames, wantFireRead: (run.shots ?? []).some((s: any) => !isReviewShot(s) && (s.fires ?? []).some(isFarFire)) };
   }
-  for (const f of fs.readdirSync(target).filter((f: string) => /-\d\d\.png$/.test(f)).sort()) {
+  for (const f of fs.readdirSync(target).filter((f: string) => /-\d\d\.png$/.test(f) && !isReviewShot({ spot: f })).sort()) {
     const m = /^(.*)-(\d\d)\.png$/.exec(f)!;
     frames.push(await judgeFrame(path.join(target, f), m[1]!, +m[2]!));
   }
@@ -204,4 +233,21 @@ if (process.argv[1] && /_light-wash\.mts$/.test(process.argv[1])) {
     if (!v.ok) bad++;
   }
   process.exit(bad ? 1 : 0);
+}
+
+/**
+ * Dated wash rulings (a place's quality-exceptions.json rows with gates ["wash"]): r-found 2026-10-31, the wash gate never
+ * read them although the place / scale / zfight gates do, so Red Dial's two 2026-10-30 coordinator rulings (an evidence
+ * close-up looking into two beacons; far fires behind the woodland Derek wants) failed it every run. A row EXCUSES:
+ *   match { spot: "<view>" }      every fault of that view's frames ("<view>@<hour>: ...")
+ *   match { rule: "far-fires" }   the far-fire read ("far fires ..." / "no far fire ...")
+ * Only rows with a dated `ruling` count; excused faults are returned to be reported, never dropped silently.
+ */
+export type WashRuling = { id?: string; gates?: string[]; ruling?: string; match?: { spot?: string; rule?: string } };
+export function excuseWashFaults(faults: readonly string[], rows: readonly WashRuling[]): { faults: string[]; excused: { fault: string; by: string }[] } {
+  const dated = rows.filter((r) => (r.gates ?? []).includes("wash") && typeof r.ruling === "string" && /\b20\d\d-\d\d-\d\d\b/.test(r.ruling) && r.match && (r.match.spot || r.match.rule === "far-fires"));
+  const by = (f: string) => dated.find((r) => (r.match!.spot && f.startsWith(`${r.match!.spot}@`)) || (r.match!.rule === "far-fires" && /^(far fires|no far fire)/.test(f)));
+  const out: string[] = [], excused: { fault: string; by: string }[] = [];
+  for (const f of faults) { const r = by(f); if (r) excused.push({ fault: f, by: r.id ?? "?" }); else out.push(f); }
+  return { faults: out, excused };
 }

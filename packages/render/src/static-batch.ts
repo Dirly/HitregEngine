@@ -1,7 +1,10 @@
 import * as THREE from "three/webgpu";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { freezeStaticSubtree } from "./static-transforms.js";
+import { OCCLUDED_LAYER, SHADOW_CAMERA_LAYERS } from "./horizon.js";
 import { ATLAS_RECT_ATTRIBUTE } from "./town-atlas.js";
+import { FOLIAGE_WIND, WIND_LOCAL_ATTRIBUTE } from "./foliage-wind.js";
+import { SHEET_RECT_ATTRIBUTE, SHEET_TINT_ATTRIBUTE, type PropSheets, type SheetPlacement } from "./prop-sheet.js";
 
 /**
  * Static draw-call batching.
@@ -86,7 +89,9 @@ export interface StaticBatchHandle {
 interface Candidate {
   mesh: THREE.Mesh;
   entityId: string;
+  /** What the merge draws with: the mesh's own material, or its page's prop sheet (prop-sheet.ts). */
   material: THREE.Material;
+  sheet: SheetPlacement | null;
 }
 
 /**
@@ -121,11 +126,11 @@ export function ownerOfFace(object: THREE.Object3D, faceIndex: number | undefine
  */
 const MERGED_ATTRIBUTES = new Set(["position", "normal", "uv", ATLAS_RECT_ATTRIBUTE]);
 
-function prepForMerge(geometry: THREE.BufferGeometry, keepColor: false | 3 | 4 = false): THREE.BufferGeometry {
+function prepForMerge(geometry: THREE.BufferGeometry, keepColor: false | 3 | 4 = false, keepLocal = false): THREE.BufferGeometry {
   const g = (geometry.index ? geometry.toNonIndexed() : geometry.clone()) as THREE.BufferGeometry;
   // Vertex colours (baked AO on kit pieces) ride through a merge exactly like uv: a world-space bake does not change
-  // them. Only kept when the bucket's material reads them; normalised to 3 floats so every member matches (4 under an
-  // `alphaHash` material: the alpha is its dithered fade, e.g. a strip's edge).
+  // them. Only kept when the bucket's material reads them; normalised so every member matches. Materials using
+  // transparency, cutout or dithering retain alpha too; RGB-only members receive opaque alpha.
   const color = g.getAttribute("color");
   if (keepColor) {
     const size = keepColor;
@@ -145,6 +150,8 @@ function prepForMerge(geometry: THREE.BufferGeometry, keepColor: false | 3 | 4 =
   for (const name of Object.keys(g.attributes)) {
     if (!MERGED_ATTRIBUTES.has(name) && !(keepColor && name === "color")) g.deleteAttribute(name);
   }
+  // a wind plant keeps its model-local vertex: the merge bakes the world into `position` (foliage-wind.ts)
+  if (keepLocal) g.setAttribute(WIND_LOCAL_ATTRIBUTE, g.getAttribute("position").clone());
   return g;
 }
 
@@ -153,10 +160,10 @@ function readsVertexColors(material: THREE.Material | THREE.Material[]): boolean
   return !Array.isArray(material) && (material as THREE.Material & { vertexColors?: boolean }).vertexColors === true;
 }
 
-/** Colour stream width a merge keeps under this material: none, 3, or 4 when it dithers by vertex alpha. */
+/** Colour stream width a merge keeps: retain alpha for transparent, cutout and dithered coverage. */
 function mergedColorSize(material: THREE.Material | THREE.Material[]): false | 3 | 4 {
-  if (!readsVertexColors(material)) return false;
-  return (material as THREE.Material & { alphaHash?: boolean }).alphaHash === true ? 4 : 3;
+  if (Array.isArray(material) || !readsVertexColors(material)) return false;
+  return material.transparent || material.alphaTest > 0 || material.alphaHash === true ? 4 : 3;
 }
 
 /**
@@ -187,6 +194,86 @@ function bucketKey(mesh: THREE.Mesh, material: THREE.Material): string {
   ].join("|");
 }
 
+/** A/B switch (`?shadowMerge=0`): off, every merged batch casts its own shadow as before. */
+export const shadowMerge = { enabled: true };
+
+const shadowOnlyMaterials = new Map<THREE.Side, THREE.Material>();
+/** The source of a shadow-only mesh's cull side; the shadow pass draws with its own override material. */
+function shadowOnlyMaterial(side: THREE.Side): THREE.Material {
+  let material = shadowOnlyMaterials.get(side);
+  if (!material) {
+    material = new THREE.MeshBasicNodeMaterial({ side });
+    material.name = "shadow-only";
+    shadowOnlyMaterials.set(side, material);
+  }
+  return material;
+}
+
+/** Can this batch's shadow be drawn from positions alone? Not when its material cuts or moves the silhouette. */
+function plainCaster(mesh: THREE.Mesh): boolean {
+  const m = mesh.material as THREE.Material & { alphaMap?: unknown; alphaHash?: boolean; positionNode?: unknown; castShadowNode?: unknown; castShadowPositionNode?: unknown; maskShadowNode?: unknown; shadowNode?: unknown };
+  return mesh.castShadow && m.alphaTest === 0 && !m.alphaMap && !m.alphaHash && !m.positionNode &&
+    !m.castShadowNode && !m.castShadowPositionNode && !m.maskShadowNode && !m.shadowNode &&
+    (mesh.layers.mask & SHADOW_CAMERA_LAYERS) !== 0;
+}
+
+/**
+ * One shadow draw for a whole culling unit, instead of one per material.
+ *
+ * Every caster in a shadow pass is drawn with the same override material, so the materials that keep a town's batches
+ * apart in the main pass mean nothing there: 40 batches of a town square were 40 draws in each cascade for one depth
+ * write. Their positions (already world-baked) go into one mesh on OCCLUDED_LAYER, which shadow cameras see and the main
+ * camera does not, and the batches stop casting. Hidden with its unit, like them. Cutouts and wind keep their own
+ * shadows: their silhouettes come from the material. Costs a second copy of the casters' positions (12 bytes a vertex).
+ *
+ * `loose`: this unit's static meshes too few to merge in the main pass, still drawn on their own. They join the shadow
+ * mesh the same way (one shell's glass, a lone statue); `released` collects them for the batch's dispose to hand back.
+ */
+function mergeShadowCasters(container: THREE.Object3D, loose: readonly THREE.Mesh[], released: THREE.Mesh[]): void {
+  const bySide = new Map<string, THREE.Mesh[]>();
+  const casters = container.children.filter((child) => (child as THREE.Mesh).isMesh) as THREE.Mesh[];
+  for (const mesh of [...casters, ...loose]) {
+    if (!plainCaster(mesh)) continue;
+    const m = mesh.material as THREE.Material;
+    const key = `${m.shadowSide ?? m.side}`;
+    const list = bySide.get(key);
+    if (list) list.push(mesh);
+    else bySide.set(key, [mesh]);
+  }
+  for (const [side, list] of bySide) {
+    if (list.length < 2) continue;
+    // a merged batch's positions are world-baked and flat; a loose mesh is neither
+    const parts = list.map((mesh) => {
+      if (mesh.parent === container) return mesh.geometry;
+      const flat = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone();
+      flat.applyMatrix4(mesh.matrixWorld);
+      released.push(mesh);
+      return flat;
+    });
+    let floats = 0;
+    for (const part of parts) floats += part.getAttribute("position").count * 3;
+    const positions = new Float32Array(floats);
+    let at = 0;
+    for (let i = 0; i < list.length; i++) {
+      const source = parts[i]!.getAttribute("position");
+      if (source.array instanceof Float32Array && source.itemSize === 3 && !(source as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) positions.set(source.array, at);
+      else for (let v = 0; v < source.count; v++) positions.set([source.getX(v), source.getY(v), source.getZ(v)], at + v * 3);
+      at += source.count * 3;
+      if (list[i]!.parent !== container) parts[i]!.dispose();
+      list[i]!.castShadow = false;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    const shadow = new THREE.Mesh(geometry, shadowOnlyMaterial(Number(side) as THREE.Side));
+    shadow.castShadow = true;
+    shadow.receiveShadow = false;
+    shadow.layers.mask = 1 << OCCLUDED_LAYER;
+    shadow.name = `batch-shadow:${list.length}`;
+    shadow.raycast = () => {}; // never pickable: it draws nothing you can see
+    container.add(shadow);
+  }
+}
+
 export function batchStaticMeshes(
   root: THREE.Object3D,
   options: {
@@ -204,6 +291,11 @@ export function batchStaticMeshes(
      * subtree. Unset = only complete model hierarchies are hidden.
      */
     prunable?: (node: THREE.Object3D) => boolean;
+    /**
+     * Runtime prop atlas: a mesh whose material is a plain page (prop-sheet.ts sheetPageOf) merges under its page's
+     * sheet material, so props painted on different pages share one draw. Unset = merge by material only.
+     */
+    sheets?: PropSheets;
   } = {},
 ): StaticBatchHandle | null {
   const minBatch = options.minBatch ?? 2;
@@ -233,18 +325,21 @@ export function batchStaticMeshes(
     // its shader depends on and render it as a single flat layer. Skip it: the
     // draw call saved is never worth losing what the mesh looks like.
     if (hasCustomAttributes(mesh.geometry, mesh.material)) return void skipped++;
-    // World-baking changes the local coordinates read by wind/displacement.
+    // World-baking changes the local coordinates read by wind/displacement. Foliage wind is the exception: its
+    // merge carries the local vertex along (WIND_LOCAL_ATTRIBUTE), so a town's planted beds batch like its crates.
     const material = mesh.material as THREE.Material & { positionNode?: unknown; displacementMap?: unknown };
-    if (material.positionNode || material.displacementMap ||
+    if ((material.positionNode && material.userData[FOLIAGE_WIND] !== true) || material.displacementMap ||
         Object.keys(mesh.geometry.morphAttributes).length > 0) return void skipped++;
     const entityId = mesh.userData["entityId"] as string | undefined;
     if (!entityId) return void skipped++;
     const unit = options.groupOf?.(mesh);
-    const key = unit === undefined ? bucketKey(mesh, mesh.material) : `${bucketKey(mesh, mesh.material)}|${unit}`;
+    const sheet = options.sheets?.placementFor(mesh.material) ?? null;
+    const drawn = sheet?.material ?? mesh.material;
+    const key = unit === undefined ? bucketKey(mesh, drawn) : `${bucketKey(mesh, drawn)}|${unit}`;
     const list = buckets.get(key);
-    if (list) list.push({ mesh, entityId, material: mesh.material });
+    if (list) list.push({ mesh, entityId, material: drawn, sheet });
     else {
-      buckets.set(key, [{ mesh, entityId, material: mesh.material }]);
+      buckets.set(key, [{ mesh, entityId, material: drawn, sheet }]);
       if (unit !== undefined) bucketGroup.set(key, unit);
     }
   });
@@ -253,11 +348,19 @@ export function batchStaticMeshes(
   group.name = "static-batch";
   group.userData["editorOverlay"] = false;
   const hidden = new Map<THREE.Mesh, boolean>();
+  options.sheets?.flush();
   const stats: StaticBatchStats = { batches: 0, merged: 0, drawCallsSaved: 0, skipped };
   const groups = new Map<string, THREE.Group>();
 
+  const loose = new Map<string | undefined, THREE.Mesh[]>();
   for (const [bucket, list] of buckets) {
-    if (list.length < minBatch) continue;
+    if (list.length < minBatch) {
+      const unit = bucketGroup.get(bucket);
+      const meshes = loose.get(unit);
+      if (meshes) meshes.push(...list.map((c) => c.mesh));
+      else loose.set(unit, list.map((c) => c.mesh));
+      continue;
+    }
 
     const geoms: THREE.BufferGeometry[] = [];
     const starts: number[] = [];
@@ -265,7 +368,19 @@ export function batchStaticMeshes(
     let triangles = 0;
 
     for (const c of list) {
-      const g = prepForMerge(c.mesh.geometry, mergedColorSize(c.material));
+      const g = prepForMerge(c.mesh.geometry, mergedColorSize(c.material), c.material.userData[FOLIAGE_WIND] === true);
+      // a sheet member carries its page's rect on every vertex (prop-sheet.ts)
+      if (c.sheet) {
+        const count = g.getAttribute("position").count;
+        const rect = new Float32Array(count * 4);
+        const tint = new Float32Array(count * 3);
+        for (let i = 0; i < count; i++) {
+          rect.set(c.sheet.rect, i * 4);
+          tint.set(c.sheet.tint, i * 3);
+        }
+        g.setAttribute(SHEET_RECT_ATTRIBUTE, new THREE.BufferAttribute(rect, 4));
+        g.setAttribute(SHEET_TINT_ATTRIBUTE, new THREE.BufferAttribute(tint, 3));
+      }
       // Bake the world transform in: the merged mesh sits at the origin, so
       // every source's placement has to live in its vertices.
       g.applyMatrix4(c.mesh.matrixWorld);
@@ -330,6 +445,11 @@ export function batchStaticMeshes(
 
   if (stats.batches === 0) return null;
   stats.drawCallsSaved = stats.merged - stats.batches;
+  const shadowReleased: THREE.Mesh[] = [];
+  if (shadowMerge.enabled) {
+    mergeShadowCasters(group, loose.get(undefined) ?? [], shadowReleased);
+    for (const [unit, sub] of groups) mergeShadowCasters(sub, loose.get(unit) ?? [], shadowReleased);
+  }
   root.add(group);
   // merged meshes sit at the origin with their placement baked in: nothing
   // moves them (culling only flips visibility), so keep them out of the
@@ -402,6 +522,7 @@ export function batchStaticMeshes(
     stats,
     groups,
     dispose(): void {
+      for (const mesh of shadowReleased) mesh.castShadow = true;
       for (const [model, visible] of hiddenRoots) model.visible = visible;
       for (const [mesh, matrixWorldAutoUpdate] of hidden) {
         mesh.visible = true;

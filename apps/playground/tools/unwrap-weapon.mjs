@@ -69,6 +69,7 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { sanitizeFbx } from "./_fbx.mjs";
 import { encodePng } from "./_png.mjs";
+import { layoutQuadFringe } from "./_quad-fringe.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 /** The engine checkout, and the folder it sits in beside the art source tree. */
@@ -5085,6 +5086,9 @@ for (const c of recipe.scaledCopy ?? []) {
   });
   console.log(`  scaledCopy: ${c.name} = ${c.from} x${c.scale.join("/")}, sharing its paint`);
 }
+
+// Arrange cards after the UV solve: changing their anchors must not move existing art islands.
+for(const part of parts){const layout=recipe.parts[part.name]?.quadFringe;if(!layout)continue;const next=layoutQuadFringe(part.world.map(v=>v.toArray()),Array.from({length:part.world.length},(_,i)=>[part.uv[i*2],part.uv[i*2+1]]),layout);part.world=next.map(p=>new THREE.Vector3(...p));part.normal=undefined;}
 
 if (recipe.smooth) {
   for (const part of parts) {

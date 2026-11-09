@@ -1,11 +1,11 @@
 // art-check rules (tools/_art-check.mts) and the world-projected texel density props measure now counts (QA-C art audit).
 import { test } from "node:test";
-import { artGroundReference, uvFootprintDetailScale } from "../tools/_art-check.mts";
+import { artGroundReference, uvFootprintDetailScale, contrastFindings, groundBandFree } from "../tools/_art-check.mts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { artFaults, artTarget, detailScale, artThresholdsSchema, passageGroundSamples, builtOpPieces, isPortalVeil, isRhythm, mergeJobEntities, unburiedTris, uvRepeatsByMaterial, uvFootprintMean, uvStretchByMaterial, unmeasuredAreas, landmarkTriplanarScale, lstarOf, materialLstar, nearPropInstances, ownedEntityIds, specUnits, textureStats, type ArtInput, type ArtMaterial, type FormNode } from "../tools/_art-check.mts";
+import { artFaults, artTarget, detailScale, artThresholdsSchema, passageGroundSamples, builtOpPieces, isPortalVeil, isRhythm, mergeJobEntities, unburiedTris, uvRepeatsByMaterial, uvFootprintMean, uvStretchByMaterial, unmeasuredAreas, landmarkTriplanarScale, lstarOf, materialLstar, nearPropInstances, ownedEntityIds, specUnits, textureStats, type ArtInput, type ArtPiece, type ArtMaterial, type FormNode } from "../tools/_art-check.mts";
 import { projectedTexels, texelDensity, type PropGeometry, type Tri } from "../tools/_prop-geometry.mts";
 
 const mat = (o: Partial<ArtMaterial> & { id: string }): ArtMaterial => ({ area: 100, texels: 40, projected: false, natural: false, lstar: 35, colours: 64, px: [128, 128], course: null, ...o });
@@ -349,6 +349,18 @@ test("ground: a stair's rock walls 2-3x coarser (as seen) than the timber lining
   assert.deepEqual(rules(base({ pieces: [{ id: "ground:x", kind: "ground", at: [0, 0], materials: [mat({ id: "surface:cliff", natural: true, seen: 7 })] }] })), ["measure:nothing measured"]);
 });
 
+// r-found 2026-10-31 (coordinator ruling; Derek: built masonry matches the surrounding ROCK): the Sun-ruins kit reads 13.9
+// tx/m as seen, every ground surface of the zone ~24, so a raised pad wearing the zone's own paint failed 1.7x beside it
+// although the untouched land around it is the same paint. Only the area the JOB painted is judged against the built work.
+test("ground: a raised pad wearing the zone's own paint is not judged against the kit; the job's own paint is", () => {
+  const pad = (painted: number | undefined) => base({ built: { "ground:pb-x-seat-h6": 14 }, pieces: [
+    { id: "p", kind: "landmark", at: [0, 0], materials: [mat({ id: "a" }), mat({ id: "b" })] },
+    { id: "ground:pb-x-seat-h6", kind: "ground", at: [0, 0], materials: [mat({ id: "surface:redstrand-ground", natural: true, projected: true, lstar: null, texels: 40, seen: 24.8, area: 167, ...(painted === undefined ? {} : { painted }) })] }] });
+  assert.deepEqual(rules(pad(0)), []);                                       // all the zone's own paint
+  assert.deepEqual(rules(pad(167)), ["texel:surface:redstrand-ground"]);     // the job painted it: judged, 1.8x
+  assert.deepEqual(rules(pad(undefined)), ["texel:surface:redstrand-ground"]); // a passage wall (no zone-paint split): the whole area
+});
+
 test("every part of a bake is measured: a mapped material on UV-less, non-projected triangles is a texel fault (REV-WS2 ledge lips)", () => {
   const tri = (material: string, uv?: [number, number][]) => ({ a: [0, 0, 0], b: [2, 0, 0], c: [0, 2, 0], material, ...(uv ? { uv } : {}) });
   // texelDensity measured only the triplanar rock; the lip role (no UVs, not triplanar) must still come back with its area
@@ -425,4 +437,39 @@ test("value: an accent (palette builtStone.accent) may stand up to accentExtra o
   assert.deepEqual(rules(inp(100, [])), ["value:ring"]); // not declared an accent: the plain band applies
   // brighter than band + accentExtra (12 + 20) fails even as a small accent
   assert.deepEqual(rules(base({ groundL: 28.8, terrain: { p: { texels: 32, steep: 25.6, lstar: 28.8 } }, accent: ["ring"], pieces: [{ ...piece(100), materials: [mat({ id: "ring", lstar: 62, area: 100 }), mat({ id: "a", lstar: 33, area: 800 }), mat({ id: "b", lstar: 34, area: 100 })] }] })), ["value:ring"]);
+});
+
+test("texel: a piece SET INTO a cliff may not be finer than the stone round it; contrast over it is a finding (o-gates 2026-10-30)", () => {
+  // the stone round it at 20 tx/m (steep): a 40 tx/m set-in front fails, the same front standing free passes the town standard
+  const inp = (setIn: boolean) => base({ terrain: { p: { texels: 20, steep: 20, lstar: 34, steepSd: 7 } }, props: {}, pieces: [{ id: "p", kind: "mesh", at: [0, 0], ...(setIn ? { setIn: true } : {}), materials: [mat({ id: "a", lumaSd: 30 }), mat({ id: "b", lumaSd: 8 })] }] });
+  assert.ok(rules(inp(true)).includes("texel:a"));
+  assert.ok(!rules(inp(false)).includes("texel:a"));
+  const notes = contrastFindings(inp(true), legacyThresholds);
+  assert.equal(notes.length, 1); assert.match(notes[0]!, /p a: picture contrast/);
+});
+
+test("value band judges rock-matched work only: ships, boats, shelters and loose props stand out on purpose (careening-strand 2026-10-31)", () => {
+  // a tarred cutter hauled out on pale sand, a hide tent on the same sand: dark against a light ground, meant to be
+  const sand = (id: string, kind: ArtPiece["kind"], lstar: number, bandFree?: boolean) => base({ groundL: 50.7, terrain: { [id]: { texels: 40, steep: null, lstar: 50.7 } }, props: {},
+    pieces: [{ id, kind, at: [0, 0], materials: [mat({ id: "hull", lstar }), mat({ id: "b", lstar: 50 })], ...(bandFree ? { bandFree } : {}) }] });
+  assert.deepEqual(rules(sand("mesh:seagoing-ships/sailing-cutter-furled", "mesh", 26.1, true)), []);
+  assert.deepEqual(rules(sand("mesh:sun-ruins/city-watch-tower-b", "mesh", 26.1)), ["value:hull"]); // masonry is still held to the band
+  // the near-black floor still judges every piece, band-free or not
+  assert.deepEqual(rules(sand("mesh:seagoing-ships/sailing-cutter-furled", "mesh", 5, true)), ["value:hull"]);
+  // who is band-free: by kind, by prefab id (ships, boats, hulls, wrecks), by the catalogue shelter flag
+  assert.equal(groundBandFree("prop", "house-furniture/barrel-a", null), true);
+  assert.equal(groundBandFree("mesh", "seagoing-ships/sailing-cutter-furled", null), true);
+  assert.equal(groundBandFree("mesh", "codex-craft/beached-rowing-boat", null), true);
+  assert.equal(groundBandFree("mesh", "seagoing-ships/merchant-barque-wreck-bow", null), true);
+  assert.equal(groundBandFree("mesh", "camp-props/tent", { shelter: true }), true);
+  assert.equal(groundBandFree("mesh", "sun-ruins/city-watch-tower-b", {}), false);
+  assert.equal(groundBandFree("mesh", "ruin-props/broad-pier", null), false);
+  assert.equal(groundBandFree("landmark", null, null), false);
+  assert.equal(groundBandFree("ground", null, null), false);
+});
+
+test("props around a built piece: landmarks, creatures and characters are not props (a lab-spawned player failed a compound's stone 3.4x)", async () => {
+  const { NOT_PROPS_RE } = await import("../tools/_art-check.mts");
+  for (const id of ["characters/player", "mobs/ghost-knight", "landmarks/red-dial-ring"]) assert.ok(NOT_PROPS_RE.test(id), id);
+  for (const id of ["sun-ruins/city-wall", "composite-props/bonfire-logs", "wall-props/banners"]) assert.ok(!NOT_PROPS_RE.test(id), id);
 });

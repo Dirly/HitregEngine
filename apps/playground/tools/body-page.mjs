@@ -13,24 +13,25 @@
  * sits), puts the given ones after them (or in place of the same id), and
  * repacks with reskin's layout: square page, PAD-texel clamped bleed, the first
  * sheet the default look. Geometry, skin, clips and every other extra are kept
- * byte for byte. Run item-icon for the body model afterwards.
+ * byte for byte. `--drop <sheetId>` takes a sheet off the page (a retired set). Run item-icon for the body model afterwards.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { decodePng, encodePng } from "./_png.mjs";
 import { assertSquarePage, squareGrid } from "./_page.mjs";
 
-const args = { theme: [] };
+const args = { theme: [], drop: [] };
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
   if (!a.startsWith("--")) continue;
   const key = a.slice(2);
   const value = process.argv[++i];
   if (key === "theme") args.theme.push(value);
+  else if (key === "drop") args.drop.push(value);
   else args[key] = value;
 }
-if (!args.glb || !args.theme.length) {
-  console.error("usage: body-page --glb <human-body.glb> --theme <sheetId>=<atlas.png> ...");
+if (!args.glb || (!args.theme.length && !args.drop.length)) {
+  console.error("usage: body-page --glb <human-body.glb> [--theme <sheetId>=<atlas.png> ...] [--drop <sheetId> ...]");
   process.exit(1);
 }
 const PAD = 8; // reskin's
@@ -59,6 +60,13 @@ for (const [id, [u, v, s]] of Object.entries(meshNode.extras.tiles)) {
   for (let y = 0; y < size; y++)
     data.set(oldPage.data.subarray(((oy + y) * oldPage.width + ox) * 4, ((oy + y) * oldPage.width + ox + size) * 4), y * size * 4);
   sheets.push({ id, png: { width: size, height: size, data } });
+}
+for (const id of args.drop) {
+  const at = sheets.findIndex((s) => s.id === id);
+  if (at < 0) { console.log(`  drop ${id}: not on the page`); continue; }
+  if (at === 0) throw new Error(`${id} is the page's first sheet (the default look): it cannot be dropped`);
+  sheets.splice(at, 1);
+  console.log(`  drop ${id}`);
 }
 for (const t of args.theme) {
   const [id, file] = String(t).split("=");

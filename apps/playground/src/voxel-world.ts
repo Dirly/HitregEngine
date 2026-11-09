@@ -23,6 +23,8 @@ import {
   type VoxelWorldData,
   type WorldField,
   voxelRecipeAssetRefs,
+  voxelCellInBounds,
+  terrainPaletteFaults,
 } from "@hitreg/core";
 import type { ChunkProvider } from "./chunk-manager.js";
 import type { VoxelWorkerRequest, VoxelWorkerResponse } from "./voxel-worker.js";
@@ -79,6 +81,45 @@ function warnOnce(key: string, message: string): void {
   if (warned.has(key)) return;
   warned.add(key);
   console.warn(message);
+}
+
+/**
+ * Say LOUDLY when a palette surface the world paints cannot draw: the terrain
+ * shader clamps a palette id past the material's layers to its last layer, so
+ * a surface added to the recipe without re-deriving the material (`worldgen
+ * material`) renders as some other ground with no other sign (e-paving
+ * 2026-11-02). Silent while the material has not loaded yet.
+ */
+export function warnTerrainPalette(field: WorldField, assets: AssetLibrary): void {
+  const recipe = field.recipe;
+  if (!recipe.material) return;
+  const material = assets.getDataAsset(recipe.material)?.data;
+  if (!material) return;
+  const faults = terrainPaletteFaults(recipe, material);
+  if (faults.length === 0) return;
+  const key = `palette:${recipe.name}:${recipe.material}:${recipe.surfaces.length}:${faults.length}`;
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.error(
+    `[voxel] world "${recipe.name}": ${faults.length} palette surface(s) do not reach the render through material "${recipe.material}" — ` +
+      `${faults.slice(0, 3).map((f) => `${f.name}: ${f.why}`).join("; ")}. Fix: worldgen material ${recipe.name} --project <owner>`,
+  );
+}
+
+/**
+ * Start the materials the world's scatter rules name. Built on the first rock otherwise, ~20 s into play, and a rock-cap
+ * material packs and uploads its texture arrays then, freezing the game for seconds. The arrays are cached by config, so
+ * the real material finds them done and this throwaway one has done its job.
+ */
+export function startScatterMaterials(field: WorldField, assets: AssetLibrary, build: (data: never) => unknown): void {
+  const ids = new Set<string>();
+  for (const rule of field.recipe.scatter ?? []) {
+    for (const id of [rule.material, rule.smallMaterial, rule.largeMaterial]) if (id) ids.add(id);
+  }
+  for (const id of ids) {
+    const data = assets.getDataAsset(id)?.data;
+    if (data) build(data as never);
+  }
 }
 
 /**
@@ -151,7 +192,9 @@ export function voxelChunkProvider(
       Number.isFinite(cz) &&
       Math.abs(cx) < maxCells &&
       Math.abs(cz) < maxCells &&
-      Math.hypot(cx + 0.5, cz + 0.5) <= limitCells,
+      Math.hypot(cx + 0.5, cz + 0.5) <= limitCells &&
+      // the component's streaming box (a cropped lab): cells outside it are never generated, meshed or baked
+      voxelCellInBounds(world.data.bounds, world.field.recipe.cellSize, cx, cz),
     // `ChunkProvider.get` has always allowed a Promise; this is what finally
     // uses it. Falls back to generating inline when no worker could start.
     // An urgent (simulation-ring) cell is generated inline: it is about to
@@ -193,6 +236,7 @@ const PRIORITY_BULK = 0;
 interface VoxelWorkerPool {
   cell(cx: number, cz: number, priority?: number): Promise<ChunkDoc>;
   mesh(source: VoxelMeshSource): Promise<VoxelMesh | null>;
+  horizon(step: number): Promise<VoxelMesh | null>;
   supercell(
     buckets: Array<{ key: string; cells: Array<{ source: VoxelMeshSource; matrix: number[] }> }>,
   ): Promise<Array<{ key: string; mesh: VoxelMesh }>>;
@@ -234,7 +278,8 @@ function cellOptionsKey(world: ResolvedVoxelWorld, options: VoxelChunkOptions): 
   const resolvable = voxelRecipeAssetRefs(world.field.recipe)
     .filter((ref) => options.assetExists?.(ref.id, ref.kind))
     .map((ref) => ref.id);
-  return `${JSON.stringify(plain)}|${resolvable.sort().join(",")}`;
+  // the streaming box decides which cells EXIST (provider.has), so a changed box is a different cell set
+  return `${JSON.stringify(plain)}|${JSON.stringify(world.data.bounds ?? null)}|${resolvable.sort().join(",")}`;
 }
 
 /**
@@ -244,6 +289,11 @@ function cellOptionsKey(world: ResolvedVoxelWorld, options: VoxelChunkOptions): 
  */
 export function voxelMeshViaWorker(source: VoxelMeshSource): Promise<VoxelMesh | null> | null {
   return activePool?.mesh(source) ?? null;
+}
+
+/** The world's horizon heightfield off-thread; null when there is no pool (headless tooling, tests). */
+export function voxelHorizonViaWorker(step: number): Promise<VoxelMesh | null> | null {
+  return activePool?.horizon(step) ?? null;
 }
 
 /**
@@ -435,6 +485,8 @@ function createVoxelWorkerPool(
     cell: (cx, cz, priority) =>
       submit<ChunkDoc>((id) => ({ kind: "cell", id, cx, cz, mesh: priority !== PRIORITY_BULK }), priority),
     mesh: (source) => submit<VoxelMesh | null>((id) => ({ kind: "mesh", id, source }), PRIORITY_BULK),
+    // ahead of the bulk far cells: it is what the player sees past them
+    horizon: (step) => submit<VoxelMesh | null>((id) => ({ kind: "horizon", id, step }), PRIORITY_BULK + 1),
     supercell: (buckets) =>
       submit<Array<{ key: string; mesh: VoxelMesh }>>((id) => ({ kind: "supercell", id, buckets }), PRIORITY_BULK),
     dispose() {

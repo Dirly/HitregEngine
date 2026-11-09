@@ -1406,6 +1406,13 @@ export class PhysicsSim {
     body.setTranslation({ x: p[0], y: p[1], z: p[2] }, true);
     body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    // a teleport is news even to a body that sleeps again before the readback (t-batch2 2026-10-31: a player asleep at
+    // one spot, fast-travelled into a cell with no collider yet, was slept by holdUngrounded before states(true); its
+    // two "asleep" reports were spent, so the scene never saw the move, the streaming focus never followed and the
+    // body's new cells never loaded — every later travel in the session showed the first place). The old held height
+    // belongs to the old place.
+    this.reportedAsleep.delete(id);
+    this.heldUngrounded.delete(id);
     // a teleported carrier carries nothing across the jump
     const last = this.carriers.get(id);
     if (last) {

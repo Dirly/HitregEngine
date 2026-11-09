@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three/webgpu";
 import type { GLTF, GLTFParser } from "three/addons/loaders/GLTFLoader.js";
-import { nameEmbeddedTextures, retainModel, shareDecodedImages } from "../src/gltf-dedupe.js";
+import { modelScope, nameEmbeddedTextures, retainModel, shareDecodedImages } from "../src/gltf-dedupe.js";
 import { shareNamedTextures } from "../src/scene-builder.js";
 
 function model(uri: string, repeat = 1): GLTF {
@@ -66,5 +66,27 @@ describe("cached model lifetime", () => {
     expect(map(a)).toBe(map(b));
     expect(map(a)).not.toBe(map(tiled));
     expect(map(a)).not.toBe(map(other));
+  });
+
+  it("gives a published model the same family as the dev bridge, not the origin", () => {
+    expect(modelScope("/__hitreg/asset-file?file=models%2Ftowns%2Fhall.glb&project=x")).toBe("models/towns");
+    expect(modelScope("https://game.example/play/content/models/towns/hall.glb")).toBe("models/towns");
+    expect(modelScope("http://localhost:4180/content/models/hall.glb")).toBe("models");
+  });
+
+  it("decodes one published shared image once, however deep the model that reaches it", async () => {
+    let decodes = 0;
+    const pixels = { width: 64, height: 64 } as ImageBitmap;
+    const decoder = { isImageBitmapLoader: true, options: {},
+      load: (_url: string, done: (bitmap: ImageBitmap) => void) => { decodes++; queueMicrotask(() => done(pixels)); } };
+    const parser = (uri: string) => ({
+      json: { images: [{ uri }] },
+      loadImageSource: async (_index: number, loader: typeof decoder) =>
+        new THREE.Texture(await new Promise<ImageBitmap>((resolve) => loader.load(uri, resolve))),
+    } as unknown as GLTFParser);
+    const shallow = parser("../shared/retention-test.png"), deep = parser("../../../shared/retention-test.png");
+    shareDecodedImages(shallow); shareDecodedImages(deep);
+    await Promise.all([shallow.loadImageSource(0, decoder as never), deep.loadImageSource(0, decoder as never)]);
+    expect(decodes).toBe(1);
   });
 });

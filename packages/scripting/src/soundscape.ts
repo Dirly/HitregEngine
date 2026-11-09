@@ -96,8 +96,14 @@ interface Voice {
   id: string;
   volume: number;
   target: number;
-  /** Seconds per full-scale change: fast into combat, slow out of it. */
+  /** Transition seconds; music gains are normalized, beds interpolate authored gains. */
   fade: number;
+}
+
+interface BedVoice extends Voice {
+  fadeStart: number;
+  fadeTarget: number;
+  fadeElapsed: number;
 }
 
 /**
@@ -170,6 +176,7 @@ export class Soundscape extends Script {
     musicFade: { default: 5, min: 0.1, max: 30, description: "Seconds a track takes to crossfade to the next place's track." },
     combatFadeIn: { default: 1.2, min: 0.05, max: 10, description: "Seconds combat music takes to come in." },
     combatFadeOut: { default: 5, min: 0.1, max: 30, description: "Seconds combat music takes to leave once the fight is over." },
+    combatReturnCrossfade: { default: false, description: "Crossfade immediately from combat back to the selected exploration track using combatFadeOut. Off preserves the normal post-combat rest before exploration resumes; useful on for a dungeon's two-track score." },
     musicGapMin: { default: 40, min: 0, max: 1800, description: "Least silence (s) after an exploration track before the next." },
     musicGapMax: { default: 150, min: 0, max: 1800, description: "Most silence (s) after an exploration track before the next." },
     spots: { default: {}, description: "Biome (or * or town) → band (or *) → comma list of spot sound ids; an id without extension is a variant family. The engine ships no sounds: a game supplies its table (the foundation project's is authoring/audio/soundscape-spots.json). Empty = no spot emitters." },
@@ -190,7 +197,7 @@ export class Soundscape extends Script {
     { name: "soundscape", args: "", description: "What the soundscape hears around you: biomes, band, zone, beds and volumes." },
   ];
 
-  private beds = new Map<string, Voice>();
+  private beds = new Map<string, BedVoice>();
   private music: Voice[] = [];
   private slotCounter = 0;
   private sampleTimer = 0;
@@ -426,7 +433,7 @@ export class Soundscape extends Script {
     for (const [id, v] of targets) {
       let voice = this.beds.get(id);
       if (!voice) {
-        voice = { slot: `bed:${id}`, id, volume: 0, target: 0, fade: this.param<number>("bedFadeSeconds") };
+        voice = { slot: `bed:${id}`, id, volume: 0, target: 0, fade: this.param<number>("bedFadeSeconds"), fadeStart: 0, fadeTarget: 0, fadeElapsed: 0 };
         this.beds.set(id, voice);
       }
       voice.target = Math.min(1.5, v * master);
@@ -463,9 +470,12 @@ export class Soundscape extends Script {
       this.musicContext = context;
       if (context === "combat") this.startTrack(this.param<number>("combatFadeIn"));
       else if (leavingCombat) {
-        for (const v of this.music) v.fade = this.param<number>("combatFadeOut");
-        for (const v of this.music) v.target = 0;
-        this.musicGap = this.param<number>("combatFadeOut") + 4;
+        if (this.param<boolean>("combatReturnCrossfade")) this.startTrack(this.param<number>("combatFadeOut"));
+        else {
+          for (const v of this.music) v.fade = this.param<number>("combatFadeOut");
+          for (const v of this.music) v.target = 0;
+          this.musicGap = this.param<number>("combatFadeOut") + 4;
+        }
       } else this.startTrack(this.param<number>("musicFade"));
     }
   }
@@ -522,14 +532,20 @@ export class Soundscape extends Script {
 
   private fadeBeds(dt: number): void {
     for (const [id, v] of this.beds) {
-      const step = dt / Math.max(0.05, v.fade);
-      v.volume += Math.max(-step, Math.min(step, v.target - v.volume));
+      if (v.target !== v.fadeTarget) {
+        v.fadeStart = v.volume;
+        v.fadeTarget = v.target;
+        v.fadeElapsed = 0;
+      }
+      v.fadeElapsed += dt;
+      const fraction = Math.min(1, v.fadeElapsed / Math.max(0.05, v.fade));
+      v.volume = v.fadeStart + (v.fadeTarget - v.fadeStart) * fraction;
       if (v.volume <= 0.001 && v.target === 0) {
         this.ctx.setSoundLoop!(v.slot);
         this.beds.delete(id);
         continue;
       }
-      this.ctx.setSoundLoop!(v.slot, v.id, { volume: v.volume, positional: false });
+      this.ctx.setSoundLoop!(v.slot, v.id, { volume: v.volume, positional: false, channel: "ambience" });
     }
   }
 
@@ -578,7 +594,7 @@ export class Soundscape extends Script {
         this.ctx.setSoundLoop!(v.slot);
         return false;
       }
-      this.ctx.setSoundLoop!(v.slot, v.id, { volume: v.volume * gain, positional: false });
+      this.ctx.setSoundLoop!(v.slot, v.id, { volume: v.volume * gain, positional: false, channel: "music" });
       return true;
     });
   }
@@ -621,6 +637,7 @@ export class Soundscape extends Script {
         volume: this.param<number>("clockBellVolume") * this.param<number>("masterVolume"),
         refDistance: this.param<number>("clockBellRefDistance"),
         priority: 4,
+        channel: "ambience",
       });
     }
     this.strikesLeft--;
@@ -680,6 +697,7 @@ export class Soundscape extends Script {
       refDistance: this.param<number>("spotRefDistance"),
       playbackRate: 0.94 + Math.random() * 0.12,
       priority: -1,
+      channel: "ambience",
     });
   }
 
@@ -838,7 +856,7 @@ export class SoundEmitter extends Script {
     if (!this.settle.tick(this.ctx.worldLoading?.(), dt)) return;
     const loop = this.p("loop");
     if (loop && this.ctx.setSoundLoop) {
-      this.ctx.setSoundLoop("emitter", loop, { volume: this.param<number>("loopVolume"), positional: true, refDistance: this.param<number>("refDistance") });
+      this.ctx.setSoundLoop("emitter", loop, { volume: this.param<number>("loopVolume"), positional: true, refDistance: this.param<number>("refDistance"), channel: "ambience" });
     }
     const hours = this.p("hours");
     if (hours && !inHours(currentHour(this.ctx), hours)) return;
@@ -892,6 +910,7 @@ export class SoundEmitter extends Script {
       refDistance: this.param<number>("refDistance"),
       playbackRate: 0.96 + Math.random() * 0.08,
       priority: 1,
+      channel: "ambience",
     });
   }
 }

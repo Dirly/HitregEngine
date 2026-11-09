@@ -139,7 +139,7 @@ export const socketAnchorSchema = z.object({
     .min(1)
     .describe(
       "What the point is for: \"door-side\", \"sign-bracket\", \"door-sign\" (a town exterior's wall point at the centre of a building's door opening, lintel + 0.3 m: a hanging sign hangs with its BOTTOM edge there), \"window\" (a window opening: position its centre, size its [w, h, depth]; nothing hangs in front of it), \"door-sign-beside\" / \"sign-beside\" (a wall point beside a door, within 1.5 m of its edge, where a PROJECTING sign hangs when the wall over the door has no room), \"door-sign-post\" (a FLOOR point 1.0-1.5 m beside a door edge on its window-free side, where a freestanding sign post (tags sign + post) stands when the eave leaves no room for a board), " +
-        "\"hearth\", \"counter\", \"altar\", \"bed-nook\", \"stall\". A plan places by id; the kind lets a designer find it.",
+        "\"hearth\", \"counter\", \"altar\", \"bed-nook\", \"stall\", \"beam\" (a structural beam or joist line a chandelier hangs from: position = the middle of its underside, yaw = the way the marker FACES, across the beam, size [length, 0, depth]). A plan places by id; the kind lets a designer find it.",
     ),
   level: z.number().int().min(0).default(0),
   position: xyz.describe("Local metres. The placed prop's origin lands here."),
@@ -297,6 +297,7 @@ export const dressingItemSchema = z
           "`auto` place = the resolver may mirror the set to make it fit; omitted otherwise = as authored.",
       ),
     note: z.string().default("").describe("Why it is here (whose desk, what trade). For the reviewer; never read by the resolver."),
+    inOpen: z.string().min(10).optional().describe("An `underCover` piece placed IN THE OPEN on purpose, with the reason (at least 10 characters): a jar set as an offering at a captive's feet, a chest dropped by a corpse. The `under-cover` rule accepts it and prints the reason. L (o-fill 2026-10-31: the Drinking Stone's offering jar is the place's question, not stored gear)."),
     setPiece: z
       .boolean()
       .optional()

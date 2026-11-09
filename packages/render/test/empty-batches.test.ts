@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three/webgpu";
 import { InstancedProps } from "../src/instancing.js";
-import { hideNonRenderingBranches, restoreNonRenderingBranches } from "../src/empty-batches.js";
+import { hideNonRenderingBranches, hideVisible, restoreNonRenderingBranches } from "../src/empty-batches.js";
 
 describe("non-rendering branches during rendering", () => {
   const mesh = () => new InstancedProps(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial(), 4);
@@ -96,4 +96,16 @@ describe("non-rendering branches during rendering", () => {
     expect(hideNonRenderingBranches(scene)).toEqual([]);
   });
 
+});
+
+describe("hideVisible", () => {
+  it("names only what it hid, so a restore cannot show what something else hid first", () => {
+    const shown = new THREE.Object3D(), alreadyHidden = new THREE.Object3D();
+    alreadyHidden.visible = false;
+    const hidden = hideVisible([shown, alreadyHidden], []);
+    expect(hidden).toEqual([shown]);
+    for (const object of hidden) object.visible = true;
+    expect(shown.visible).toBe(true);
+    expect(alreadyHidden.visible).toBe(false);
+  });
 });

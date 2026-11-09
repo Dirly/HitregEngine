@@ -33,6 +33,8 @@ export const CATEGORIES = ["furniture", "storage", "bedding", "light", "tablewar
 export const LIMITS = { trianglesMax: 1200, partMinExtent: 0.05, texel: { target: 40, min: 32, max: 48 } };
 /** A landmark request (`request add --landmark <m>`) is built at its full height: never a small prop scaled up (texel). */
 export const LANDMARK_TRIANGLES = 2400, LANDMARK_MAX_M = 40; // 40: the Red Dial needle is 36 m (c-props 2026-10-29)
+/** A landmark's largest allowed side: its height, or its declared plan (`--footprint`), each +10%. */
+export const landmarkSide = (lm: number, fp?: [number, number]): number => +(1.1 * Math.max(lm, ...(fp ?? []))).toFixed(1);
 
 export interface ScaleInfo { id: string; height: number }
 export interface BriefInput {
@@ -141,8 +143,10 @@ export function writeBrief(input: BriefInput): string {
   ];
   const lm = input.request.landmark, hero = input.request.size;
   if (hero && !lm) lines.push("", "## Size (a hero prop placed at this size)", `The finished prop is ${hero} m tall; do not scale later. Build it at ${hero} m (within 10%): the place stands it at scale 1.`);
-  if (lm) lines.push("", "## LANDMARK structure (overrides the size and triangle limits above)", `This is a landmark seen from 300 m: build it at its FULL real size, ${lm} m tall (within 10%), never small. Its largest side may be up to ${lm} m and it may use up to ${LANDMARK_TRIANGLES} triangles. Keep it KISS: long beams and blocks, few parts; the scale class only says who uses it.`);
-  if (r.concept) lines.push("", "## Concept frame (the design reference)", `\`context/${r.concept.split("/").pop()}\` is this piece's painted concept frame: open and look at it before modelling. Match its silhouette, proportions, structural depth and where its carved/painted motifs sit (paint(...) regions where it shows carving). The size, KISS and contract rules here win where the frame disagrees; the scale figure in it is not part of the prop.`);
+  const fp = input.request.footprint, side = landmarkSide(lm ?? 0, fp);
+  if (lm) lines.push("", "## LANDMARK structure (overrides the size and triangle limits above)", `This is a landmark seen from 300 m: build it at its FULL real size, ${lm} m tall (within 10%), never small. ${fp ? `Its plan is ${fp[0]} m wide x ${fp[1]} m deep (within 10%); its largest side may be up to ${side} m` : `Its largest side may be up to ${lm} m`} and it may use up to ${LANDMARK_TRIANGLES} triangles. Keep it KISS: long beams and blocks, few parts; the scale class only says who uses it.`);
+  const frames = (r.concept ?? "").split(",").filter(Boolean).map((c) => `\`context/${c.split("/").pop()}\``);
+  if (frames.length) lines.push("", "## Concept frame (the design reference)", `${frames.length > 1 ? `${frames[0]} is this piece's MAIN painted concept frame (${frames.slice(1).join(", ")} ${frames.length > 2 ? "are further views" : "is a further view"} of the same piece)` : `${frames[0]} is this piece's painted concept frame`}: open and look at ${frames.length > 1 ? "them" : "it"} before modelling. Match its silhouette, proportions, structural depth and where its carved/painted motifs sit (paint(...) regions where it shows carving). The size, KISS and contract rules here win where the frame disagrees; the scale figure in it is not part of the prop.`);
   if (input.reviewNote) lines.push("", "## The owner reviewed an earlier design for this request and sent it back", "Make a NEW design that fixes this (it overrides anything above it contradicts):", "", input.reviewNote.trim());
   if (input.retry) lines.push("", "## Your previous design FAILED the check", "Fix exactly these faults (the rest of the brief still holds):", "```", input.retry.trim(), "```");
   return lines.filter((l, i, a) => !(l === "" && a[i - 1] === "")).join("\n") + "\n";

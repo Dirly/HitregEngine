@@ -16,6 +16,19 @@ The schemas are the reference (`GET /__hitreg/spec` → `scripts["mob-brain"]`
 for every param, `events` for `mob.attack` / `mob.state` / `mob.threat` /
 `mob.alert`). This file is the judgment: how to wire one, and the traps.
 
+Use `behaviorArchetype` for a reusable fight policy rather than coordinating
+several low-level knobs on every creature. Neutral animals retaliate alone;
+Protective creatures defend nearby allies without joining an Aggressive ally's
+unprovoked pull. Territorial creatures retain the existing intrusion boundary.
+Factions still define who counts as an ally: sharing a painted body must not
+merge unrelated populations. The schema describes the presets and tuning;
+`inherit` keeps existing authored temperament and social behavior unchanged.
+
+Population overrides are intentional policy changes: rare row, member/mix row,
+area, then template. A legacy temperament at a higher scope cancels a lower
+preset, so a hostile nest area cannot silently inherit its worker template's
+peaceful preset. Pet stance and orders retain their own behavior.
+
 ## Wiring a mob
 
 **A mob is two entities**, because an entity carries exactly one `script` and
@@ -132,10 +145,14 @@ own. Your combat layer reports it and the brain decides what it means:
 // when a hit lands
 ctx.events?.emit("mob.threat", { mobId, sourceId: attackerId, amount: damage });
 // a heal near a fight is conventionally worth about half
-ctx.events?.emit("mob.threat", { mobId, sourceId: healerId, amount: healed * 0.5 });
+ctx.events?.emit("mob.threat", { mobId, sourceId: healerId, amount: healed * 0.5, provoked: false });
 // a taunt: top of the table AND forced target for a few seconds
 ctx.events?.emit("mob.threat", { mobId, sourceId: tankId, kind: "taunt", seconds: 4 });
 ```
+
+Mark indirect threat as non-provoking: healing can earn hate without turning an
+unprovoked pull into a call for Protective allies. Defensive alerts preserve
+their provenance through assists. Existing damage/taunt bridges need no change.
 
 Once anyone has earned threat, it decides the target — that is what makes a
 tank a role rather than a costume. `threatHalfLife` is the feel knob: short and
@@ -350,6 +367,8 @@ holds the DATA that uses them (which boss, which thresholds, which spawn markers
 | Builtin | File | What it does |
 |---|---|---|
 | `encounter-waves` | `packages/scripting/src/encounter-waves.ts` | Adds join the fight at the boss's health thresholds: waves `{ atHp, count, mouths }` from named mouths, at most `maxAlive` alive, corpses removed after `corpseSeconds` (adds never respawn), re-armed when the boss dies or heals home. Reads `combat/<boss>.hp`/`.maxHp`/`.dead`; asks the server for bodies with the `npc.spawn` / `npc.despawn` events, which `NpcManager` answers. |
+| `boss-gate` | `packages/scripting/src/boss-gate.ts` | A kinematic gate whose art and collision open together after the boss dies. Arena entrances can start open and close on actual boss aggro, with optional evade recovery. Victory is latched on the shared clock for late joins. Supports sinking slabs and rising portcullises; parameter meanings are in the live spec. See the reusable arena guidance in `tools/dungeon-pipeline/README.md`. |
+| `encounter-choice` | `packages/scripting/src/encounter-choice.ts` | The authority chooses one NPC template per instance under a stable actor id. Wipes reuse the choice and gates and waves follow that same actor. Use prefab templates for alternatives so unchosen bosses never stand in the room. |
 
 Add the next mechanic (an enrage timer, a shield phase, a summoned totem) as its own builtin beside it, with its own
 tests, and list it here.

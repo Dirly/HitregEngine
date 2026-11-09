@@ -1,6 +1,49 @@
 import { z } from "zod";
 import type { EventRegistrationOptions } from "./events.js";
 
+export const MOB_BEHAVIOR_ARCHETYPES = ["inherit", "neutral", "protective", "aggressive", "territorial"] as const;
+export const mobBehaviorArchetypeSchema = z.enum(MOB_BEHAVIOR_ARCHETYPES).describe(
+  "Reusable fight policy: inherit preserves legacy temperament/alerts; neutral retaliates alone; protective retaliates and assists defensive same-faction alerts; aggressive attacks on sight; territorial attacks intruders inside territory. Named presets override temperament. Pets retain their stance/order rules.",
+);
+export type MobBehaviorArchetype = z.infer<typeof mobBehaviorArchetypeSchema>;
+export interface MobBehaviorInput {
+  behaviorArchetype?: MobBehaviorArchetype;
+  temperament?: string;
+  alertRadius?: number;
+}
+
+/** One authority for presets; the existing brain still owns acquisition, threat and movement. */
+export function resolveMobBehavior(input: MobBehaviorInput): {
+  temperament: "hostile" | "passive" | "territorial";
+  alertRadius: number;
+  defensiveAssistOnly: boolean;
+} {
+  const preset = input.behaviorArchetype ?? "inherit";
+  const legacy = input.temperament === "passive" || input.temperament === "territorial" ? input.temperament : "hostile";
+  const temperament = preset === "neutral" || preset === "protective" ? "passive"
+    : preset === "aggressive" ? "hostile" : preset === "territorial" ? "territorial" : legacy;
+  const authored = typeof input.alertRadius === "number" && input.alertRadius >= 0 ? input.alertRadius : undefined;
+  return {
+    temperament,
+    alertRadius: preset === "neutral" ? 0 : preset === "protective" ? (authored && authored > 0 ? authored : 10)
+      : authored ?? (temperament === "passive" ? 0 : 10),
+    defensiveAssistOnly: preset === "protective",
+  };
+}
+
+/** Highest authored scope wins as a unit: a legacy mood deliberately cancels a lower-scope preset. */
+export function mobBehaviorOverride(...scopes: readonly MobBehaviorInput[]): {
+  behaviorArchetype?: MobBehaviorArchetype;
+  temperament?: ReturnType<typeof resolveMobBehavior>["temperament"];
+} {
+  for (const scope of scopes) {
+    if (scope.behaviorArchetype !== undefined || scope.temperament !== undefined) {
+      return { behaviorArchetype: scope.behaviorArchetype ?? "inherit", ...(scope.temperament !== undefined ? { temperament: resolveMobBehavior({ temperament: scope.temperament }).temperament } : {}) };
+    }
+  }
+  return {};
+}
+
 /**
  * What a mob brain says out loud.
  *
@@ -153,6 +196,7 @@ export const mobEventDecls: readonly MobEventDecl[] = [
         )
         .default("add"),
       seconds: z.number().min(0).describe("Taunt duration. Ignored by every other kind.").default(3),
+      provoked: z.boolean().optional().describe("False for indirect threat such as healing an enemy: adds hate without marking this source as a direct provocation or recruiting Protective allies. Omitted/true preserves damage/taunt producers' defensive behavior."),
     }),
   },
   {
@@ -163,6 +207,8 @@ export const mobEventDecls: readonly MobEventDecl[] = [
       at: z.tuple([z.number(), z.number(), z.number()]).describe("Where the shout came from — neighbours judge the radius against this, not against the mob's current position."),
       radius: z.number().min(0).describe("Metres the shout carries."),
       faction: z.string().describe("Who is shouting. A mob only answers its own faction; empty means 'anyone in earshot who shares my spawn area'.").default(""),
+      cause: z.enum(["acquisition", "defense"]).optional().describe("Defense = direct threat or a defensive ally assist; acquisition = an unprovoked sight/territory pull. Protective brains answer defense only. Omitted legacy alerts retain legacy listeners' behavior."),
+      spawnArea: z.string().optional().describe("Sender's population area. Protective brains without factions require an exact nonempty match; factions remain the primary ally boundary. Omitted preserves legacy listeners' fallback."),
     }),
   },
 ];

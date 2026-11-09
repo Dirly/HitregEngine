@@ -43,7 +43,7 @@ import { walkTo, type WalkDeps } from "./_quest-walk.mts";
 import {
   WALK_THROUGH_TAGS, bodySkip,
   fellJustNow as fellJustNowLib, AIR_M, FALL_M, STUCK_S, assetRefs, declaredNetwork, declaredRoutes, densifyPts, derivedRoutes, descendants, dropHoldFault, entityTargets, fileTargets, goalSurface, highestWalkable, judgeLeg, MISS_Y, nearestRoutePoint, networkPath,
-  oneWayFaults, portalSentAfterReach, bodyClashes, bodyTrail, readJob, reverseRoute, shadowFaults, uncoveredPoints,
+  oneWayFaults, portalSentAfterReach, portalWalkInPoint, bodyClashes, bodyTrail, readJob, reverseRoute, shadowFaults, uncoveredPoints,
   type EntityView, type Fault, type LegResult, type P3, type Pt, type Route, type Sample, type Target,
 } from "./_poi-walk-lib.mts";
 import { encodePng } from "./_png.mjs";
@@ -104,11 +104,36 @@ if (!declaredRoutes(job.handoff).length) faults.push({ kind: "NO-ROUTES", what: 
 
 const sceneIds = job.sceneOps.map((o) => String(o["id"])).filter((id) => world.entities.has(id));
 const owned = descendants(world.entities as unknown as Map<string, { parent?: string | null }>, sceneIds);
+/** World scale of an entity: the transform scales multiplied up its parent chain (a portal box scales with it). */
+const worldScale = (id: string): [number, number, number] => {
+  const out: [number, number, number] = [1, 1, 1];
+  for (let cur: string | null | undefined = id, n = 0; cur && n < 64; n++) {
+    const e = world.entities.get(cur) as unknown as { parent?: string | null; components: Record<string, unknown> } | undefined;
+    if (!e) break;
+    const s = (e.components["transform"] as { scale?: number[] } | undefined)?.scale;
+    if (Array.isArray(s) && s.length === 3) { out[0] *= s[0]!; out[1] *= s[1]!; out[2] *= s[2]!; }
+    cur = e.parent;
+  }
+  return out;
+};
 const views: EntityView[] = [...owned].map((id) => {
   const e = world.entities.get(id)! as unknown as { parent?: string | null; tags: string[]; components: Record<string, unknown> };
-  return { id, parent: e.parent ?? null, tags: e.tags, position: world.positionOf(id), quaternion: world.quaternionOf(id), components: e.components };
+  return { id, parent: e.parent ?? null, tags: e.tags, position: world.positionOf(id), quaternion: world.quaternionOf(id), scale: worldScale(id), components: e.components };
 });
-let targets: Target[] = [...fileTargets(job), ...entityTargets(views)];
+// door markers of the models the POI's meshes use (<model>.markers.json beside the asset, any project of the closure)
+const doorMarkers = new Map<string, { id: string; position: number[]; yaw: number }[]>();
+const doorsOfAsset = (asset: string) => {
+  if (doorMarkers.has(asset)) return doorMarkers.get(asset)!;
+  let list: { id: string; position: number[]; yaw: number }[] = [];
+  for (const p of fs.readdirSync(path.join(PLAYGROUND, "projects"))) {
+    const mf = path.join(PLAYGROUND, "projects", p, "assets", "models", `${asset.replace(/.(glb|gltf)$/i, "")}.markers.json`);
+    if (!fs.existsSync(mf)) continue;
+    try { list = ((JSON.parse(fs.readFileSync(mf, "utf8")).markers ?? []) as any[]).filter((m) => m.kind === "door" && Array.isArray(m.position)).map((m) => ({ id: String(m.id), position: m.position as number[], yaw: Number(m.yaw) || 0 })); } catch {}
+    break;
+  }
+  doorMarkers.set(asset, list); return list;
+};
+let targets: Target[] = [...fileTargets(job), ...entityTargets(views, doorsOfAsset)];
 const ONLY = flag("only");
 const onlyRoutes = ONLY ? routes.filter((r) => r.id.includes(ONLY)) : routes;
 if (ONLY) targets = targets.filter((t) => t.id.includes(ONLY));
@@ -185,7 +210,9 @@ function stickTo(to: Pt, jump: boolean, arrive = 0.8): { stuckAt: P3 | null } {
   for (let k = 0; clock - t0 < limit; k++) {
     const p = b.feet();
     const dx = to[0] - p[0], dz = to[2] - p[2], d = Math.hypot(dx, dz);
-    if (d < arrive) return { stuckAt: null };
+    // arrived: let go of the stick, as a player does. The server holds the last input until a new one comes, so a walk that
+    // only stopped sending ran on at full speed (moon 2026-10-31: 2.3 m past a portal walk-in, into the recess back wall: BODY)
+    if (d < arrive) { step([0, 0], false); return { stuckAt: null }; }
     if (d < best - 0.3) { best = d; bestT = clock; jumps = 0; }
     if (clock - bestT > STUCK_S) return { stuckAt: p };
     const j = jump && clock - bestT > 1 && jumps < 3 && k % 20 === 0;
@@ -289,13 +316,13 @@ for (const t of targets) {
   travels.length = 0; refusals.length = 0;
   if (from) {
     coldStart([from[0], startY(from), from[2]]);
-    const s = t.from ? stickTo(t.at, true, 0.6) : net ? alongNetwork(net, t.at, t.tolXZ ?? 0.6) : plannerTo(t.at);
+    const s = t.from ? stickTo(t.at, !t.noJump, 0.6) : net ? alongNetwork(net, t.at, t.tolXZ ?? 0.6) : plannerTo(t.at);
     const res = judgeLeg(`${t.id} reach from ${fmt([from[0], from[2]])}`, trace, t.at, { tolXZ: t.tolXZ, stuckAt: s.stuckAt, wet: wet(t.at[0], t.at[2]), ...(t.wadeXZ ? { wadeXZ: t.wadeXZ } : {}) });
     row.reach = { ...res, trace: thin(trace) };
     faults.push(...res.faults);
     if (t.through && res.ok) {
       trace = trace.slice(-1);
-      const s2 = stickTo([t.through[0], t.through[1], t.through[2]], true, 0.8);
+      const s2 = stickTo([t.through[0], t.through[1], t.through[2]], !t.noJump, 0.8);
       row.through = judgeLeg(`${t.id} through`, trace, [t.through[0], t.through[1], t.through[2]], { tolXZ: 1.2, stuckAt: s2.stuckAt });
       faults.push(...row.through.faults);
     }
@@ -305,7 +332,7 @@ for (const t of targets) {
       const ox = from[0] - t.at[0], oz = from[2] - t.at[2], ol = Math.hypot(ox, oz) || 1;
       const sent = portalSentAfterReach(portal, travels, {
         stepOut: () => { stickTo([t.at[0] + (ox / ol) * 6, null, t.at[2] + (oz / ol) * 6], false, 0.6); },
-        walkIn: () => { stickTo(t.at, false, 0.2); },
+        walkIn: () => { stickTo(portal.box ?? portalWalkInPoint(t.at, from, portal.half), false, 0.2); }, // the box centre when fitted off the anchor, else the portal plane (_poi-walk-lib portalWalkInPoint)
         interact: () => world.eventBus.injectFromPeer(bodyPeer, [{ name: QUEST_EVENTS.interact, payload: { actorId: b.bodyId, entityId: portal.entityId } }]),
         idle: () => idle(30),
       });

@@ -20,6 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { killTree } from "./_kill-tree.mts";
 import { fileURLToPath } from "node:url";
 // @ts-expect-error plain JS module
 import { loadPlaywright } from "./_playwright.mjs";
@@ -42,6 +43,11 @@ const DEFAULT_SPOTS: Record<string, Spot[]> = {
     // the picture: same moor, from a rise (30 m up) so the town 1.5 km off clears the near ground
     { name: "moor-view", x: -2150, z: -300, toward: [-652, -273], lift: 30, pitch: 0.5 },
   ],
+  redstrand: [
+    // p-perf 2026-11-02: Bell Strand's shells and the Drinking Stone camp drew 1.7-1.9 km off from the Moon Gate
+    { name: "spawn-to-sun", x: 671, z: -338, toward: [1967, 858] },
+    { name: "moon-to-town", x: 1928, z: 1054, toward: [671, -338], lift: 20, pitch: 2 },
+  ],
 };
 const SPOTS: Spot[] = arg("spots") ? JSON.parse(fs.readFileSync(arg("spots"), "utf8")) : DEFAULT_SPOTS[SCENE] ?? [];
 if (!SPOTS.length) { console.error(`STOP: no spots for ${SCENE} (pass --spots)`); process.exit(2); }
@@ -49,7 +55,7 @@ fs.mkdirSync(OUT, { recursive: true });
 
 let vite: ReturnType<typeof spawn> | null = null;
 let base = arg("url").replace(/\/$/, "");
-const stopVite = () => { if (vite?.pid) { try { process.platform === "win32" ? spawn("taskkill", ["/pid", String(vite.pid), "/t", "/f"]) : process.kill(vite.pid); } catch { /* gone */ } } };
+const stopVite = () => killTree(vite?.pid); // synchronous: an async taskkill raced process.exit and leaked vite
 process.on("exit", stopVite);
 if (!base) {
   const port = arg("port", "5347");

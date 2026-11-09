@@ -196,6 +196,39 @@ describe("dressCharacter", () => {
     expect(dressed.models.get(HELM)!.parts).toEqual(["Helm", "Visor"]);
   });
 
+  it("fits mounted masks to the wearer while retaining shared hood paint and hiding hair", () => {
+    const fittedCreation = characterCreationSchema.parse({
+      ...creation,
+      appearance: creation.appearance.map((slot) => slot.id !== "sex" ? slot : {
+        ...slot,
+        options: slot.options.map((option) => option.id !== "female" ? option : {
+          ...option, remap: { ...femaleRemap, parts: { ...femaleRemap.parts, CultMask: "F_CultMask" } },
+        }),
+      }),
+    });
+    const items = [
+      { model: HELM, parts: ["Hood"], texture: "red-hood.png" },
+      { model: HELM, parts: ["CultMask"], texture: "bronze-face.png" },
+    ];
+    const fit = (sex: string) => dressCharacter({
+      creation: fittedCreation,
+      appearance: { sex, hair: "short" }, items,
+      sheets: (model) => model === HELM ? new Set(["red-hood.png", "bronze-face.png", "bronze-face-f.png"]) : null,
+      rules: (model) => model === HELM ? partRulesSchema.parse({ hides: { Hood: ["HairShort"] } }) : null,
+    });
+    const female = fit("female");
+    expect(female.models.get(HELM)!.groups).toEqual([
+      { parts: ["Hood"], texture: "red-hood.png" },
+      { parts: ["F_CultMask"], texture: "bronze-face-f.png" },
+    ]);
+    expect(female.models.get(HELM)!.mount?.socket).toBe("Head");
+    expect(female.models.get(HAIR)!.parts).toEqual([]);
+    expect(fit("male").models.get(HELM)!.groups).toEqual([
+      { parts: ["Hood"], texture: "red-hood.png" },
+      { parts: ["CultMask"], texture: "bronze-face.png" },
+    ]);
+  });
+
   it("falls back to the default appearance with no build", () => {
     const dressed = dressCharacter({ creation, appearance: null, items: [] });
     expect(dressed.models.get(HEAD)!.parts).toEqual(["HeadFace"]);

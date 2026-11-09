@@ -26,6 +26,7 @@ import {
   type WorldField,
   type WorldRecipe,
 } from "../src/index.js";
+import { ROAD_BANK_OVERSHOOT } from "../src/voxel/field.js";
 
 // ------------------------------------------------------------------ helpers
 
@@ -724,29 +725,40 @@ describe("terrain features", () => {
       const t = Math.min(1, Math.max(0, (v - e0) / (e1 - e0)));
       return t * t * (3 - 2 * t);
     };
+    // Since ce4bc50 (2026-10-27) the band is HELD between the road and the ground under it, +/- ROAD_BANK_OVERSHOOT,
+    // by a smooth min/max: a sampled side height metres off the real ground no longer draws a rim. The ground here
+    // is ~3-9 m under a road at 20, so the left bank (leftY 30, a cut over ground that is not there) is held at the
+    // road + the overshoot, and the right bank (rightY 8, near the real ground) keeps the analytic S-curve.
+    const sMax = (a: number, b: number, k: number): number => {
+      const h = Math.min(1, Math.max(0, 0.5 + (0.5 * (a - b)) / k));
+      return b + (a - b) * h + k * h * (1 - h);
+    };
+    const held = (curve: number, nat: number): number =>
+      -sMax(-(Math.max(20, nat) + ROAD_BANK_OVERSHOOT), -sMax(Math.min(20, nat) - ROAD_BANK_OVERSHOOT, curve, ROAD_BANK_OVERSHOOT), ROAD_BANK_OVERSHOOT);
     // on the road: the surface
     expect(field.height(0, 40)).toBeCloseTo(20, 4);
-    // inside the fully-regraded part of the band: the analytic embankment,
-    // rising toward leftY on +z and falling toward rightY on -z, whatever the
-    // natural ground does there
+    // inside the fully-regraded part of the band: the embankment, rising
+    // toward leftY on +z and falling toward rightY on -z, held to the ground
     for (const d of [half + 1, half + 4, half + 6 + 4]) {
-      expect(field.height(0, 40 + d)).toBeCloseTo(20 + (30 - 20) * s(half, outer, d), 4);
-      expect(field.height(0, 40 - d)).toBeCloseTo(20 + (8 - 20) * s(half, outer, d), 4);
+      expect(field.height(0, 40 + d)).toBeCloseTo(held(20 + (30 - 20) * s(half, outer, d), bare.height(0, 40 + d)), 4);
+      expect(field.height(0, 40 - d)).toBeCloseTo(held(20 + (8 - 20) * s(half, outer, d), bare.height(0, 40 - d)), 4);
     }
+    // the right bank is the pure S-curve (it lies well inside the hold)
+    expect(field.height(0, 40 - (half + 4))).toBeCloseTo(20 + (8 - 20) * s(half, outer, half + 4), 4);
     // a side height the band cannot hold is clamped to the face it can: a
     // cut no steeper than 1:1, a fill no steeper than 0.8 — a path skirting
     // a cliff gets a bench, not a wall
     const cliff = createWorldField(testRecipe({ features: { ...noFeatures(), roads: [{ ...road, leftY: [80, 80], rightY: [-40, -40] }] } }));
     const band = outer - half;
-    expect(cliff.height(0, 40 + half + 6 + 4)).toBeCloseTo(20 + band * 1.0 * s(half, outer, half + 6 + 4), 4);
-    expect(cliff.height(0, 40 - (half + 6 + 4))).toBeCloseTo(20 - band * 0.8 * s(half, outer, half + 6 + 4), 4);
+    expect(cliff.height(0, 40 + half + 6 + 4)).toBeCloseTo(held(20 + band * 1.0 * s(half, outer, half + 6 + 4), bare.height(0, 40 + half + 6 + 4)), 4);
+    expect(cliff.height(0, 40 - (half + 6 + 4))).toBeCloseTo(held(20 - band * 0.8 * s(half, outer, half + 6 + 4), bare.height(0, 40 - (half + 6 + 4))), 4);
     // past the outer edge: untouched
     expect(field.height(0, 40 + outer + 0.5)).toBeCloseTo(bare.height(0, 40 + outer + 0.5), 5);
     expect(field.height(0, 40 - outer - 0.5)).toBeCloseTo(bare.height(0, 40 - outer - 0.5), 5);
     // and inside the fade, strictly between the embankment and the natural ground
     const dFade = outer - 2;
-    const emb = 20 + (30 - 20) * s(half, outer, dFade);
     const nat = bare.height(0, 40 + dFade);
+    const emb = held(20 + (30 - 20) * s(half, outer, dFade), nat);
     const h = field.height(0, 40 + dFade);
     expect(h).toBeGreaterThanOrEqual(Math.min(emb, nat) - 1e-6);
     expect(h).toBeLessThanOrEqual(Math.max(emb, nat) + 1e-6);

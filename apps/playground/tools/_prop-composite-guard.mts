@@ -52,10 +52,14 @@ export interface PropRequest { id: string; name: string; culture: string; scale:
   /** A LANDMARK structure (a headframe, a beacon frame): its height in metres. The Codex gate then allows that size and
    *  LANDMARK_TRIANGLES (LANDMARKS 2026-10-22: an 18 m headframe could only be a 6 m prop scaled x3 at 13 tx/m). */
   landmark?: number;
+  /** A landmark's PLAN in metres [width, depth] (`request add --footprint <w>x<d>`): a temple or hall longer than it is
+   *  tall. The gate then allows its largest side up to the footprint (w-temple4 2026-11-02: a 24 x 28 m, 18 m tall temple
+   *  front was capped at 1.1 x its height). */
+  footprint?: [number, number];
   /** HERO size (`request add --size <m>`): the finished prop's height in metres, made at that size and never scaled up after
    *  (Exiles' Bell 2026-10-24: the bell and the winch were made small and stood in the layout at x1.15-1.2). */
   size?: number;
-  /** The piece's CONCEPT frame (`request add --concept <png>`, path from apps/playground), painted before the build
+  /** The piece's CONCEPT frame(s) (`request add --concept <png>[,<png>]`, paths from apps/playground, comma-joined; the first is the main view), painted before the build
    *  (art-direction: concept first): the Codex design job gets it as context, `props paint gen` as a second ref. */
   concept?: string;
   /** The stone/material TILE its paint must match (`request add --tint <png>`, e.g. the zone cliff tile): `paint gen` sends it as the third ref. */
@@ -98,6 +102,7 @@ export function addRequest(project: string, r: Omit<PropRequest, "id" | "at" | "
   if (dup && !dup.for.split(", ").includes(r.for)) dup.for = `${dup.for}, ${r.for}`;
   if (dup && r.size) dup.size = r.size;
   if (dup && r.concept) dup.concept = r.concept;
+  if (dup && r.footprint) dup.footprint = r.footprint;
   if (dup && r.tint) dup.tint = r.tint;
   const row: PropRequest = dup ?? { id: `${r.culture}/${slug}`, ...r, at: new Date().toISOString(), status: "open" };
   if (!dup) list.push(row);

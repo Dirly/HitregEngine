@@ -54,6 +54,39 @@ export interface SceneIssue {
   message: string;
 }
 
+function validateEntityStructure(
+  doc: SceneDoc,
+  id: EntityId,
+  entity: EntityDoc,
+  max: number,
+  issues: SceneIssue[],
+): void {
+  if (entity.parent !== null && !(entity.parent in doc.entities)) {
+    issues.push({ entity: id, message: `parent ${entity.parent} does not exist` });
+  }
+  // Cycle check: walk up, bounded by entity count.
+  let cursor = entity.parent;
+  let hops = 0;
+  while (cursor !== null && hops <= max) {
+    if (cursor === id) {
+      issues.push({ entity: id, message: "parent chain forms a cycle" });
+      break;
+    }
+    cursor = doc.entities[cursor]?.parent ?? null;
+    hops++;
+  }
+}
+
+/** Internal compile check after every final component has already been normalized. */
+export function validateSceneStructure(doc: SceneDoc): SceneIssue[] {
+  const issues: SceneIssue[] = [];
+  const max = Object.keys(doc.entities).length;
+  for (const [id, entity] of Object.entries(doc.entities)) {
+    validateEntityStructure(doc, id, entity, max, issues);
+  }
+  return issues;
+}
+
 /**
  * Structural + component validation of a whole document. Returns issues rather
  * than throwing so tooling (and AI) can report everything at once.
@@ -67,20 +100,7 @@ export function validateScene(
   // on a 12k-entity expanded world, seconds of every editor rebuild
   const max = Object.keys(doc.entities).length;
   for (const [id, entity] of Object.entries(doc.entities)) {
-    if (entity.parent !== null && !(entity.parent in doc.entities)) {
-      issues.push({ entity: id, message: `parent ${entity.parent} does not exist` });
-    }
-    // cycle check: walk up, bounded by entity count
-    let cursor = entity.parent;
-    let hops = 0;
-    while (cursor !== null && hops <= max) {
-      if (cursor === id) {
-        issues.push({ entity: id, message: "parent chain forms a cycle" });
-        break;
-      }
-      cursor = doc.entities[cursor]?.parent ?? null;
-      hops++;
-    }
+    validateEntityStructure(doc, id, entity, max, issues);
     for (const [name, data] of Object.entries(entity.components)) {
       const result = registry.validate(name, data);
       if (!result.ok) {

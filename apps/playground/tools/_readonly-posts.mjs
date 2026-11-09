@@ -10,3 +10,13 @@ export const dropWrites = (route) => {
   if (r.method() !== "GET" && !READ_ONLY_POSTS.test(r.url())) return route.fulfill({ status: 200, contentType: "application/json", body: "{\"ok\":true}" });
   return route.continue();
 };
+/** The dev-server endpoints that write AUTHORING files (scene autosave, assets, menus, pins, owner edits). A test
+ *  client that must keep other POSTs live (play, travel, player data) drops just these: 2026-11-03 a portal-play
+ *  client autosaved the scene it booted with over installs other tools had written meanwhile (places vanished). */
+export const AUTHORING_WRITES = /\/__hitreg\/(write-asset|owner-edit|pins|scene-menu)\b/;
+/** Playwright route handler for /__hitreg/: authoring writes are answered {"ok":true} and dropped; the rest pass. */
+export const dropAuthoringWrites = (route) => {
+  const r = route.request();
+  if (r.method() !== "GET" && AUTHORING_WRITES.test(r.url())) return route.fulfill({ status: 200, contentType: "application/json", body: "{\"ok\":true}" });
+  return route.continue();
+};

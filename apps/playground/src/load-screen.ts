@@ -32,6 +32,12 @@ export const MIN_SECONDS = 1.2;
 export const MAX_SECONDS = 45;
 /** Background streaming may keep hitching after the playable area is ready. */
 export const MAX_SETTLE_SECONDS = 5;
+/**
+ * The town around the player may still be arriving when its ground is ready. Lifting the screen then put that work in
+ * front of the player at a paced rate: 70 s under 30 fps. Behind the screen it runs flat out, so the screen waits for it,
+ * but never longer than this past ready.
+ */
+export const MAX_FINISH_SECONDS = 45;
 
 export interface LoadSignals {
   /** The player means to be in the world now (playing; a networked tab with a grant). */
@@ -44,6 +50,8 @@ export interface LoadSignals {
   loading(): number;
   /** Local ground is ready to play on; optional for hosts without a streamed world. */
   ready?(): boolean;
+  /** The world around the player is still arriving or building its shaders: hold the screen (see MAX_FINISH_SECONDS). */
+  finishing?(): boolean;
   /** The world is being torn down / switched (a scene switch in progress). */
   switching(): boolean;
   /** Where the player is going, for the title ("Ironspur Shore"); "" = the scene's name is used. */
@@ -59,6 +67,11 @@ export interface LoadScreenOptions {
 
 type Phase = "connect" | "body" | "stream" | "settle" | "done";
 
+/** Local asset previews have no player to wait for. Network entry expects a body even before it arrives. */
+export function wantsWorldEntry(playing: boolean, networked: boolean, hasLocalPlayer: boolean): boolean {
+  return playing && (networked || hasLocalPlayer);
+}
+
 export function loadPhase(s: LoadSignals): Phase {
   if (!s.connected()) return "connect";
   if (!s.hasBody() || s.switching()) return "body";
@@ -67,8 +80,10 @@ export function loadPhase(s: LoadSignals): Phase {
 }
 
 export function shouldReleaseLoad(phase: Phase, elapsed: number, calmSeconds: number,
-  readySeconds: number, groundRequired: boolean): boolean {
-  const settled = phase === "settle" && (calmSeconds >= SETTLE_SECONDS || readySeconds >= MAX_SETTLE_SECONDS);
+  readySeconds: number, groundRequired: boolean, finishing = false): boolean {
+  const settled = phase === "settle" && (finishing
+    ? readySeconds >= MAX_FINISH_SECONDS
+    : calmSeconds >= SETTLE_SECONDS || readySeconds >= MAX_SETTLE_SECONDS);
   return (settled && elapsed >= MIN_SECONDS) || (!groundRequired && elapsed >= MAX_SECONDS);
 }
 
@@ -213,7 +228,7 @@ export function mountLoadScreen(opts: LoadScreenOptions): { dispose(): void; sho
     const elapsed = (now - startedAt) / 1000;
     const settled = phase === "settle" && (now - calmSince) / 1000 >= SETTLE_SECONDS;
     const readySeconds = readySince === null ? 0 : (now - readySince) / 1000;
-    if (shouldReleaseLoad(phase, elapsed, (now - calmSince) / 1000, readySeconds, !!s.ready)) {
+    if (shouldReleaseLoad(phase, elapsed, (now - calmSince) / 1000, readySeconds, !!s.ready, s.finishing?.() ?? false)) {
       if (!settled && !s.ready) console.warn(`[load-screen] let through after ${MAX_SECONDS}s (phase ${phase}, ${loading} still loading)`);
       shownProgress = 1;
       fill.style.transform = "scaleX(1)";

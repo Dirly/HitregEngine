@@ -70,9 +70,36 @@ export const voxelWorldSchema = z.object({
     .max(4)
     .default(1)
     .describe("Coarsen the COLLISION mesh relative to the visual one. Leave at 1: anything else breaks 'what you see is what you collide with', which is the invariant this whole terrain path exists to keep."),
+  bounds: z
+    .object({
+      min: z.tuple([z.number(), z.number()]).describe("World [x, z] of the box's low corner, metres."),
+      max: z.tuple([z.number(), z.number()]).describe("World [x, z] of the box's high corner, metres."),
+    })
+    .refine((b) => b.max[0] > b.min[0] && b.max[1] > b.min[1], { message: "bounds.max must exceed bounds.min on both axes" })
+    .optional()
+    .describe(
+      "Streaming box in world metres. Cells that do not overlap it are never generated, rendered, cooked or simulated " +
+        "(client rings, HLOD and far terrain, the server's residency and terrain bake alike); past it the view shows sky. " +
+        "Omitted = unbounded (only the recipe's own world limit). Meant for crop-and-work scratch scenes such as a " +
+        "place-build lab: a box round the job instead of the whole world.",
+    ),
 });
 
 export type VoxelWorldData = z.infer<typeof voxelWorldSchema>;
+export type VoxelWorldBounds = NonNullable<VoxelWorldData["bounds"]>;
+
+/**
+ * Does cell (cx, cz) of a `cellSize` lattice overlap the component's streaming
+ * box? Every streamer (client provider, server residency, terrain bake) asks
+ * this one question, so "outside the box" means the same thing everywhere.
+ * No bounds = every cell (unbounded, the default).
+ */
+export function voxelCellInBounds(bounds: VoxelWorldBounds | undefined, cellSize: number, cx: number, cz: number): boolean {
+  if (!bounds) return true;
+  const x0 = cx * cellSize;
+  const z0 = cz * cellSize;
+  return x0 + cellSize > bounds.min[0] && x0 < bounds.max[0] && z0 + cellSize > bounds.min[1] && z0 < bounds.max[1];
+}
 
 export function registerVoxelComponents(registry: ComponentRegistry): void {
   registry.register("voxelWorld", voxelWorldSchema);

@@ -34,6 +34,8 @@ export const artThresholdsSchema = z.object({
     minArea: z.number().min(0).default(4).describe("Surfaces smaller than this (m²) are not judged: trims, ropes, small hand-made detail."),
     naturalRatio: range(0.6, 1.6, "Natural rock (triplanar / splat / natural-role) texels/m over the terrain's stone around it (its steep samples; all samples when none are steep): outside this window the rock reads as a different scale of art than the mountain behind it."),
     builtTarget: z.number().positive().default(40).describe("Town texel standard for built surfaces (texels/m)."),
+    setInMax: z.number().min(1).default(1.15).describe("A built piece SET INTO the ground or a cliff (layout `bedded`, placeRule seat `set-in`): its surfaces' texels/m over the terrain's stone around it (steep samples) may not exceed this. A piece set into a 20 tx/m cliff cannot be 40 (coordinator 2026-10-30, the Weeping Sun face)."),
+    setInContrast: z.number().min(1).default(1.5).describe("FINDING (not a fault): a set-in piece's picture contrast (luma sd) over the terrain stone's around it above this reads crisper/finer than the rock (the Weeping Sun face: 2x the cliff's on screen, at the same 40 tx/m)."),
     builtTolerance: z.number().min(0).default(8).describe("Allowed deviation of a built surface from builtTarget (texels/m)."),
     stretch: z.number().min(1).default(1.3).describe("A UV-laid triangle whose texels are longer one way than the other by more than this (the ratio of its world-to-UV map's singular values) is STRETCHED: a sheared coping, a squashed bevel. The area median hides it (a shear keeps the texel area)."),
     stretchShare: z.number().min(0).max(1).default(0.05).describe("Largest share of a built surface's UV-laid area that may be stretched (every face counted, tops and caps included)."),
@@ -112,6 +114,8 @@ export interface ArtMaterial {
   lstar: number | null;
   /** Distinct colours of its texture (5-bit), null when unknown. */
   colours: number | null;
+  /** Its picture's luma sd (contrast, 0-255; the whole picture), when known. */
+  lumaSd?: number | null;
   /** Texture pixels [w, h], null for a flat colour. */
   px: [number, number] | null;
   /** Its texture path (house role tiles are exempt from the colour-count rule). */
@@ -130,6 +134,11 @@ export interface ArtMaterial {
   stretch?: { share: number; worst: number };
   /** Texels/m AS SEEN: `texels` over its texture's `detailScale` (a 512 px tile whose marks span 4 px reads like a 128 px one). */
   seen?: number | null;
+  /** Ground pieces (a job height patch's top): the m2 of this surface the JOB'S OWN PAINT put there (its groundPaints), over
+   *  what the zone's own paint would show on the same ground. Set = only this area is judged against the built work beside
+   *  it; ground wearing the zone's own paint, as the untouched land beside it does, is not art the job added (coordinator
+   *  2026-10-31, Derek: built masonry matches the surrounding ROCK). Unset (passage walls / ceilings): the whole area. */
+  painted?: number;
   /** Its texture is laid on triangles with NO UVs and no world projection (not triplanar): every pixel samples one texel,
    *  the picture never shows (a stamp landmark's lip/trim role on a non-triplanar material). */
   noUv?: boolean;
@@ -141,6 +150,11 @@ export interface ArtPiece {
    *  `ground` = the job's OWN terrain (a height patch's top, its passages' walls and ceilings), materials = the splat surfaces drawn there. */
   kind: "landmark" | "paint" | "mesh" | "prop" | "ground";
   at: [number, number];
+  /** SET INTO the ground or a cliff (layout `bedded`, placeRule seat `set-in`): its texels may not be finer than the stone round it. */
+  setIn?: boolean;
+  /** Not matched to the surrounding rock (`groundBandFree`: a loose prop, a ship or boat, a tent or lean-to): the value
+   *  rule's ground band does not judge it; the near-black floor still does. */
+  bandFree?: boolean;
   materials: ArtMaterial[];
   /** Bindings from emitted source roles to the baked materials. Absent = source roles unavailable, reported for visual review. */
   architecture?: ArchitecturalMaterialBinding[];
@@ -183,7 +197,7 @@ export interface ArtInput {
   /** Accent material ids (every zone palette's builtStone.accent): judged by value.accentExtra / accentShare. */
   accent?: string[];
   /** Terrain texels/m around each piece: all samples and steep ones (null when none are steep). */
-  terrain: Record<string, { texels: number; steep: number | null; lstar: number | null }>;
+  terrain: Record<string, { texels: number; steep: number | null; lstar: number | null; steepSd?: number | null }>;
   /** Area-weighted median texels/m of the catalogued props near each piece (null when none). */
   props: Record<string, number | null>;
   pieces: ArtPiece[];
@@ -203,6 +217,22 @@ export interface ArtFault { rule: "texel" | "value" | "variety" | "portal" | "fo
 const r1 = (v: number) => Math.round(v * 10) / 10;
 const dist = (a: [number, number], b: [number, number]) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
+/** FINDINGS (never faults): a set-in piece whose picture contrast is well over the terrain stone's around it reads crisper
+ *  (finer) than the rock at the same texels/m (o-gates 2026-10-30: the Weeping Sun face, sd 2x the cliff's on screen). */
+export function contrastFindings(inp: ArtInput, t: ArtThresholds): string[] {
+  const out: string[] = [];
+  for (const p of inp.pieces) {
+    const ref = inp.terrain[p.id]?.steepSd; if (!p.setIn || !ref) continue;
+    for (const m of p.materials) if (!m.natural && m.area >= t.texel.minArea && m.lumaSd && m.lumaSd / ref > t.texel.setInContrast)
+      out.push(`${p.id} ${m.id}: picture contrast (luma sd) ${r1(m.lumaSd)} vs the stone it is set into ${r1(ref)} (${r1(m.lumaSd / ref)}x > ${t.texel.setInContrast}x): reads crisper than the rock; calm it`);
+  }
+  return out;
+}
+/** Prefab instances that are NOT "the props around" a built piece (texel propRatio): landmarks (built pieces), creatures
+ *  (mobs/*: a ghost knight at 100 texels/m beside a gate is not the prop scale) and characters (characters/*: the player a
+ *  lab spawns at the place, NPCs; r-found 2026-10-31, the lab-spawned player at 11.9 tx/m was the only prop within 30 m of
+ *  Red Dial's west compound and failed its stone 3.4x). */
+export const NOT_PROPS_RE = /^(landmarks|mobs|characters)\//;
 export function texelFaults(inp: ArtInput, t: ArtThresholds): ArtFault[] {
   const out: ArtFault[] = [];
   for (const p of inp.pieces) {
@@ -224,6 +254,9 @@ export function texelFaults(inp: ArtInput, t: ArtThresholds): ArtFault[] {
         if (r < t.texel.naturalRatio[0] || r > t.texel.naturalRatio[1])
           out.push({ rule: "texel", piece: p.id, what: m.id, detail: `natural surface ${r1(m.texels)} texels/m vs the terrain's stone ${r1(ref)} around it (${r1(r)}x, allowed ${t.texel.naturalRatio.join("-")}x)${m.projected ? ": a triplanar copy at its own scale (landmark.mts now takes the surface's uvScale: re-bake)" : ""}` });
       } else if (p.kind !== "prop") {
+        const stone = ter ? ter.steep ?? ter.texels : null;
+        if (p.setIn && stone && Number.isFinite(stone) && m.texels > stone * t.texel.setInMax)
+          out.push({ rule: "texel", piece: p.id, what: m.id, detail: `set into the ground: ${r1(m.texels)} texels/m vs the stone it is set into ${r1(stone)} (${r1(m.texels / stone)}x, allowed ${t.texel.setInMax}x): finer than the rock round it` });
         if (Math.abs(m.texels - t.texel.builtTarget) > t.texel.builtTolerance)
           out.push({ rule: "texel", piece: p.id, what: m.id, detail: `built surface ${r1(m.texels)} texels/m, standard ${t.texel.builtTarget} +- ${t.texel.builtTolerance}` });
         else if (props && (m.texels / props < t.texel.propRatio[0] || m.texels / props > t.texel.propRatio[1]))
@@ -257,13 +290,28 @@ export function groundFaults(inp: ArtInput, t: ArtThresholds): ArtFault[] {
     const ref = inp.built?.[p.id] ?? null;
     if (!ref) continue;
     for (const m of p.materials) {
-      if (m.area < t.texel.minArea || m.seen == null || !(m.seen > 0)) continue;
+      // only what the job painted: the zone's own paint on a raised pad is the land around it, not a second scale of art
+      const judged = m.painted ?? m.area;
+      if (judged < t.texel.minArea || m.seen == null || !(m.seen > 0)) continue;
       const r = m.seen / ref;
       if (r < t.texel.groundRatio[0] || r > t.texel.groundRatio[1])
-        out.push({ rule: "texel", piece: p.id, what: m.id, detail: `the job's own ground ${r1(m.seen)} texels/m as seen (${r1(m.texels)} nominal) vs the built work beside it ${r1(ref)} as seen (${r1(r)}x, allowed ${t.texel.groundRatio.join("-")}x) over ${Math.round(m.area)} m2: paint it with a finer palette surface (paint operator, faces: true for walls) or line it` });
+        out.push({ rule: "texel", piece: p.id, what: m.id, detail: `the job's own ground ${r1(m.seen)} texels/m as seen (${r1(m.texels)} nominal) vs the built work beside it ${r1(ref)} as seen (${r1(r)}x, allowed ${t.texel.groundRatio.join("-")}x) over ${Math.round(judged)} m2${m.painted != null ? " of its own paint" : ""}: paint it with a palette surface that reads like the built work (paint operator, faces: true for walls), or leave the zone's own paint, or line it` });
     }
   }
   return out;
+}
+
+/** L (careening-strand 2026-10-31, coordinator ruling): the value rule's GROUND BAND is Derek's "match the surrounding
+ *  rock" ruling, so it judges masonry and rock-matched work (landmarks, paint, owned meshes, structure-sized prefabs), not
+ *  what is meant to stand out against the ground: a loose catalogued prop (kind `prop`), a ship, boat or wreck hull (a
+ *  tarred cutter hauled out on pale sand read L* 26 vs 51), or a shelter (catalogue dressing `shelter`: a hide tent on
+ *  sand read 35 vs 50). The near-black floor (`value.minL`) still judges every piece. A band-free piece is also never the
+ *  "built work beside it" a ground pad's texels are matched against (art-check.mts built reference). */
+export const BAND_FREE_PREFAB_RE = /^seagoing-ships\/|(^|[/-])(boat|boats|ship|hull|wreck)([/-]|$)/i;
+export function groundBandFree(kind: ArtPiece["kind"], prefabId?: string | null, dressing?: { shelter?: boolean } | null): boolean {
+  if (kind === "prop") return true;
+  if (kind !== "mesh" || !prefabId) return false;
+  return BAND_FREE_PREFAB_RE.test(prefabId) || dressing?.shelter === true;
 }
 
 export function valueFaults(inp: ArtInput, t: ArtThresholds): ArtFault[] {
@@ -280,7 +328,7 @@ export function valueFaults(inp: ArtInput, t: ArtThresholds): ArtFault[] {
       if (m.lstar < t.value.minL) out.push({ rule: "value", piece: p.id, what: m.id, detail: `mean L* ${r1(m.lstar)} over ${Math.round(m.area)} m2 is near-black (floor ${t.value.minL}): lighten the tint and add an emissive lift (emissiveMap = the same texture, 0.15-0.75), never a darker mask` });
       else if (accentOk) continue;
       else if ((inp.accent ?? []).includes(m.id) && g != null && m.lstar > g && share > t.value.accentShare) out.push({ rule: "value", piece: p.id, what: m.id, detail: `accent ${m.id} at L* ${r1(m.lstar)} (ground ${r1(g)}) covers ${Math.round(share * 100)}% of ${p.id}, an accent may cover <= ${Math.round(t.value.accentShare * 100)}%: use it on rings / courses / coping only` });
-      else if (g != null && Math.abs(m.lstar - g) > t.value.maxDelta) out.push({ rule: "value", piece: p.id, what: m.id, detail: `mean L* ${r1(m.lstar)} vs the zone ground ${r1(g)} (|delta| ${r1(Math.abs(m.lstar - g))} > ${t.value.maxDelta}): ${m.lstar > g ? "pull the tint down into the ground band" : "lift it (lighter tint + emissive)"}` });
+      else if (!p.bandFree && g != null && Math.abs(m.lstar - g) > t.value.maxDelta) out.push({ rule: "value", piece: p.id, what: m.id, detail: `mean L* ${r1(m.lstar)} vs the zone ground ${r1(g)} (|delta| ${r1(Math.abs(m.lstar - g))} > ${t.value.maxDelta}): ${m.lstar > g ? "pull the tint down into the ground band" : "lift it (lighter tint + emissive)"}` });
     }
   }
   return out;
@@ -523,15 +571,17 @@ export const hexLinear = (hex: string | undefined): [number, number, number] => 
   const h = /^#?([0-9a-f]{6})$/i.exec(hex ?? "")?.[1] ?? "ffffff";
   return [0, 2, 4].map((i) => lin(parseInt(h.slice(i, i + 2), 16))) as [number, number, number];
 };
-export interface TextureStats { width: number; height: number; mean: [number, number, number]; colours: number; periodPx: number | null; periodicity: number }
+export interface TextureStats { width: number; height: number; mean: [number, number, number]; colours: number; periodPx: number | null; periodicity: number; /** sRGB luma standard deviation of the opaque pixels (0-255): the picture's contrast */ lumaSd?: number }
 /** Mean linear colour of the opaque pixels, distinct 5-bit colours, and the strongest row period (coursed masonry). */
 export function textureStats(img: { width: number; height: number; data: Uint8Array }): TextureStats {
   const { width: w, height: h, data } = img;
   const mean = [0, 0, 0]; let n = 0;
   const q = new Set<number>(), rows = new Float64Array(h), rowN = new Float64Array(h);
+  let ls = 0, ls2 = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const i = (y * w + x) * 4;
     if (data[i + 3]! < 128) continue;
+    { const y8 = 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!; ls += y8; ls2 += y8 * y8; }
     const l = [lin(data[i]!), lin(data[i + 1]!), lin(data[i + 2]!)];
     mean[0] += l[0]!; mean[1] += l[1]!; mean[2] += l[2]!; n++;
     q.add((data[i]! >> 3) * 1024 + (data[i + 1]! >> 3) * 32 + (data[i + 2]! >> 3));
@@ -550,7 +600,7 @@ export function textureStats(img: { width: number; height: number; data: Uint8Ar
     let lag = 1; while (lag + 1 < c.length && c[lag]! > 0) lag++; // past the first zero crossing (a ripple on the decay is no course)
     for (lag = Math.max(lag, 3); lag <= h / 2; lag++) if (c[lag]! > best && c[lag]! >= c[lag - 1]! && c[lag]! >= (c[lag + 1] ?? -Infinity)) { best = c[lag]!; period = lag; }
   }
-  return { width: w, height: h, mean: m, colours: q.size, periodPx: period, periodicity: best };
+  return { width: w, height: h, mean: m, colours: q.size, periodPx: period, periodicity: best, lumaSd: n ? Math.sqrt(Math.max(0, ls2 / n - (ls / n) ** 2)) : 0 };
 }
 /** How many texture pixels one visible mark spans: the box-downsample factor k (1..16, interpolated in log2 k) at which
  *  half of the luminance variance is gone. Pixel noise ~1.5-2; a 512 px tile painted with 4 px marks ~4 (it reads like
@@ -681,6 +731,8 @@ export function landmarkTriplanarScale(surf: { uvScale?: number } | undefined, o
 export function artTarget(jobDir: string, over: { project?: string; world?: string } = {}): { project: string; world: string } {
   const parts = jobDir.split(/[\\/]/);
   const pi = parts.lastIndexOf("projects"), zi = parts.indexOf("zonegen");
+  // a job COPY outside the project tree (place-build --job, a tools proof) is measured in the lab it names
+  if ((pi < 0 || zi < 0) && over.project && over.world) return { project: over.project, world: over.world };
   if (pi < 0 || zi < 0) throw new Error(`${jobDir} is not a zonegen POI job (projects/<p>/authoring/zonegen/<world>/zones/<zone>/pois/<job>)`);
   return { project: over.project ?? parts[pi + 1]!, world: over.world ?? parts[zi + 1]! };
 }

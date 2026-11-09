@@ -202,7 +202,12 @@ source, a draft declaration (kept if one exists; its measured size is refreshed)
    swapped, alpha cut-out when the PNG has alpha). Over a model whose UVs are an atlas layout, add
    `--triplanar <metres per tile>` so tiling art is projected in metres (128 px over 3.2 m = the 40 texels/m
    standard; `props status` measures a triplanar material as width / metres). Painted art on an atlas kit prop is
-   a `props reskin`, not a variant. Examples: `variant-props/silk-pile` (`poi-props/bone-pile` with
+   a `props reskin`, not a variant. **Row convention:** a glTF's own embedded page is read row = v x H, an engine material's
+   map row = (1 - v) x H (TextureLoader flipY). When the replaced parts drew their glTF's own page, `--art` installs
+   the page FLIPPED so every island lands back on its tile (k-props 2026-10-31: a regraded well page installed as is put
+   the roof on the page's blank half, white, and a trough on its black padding). `props status` fails any prop whose
+   UV islands sample unpainted texels (`blank-uv`: flat white, border-connected flat black, or an all-clear island;
+   tools/_prop-blank-uv.mts); a row's `blankUvExempt` (a reason) is the only way past it. Examples: `variant-props/silk-pile` (`poi-props/bone-pile` with
    `--material silkroot/silk --triplanar 1.6`), `variant-props/hide-lean-to` (`carters-rest/lean-to --part roof
    --art textures/variant-props/hide-leather.png`, wrapped as `camp-props/hide-lean-to`).
 4. **Compose**: `props compose <recipe.json>` builds one prefab from existing props (`prefab`), existing models
@@ -301,3 +306,10 @@ catalogs in `authoring/purchased-assets`, and the current undergrowth variant
 manifest. Keep this index with the project so another agent can discover the same
 assets and fire-enabled prefabs. Detailed original-prop fire setup is documented
 in `authoring/poi-props/README.md`.
+
+## Kit .blend files
+
+Importing a glTF into a kept `.blend` packs another copy of its atlas each time. `props status` fails a `.blend` over
+100 MB; `node tools/blend-images.mjs <file> --fix` (from `apps/playground`) keeps one copy of each image and replaces the
+file only if every object is unchanged. A script that imports and saves removes the imported mesh with its object, or
+calls `dedupe()` from `tools/blend_images.py` before saving.

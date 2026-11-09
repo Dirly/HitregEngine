@@ -4,6 +4,12 @@
  *   npx tsx tools/town-kit-check.mts seams <model.glb> [more.glb ...] [--allow ExteriorNormal,ExteriorBottom,Stone]
  *   npx tsx tools/town-kit-check.mts smoke <model.glb> [more.glb ...] [--expect N | --markers <model>.markers.json]
  *   npx tsx tools/town-kit-check.mts overlap --layout <town>-layout.json --glb-dir <dir of <lot>.glb>
+ *   npx tsx tools/town-kit-check.mts row-fit <a.glb>:<lot width m> <b.glb>:<lot width m> ... [--json out.json]
+ *
+ * row-fit (k-town2, R77): every ORDERED pair of the given row houses (a house beside itself included) stands at the row
+ *   pitch -- lots side by side, street fronts on one line (the front door marker's wall line) -- and fails any triangle
+ *   crossing the party line by more than 1 cm (into the neighbour or beside it) and any open gap over 5 cm on the line
+ *   where both houses have body (tools/_row-fit.mts).
  *
  * A face is EXTERIOR when a horizontal ray along its normal from its centre hits nothing of the model (it looks out at
  * the street), so a notch wall, an open bay's back wall and a face behind entry steps all count, and a door reveal, a
@@ -42,6 +48,17 @@
  *   ridge       the cap is at or above the building's ridge (the highest roof face), within 0.05 m.
  *   wall        no exterior wall face within 2 m (XZ) of the cap rises above it: a stack against a taller wall is a
  *               stone pillar glued to it (house-m's outshut stack, review fault 1).
+ *   flue        (k-town4, R79; Derek 2026-11-02 "all the chimneys are disconnected from the actual fireplace") every stack
+ *               has a hearth marker below it within 1.2 m (plan) -- a chimney with no fireplace under it fails -- and
+ *               masonry fills the column between them: from the storey over the hearth to 1 m under the cap, every 0.4 m
+ *               the point on the stack's axis is INSIDE solid (four horizontal rays all hit within 1.2 m). The roof stack
+ *               used to start at the roof course with nothing below it.
+ *   upstairs    (k-kit2, R80; Derek 2026-11-03 "the fireplace is in the way, the walkway up top is very very tight") every
+ *               upper floor a `stair-head` marker reaches, on a 0.1 m plan raster (tools/_upstairs.mts): the walk from the
+ *               stair head to every room (a 1.6 m tile holding a 1.2 m disc of clear floor) never narrows below 1.2 m,
+ *               and >= 60 % of the floor is clear (floor under it, nothing crossing 0.3 / 0.9 / 1.6 m over it: flue,
+ *               rails, stair hole). The ridge-x strand-narrow-house (flue mid-way along a party gable, facing the stair
+ *               hole) fails it at 1.02 m; the back-gable rebuild passes (walk never under 2 m).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -49,6 +66,8 @@ import { fileURLToPath } from "node:url";
 import * as THREE from "three";
 import { glbTriangles } from "./dress-sockets.mts";
 import { findChimneys } from "../../../packages/render/src/chimney-smoke.ts";
+import { rowFitAll, type RowHouse } from "./_row-fit.mts";
+import { upstairsFloors, upstairsFindings } from "./_upstairs.mts";
 // @ts-expect-error plain JS module
 import { decodePng } from "./_png.mjs";
 
@@ -115,6 +134,9 @@ export function rayHit(soup: Soup, ox: number, oy: number, oz: number, dx: numbe
 }
 
 export type Marker = { kind: string; position: number[] };
+export function readMarkersFull(file: string): { kind: string; position: number[]; yaw?: number; exterior?: boolean }[] {
+  try { return (JSON.parse(fs.readFileSync(file, "utf8")) as { markers?: any[] }).markers ?? []; } catch { return []; }
+}
 export function readMarkers(file: string): Marker[] {
   const mk = file.replace(/\.glb$/i, ".markers.json");
   return fs.existsSync(mk) ? ((JSON.parse(fs.readFileSync(mk, "utf8")) as { markers?: Marker[] }).markers ?? []) : [];
@@ -282,6 +304,25 @@ export function smokeFindings(tops: THREE.Vector3[], chimneys: Marker[], ridge: 
   return f;
 }
 
+/** flue findings (R79): a hearth under every chimney-top marker, and a solid column from the storey above the hearth to the cap. */
+export function flueFindings(soup: Soup, markers: Marker[], storey = 3.2): string[] {
+  const f: string[] = [];
+  const hearths = markers.filter((m) => m.kind === "hearth");
+  markers.filter((m) => m.kind === "chimney-top").forEach((m, k) => {
+    const [mx, my, mz] = [m.position[0]!, m.position[1]!, m.position[2]!];
+    const h = hearths.map((q) => ({ q, d: Math.hypot(q.position[0]! - mx, q.position[2]! - mz) })).filter((x) => x.d <= 1.2 && x.q.position[1]! < my).sort((a, b) => a.d - b.d)[0];
+    if (!h) { f.push(`stack ${k + 1} at (${mx.toFixed(1)}, ${my.toFixed(1)}, ${mz.toFixed(1)}): no fireplace (hearth marker) under it within 1.2 m`); return; }
+    const floor = Math.round((h.q.position[1]! - 0.2) / storey) * storey;          // the hearth's storey floor
+    const gaps: number[] = [];
+    for (let y = floor + storey + 0.3; y <= my - 1.0; y += 0.4) {
+      const inside = [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => rayHit(soup, mx, y, mz, dx!, 0, dz!, 1.2) !== null);
+      if (!inside) gaps.push(y);
+    }
+    if (gaps.length) f.push(`stack ${k + 1}: the column between the hearth and the cap is open at ${gaps.length} height(s) (${gaps[0]!.toFixed(1)}..${gaps[gaps.length - 1]!.toFixed(1)} m): the stack is disconnected from its fireplace`);
+  });
+  return f;
+}
+
 /** A built wall footprint in its own frame: x0, x1, z0, z1 (metres) of the wall-role faces above 1.2 m. null when it has none. */
 export function wallBox(faces: Face[]): [number, number, number, number] | null {
   let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
@@ -335,6 +376,27 @@ if (isMain) {
     console.log(f.length ? `OVERLAP FAILED (${f.length})` : "OVERLAP OK");
     process.exit(f.length ? 1 : 0);
   }
+  if (cmd === "row-fit") {
+    const houses: RowHouse[] = [];
+    for (const a of files) {
+      const m = /^(.*\.glb):([\d.]+)$/i.exec(a);
+      if (!m) { console.error(`row-fit: give each model as <file.glb>:<lot width in m> (got ${a})`); process.exit(2); }
+      const file = m[1]!, soup = glbTriangles(file);
+      const mk = readMarkersFull(file.replace(/\.glb$/i, ".markers.json"));
+      const door = mk.find((k) => k.kind === "door" && k.exterior !== false && Math.abs(((k.yaw ?? 0) + 360) % 360) < 1);
+      let front = door ? door.position[2]! : NaN;
+      if (!Number.isFinite(front)) { console.error(`row-fit: ${path.basename(file)} has no front (yaw 0) exterior door marker`); process.exit(2); }
+      houses.push({ id: path.basename(file, ".glb"), tris: soup.pos, lot: Number(m[2]), front });
+    }
+    const res = rowFitAll(houses);
+    let bad = 0;
+    for (const r of res) { console.log(`${r.pair}: ${r.findings.length ? "FAIL" : "ok"}`); for (const x of r.findings) console.log(`  ! ${x}`); bad += r.findings.length ? 1 : 0; }
+    // k-town9: also the lot width each house was proven at (party lines at +-lot/2 off the model origin), so the town
+    // check judges neighbours at that pitch (a corner type's lot is its built width, wider than its walls)
+    const jf = opt("json", ""); if (jf) fs.writeFileSync(jf, JSON.stringify({ lots: Object.fromEntries(houses.map((h) => [h.id, h.lot])), pairs: res, ok: bad === 0 }, null, 2) + "\n");
+    console.log(bad ? `ROW-FIT FAILED (${bad} of ${res.length} pairs)` : `ROW-FIT OK (${res.length} pairs)`);
+    process.exit(bad ? 1 : 0);
+  }
   if (!["seams", "smoke"].includes(cmd) || !files.length) { console.error("usage: town-kit-check seams|smoke <model.glb> [...] [--allow a,b] [--expect N | --markers f]"); process.exit(2); }
   let bad = 0;
   for (const file of files) {
@@ -359,8 +421,12 @@ if (isMain) {
       const ridge = ridgeHeight(soup);
       let f: string[];
       if (expectOpt) { const expect = Number(expectOpt); f = tops.length === expect ? [] : [`${tops.length} cap(s) found of ${expect} expected`]; }
-      else if (mkFile) f = smokeFindings(tops, chimneys, ridge, faces);
+      else if (mkFile) f = [...smokeFindings(tops, chimneys, ridge, faces), ...flueFindings(soup, markers)];
       else f = tops.length >= 1 ? [] : ["no chimney found"];
+      // R80 upstairs (k-kit2): every upper floor a stair reaches keeps a walk >= 1.2 m and >= 60 % clear
+      const ups = mkFile ? upstairsFloors(soup, markers as any) : [];
+      if (ups.length) console.log(`${name}: upstairs ${ups.map((u) => `storey ${u.level} walk ${u.walk.toFixed(2)} m, clear ${(u.share * 100).toFixed(0)} % (${u.clear.toFixed(1)} of ${u.gross.toFixed(1)} m2)`).join("; ")}`);
+      f.push(...upstairsFindings(ups));
       console.log(`${name}: ${tops.length} chimney top(s) found${mkFile ? ` of ${chimneys.length} placed` : ""}${ridge !== null ? `, ridge ${ridge.toFixed(2)} m` : ""}: ${tops.map((t) => `(${t.x.toFixed(1)}, ${t.y.toFixed(1)}, ${t.z.toFixed(1)})`).join(" ")}`);
       for (const x of f) console.log(`  ! ${x}`);
       bad += f.length;

@@ -25,11 +25,13 @@
  *                                    same model(s), new material or art (--triplanar projects tiling art over atlas UVs in metres)
  *   npx tsx tools/props.mts compose <recipe.json>                          (props + models + primitives + alpha cards -> one prefab;
  *                                    REFUSED when its prefab parts mix cultures or scales, or a part is resized to stand in)
- *   npx tsx tools/props.mts request add --name <thing> --culture <c> --scale <s> --for <place> [--why text] [--landmark <m>] [--size <metres tall>] [--concept <png>] [--tint <png>] | request [--all]
+ *   npx tsx tools/props.mts request add --name <thing> --culture <c> --scale <s> --for <place> [--why text] [--landmark <m> [--footprint <w>x<d>]] [--size <metres tall>] [--concept <png>[,<png>]] [--tint <png>] | request [--all]
  *                                    --concept: the piece's concept frame (painted first); its Codex design job and `paint gen` get it as the reference
  *                                    --tint: the stone tile its paint matches (zone cliff tile): `paint gen` sends it as a third ref
  *                                    --size: a hero prop's finished height; the Codex brief says it is made at that size, never scaled later
- *                                    (--landmark: a built landmark structure that tall, 6-40 m: the Codex gate builds it at full size, 40 tx/m)
+ *                                    (--landmark: a built landmark structure that tall, 6-40 m: the Codex gate builds it at full size, 40 tx/m;
+ *                                     --footprint: its plan when longer than it is tall, so the gate allows that largest side)
+ *                                    --concept a.png,b.png: several frames, the first the main view; all go to the Codex design job
  *                                    | request made <id> --with <catalogue prop id> | request drop <id> --why text | request reopen <id> --why text
  *                                    the project's prop-request list by culture (authoring/dressing/prop-requests.json)
  *   npx tsx tools/props.mts codex <request id...> | --all --project <p> [--batch 5] [--names <id>=<name>,...] [--scales <id>=<scale>,...] [--redo --notes-file <{id: review note}>] [--dry] [--designs-only] [--review-sheet <png>]
@@ -39,7 +41,8 @@
  *   npx tsx tools/props.mts codex install [--cards <name,...>] [--review-sheet <png>]   (rebuild + pack + catalogue the designs; cards; close requests)
  *   npx tsx tools/props.mts dupes [<new prefab id>...]                     (DUPLICATE of <existing id>; exit 1 when ids are given and one is)
  *   npx tsx tools/props.mts reuse | reuse schema                          (preferred reusable parts; validated authoring policy schema)
- *   npx tsx tools/props.mts paint plan|status|gen|import <design name...> [--art <png>] [--force] | paint schema
+ *   npx tsx tools/props.mts paint plan|status|gen|import <design name | held design .py path...> [--art <png>] [--force] [--previous <png>] | paint schema
+ *                                    gen --previous <png>: the prop's old artwork (copy it out first) is the last reference: keep its palette + motifs
  *                                    named paint(...) surfaces -> measured UV guide -> generated/supplied artwork -> registered source atlas;
  *                                    writes world-kit authoring/codex-craft/paint only; final builds refuse missing/stale paint
  *   npx tsx tools/props.mts menu --map <map id> --room <room id> [--role r] [--plan p] [--wealth w] [--all]
@@ -64,7 +67,7 @@ import crypto from "node:crypto";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { applyOps, ComponentRegistry, registerCoreComponents, dressingSchema, dressingSetSchema, dressingOrigin, isLooseClutter, type DressingData } from "@hitreg/core";
+import { applyOps, ComponentRegistry, registerCoreComponents, dressingSchema, dressingSetSchema, dressingOrigin, isLooseClutter, placeRuleSchema, type DressingData } from "@hitreg/core";
 import { mergeVocabulary, scaleFits, cultureFits, dressingPlanSchema, type DressingVocabulary } from "@hitreg/core";
 import { socketMapSchema, placeableFloor, roomBudget, standStretches, describeSetShape, HEAD_STEP, expandRoomRoles, ROOM_ROLE_ALIASES, type DressingSet } from "@hitreg/core";
 import { locate, prefabGeometry, measure, findSurfaces, supportBelow, surfaceTopUnder, readJson, prefabFile, type PropGeometry, type Measure, type V3 } from "./_prop-geometry.mts";
@@ -73,6 +76,7 @@ import { kindSizes, realSizeIssue, standsAgainstWall, type KindSize } from "./_p
 import { addRequest, closeRequest, reopenRequest, compositeFaults, readRequests, requestsFile } from "./_prop-composite-guard.mts";
 import { texelDensity, clearGeometryCaches, projectedTexels, type Density, type TexInfo, type PixelPage } from "./_prop-geometry.mts";
 import { blockbenchReport } from "./_bb-sources.mts";
+import { blankUv, blankUvFault } from "./_prop-blank-uv.mts";
 import {propPolicy,filterPropIndex} from './_prop-curation.mts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -119,7 +123,9 @@ const proj = (rel: string): string => firstExisting(ROOTS, rel) ?? path.join(PRO
 
 // -------------------------------------------------------------- catalogs ----
 /** `shared`: a reusable collection (kits, supplied props, wrappers/variants/composites); otherwise a site's own. */
-interface CatalogEntry { path: string; entries: string; prefabIds?: boolean; pathFields?: string[]; dressing?: string; dressingExempt?: string; shared?: boolean }
+/** `placeRules`: the collection's PLACEMENT SOLVER sidecar ({ version, props: { <prefab id>: placeRule } }, schema @hitreg/core
+ *  placeRuleSchema): `sync` writes each onto its prefab root as the `placeRule` component (t-place 2026-10-30). */
+interface CatalogEntry { path: string; entries: string; prefabIds?: boolean; pathFields?: string[]; dressing?: string; dressingExempt?: string; placeRules?: string; shared?: boolean }
 /** Prefab folders that hold no props at all (building cells, shells, characters): accounted for without a row each. */
 interface ExemptFolder { folder: string; reason: string }
 interface Owner { entry: CatalogEntry; row: any }
@@ -294,7 +300,8 @@ function audit(id: string, owners: Owner[], data: DressingData, all: Map<string,
   if (/drawer/.test(n) && data.mount === "floor" && !data.provides.some((s) => s.kind === "slot")) why.push("a drawer standing on the floor that provides no drawer slots");
   if (/chandelier/.test(n) && data.mount !== "ceiling") why.push("chandelier not ceiling-mounted");
   if (/paper|scroll|book|letter/.test(n) && data.mount !== "surface" && data.mount !== "wall" && data.mount !== "part" && m.size[1] < 0.5) why.push("document not surface/wall-mounted");
-  if (standsAgainstWall(n) && data.mount === "floor" && data.against !== "wall") why.push("wardrobe/shelf/bed must be against:wall");
+  // furniture only: a nest's brood bed (category decor) is not a bed (c-mound 2026-10-30)
+  if (standsAgainstWall(n) && data.mount === "floor" && data.against !== "wall" && data.category !== "decor") why.push("wardrobe/shelf/bed must be against:wall");
   if (/candle|torch|brazier|campfire/.test(n) && !/shelf|holder/.test(n) && !data.fire && geo.effects.length) why.push("flame prop not fire:true");
   for (const r of data.rooms) if (!ROOMS.includes(r)) why.push(`room "${r}" not in the vocabulary`);
   const vocab = vocabulary();
@@ -304,6 +311,13 @@ function audit(id: string, owners: Owner[], data: DressingData, all: Map<string,
   // real size per kind, at the user scale it was made for (a row's realSizeExempt says why it is deliberately off)
   const real = lightOnly ? null : realSizeIssue(id, data.size, data.scale, vocab.scales, KIND_SIZES);
   if (real && !owners.some((o) => typeof o.row?.realSizeExempt === "string" && o.row.realSizeExempt.trim().length >= 8)) why.push(real);
+  // every UV island lands on PAINT (Derek 2026-10-31, the strand well's white roof / near-black trough): a re-skin page
+  // or an atlas whose islands sample its empty cells, padding or a transparent corner renders white / black / nothing.
+  // A row's blankUvExempt (>= 8 chars) says why flat white/black is deliberate (a painted-black shaft mouth).
+  if (!owners.some((o) => typeof o.row?.blankUvExempt === "string" && o.row.blankUvExempt.trim().length >= 8)) {
+    const blank = blankUvFault(blankUv(geo, { projected: projectedTexels(ASSETS) }));
+    if (blank) why.push(blank);
+  }
   return why;
 }
 
@@ -342,7 +356,7 @@ function suggest(id: string, owners: Owner[]): Record<string, unknown> {
 
 // --------------------------------------------------------------- status ----
 interface Row { id: string; state: "ok" | "STALE" | "MISSING"; why: string[]; exempt?: string }
-function evaluate(only?: string): { rows: Row[]; data: Map<string, DressingData> } {
+function evaluate(only?: string, releaseMeasurements = false): { rows: Row[]; data: Map<string, DressingData> } {
   const all = catalogued(only), everything = only ? catalogued() : all;
   // parse every declaration in the project first (slot hosts and chains may live in another collection)
   const data = new Map<string, DressingData>(), errors = new Map<string, string>();
@@ -355,6 +369,10 @@ function evaluate(only?: string): { rows: Row[]; data: Map<string, DressingData>
   }
   const rows: Row[] = [];
   for (const [id, owners] of [...all].sort((a, b) => a[0].localeCompare(b[0]))) {
+    // Index rows retain declarations and verdicts only. Keeping every completed
+    // prop's triangles, decoded pages and parsed glTFs made a full catalogue
+    // exhaust memory. A single audit still shares all of its own measurements.
+    if (releaseMeasurements) { clearGeometryCaches(); geoCache.clear(); densCache.clear(); pageCache.clear(); }
     const dcl = lookup(id, owners);
     if (!fs.existsSync(prefabFile(ASSETS, id))) { rows.push({ id, state: "MISSING", why: ["prefab file missing"] }); continue; }
     const { d, rootId } = prefabRoot(id);
@@ -369,12 +387,13 @@ function evaluate(only?: string): { rows: Row[]; data: Map<string, DressingData>
     if (stable(onPrefab) !== stable(p)) why.push(onPrefab ? "prefab root out of sync with the sidecar (run sync)" : "prefab root has no dressing yet (run sync)");
     rows.push({ id, state: why.length ? "STALE" : "ok", why });
   }
+  if (releaseMeasurements) { clearGeometryCaches(); geoCache.clear(); densCache.clear(); pageCache.clear(); }
   return { rows, data };
 }
 
 // ----------------------------------------------------------------- sync ----
-function sync(): { changed: string[]; rehashed: string[]; staleHash: string[] } {
-  const all = catalogued(), changed: string[] = [], rehashed: string[] = [], staleHash: string[] = [];
+function sync(only?: string): { changed: string[]; rehashed: string[]; staleHash: string[] } {
+  const all = catalogued(only), changed: string[] = [], rehashed: string[] = [], staleHash: string[] = [];
   for (const [id, owners] of all) {
     const dcl = lookup(id, owners);
     if (!dcl || !fs.existsSync(prefabFile(ASSETS, id))) continue;
@@ -387,6 +406,15 @@ function sync(): { changed: string[]; rehashed: string[]; staleHash: string[] } 
       const parsed = dressingSchema.safeParse(dcl.raw);
       if (!parsed.success) { console.error(`skip ${id}: invalid declaration`); continue; }
       if (stable(current) !== stable(parsed.data)) ops = [{ op: "set-component", id: rootId, component: "dressing", data: parsed.data }];
+    }
+    // the PLACEMENT SOLVER's rule (placeRules sidecar): what seat, grade, tolerances and foundation the piece takes
+    for (const { entry } of owners) {
+      const raw = entry.placeRules ? sidecar(entry.placeRules).props[id] : undefined;
+      if (raw === undefined) continue;
+      const rule = placeRuleSchema.safeParse(raw);
+      if (!rule.success) { console.error(`skip placeRule of ${id}: ${rule.error.issues[0]?.message ?? "invalid"}`); break; }
+      if (stable(d.entities[rootId]?.components?.placeRule) !== stable(rule.data)) ops.push({ op: "set-component", id: rootId, component: "placeRule", data: rule.data });
+      break;
     }
     if (!ops.length) continue;
     const next = applyOps(d, ops, components).doc;
@@ -478,7 +506,7 @@ function socketSummary(p: DressingData): string {
     .join(" ");
 }
 function buildIndex() {
-  const { rows, data } = evaluate();
+  const { rows, data } = evaluate(undefined, true);
   const owners = catalogued();
   // a row with `supersededBy` (a reskin or revision under a new id) keeps its declaration, so installed scenes and old
   // plans still check, but the menu offers only its successor
@@ -1189,7 +1217,7 @@ async function main() {
   if (cmd === 'paint') {
     const {paintCommand} = await import('./prop-codex/paint.mts');
     const wk = path.resolve(HERE, '..', 'projects', 'world-kit');
-    const result = await paintCommand(wk, positional[0] ?? '', positional.slice(1), {art:flag('art'), force:!!flags.force});
+    const result = await paintCommand(wk, positional[0] ?? '', positional.slice(1), {art:flag('art'), force:!!flags.force, previous:flag('previous')});
     console.log(JSON.stringify(result, null, 2));
     if (positional[0] === 'status' && Array.isArray(result) && result.some((r:any)=>!r.ready)) process.exitCode=1;
     return;
@@ -1259,6 +1287,13 @@ async function main() {
       const uncut = blockbenchSources().reduce((s, r) => s + r.uncut.length, 0);
       if (uncut) console.log(`UNCUT   ${uncut} Blockbench element(s)/group(s) in no catalog row and no blockbench-sources.json skip (props sources --uncut lists them)`);
     }
+    {
+      // a low-poly kit's .blend is a few MB; past GitHub's 100 MB limit it is almost always the same atlas packed per import
+      const authoring = path.join(PROJECT, "authoring");
+      const heavy = fs.existsSync(authoring) ? fs.readdirSync(authoring, { recursive: true, withFileTypes: true }).filter((e) => e.isFile() && e.name.endsWith(".blend")).map((e) => path.join(e.parentPath, e.name)).filter((f) => fs.statSync(f).size > 100e6) : [];
+      for (const f of heavy) console.log(`HEAVY   ${path.relative(PROJECT, f).replaceAll("\\", "/")} is ${(fs.statSync(f).size / 1e6).toFixed(0)} MB (node tools/blend-images.mjs <file> --fix)`);
+      if (heavy.length) process.exitCode = 1;
+    }
     if (fs.existsSync(INDEX_OUT)) {
       const t = fs.statSync(INDEX_OUT).mtimeMs, newer = registry.catalogs.some((c) => c.dressing && fs.existsSync(proj(c.dressing)) && fs.statSync(proj(c.dressing)).mtimeMs > t); // a sidecar may live in any closure project
       if (newer) { console.log("STALE   prop-index.json is older than a sidecar (run index)"); process.exitCode = 1; }
@@ -1283,7 +1318,7 @@ async function main() {
     return;
   }
   if (cmd === "sync") {
-    const r = sync();
+    const r = sync(typeof flags.catalog === "string" ? flags.catalog : undefined);
     console.log(`sync: ${r.changed.length} prefab(s) updated, ${r.rehashed.length} catalog hash(es) refreshed`);
     for (const s of r.staleHash) console.log(`  catalog hash was already stale, left alone: ${s}`);
     return;
@@ -1358,11 +1393,15 @@ async function main() {
       if (lm !== undefined && !(lm > 6 && lm <= LANDMARK_MAX_M)) throw Error(`request add --landmark <m>: a landmark structure is over 6 m and at most ${LANDMARK_MAX_M} m tall`);
       const size = flag("size") ? Number(flag("size")) : undefined;
       if (size !== undefined && !(size > 0 && size <= 30)) throw Error("request add --size <metres tall>: the finished prop's height, 0-30 m");
-      const concept = flag("concept") ? path.relative(path.resolve(HERE, ".."), path.resolve(flag("concept")!)).replaceAll(String.fromCharCode(92), "/") : undefined;
-      if (concept && !fs.existsSync(path.resolve(HERE, "..", concept))) throw Error(`request add --concept: no such image ${concept}`);
+      const concepts = (flag("concept") ?? "").split(",").filter(Boolean).map((c) => path.relative(path.resolve(HERE, ".."), path.resolve(c)).replaceAll(String.fromCharCode(92), "/"));
+      for (const c of concepts) if (!fs.existsSync(path.resolve(HERE, "..", c))) throw Error(`request add --concept: no such image ${c}`);
+      const concept = concepts.length ? concepts.join(",") : undefined;
+      const fp = flag("footprint") ? flag("footprint")!.split(/[x,]/).map(Number) : undefined;
+      if (fp && (fp.length !== 2 || fp.some((v) => !(v > 0 && v <= 60)) || lm === undefined)) throw Error("request add --footprint <w>x<d>: a landmark's (--landmark) plan in metres, each side 0-60");
+      const footprint = fp as [number, number] | undefined;
       const tint = flag("tint") ? path.relative(path.resolve(HERE, ".."), path.resolve(flag("tint")!)).replaceAll(String.fromCharCode(92), "/") : undefined;
       if (tint && !fs.existsSync(path.resolve(HERE, "..", tint))) throw Error(`request add --tint: no such image ${tint}`);
-      const r = addRequest(RP, { name: need("name"), culture, scale, for: need("for"), why: flag("why") ?? "", ...(lm ? { landmark: lm } : {}), ...(size ? { size } : {}), ...(concept ? { concept } : {}), ...(tint ? { tint } : {}) });
+      const r = addRequest(RP, { name: need("name"), culture, scale, for: need("for"), why: flag("why") ?? "", ...(lm ? { landmark: lm } : {}), ...(footprint ? { footprint } : {}), ...(size ? { size } : {}), ...(concept ? { concept } : {}), ...(tint ? { tint } : {}) });
       console.log(`prop request ${r.id} (${r.status}) for ${r.for} -> ${path.relative(process.cwd(), requestsFile(RP))}`);
       return;
     }

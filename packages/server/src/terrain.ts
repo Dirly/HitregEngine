@@ -27,6 +27,7 @@ import {
   registerVoxelWorld,
   voxelChunkDoc,
   voxelChunkOptionsFrom,
+  voxelCellInBounds,
   type ChunkDoc,
   type ChunkRep,
   type RecipeEdit,
@@ -231,9 +232,17 @@ export class TerrainStreamer {
     return this.loaded.has(chunkKey(cx, cz));
   }
 
-  /** Is this cell inside the world (past the limit is open sea floor nobody stands on)? */
+  /**
+   * Is this cell inside the world (past the limit is open sea floor nobody stands on), and inside the
+   * voxelWorld component's streaming box when it has one (a cropped lab: never loaded, cooked or simulated)?
+   */
   inWorld(cx: number, cz: number): boolean {
-    return Number.isFinite(cx) && Number.isFinite(cz) && Math.hypot(cx + 0.5, cz + 0.5) <= this.limitCells;
+    return (
+      Number.isFinite(cx) &&
+      Number.isFinite(cz) &&
+      Math.hypot(cx + 0.5, cz + 0.5) <= this.limitCells &&
+      voxelCellInBounds(this.resolved.data.bounds, this.resolved.streamer.cellSize, cx, cz)
+    );
   }
 
   /**

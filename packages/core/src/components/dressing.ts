@@ -216,6 +216,15 @@ export const dressingSchema = z
       .default("both")
       .describe("Where it may be used. An `outdoor` prop inside a building (a gravestone, a market stall) is refused, and the reverse."),
     category: z.string().default("").describe("Coarse family for the catalogue menu: furniture, storage, bedding, light, tableware, document, tool, decor, trade, sacred, street."),
+    hideDistance: z
+      .union([z.number().min(0).max(2000), z.literal("never")])
+      .optional()
+      .describe(
+        "Metres from a placed copy at which the client stops drawing it (runtime, place-streamer + culling). Omitted = " +
+          "derived from `size` and `category` (propHideDistance: a 0.4 m vase ~30 m, a brazier ~60 m, a cart ~160 m, " +
+          "anything over 3.5 m never). \"never\" for a prop that must read from afar. A placed subtree with its own " +
+          "`culling` component (or under a landmark) overrides it. docs/culling.md \"Props hide by size\".",
+      ),
     contact: z
       .enum(["base", "legs", "embed", "hang", "wall", "seated"])
       .optional()
@@ -287,6 +296,29 @@ export const dressingSchema = z
           "centre of a room that keeps its middle clear (every dungeon room). Everything else fills walls and corners first. A plan may also mark " +
           "one item `setPiece`. Omitted = false.",
       ),
+    facesCentre: z
+      .enum(["+z", "-z", "+x", "-x"])
+      .optional()
+      .describe(
+        "FACES THE CENTRE: the local side (its entrance, mouth or seat front) this piece turns toward the place's centrepiece, the camp fire " +
+          "(a tent's entrance, a lean-to's open side, a bedroll's head end, a log seat's front). place-build yaws such a layout piece to the nearest " +
+          "fire or centrepiece within 30 m; `dress check` refuses one placed more than 25 degrees off (`faces-centre`). L (Derek 2026-10-31: all tent " +
+          "entrances face the fire). Omitted = no facing rule.",
+      ),
+    shelter: z
+      .boolean()
+      .optional()
+      .describe(
+        "A SHELTER (a tent, lean-to, awning or hut): `underCover` gear may stand inside its footprint or at its mouth (the `facesCentre` side). Omitted = false.",
+      ),
+    underCover: z
+      .boolean()
+      .optional()
+      .describe(
+        "Gear KEPT UNDER COVER (weapon racks and stands, jars and vases, chests, bedding): outdoors it stands inside a `shelter` or within " +
+          "2.5 m of its mouth, never in the open (`under-cover`); the open ground gets the fire, seats, a spit and rubbish. L (Derek 2026-10-31: " +
+          "the weapon stand and the vases would be in the tent). Omitted = false.",
+      ),
     tags: z
       .array(z.string().min(1))
       .optional()
@@ -321,6 +353,22 @@ export const dressingSchema = z
         "floor only: a loose container standing on the floor (a sack, crate, basket, barrel, box). Loose things count against a room's small " +
           "floor-clutter budget; past it they go on shelves, in a storage room, or are left out. Omitted = derived: a solid floor prop of " +
           "category storage or trade that does not stand against a wall (shelves, wardrobes and cabinets are furniture, not clutter).",
+      ),
+    holdsGoods: z
+      .boolean()
+      .optional()
+      .describe(
+        "A shelf, bookshelf or dresser whose boards are made to be FILLED (its model carries no goods): every surface socket it provides must " +
+          "hold at least one item placed `on` it (books, jars, crockery, boxes), or `dress check` fails `shelf-empty` (owner 2026-10-30: bare " +
+          "shelves read as an empty house). `on` items naming no socket go to its emptiest board first. Omitted = false.",
+      ),
+    hangFrom: z
+      .enum(["ceiling", "beam"])
+      .optional()
+      .describe(
+        "ceiling only: what it hangs from. `beam`: a heavy hung light (a chandelier) hangs from a structural beam or joist line, never from " +
+          "bare boards between them; `dress check` fails `beam-hang` when its point is off every `beam` anchor of the map (a building export's " +
+          "beam markers) and warns when the map has none. Omitted = `ceiling`.",
       ),
   })
   .superRefine((d, ctx) => {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three/webgpu";
 import {
-  CUBE_FACES, castAll, groundExpected, classifyHole, countedPixels, fieldOpeningFilter, gapBetweenDepths, solidAlong, isSentinel, notMapObjects, pixelRay, rayHitsBox, rimPixels, sentinelClusters, surfaceMeshes, viewBasis,
+  CUBE_FACES, castAll, sentinelViews, groundExpected, classifyHole, countedPixels, fieldOpeningFilter, gapBetweenDepths, framesApart, solidAlong, isSentinel, notMapObjects, pixelRay, rayHitsBox, rimPixels, sentinelClusters, surfaceMeshes, viewBasis,
   type SeeThroughView, type V3,
 } from "../src/see-through.js";
 
@@ -39,6 +39,36 @@ describe("see-through probe", () => {
     for (const o of [skinned, weapon, placeholder, pv, heads]) expect(skip.has(o)).toBe(true);
     expect(skip.has(shell.children[0]!)).toBe(false);
     expect(surfaceMeshes(scene, skip)).toEqual([shell.children[0]]);
+  });
+
+  it("leaves out a static batch's hidden sources (the batch draws them), not other hidden meshes", () => {
+    const scene = new THREE.Scene();
+    const mk = () => new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial());
+    const source = mk(), culled = mk(), batch = mk();
+    source.userData["staticBatch"] = true; source.visible = false; // merged into `batch`
+    culled.visible = false; // hidden for another reason (an interior): still a surface, its holes are "culled"
+    scene.add(source, culled, batch);
+    expect(surfaceMeshes(scene)).toEqual([culled, batch]);
+  });
+
+  it("compiles every view's target before the sentinel draws (a first draw into a new target only starts its pipeline)", async () => {
+    const log: string[] = [];
+    let target: unknown = null;
+    const renderer = {
+      setRenderTarget: (t: unknown) => { target = t; },
+      getRenderTarget: () => target,
+      getClearColor: (c: THREE.Color) => c,
+      getClearAlpha: () => 1,
+      setClearColor: () => {},
+      clear: () => {},
+      compileAsync: async () => { log.push(`compile ${target ? "rt" : "canvas"}`); },
+      render: (scene: THREE.Scene) => { log.push(`render bg ${(scene.background as THREE.Color | null)?.getHex().toString(16) ?? "-"}`); },
+      readRenderTargetPixelsAsync: async () => new Uint8Array(4 * 4 * 4),
+    };
+    const scene = new THREE.Scene();
+    await sentinelViews({ renderer } as never, scene, CUBE_FACES.slice(0, 2).map((view) => ({ eye: [0, 0, 0] as V3, view })), 4);
+    expect(log).toEqual(["compile rt", "compile rt", "render bg ff00ff", "render bg ff00ff"]);
+    expect(scene.background).toBe(null);
   });
 
   it("knows the sentinel, tolerant of rounding but not of lit surfaces", () => {
@@ -157,6 +187,20 @@ describe("see-through probe", () => {
     expect(gapBetweenDepths([3, 3.2, 3.4, 2.9])).toBe(false);
     expect(gapBetweenDepths([30, 34, 41])).toBe(false);
     expect(gapBetweenDepths([3, null, null])).toBe(false);
+  });
+
+  it("sky framed by two pieces that never meet is not a seam (framesApart); a real 1-2 px seam still is", () => {
+    const hit = (entity: string, point: [number, number, number], distance: number) => ({ entity, mesh: entity, point, distance });
+    // Red Dial: an avenue wall's top 21 m out closes the bottom of a sky sliver through a gate arch 46-49 m out
+    const redDial = [hit("wall", [-30.9, 2.36, 7.1], 21), hit("wall", [-31.0, 2.37, 6.9], 21.2), hit("gate", [-38.6, 4.8, -15.6], 46), hit("gate", [-38.7, 6.5, -16.0], 47), hit("gate", [-39.4, 4.9, -17.9], 49), null];
+    expect(framesApart(redDial)).toBe(true);
+    expect(gapBetweenDepths(redDial.map((h) => (h ? h.distance : null)))).toBe(false); // the depth rule alone missed it
+    // two pieces meeting at 46 m with a 1-2 px slit (0.4-0.7 m) between them: a seam
+    expect(framesApart([hit("a", [0, 4, -46], 46), hit("a", [0, 5, -46], 46), hit("b", [0.7, 4, -46.1], 46.1), hit("b", [0.6, 5, -46], 46)])).toBe(false);
+    // a near pair and a far third piece: the near pair still meets, so the pocket stays a hole
+    expect(framesApart([hit("a", [0, 2, -10], 10), hit("b", [0.3, 2, -10], 10), hit("c", [0, 9, -80], 80)])).toBe(false);
+    // one entity framing a slit is never excused here (open mesh)
+    expect(framesApart([hit("a", [0, 2, -10], 10), hit("a", [0, 9, -60], 60)])).toBe(false);
   });
 
   it("names the cause: single-sided, culled, seam, open mesh", () => {

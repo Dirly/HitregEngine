@@ -52,7 +52,7 @@ export function registerCharacterAssetTypes(assets: AssetLibrary): void {
 
 /**
  * The game's creation rules: the `creation` asset named `id`, or — with no
- * id — the only one installed. Null when there is none (or several and no id),
+ * id — the only player-selectable one installed. Null when there is none (or several and no id),
  * which means "no creation screen": characters are made from a name alone.
  */
 export function findCreation(
@@ -63,7 +63,7 @@ export function findCreation(
     const asset = assets.getDataAsset(id);
     return asset?.type === "creation" ? (asset.data as CharacterCreation) : null;
   }
-  const all = assets.dataAssetsOfType("creation");
+  const all = assets.dataAssetsOfType("creation").filter((asset) => (asset.data as CharacterCreation).playerSelectable !== false);
   return all.length === 1 ? (all[0]!.data as CharacterCreation) : null;
 }
 

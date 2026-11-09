@@ -13,6 +13,7 @@ vi.spyOn(THREE.TextureLoader.prototype, "loadAsync").mockImplementation(
 );
 
 const { cachedInstancedMaterial, cachedMergedMaterial, materialForId } = await import("../src/scene-builder.js");
+const { applyModelEmissive } = await import("../src/ubermesh.js");
 
 function texturedSource(id: string): THREE.NodeMaterial {
   const data = materialSchema.parse({ color: "#ffffff", map: "masonry" });
@@ -61,5 +62,39 @@ describe("instanced copies of a material whose maps load late", () => {
     await deliverAll();
     const copy = cachedInstancedMaterial("late-maps#ready#0", source) as THREE.NodeMaterial;
     expect(copy.colorNode).toBe(source.colorNode);
+  });
+
+  it("keeps a creature's late texture when its initial look clears glow", async () => {
+    const source = texturedSource("late-maps/creature-clear");
+    const mesh = new THREE.SkinnedMesh(new THREE.BoxGeometry(), source);
+    applyModelEmissive(mesh, null);
+    await deliverAll();
+    expect((mesh.material as THREE.NodeMaterial).colorNode).toBe(source.colorNode);
+    expect((mesh.material as THREE.NodeMaterial).colorNode).toBeTruthy();
+  });
+
+  it("applies the latest glow after maps arrive without changing the shared source", async () => {
+    const source = texturedSource("late-maps/creature-glow") as THREE.MeshStandardNodeMaterial;
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(), source);
+    applyModelEmissive(mesh, { color: "#ff0000", intensity: 1 });
+    applyModelEmissive(mesh, { color: "#00ff00", intensity: 2 });
+    await deliverAll();
+    const material = mesh.material as THREE.MeshStandardNodeMaterial;
+    expect(material.colorNode).toBe(source.colorNode);
+    expect(material.colorNode).toBeTruthy();
+    expect(material.emissive.getHexString()).toBe("00ff00");
+    expect(material.emissiveIntensity).toBe(2);
+    expect(source.emissive.getHexString()).toBe("000000");
+  });
+
+  it("does not apply an old pending glow to a replacement material", async () => {
+    const source = texturedSource("late-maps/creature-replaced");
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(), source);
+    applyModelEmissive(mesh, { color: "#ff0000", intensity: 2 });
+    const replacement = new THREE.MeshStandardNodeMaterial();
+    mesh.material = replacement;
+    await deliverAll();
+    expect(mesh.material).toBe(replacement);
+    expect(replacement.emissive.getHexString()).toBe("000000");
   });
 });

@@ -1,7 +1,9 @@
 import * as THREE from "three/webgpu";
 import {
   add,
+  attribute,
   clamp,
+  Fn,
   float,
   mul,
   positionGeometry,
@@ -9,8 +11,8 @@ import {
   sin,
   smoothstep,
   time,
-  vec3,
   uniform,
+  vec3,
 } from "three/tsl";
 import { editMeshMaterials } from "./node-material.js";
 
@@ -18,6 +20,19 @@ type N = ReturnType<typeof float>;
 
 /** Tag on a material this module has already wired, and the flag hlod-proxy reads. */
 export const FOLIAGE_WIND = "foliageWind";
+
+/**
+ * The model-local vertex, carried as an attribute by a STATIC BATCH (static-batch.ts): a merge bakes the world
+ * transform into `position`, so `positionGeometry` there is world space and "how far up the plant" would be lost.
+ * The wind reads this when the geometry has it and `positionGeometry` otherwise, so ONE material draws both the
+ * single plant and the merged bed — which is what lets a town's ferns and potted trees batch at all.
+ */
+export const WIND_LOCAL_ATTRIBUTE = "windLocal";
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const windLocal = (): N3 => (Fn as any)((_: unknown, builder: { hasGeometryAttribute(name: string): boolean }) =>
+  builder.hasGeometryAttribute(WIND_LOCAL_ATTRIBUTE) ? attribute(WIND_LOCAL_ATTRIBUTE, "vec3") : positionGeometry)();
+type N3 = typeof positionGeometry;
 
 /**
  * How a plant answers the wind.
@@ -141,7 +156,8 @@ export function applyFoliageWind(root: THREE.Object3D, options: FoliageWindOptio
   const t = mul(time, float(speed));
   // low spatial frequency, so a gust is metres wide rather than per-plant noise
   const place = mul(add(positionLocal.x, positionLocal.z), float(0.28));
-  const up = clamp(positionGeometry.y.sub(float(base)).div(float(height)), 0, 1);
+  const local = windLocal();
+  const up = clamp(local.y.sub(float(base)).div(float(height)), 0, 1);
 
   let offset: N;
   if (options.mode === "sway") {
@@ -162,8 +178,8 @@ export function applyFoliageWind(root: THREE.Object3D, options: FoliageWindOptio
     // ripple and a sway. `place` is folded in only so two trees standing side
     // by side do not shimmer identically.
     const vertex = add(
-      mul(positionGeometry.x, float(3.1)),
-      add(mul(positionGeometry.y, float(2.7)), mul(positionGeometry.z, float(4.3))),
+      mul(local.x, float(3.1)),
+      add(mul(local.y, float(2.7)), mul(local.z, float(4.3))),
     );
     const phase = add(vertex, place);
     const a = sin(add(t, phase));
@@ -173,11 +189,14 @@ export function applyFoliageWind(root: THREE.Object3D, options: FoliageWindOptio
   }
 
   const filter = options.materials?.trim();
+  // every clone of a model shares its source materials: one edited material per (source, wind, model height) — a
+  // material per placed copy was a shader build per copy (node-material.ts editMeshMaterials)
+  const key = `wind:${JSON.stringify([options.mode, strength, speed, options.canopy ?? null, filter ?? null, +base.toFixed(3), +height.toFixed(3)])}`;
   return editMeshMaterials(root, (material) => {
     if (material.userData[FOLIAGE_WIND]) return false;
     if (filter && !windMaterialMatches(material, filter)) return false;
     material.positionNode = add(positionLocal, offset);
     material.userData[FOLIAGE_WIND] = true;
     return true;
-  });
+  }, key);
 }

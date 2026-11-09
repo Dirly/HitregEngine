@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import {
   buildVoxelMesh,
+  buildHorizonMesh,
   createWorldField,
   mergeVoxelMeshes,
   voxelChunkDoc,
@@ -92,7 +93,14 @@ interface SupercellMessage {
   }>;
 }
 
-export type VoxelWorkerRequest = InitMessage | CellMessage | MeshMessage | SupercellMessage;
+/** The whole island as one heightfield (core `buildHorizonMesh`): seconds of work, once, then the disk cache. */
+interface HorizonMessage {
+  kind: "horizon";
+  id: number;
+  step: number;
+}
+
+export type VoxelWorkerRequest = InitMessage | CellMessage | MeshMessage | SupercellMessage | HorizonMessage;
 
 export type VoxelWorkerResponse = (
   | { kind: "ready" }
@@ -169,6 +177,20 @@ ctx.onmessage = async (event: MessageEvent<VoxelWorkerRequest>) => {
     } catch (error) {
       ctx.postMessage({
         kind: "supercell",
+        id: message.id,
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies VoxelWorkerResponse);
+    }
+    return;
+  }
+  if (message.kind === "horizon") {
+    try {
+      const mesh = buildHorizonMesh(field, message.step);
+      const empty = mesh.triangleCount === 0;
+      await send({ kind: "mesh", id: message.id, mesh: empty ? null : mesh } satisfies VoxelWorkerResponse, []);
+    } catch (error) {
+      ctx.postMessage({
+        kind: "mesh",
         id: message.id,
         error: error instanceof Error ? error.message : String(error),
       } satisfies VoxelWorkerResponse);

@@ -96,8 +96,10 @@ export function portalVeilOps(doc: SceneDoc, sceneId: string, stated: StatedFile
     // an arrival anchor's measured queue (kept through rebuilds like the veils)
     const sq = stated[sceneId]?.[id]?.queue;
     const pa = e.components["portalAnchor"] as Record<string, unknown> | undefined;
-    if (sq && pa && !opts.remove && JSON.stringify(pa["queue"]) !== JSON.stringify(sq)) {
-      ops.push({ op: "set-component", id, component: "portalAnchor", data: { ...pa, queue: sq } } as Op);
+    // L (Weeping Stair 2026-11-01): a plain anchor with no portalAnchor component yet got its queue measured and never
+    // written ("queue unmeasured" after every --fit): the component is created with the default corridor
+    if (sq && !opts.remove && JSON.stringify(pa?.["queue"]) !== JSON.stringify(sq)) {
+      ops.push({ op: "set-component", id, component: "portalAnchor", data: { corridor: 0, ...pa, queue: sq } } as Op);
       lines.push(`  ${id}: arrival queue ${JSON.stringify(sq)} (stated)`);
     }
     const walk = sc?.name === "portal" && sc.params?.["mode"] === "trigger";

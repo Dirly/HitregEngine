@@ -1328,6 +1328,9 @@ export function scatterCell(
         // tucked against the anchor would be refused by the anchor itself; other rules' props still refuse them
         if (emit.formation && owned) {
           const members = formationMembers(field, emit, emit.formation, wx, wz, groundY, scale, r4 * Math.PI * 2, gx, gz, ruleSeed, (mx, mz, ms) => {
+            // a clearing keeps the whole formation off it, not just the anchor: members of an anchor outside a
+            // clearing used to stand inside it (rustblood-mound: sandstone members on the cleared tunnel crest)
+            if (vegOn && veg.clearingKeep(mx, mz, 0, clearPad, rule.id) <= 0) return null;
             const g = field.ground(mx, mz);
             if (field.planarNear(mx, mz) && !planarFootingHolds(field, mx, g, mz)) return null;
             if (emit.water) {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three";
 import { applyOps, ComponentRegistry, createScene, registerCoreComponents } from "@hitreg/core";
-import { registerBuiltinScripts, ScriptRegistry, ScriptRuntime, type InputLike, type SimLike } from "../src/index.js";
+import { registerBuiltinScripts, ScriptRegistry, ScriptRuntime, type InputLike, type SimLike, type RuntimeVfxFrame } from "../src/index.js";
 
 const core = new ComponentRegistry();
 registerCoreComponents(core);
@@ -13,7 +13,7 @@ const DURATION = 0.9; // every clip, for the stand-in playhead
  * The controller with footsteps on, a stand-in animation host whose playhead
  * advances at whatever rate the controller sets, and a log of every sound.
  */
-function harness(params: Record<string, unknown> = {}, opts: { phase?: boolean } = {}) {
+function harness(params: Record<string, unknown> = {}, opts: { phase?: boolean; dust?: boolean; raycast?: SimLike["raycast"]; object?: THREE.Object3D } = {}) {
   const held = new Set<string>(["KeyW"]);
   const input: InputLike = { isDown: (code) => held.has(code) };
   let velocity: [number, number, number] = [0, 0, 0];
@@ -21,6 +21,7 @@ function harness(params: Record<string, unknown> = {}, opts: { phase?: boolean }
     getLinvel: () => velocity,
     setLinvel: () => {},
     applyImpulse: () => {},
+    ...(opts.raycast ? { raycast: opts.raycast } : {}),
   };
   const doc = applyOps(
     createScene("t"),
@@ -34,6 +35,7 @@ function harness(params: Record<string, unknown> = {}, opts: { phase?: boolean }
           tags: ["player"],
           components: {
             transform: {},
+            collider: { shape: "capsule", size: [0.8, 1.8, 0.8] },
             script: {
               name: "third-person-controller",
               params: {
@@ -59,15 +61,26 @@ function harness(params: Record<string, unknown> = {}, opts: { phase?: boolean }
   let playhead = 0;
   let rate = 1;
   const sounds: Array<{ id: string; volume: number; t: number }> = [];
+  const puffs: Array<{ effect: unknown; frame: RuntimeVfxFrame; ground: number | null }> = [];
   let clock = 0;
   const runtime = new ScriptRuntime({
     doc,
-    objects: new Map([["hero", new THREE.Object3D()]]),
+    objects: new Map([["hero", opts.object ?? new THREE.Object3D()]]),
     sim,
     registry,
     input,
     viewForward: () => [0, -1],
     localPlayer: () => "hero",
+    ...(opts.dust ? { vfx: {
+      play: (effect: unknown, frame: RuntimeVfxFrame) => {
+        // Resolve the ground query just as the particle module's ground anchor does.
+        const [x, y, z] = frame.origin;
+        puffs.push({ effect, frame, ground: frame.ground?.(x, z, y + 1) ?? null });
+        return { done: false, stop: () => {} };
+      },
+      playSpell: () => { throw new Error("unexpected spell"); },
+      stopAll: () => {},
+    } } : {}),
     setAnimation: (_id, next) => {
       if (next !== clip) playhead = 0;
       clip = next;
@@ -85,6 +98,7 @@ function harness(params: Record<string, unknown> = {}, opts: { phase?: boolean }
   runtime.start();
   return {
     sounds,
+    puffs,
     clip: () => clip,
     release: (code: string) => held.delete(code),
     /** Hold a velocity for `ticks` fixed steps, advancing the playhead at the controller's rate. */
@@ -100,6 +114,44 @@ function harness(params: Record<string, unknown> = {}, opts: { phase?: boolean }
 }
 
 describe("third-person-controller footsteps", () => {
+  it("grounds dust on the floor rather than the player's capsule crown", () => {
+    const object = new THREE.Object3D();
+    object.position.y = 0.9;
+    const h = harness({ groundProbe: 0 }, { dust: true, object, raycast: (from, _dir, _reach, opts) => {
+      const floor = opts?.exclude?.includes("hero");
+      const y = floor ? 0 : 1.8;
+      return { entityId: floor ? "floor" : "hero", point: [from[0], y, from[2]], normal: [0, 1, 0], distance: from[1] - y };
+    } });
+    h.run([0, 0, -6], 120);
+    expect(h.puffs.length).toBeGreaterThan(2);
+    for (const puff of h.puffs) {
+      expect(puff.ground).toBe(0);
+      expect(puff.frame.caster).toBe(object);
+      expect(puff.frame.origin[1]).toBeCloseTo(0);
+    }
+    const before = h.puffs.length;
+    h.run([0, -8, -6], 60);
+    expect(h.puffs.length).toBe(before);
+  });
+
+  it("falls back to world-space feet with a translated parent and scaled collider", () => {
+    const parent = new THREE.Object3D();
+    parent.position.set(10, 4, -3);
+    parent.scale.setScalar(2);
+    const object = new THREE.Object3D();
+    object.position.set(1, 0.9, 2);
+    parent.add(object);
+    const h = harness({ groundProbe: 0 }, { dust: true, object, raycast: () => null });
+    h.run([0, 0, -6], 120);
+    expect(h.puffs.length).toBeGreaterThan(2);
+    for (const puff of h.puffs) {
+      expect(puff.ground).toBeNull();
+      expect(puff.frame.origin[0]).toBeCloseTo(12);
+      expect(puff.frame.origin[1]).toBeCloseTo(4);
+      expect(puff.frame.origin[2]).toBeCloseTo(1);
+    }
+  });
+
   it("steps on the clip's own contacts: two per cycle, whatever the speed", () => {
     const h = harness();
     h.run([0, 0, -6], 60); // settle into the run

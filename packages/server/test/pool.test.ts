@@ -60,11 +60,13 @@ describe.skipIf(!scene)("voxel worker pool", () => {
     }
     expect(terrain.has(cx, cz)).toBe(true);
     // the whole ring lands eventually
-    while (terrain.cells().length < 5 && Date.now() - start < 30_000) {
+    while (terrain.cells().length < 4 && Date.now() - start < 30_000) {
       terrain.update([focus]);
       await wait(20);
     }
-    expect(terrain.cells().length).toBeGreaterThanOrEqual(5); // ring 1 = the centre + 4 neighbours
+    // ring 1 = the four cells round the cell corner nearest the focus (core computeChunkStates measures from that
+    // corner since 2026-10-22, ce4bc50; it was the centre + 4 neighbours before)
+    expect(terrain.cells().length).toBeGreaterThanOrEqual(4);
     // worker output == inline output (the field is pure): same entity ids in the cell
     const inline = voxelChunkDoc(terrain.resolved.field, terrain.resolved.data.world, cx, cz, {
       collision: true,

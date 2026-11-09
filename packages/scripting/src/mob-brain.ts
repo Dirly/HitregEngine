@@ -2,6 +2,9 @@ import type * as THREE from "three";
 import { z } from "zod";
 import {
   MOB_EVENTS,
+  MOB_BEHAVIOR_ARCHETYPES,
+  resolveMobBehavior,
+  type MobBehaviorArchetype,
   ThreatTable,
   combatKey,
   combatants,
@@ -79,6 +82,17 @@ export const ALERT_MAX_HEIGHT_GAP = 3;
  */
 export const ALERT_SIGHT_GRACE = 2;
 
+/**
+ * Warned once per scene when a brain swings and nothing listens to `mob.attack`.
+ * The brain only decides WHEN to hit; what a hit does is the game's, joined by a
+ * listener such as foundation's `mob-combat-bridge`. A scene built without one
+ * has creatures that chase, wind up and never land a blow, silently
+ * (d-tombs6, 2026-10-31: a hand-built dungeon instance missed it).
+ */
+export const UNHEARD_ATTACK_WARNING =
+  "[mob-brain] mob.attack has no listener in this scene: creatures wind up and never hit. " +
+  "Add the game's attack join (foundation: an entity with script mob-combat-bridge).";
+
 /** `mob.threat` as this script reads it (the schema is in core). */
 interface ThreatPayload {
   mobId: string;
@@ -86,6 +100,7 @@ interface ThreatPayload {
   amount?: number;
   kind?: "add" | "set" | "taunt" | "forget";
   seconds?: number;
+  provoked?: boolean;
 }
 
 /** `mob.alert` as this script reads it. */
@@ -95,6 +110,8 @@ interface AlertPayload {
   at?: [number, number, number];
   radius?: number;
   faction?: string;
+  cause?: "acquisition" | "defense";
+  spawnArea?: string;
 }
 import { TerrainSteering, groundHeightAt, LAYER_WORLD, LAYER_PROP, LAYER_TERRAIN } from "./steering.js";
 
@@ -360,8 +377,14 @@ export class MobBrain extends Script {
       description:
         "Metres its shout carries when it pulls: packmates of the same faction inside this take the same target. " +
         "0 = fights alone. This is what makes a camp a camp rather than five things queueing up to die. " +
-        "-1 (default) = by temperament: 10 for hostile and territorial, 0 for passive (a passive creature neither shouts " +
-        "nor answers a shout unless this is set).",
+        "-1 (default) = by temperament: 10 for hostile and territorial, 0 for passive. An explicitly positive radius " +
+        "opts a passive creature into alerting and defending same-faction packmates when a fight starts; it still never " +
+        "acquires an unprovoking target on sight. 0 disables both sending and answering alerts, even for a passive group.",
+    },
+    behaviorArchetype: {
+      default: "inherit",
+      options: MOB_BEHAVIOR_ARCHETYPES,
+      description: "Fight policy: inherit preserves temperament/alertRadius. neutral retaliates alone (alerts disabled); protective never acquires on sight and answers defensive same-faction alerts only (positive alertRadius or 10m); aggressive attacks on sight; territorial defends territory. Named presets override temperament; aggressive/territorial keep authored alertRadius. Spawn row > area > template; a legacy mood override cancels a lower preset. Pets retain stance/order behavior.",
     },
     temperament: {
       default: "hostile",
@@ -473,6 +496,10 @@ export class MobBrain extends Script {
   private heardOf = new Map<string, number>();
   /** Sources that have hit/threatened it first-hand: never dropped for want of sight. */
   private struckBy = new Set<string>();
+  private defensiveTargets = new Set<string>();
+  private resolvedAlertRadius = 10;
+  private defensiveAssistOnly = false;
+  private allowDefensiveEscalation = false;
   /** Ids worth considering, refreshed at 1 Hz — see `candidates`. */
   private candidateCache: string[] = [];
   private candidatesAt = -Infinity;
@@ -522,8 +549,12 @@ export class MobBrain extends Script {
         this.routeAt = dir > 0 ? seg + 1 : seg;
       }
     }
-    const temperament = String(this.param<string>("temperament") ?? "hostile");
-    this.temperament = temperament === "passive" || temperament === "territorial" ? temperament : "hostile";
+    const archetype = this.param<string>("owner").trim() ? "inherit" : this.param<MobBehaviorArchetype>("behaviorArchetype");
+    const behavior = resolveMobBehavior({ behaviorArchetype: archetype, temperament: this.param<string>("temperament"), alertRadius: this.param<number>("alertRadius") });
+    this.temperament = behavior.temperament;
+    this.resolvedAlertRadius = behavior.alertRadius;
+    this.defensiveAssistOnly = behavior.defensiveAssistOnly;
+    this.allowDefensiveEscalation = archetype === "aggressive" || archetype === "territorial" || archetype === "protective";
     this.tags = splitList(this.param<string>("targetTags"));
     this.choices = splitList(this.param<string>("abilities"));
     // A bad moveset is reported and dropped, never thrown: the mob still
@@ -596,7 +627,11 @@ export class MobBrain extends Script {
     if (p.mobId !== this.actorId || !p.sourceId) return;
     const now = this.ctx.now() / 1000;
     if (p.kind === "forget") return this.forget(p.sourceId);
-    this.struckBy.add(p.sourceId);
+    // A sight pull can become defense later; let that escalation recruit protective allies once.
+    if (p.provoked !== false) {
+      if (this.allowDefensiveEscalation && !this.struckBy.has(p.sourceId) && this.alertedFor === p.sourceId) this.alertedFor = "";
+      this.struckBy.add(p.sourceId);
+    }
     this.heardOf.delete(p.sourceId);
     if (p.kind === "taunt") this.threat.taunt(p.sourceId, now, p.seconds ?? 3);
     else if (p.kind === "set") this.threat.set(p.sourceId, p.amount ?? 0, now);
@@ -614,6 +649,7 @@ export class MobBrain extends Script {
     this.threat.forget(sourceId);
     this.heardOf.delete(sourceId);
     this.struckBy.delete(sourceId);
+    this.defensiveTargets.delete(sourceId);
     if (this.targetId === sourceId) this.targetId = "";
     if (this.alertedFor === sourceId) this.alertedFor = "";
   }
@@ -633,11 +669,14 @@ export class MobBrain extends Script {
     if (this.state === "chase" || this.state === "attack") return; // already busy
     const radius = this.alertRadius();
     if (radius <= 0) return;
+    if (this.defensiveAssistOnly && p.cause !== "defense") return;
     // Own faction only. With no factions in play, a shared spawn area is the
     // pack — which is exactly the set the spawner woke together.
     if (p.faction || this.faction) {
       if (p.faction !== this.faction) return;
     } else if (!this.param<string>("spawnArea")) {
+      return;
+    } else if (this.defensiveAssistOnly && p.spawnArea !== this.param<string>("spawnArea")) {
       return;
     }
     const me = this.bodyPosition();
@@ -656,6 +695,7 @@ export class MobBrain extends Script {
       if (!this.heardOf.has(p.targetId)) this.heardOf.set(p.targetId, now + ALERT_SIGHT_GRACE);
     }
     this.threat.add(p.targetId, 1, now);
+    if (p.cause === "defense") this.defensiveTargets.add(p.targetId);
   }
 
   override onFixedUpdate(dt: number): void {
@@ -675,6 +715,7 @@ export class MobBrain extends Script {
         this.threat.clear();
         this.heardOf.clear();
         this.struckBy.clear();
+        this.defensiveTargets.clear();
         this.steering.reset();
         this.windupUntil = 0;
         this.lunge = null;
@@ -836,6 +877,8 @@ export class MobBrain extends Script {
           at: [me[0], me[1], me[2]],
           radius,
           faction: this.faction,
+          cause: this.struckBy.has(target.id) || this.defensiveTargets.has(target.id) ? "defense" : "acquisition",
+          spawnArea: this.param<string>("spawnArea"),
         });
       }
     }
@@ -1053,7 +1096,7 @@ export class MobBrain extends Script {
       this.lunge = { at: [me[0] + (dx / len) * travel, me[2] + (dz / len) * travel], from: now + move.windup - travel / speed, speed };
     }
     this.faceGoal = Math.atan2(dx, dz);
-    this.ctx.events?.emit(MOB_EVENTS.attack, {
+    this.emitAttack({
       mobId: this.actorId,
       targetId: target.id,
       abilityId: move.ability,
@@ -1234,9 +1277,7 @@ export class MobBrain extends Script {
 
   /** How far its shout carries (and how far off it answers one): the param, or by temperament when it is -1. */
   private alertRadius(): number {
-    const r = this.param<number>("alertRadius");
-    if (typeof r === "number" && r >= 0) return r;
-    return this.temperament === "passive" ? 0 : 10;
+    return this.resolvedAlertRadius;
   }
 
   /**
@@ -1405,6 +1446,7 @@ export class MobBrain extends Script {
       this.threat.clear();
       this.heardOf.clear();
       this.struckBy.clear();
+      this.defensiveTargets.clear();
     }
     if (fromHome <= Math.max(1.5, this.route.length ? 1.5 : this.param<number>("roam") * 0.5)) {
       this.heal();
@@ -1567,6 +1609,14 @@ export class MobBrain extends Script {
     return out;
   }
 
+  /** `mob.attack` out, with the once-per-scene warning when nobody will answer it. */
+  private emitAttack(payload: Record<string, unknown>): void {
+    const events = this.ctx.events;
+    if (!events) return;
+    if (events.firstUnheard?.(MOB_EVENTS.attack)) console.warn(UNHEARD_ATTACK_WARNING);
+    events.emit(MOB_EVENTS.attack, payload);
+  }
+
   private tryAttack(dist: number, toTarget: readonly [number, number], now: number): void {
     if (now < this.nextAttackAt) return;
     // The first tick in range is not a free hit: schedule, then swing.
@@ -1577,7 +1627,7 @@ export class MobBrain extends Script {
     this.nextAttackAt =
       now + this.param<number>("attackInterval") + hash01(`${this.actorId}:${now}`) * this.param<number>("attackJitter");
     const len = Math.hypot(toTarget[0], toTarget[1]) || 1;
-    this.ctx.events?.emit(MOB_EVENTS.attack, {
+    this.emitAttack({
       mobId: this.actorId,
       targetId: this.targetId,
       abilityId: this.choices.length > 0 ? this.choices[Math.floor(hash01(`${this.actorId}:a:${now}`) * this.choices.length)]! : "",

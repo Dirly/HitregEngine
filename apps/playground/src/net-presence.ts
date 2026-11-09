@@ -1212,8 +1212,10 @@ export class NetPresence {
     const s = state as { players?: unknown; entities?: unknown } | null;
     const players = s?.players;
     if (!players || typeof players !== "object") return;
-    this.clock?.onSnapshot(tick);
     const simMs = (s as { simMs?: unknown }).simMs;
+    // a dedicated server's ticks are its sim's, not one per snapshot; its clock says how fast they run
+    if (typeof simMs === "number" && simMs > 0 && tick > 0) this.clock?.setTickRate(Math.round((tick * 1000) / simMs));
+    this.clock?.onSnapshot(tick);
     if (typeof simMs === "number" && Number.isFinite(simMs) && (this.hostSim === null || simMs >= this.hostSim.ms)) {
       this.hostSim = { ms: simMs, at: performance.now() };
     }

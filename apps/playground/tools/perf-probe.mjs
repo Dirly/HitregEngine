@@ -41,6 +41,8 @@ const out = opt("out", null);
 
 const browser = await chromium.launch({ channel: "chrome", headless: true, args: ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist"] });
 const page = await (await browser.newContext({ viewport: { width: 1280, height: 720 } })).newPage();
+// a test client never writes authoring files (its scene autosave erased other tools' installs, 2026-11-03)
+await page.route(/\/__hitreg\//, (await import("./_readonly-posts.mjs")).dropAuthoringWrites);
 const logs = [];
 page.on("console", (m) => { const t = m.text(); if (/warn|error|fail|fell/i.test(t) && !/404/.test(t)) logs.push(t.slice(0, 200)); });
 page.on("pageerror", (e) => logs.push("PAGEERROR " + e.message));

@@ -13,7 +13,7 @@ import {
   loadGltf,
   materialForId,
   polygonGeometry,
-  type BuildOptions, type ImpostorPageItem, cachedImpostor, cachedMergedMaterial, impostorBatchFor, impostorPageBatchFor, submeshBounds } from "./scene-builder.js";
+  type BuildOptions, type ImpostorPageItem, cachedImpostor, cachedMergedMaterial, impostorBatchFor, impostorPageBatchFor, prepareSharedModel, submeshBounds, type AssetLookSource } from "./scene-builder.js";
 import { voxelGeometry, voxelGeometryFromMesh } from "./voxel-geometry.js";
 import { landmarkFogKey, landmarkFogMaterial, type LandmarkFog } from "./landmark-fog.js";
 import { landmarkSettings } from "./culling.js";
@@ -465,6 +465,11 @@ function prepVoxelForMerge(geometry: THREE.BufferGeometry): THREE.BufferGeometry
  */
 const sharedHlodMaterialCache = new Map<string, THREE.Material>();
 
+/** The terrain material far proxies draw with, for a mesh that must match them (the horizon tier). */
+export function hlodMaterial(id: string | undefined, options: BuildOptions): THREE.Material {
+  return materialForId(id, options, sharedHlodMaterialCache);
+}
+
 export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}): Promise<HlodProxy> {
   // `mesh.hlod: false` (small rocks, pebbles): culled past the full-render ring rather than baked
   if (Object.values(doc.entities).some((e) => (e.components["mesh"] as ProxyMesh | undefined)?.hlod === false)) {
@@ -549,6 +554,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     let gltf: Awaited<ReturnType<typeof loadGltf>> | null = null;
     try {
       gltf = await loadGltf(url);
+      prepareSharedModel(gltf.scene, entities.map(([, entity]) => (entity.components["mesh"] as ProxyMesh & { source: AssetLookSource }).source));
       submeshes = extractGltfSubmeshes(gltf, node);
     } catch (error) {
       console.warn(`[render] hlod merge: failed to load "${assetId}":`, error);
@@ -835,10 +841,11 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     const merged = mergeBucket(geoms);
     if (!merged) continue;
     const mesh = new THREE.Mesh(merged, materialForId(key === "__default" ? undefined : key, options, materialCache));
-    // distant terrain neither casts nor receives: shadow cascades do not reach
-    // the far ring, and rasterising a supercell of terrain into them is pure cost
+    // distant terrain does not cast: shadow cascades do not reach the far ring,
+    // and rasterising a supercell of terrain into them is pure cost. It receives:
+    // cloud shadows ride the sun's shadow term (cloud-shadow.ts): past the cascades it is fully lit, so receiving costs a depth test and keeps the clouds' shade from stopping at a ring around the player
     mesh.castShadow = false;
-    mesh.receiveShadow = false;
+    mesh.receiveShadow = true;
     // what the culling system's horizon is built from (the drawn terrain)
     mesh.userData["terrainProxy"] = true;
     group.add(mesh);

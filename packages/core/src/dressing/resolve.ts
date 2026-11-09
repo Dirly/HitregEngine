@@ -401,6 +401,8 @@ interface Work {
   mirror?: boolean;
   /** The plan item is a declared set piece (may stand in a keep-clear centre). */
   setPiece?: boolean;
+  /** The plan item's `inOpen` reason: an underCover piece in the open on purpose. */
+  inOpen?: string;
   /** Placed by `auto` near the hearth on purpose (fireside seating): standing at the hearth clearance's edge is the point, not a warning. */
   byHearth?: boolean;
   /** The place as the plan wrote it, before an `auto` place was turned into a concrete one. */
@@ -451,6 +453,8 @@ interface Ctx {
   /** Outdoor vignettes by arrangement id (or why one could not be laid out), and the rooms already laid out. */
   vignettes: Map<string, Vignette | string>;
   vignetteRooms: Set<string>;
+  /** Items placed on each board of a host, by socket id (`shelf-empty`). */
+  boards: Map<string, Map<string, number>>;
   /** Door / opening / hallway-mouth clear boxes per level (`opening-clear`). */
   openings: Map<number, Opening[]>;
   /** The caller set `minItems` (a test, a trial): the outdoor density floor is theirs too. */
@@ -761,6 +765,39 @@ function cellInFront(g: Grid, wall: SocketWall, x: number, z: number): V2 {
   return g.cellOf(x + wall.normal[0] * 0.2, z + wall.normal[1] * 0.2);
 }
 
+/** A hung light's point may sit this far beyond half a beam's width from its line (chain ring, bracket). */
+const BEAM_REACH = 0.15;
+/** A `beam` anchor's line: centred on its position, the marker FACING across the beam (yaw, 0 = local +Z), so the beam runs perpendicular to it for size[0] metres; size[2] is its depth (width seen from below). */
+function beamLine(a: { position: [number, number, number]; yaw: number; size?: number[] }): { dx: number; dz: number; half: number; width: number } {
+  const r = (a.yaw * Math.PI) / 180;
+  return { dx: Math.cos(r), dz: -Math.sin(r), half: (a.size?.[0] ?? 0) / 2, width: a.size?.[2] ?? 0.3 };
+}
+/** Plan distance from (x, z) to a `beam` anchor's line. */
+function beamDistance(a: { position: [number, number, number]; yaw: number; size?: number[] }, x: number, z: number): number {
+  const { dx, dz, half } = beamLine(a);
+  const t = Math.max(-half, Math.min(half, (x - a.position[0]) * dx + (z - a.position[2]) * dz));
+  return Math.hypot(x - (a.position[0] + dx * t), z - (a.position[2] + dz * t));
+}
+/** A post, pier or strut this much proud of a wall face is not the wall: nothing wall-mounted hangs on it (`wall-post`). */
+const POST_PROUD = 0.2;
+/** Metres of floorless cells in front of a wall at (x, z) before the room's floor starts (the wall's own thickness, or a post on it). */
+function faceDepth(g: Grid, wall: SocketWall, x: number, z: number): number {
+  for (let d = 0.05; d <= 1.2; d += g.step / 2) {
+    const cell = g.cellOf(x + wall.normal[0] * d, z + wall.normal[1] * d);
+    if (FLOORISH.has(g.ch(cell[0], cell[1]))) return d;
+  }
+  return Infinity;
+}
+/** How far whatever stands behind wall interval [t0, t1] sits proud of the wall's own face next to it (0 = flush wall). */
+function postProud(g: Grid, wall: SocketWall, t0: number, t1: number, len: number): number {
+  const { u } = wallFrame(wall), at = (t: number) => faceDepth(g, wall, wall.a[0] + u[0] * t, wall.a[1] + u[1] * t);
+  const step = g.step / 2, mine: number[] = [], near: number[] = [];
+  for (let t = t0; t <= t1 + 1e-6; t += step) mine.push(at(Math.min(Math.max(t, 0), len)));
+  for (let t = Math.max(0, t0 - 1.2); t <= Math.min(len, t1 + 1.2) + 1e-6; t += step) if (t < t0 - step / 2 || t > t1 + step / 2) near.push(at(t));
+  const face = Math.min(...near.filter(Number.isFinite)), back = Math.max(...mine.filter(Number.isFinite));
+  return Number.isFinite(face) && Number.isFinite(back) ? Math.max(0, back - face) : 0;
+}
+
 function fitFloor(ctx: Ctx, w: Work, data: DressingData, g: Grid, r: Rect, wall?: SocketWall): { room: string; outdoor: boolean } {
   const cells: V2[] = [];
   const bad = new Map<string, V2>();
@@ -949,6 +986,11 @@ function resolveDirect(ctx: Ctx, w: Work, data: DressingData): Res | undefined {
     const [c, r] = cellInFront(g, wall, px, pz);
     const outdoor = g.ch(c, r) === "o";
     settingCheck(ctx, w, data, outdoor);
+    const proud = postProud(g, wall, p.t - W / 2, p.t + W / 2, len);
+    if (proud >= POST_PROUD)
+      vio(ctx, w.id, "wall-post",
+        `${w.prop} at t ${f2(p.t)} on wall ${wall.id} is hung on a post or pier standing ${f2(proud)} m proud of the wall face; wall-mounted things ` +
+          `(sconces, pictures, hangings) go on the wall itself, never on a post, pillar or strut (owner 2026-10-30): move it along the wall clear of the post`);
     return {
       work: w,
       data,
@@ -974,7 +1016,19 @@ function resolveDirect(ctx: Ctx, w: Work, data: DressingData): Res | undefined {
       if (Number.isFinite(h)) head = Math.min(head, h);
     }
     if (!Number.isFinite(head)) head = 0;
-    const ceilY = g.lv.floorY + head;
+    let ceilY = g.lv.floorY + head;
+    if (data.hangFrom === "beam") {
+      // a heavy hung light hangs from a beam or joist line: its chain runs up to that beam's underside
+      const beams = ctx.input.map.anchors.filter((a) => a.kind === "beam" && a.level === p.level);
+      const hit = beams.map((a) => ({ a, d: beamDistance(a, p.at[0], p.at[1]) })).sort((x, y) => x.d - y.d)[0];
+      if (!hit)
+        warn(ctx, w.id, "beam-hang", `${w.prop} hangs from a beam, but map "${ctx.input.map.id}" level ${p.level} has no \`beam\` anchor (the building export's beam markers): re-run \`dress sockets\` on a model that exports them`);
+      else if (hit.d > beamLine(hit.a).width / 2 + BEAM_REACH)
+        vio(ctx, w.id, "beam-hang",
+          `${w.prop} at ${at2(p.at[0], p.at[1])} hangs from bare ceiling ${f2(hit.d)} m off the nearest beam (${hit.a.id}); a chandelier hangs from the main beam or a joist line (owner 2026-10-30): ` +
+            `move it onto ${beams.map((a) => `${a.id} (${at2(a.position[0], a.position[2])}, yaw ${a.yaw})`).join(", ")}`);
+      else if (hit.a.position[1] > g.lv.floorY + 0.5) ceilY = Math.min(ceilY, hit.a.position[1]);
+    }
     if (p.drop > 0 && !data.chain) vio(ctx, w.id, "no-chain", `${w.prop} has no \`chain\`, so it mounts flush under the ceiling: set drop 0, or use a chained variant`);
     const drop = data.chain ? p.drop : 0;
     const top = ceilY - drop, bottom = top - H, maxDrop = Math.max(0, head - H - WALK_HEAD);
@@ -1017,19 +1071,24 @@ function resolveDirect(ctx: Ctx, w: Work, data: DressingData): Res | undefined {
     const yaw = a.yaw * DEG, box = boxFromOrigin([a.position[0], ay, a.position[2]], yaw, data.size, dressingOrigin(data));
     const g = ctx.grids.get(a.level);
     let room = "";
+    // Window markers face OUT from the shell, but their daylight fixture shines inward.
+    // Give it the room behind the pane so its light follows that room's culling root.
+    const windowLight = a.outdoor && a.kind === "window" && data.category === "light" && data.anchorKinds.includes("window");
     // an outdoor anchor of a measured site (a level with a `ground` raster) stands on that grid: its room, its footprint
     const onGrid = !a.outdoor || !!g?.lv.ground;
-    if (g && onGrid) {
+    if (g && (onGrid || windowLight)) {
       const [c, r] = g.cellOf(box.cx, box.cz);
       room = g.roomAt(c, r);
       // A fixture set into a wall (a hearth, a sconce) belongs to the room it faces: its room group, its culling.
       for (let d = g.step; !room && d <= 2 + EPS; d += g.step) {
-        const [c2, r2] = g.cellOf(a.position[0] + Math.sin(yaw) * d, a.position[2] + Math.cos(yaw) * d);
+        const direction = windowLight ? -1 : 1;
+        const [c2, r2] = g.cellOf(a.position[0] + Math.sin(yaw) * d * direction, a.position[2] + Math.cos(yaw) * d * direction);
         room = g.roomAt(c2, r2);
       }
     }
-    settingCheck(ctx, w, data, a.outdoor);
-    const res: Res = { work: w, data, level: a.level, room, outdoor: a.outdoor, ...(onGrid ? {} : { outdoorAnchor: true }), box, origin: [a.position[0], ay, a.position[2]], chain: [] };
+    const outdoor = a.outdoor && !(windowLight && room);
+    settingCheck(ctx, w, data, outdoor);
+    const res: Res = { work: w, data, level: a.level, room, outdoor, ...(onGrid ? {} : { outdoorAnchor: true }), box, origin: [a.position[0], ay, a.position[2]], chain: [] };
     if (data.mount === "floor" && onGrid) {
       if (data.solid) res.floor = rectOf(box);
       else res.cover = rectOf(box);
@@ -1128,7 +1187,9 @@ function resolveChildren(ctx: Ctx, host: Res, kids: Work[], out: Map<string, Res
       }
     } else {
       const reasons: string[] = [];
-      for (const s of sockets) {
+      // a shelf made to be filled spreads its goods: the emptiest board that takes the item first
+      const order = host.data.holdsGoods ? [...sockets].sort((a, b) => used(a) - used(b)) : sockets;
+      for (const s of order) {
         const why = socketRefusal(s, data, (s.yaw + p.yaw) * DEG) ?? (used(s) >= s.capacity ? `is full (${s.capacity})` : undefined);
         if (!why) {
           chosen = s;
@@ -1152,6 +1213,7 @@ function resolveChildren(ctx: Ctx, host: Res, kids: Work[], out: Map<string, Res
     });
   }
 
+  ctx.boards.set(host.work.id, new Map(sockets.map((s) => [s.id, uses.get(s.id)!.length])));
   for (const s of sockets) {
     const items = uses.get(s.id)!;
     if (s.kind === "surface") arrange(ctx, host, s, items);
@@ -2144,6 +2206,70 @@ function graveLayout(ctx: Ctx, g: Grid, level: number, room: string, w: Work, ta
   return out;
 }
 
+/** `faces-centre`: a piece's `facesCentre` side may turn at most this far (degrees) from its room's centrepiece. */
+export const FACES_CENTRE_TOL_DEG = 25;
+/** `faces-centre`: a centrepiece further than this (m) is not the piece's centre (another camp's fire). */
+export const FACES_CENTRE_REACH_M = 30;
+/** `under-cover`: metres from a shelter's mouth point (the middle of its `facesCentre` side) that still count as under its cover. */
+export const UNDER_COVER_MOUTH_M = 2.5;
+/** The world direction (unit XZ) a local side turns to under a yaw (local +z = fwd(yaw); local +x = (cos, -sin)). */
+export function sideDir(side: "+z" | "-z" | "+x" | "-x", yaw: number): V2 {
+  const f = fwd(yaw), x: V2 = [Math.cos(yaw), -Math.sin(yaw)];
+  return side === "+z" ? f : side === "-z" ? [-f[0], -f[1]] : side === "+x" ? x : [-x[0], -x[1]];
+}
+/** The yaw that turns a local side toward a world direction (inverse of sideDir). */
+export function yawFacing(side: "+z" | "-z" | "+x" | "-x", dx: number, dz: number): number {
+  return side === "+z" ? Math.atan2(dx, dz) : side === "-z" ? Math.atan2(-dx, -dz) : side === "+x" ? Math.atan2(-dz, dx) : Math.atan2(dz, -dx);
+}
+/** A shelter's mouth point: the middle of its open side, just outside its footprint. */
+export function shelterMouth(b: { cx: number; cz: number; yaw: number; w: number; d: number }, side: "+z" | "-z" | "+x" | "-x"): V2 {
+  const dir = sideDir(side, b.yaw), half = (side === "+x" || side === "-x" ? b.w : b.d) / 2;
+  return [b.cx + dir[0] * (half + 0.5), b.cz + dir[1] * (half + 0.5)];
+}
+/** Inside a yawed footprint box (centre, yaw, width along local x, depth along local z). */
+function inBox(b: { cx: number; cz: number; yaw: number; w: number; d: number }, x: number, z: number): boolean {
+  const dx = x - b.cx, dz = z - b.cz, c = Math.cos(b.yaw), s = Math.sin(b.yaw);
+  const lx = dx * c - dz * s, lz = dx * s + dz * c; // world -> local (inverse of the yaw rotation)
+  return Math.abs(lx) <= b.w / 2 + EPS && Math.abs(lz) <= b.d / 2 + EPS;
+}
+/**
+ * CAMP RULES (Derek 2026-10-31), per room:
+ * `faces-centre`: a piece declaring `facesCentre` (tents, lean-tos, bedrolls, log seats) turns that side to the room's
+ * centrepiece (a fire, a centrepiece prop or the plan's set piece) within FACES_CENTRE_REACH_M, FACES_CENTRE_TOL_DEG at most.
+ * `under-cover`: an outdoor `underCover` piece (racks, jars, chests, bedding) stands inside a `shelter` or within
+ * UNDER_COVER_MOUTH_M of its mouth, never in the open (camp rooms only).
+ */
+function campCheck(ctx: Ctx, rm: SocketRoom, here: Res[]): void {
+  const centres = here.filter((r) => r.floor && (r.data.fire || r.data.centrepiece || r.work.setPiece) && !r.data.facesCentre);
+  for (const r of here) {
+    const side = r.data.facesCentre;
+    if (!side || !r.floor || !centres.length) continue;
+    const c = centres.filter((x) => x !== r).sort((a, b) => Math.hypot(a.box.cx - r.box.cx, a.box.cz - r.box.cz) - Math.hypot(b.box.cx - r.box.cx, b.box.cz - r.box.cz))[0];
+    if (!c) continue;
+    const dx = c.box.cx - r.box.cx, dz = c.box.cz - r.box.cz, dist = Math.hypot(dx, dz);
+    if (dist > FACES_CENTRE_REACH_M || dist < EPS) continue;
+    const dir = sideDir(side, r.box.yaw), off = (Math.acos(Math.max(-1, Math.min(1, (dir[0] * dx + dir[1] * dz) / dist))) * 180) / Math.PI;
+    if (off > FACES_CENTRE_TOL_DEG + EPS) {
+      const want = ((yawFacing(side, dx, dz) * 180) / Math.PI + 360) % 360;
+      vio(ctx, r.work.id, "faces-centre",
+        `${r.work.prop}'s ${side} side (its way in / its front) turns ${Math.round(off)} deg away from ${c.work.id} (${c.work.prop}, ${f2(dist)} m off): it faces the ` +
+          `camp's centre (at most ${FACES_CENTRE_TOL_DEG} deg). Give it "yaw": ${Math.round(want)}`);
+    }
+  }
+  // under-cover is a CAMP rule: a water jar by a town well or a chest on a quay stays where it is
+  if (!roomRoles(ctx, rm.id).includes("camp")) return;
+  const shelters = here.filter((r) => r.floor && r.data.shelter);
+  for (const r of here) {
+    if (!r.data.underCover || !r.outdoor) continue;
+    if (r.work.inOpen) { warn(ctx, r.work.id, "in-open", `${r.work.prop} stands in the open on purpose: ${r.work.inOpen}`); continue; }
+    const ok = shelters.some((s) => s !== r && (inBox(s.box, r.box.cx, r.box.cz) || (s.data.facesCentre ? Math.hypot(...((m) => [m[0] - r.box.cx, m[1] - r.box.cz] as const)(shelterMouth(s.box, s.data.facesCentre))) <= UNDER_COVER_MOUTH_M + EPS : false)));
+    if (!ok)
+      vio(ctx, r.work.id, "under-cover",
+        `${r.work.prop} stands in the open at ${at2(r.box.cx, r.box.cz)}: gear kept dry or guarded goes inside a shelter or within ${UNDER_COVER_MOUTH_M} m of its mouth ` +
+          (shelters.length ? `(${shelters.map((s) => s.work.id).join(", ")}: place it { "kind": "auto", "room": "${rm.id}", "prefer": "near", "near": "${shelters[0]!.work.id}" } or at its mouth)` : "(the room has no shelter: add a tent or lean-to, or leave it out)"));
+  }
+}
+
 /**
  * `graveyard-rows` (a violation): a yard's graves stand in 2+ rows and spread over it — not more than GRAVE_CLUMP of them
  * within GRAVE_CLUMP_R m of the yard's centroid, and spanning GRAVE_SPREAD of its free extent along the rows and across.
@@ -2378,6 +2504,7 @@ function ruleChecks(ctx: Ctx, placed: Res[]): void {
       const here = placed.filter((r) => r.level === level && r.room === rm.id);
       if (roomRoles(ctx, rm.id).includes("chapel")) chapelCheck(ctx, level, rm, here);
       graveyardCheck(ctx, level, rm, here, placeableFloor(g.lv).find((x) => x.room === rm.id)?.placeable ?? rm.area);
+      campCheck(ctx, rm, here);
       const hung = here.filter((r) => isChandelier(r.data)).length, wanted = chandeliersWanted(rm);
       if (wantsChandelier(ctx, rm) && hung < wanted)
         warn(ctx, rm.id, "no-chandelier",
@@ -3231,8 +3358,19 @@ function resolveAuto(ctx: Ctx, w: Work, data: DressingData, members: AutoMember[
       }
       at = best;
     }
+    // a light that hangs from a beam moves onto the nearest point of the nearest beam line, and its chain runs to the beam
+    let beamHead = Infinity;
+    if (data.hangFrom === "beam") {
+      const b = ctx.input.map.anchors.filter((a) => a.kind === "beam" && a.level === level).sort((x, y) => beamDistance(x, at[0], at[1]) - beamDistance(y, at[0], at[1]))[0];
+      if (b) {
+        const { dx, dz, half } = beamLine(b);
+        const t = Math.max(-half, Math.min(half, (at[0] - b.position[0]) * dx + (at[1] - b.position[2]) * dz));
+        at = [b.position[0] + dx * t, b.position[2] + dz * t];
+        if (b.position[1] > grid.lv.floorY + 0.5) beamHead = b.position[1] - grid.lv.floorY;
+      }
+    }
     // the lowest ceiling over its footprint (a narrow ridge: the slopes either side are lower than the cell at its centre)
-    let head = Infinity;
+    let head = beamHead;
     for (const [c2, r2] of grid.cells({ cx: at[0], cz: at[1], hw: data.size[0] / 2, hd: data.size[2] / 2, yaw: 0 })) {
       const h = grid.head(c2, r2);
       if (Number.isFinite(h)) head = Math.min(head, h);
@@ -3721,6 +3859,7 @@ export function resolveDressing(input: DressingResolveInput): DressingResolveRes
     graves: new Map(),
     vignettes: new Map(),
     vignetteRooms: new Set(),
+    boards: new Map(),
     openings: new Map(),
     minItemsGiven: !!o.minItems,
   };
@@ -3737,7 +3876,7 @@ export function resolveDressing(input: DressingResolveInput): DressingResolveRes
   const setAnchor = new Map<string, string>();
   for (const item of input.plan.items) {
     if (item.prop) {
-      works.push({ id: item.id, prop: item.prop, place: item.place, group: "", ...(item.setPiece ? { setPiece: true } : {}) });
+      works.push({ id: item.id, prop: item.prop, place: item.place, group: "", ...(item.setPiece ? { setPiece: true } : {}), ...(item.inOpen ? { inOpen: item.inOpen } : {}) });
       continue;
     }
     const set = input.set(item.set);
@@ -3872,6 +4011,16 @@ export function resolveDressing(input: DressingResolveInput): DressingResolveRes
     if (!reported.has(w.id)) vio(ctx, w.id, "cycle", `"${w.id}" and "${hid}" rest on each other (a cycle of \`on\` places); one of them must stand on the floor, a wall or the ceiling`);
 
   const placed = works.map((w) => out.get(w.id)).filter((r): r is Res => !!r);
+  // shelves made to be filled carry goods on every board (owner 2026-10-30: "shelves look bare")
+  for (const r of placed) {
+    if (!r.data.holdsGoods) continue;
+    const boards = r.data.provides.filter((s) => s.kind === "surface"), held = ctx.boards.get(r.work.id);
+    const bare = boards.filter((s) => !held?.get(s.id));
+    if (bare.length)
+      vio(ctx, r.work.id, "shelf-empty",
+        `${r.work.prop} ("${r.work.id}") has ${bare.length} of ${boards.length} board(s) bare (${bare.map((s) => s.id).join(", ")}): a shelf, bookshelf or dresser carries goods on ` +
+          `every board; put books, jars, crockery or boxes \`{ "kind": "on", "item": "${r.work.id}", "socket": "${bare[0]!.id}" }\` on each`);
+  }
   pairChecks(ctx, placed);
   obstacleChecks(ctx, placed);
   routeCheck(ctx, placed);

@@ -6,6 +6,8 @@
  *   worldgen vegetation <world> --region <id> --clear            remove it
  *   worldgen vegetation <world> --clearings <file>               upsert clearings by id (a JSON array, or { "clearings": [...] })
  *   worldgen vegetation <world> --remove-clearings <owner|id,..> remove clearings by owner or id
+ *   worldgen vegetation <world> --fields <file>                  upsert declared FIELDS by id (crop cover grows only there)
+ *   worldgen vegetation <world> --remove-fields <owner|id,..>    remove fields by owner or id
  *   worldgen vegetation <world> --region <id> --count            solve the region's cells and tally scatter per rule
  *   worldgen vegetation <world> --at x,z                         the plan and clearing keep at one point
  *   add --dry-run to any write to validate and print without writing.
@@ -18,6 +20,7 @@ import fs from "node:fs";
 import {
   clearingSchema,
   createWorldField,
+  fieldSchema,
   pointInPolygon,
   regionVegetationSchema,
   scatterCell,
@@ -87,6 +90,33 @@ export function commandVegetation(host: VegetationHost): void {
     wrote = true;
   }
 
+  // declared fields: the only ground a crop layer (cover[].fields) grows on (owner ruling 2026-10-30)
+  const fieldsArg = opt("fields");
+  if (fieldsArg) {
+    const raw = readJson(host, fieldsArg) as unknown;
+    const list = Array.isArray(raw) ? raw : (raw as { fields?: unknown[] }).fields ?? host.fail("--fields: expected an array or { fields: [...] }");
+    const parsed = list.map((c, i) => {
+      const r = fieldSchema.safeParse(c);
+      if (!r.success) host.fail(`field ${i}: ${r.error.message}`);
+      return r.data;
+    });
+    const ids = new Set(parsed.map((c) => c.id));
+    recipe.features.fields = [...(recipe.features.fields ?? []).filter((c) => !ids.has(c.id)), ...parsed];
+    const crops = recipe.cover.filter((l) => l.fields).map((l) => l.id);
+    for (const f of parsed) for (const l of f.layers ?? []) if (!crops.includes(l)) console.log(`  ! field ${f.id}: "${l}" is not a crop layer (cover[].fields) of this world (${crops.join(", ") || "none"})`);
+    console.log(`fields: upserted ${parsed.length} (${recipe.features.fields.length} total); crop layers: ${crops.join(", ") || "NONE (set cover[].fields on a layer)"}`);
+    wrote = true;
+  }
+  const removeFields = opt("remove-fields");
+  if (removeFields) {
+    const keys = new Set(removeFields.split(","));
+    const before = recipe.features.fields?.length ?? 0;
+    recipe.features.fields = (recipe.features.fields ?? []).filter((c) => !keys.has(c.id) && !(c.owner && keys.has(c.owner)));
+    console.log(`fields: removed ${before - recipe.features.fields.length}`);
+    if (!recipe.features.fields.length) delete recipe.features.fields;
+    wrote = true;
+  }
+
   // report (always, after any edit, so a dry run shows what it would write)
   const index = vegetationIndex(recipe);
   const ruleIds = recipe.scatter.map((r) => r.id);
@@ -111,6 +141,9 @@ export function commandVegetation(host: VegetationHost): void {
     console.log(`clearings: ${clearings.length} — ${[...owners].map(([o, n]) => `${o} ${n}`).join(", ")}`);
   }
   for (const w of index.warnings) console.log(`WARNING ${w}`);
+  const crops = recipe.cover.filter((l) => l.fields).map((l) => l.id);
+  if (crops.length || recipe.features.fields?.length)
+    console.log(`fields: ${(recipe.features.fields ?? []).map((f) => `${f.id}${f.owner ? ` (${f.owner})` : ""}`).join(", ") || "none declared"}; crop layers (grow only there): ${crops.join(", ") || "none"}`);
   if (!index.hasPlans && !clearings.length) console.log("no region vegetation and no clearings: the biomes decide everywhere");
 
   const at = opt("at");

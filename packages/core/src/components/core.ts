@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { mobBehaviorArchetypeSchema } from "../mob.js";
 import type { ComponentRegistry } from "./registry.js";
 import { prefabInstanceSchema } from "../prefab.js";
 import { registerPhysicsComponents } from "./physics.js";
@@ -10,9 +11,11 @@ export const MAX_SPLAT_LAYERS = 16;
 export const MAX_INDEXED_SPLAT_LAYERS = 64;
 import { registerVoxelComponents } from "./voxel.js";
 import { registerPlacementComponent } from "./placement.js";
+import { registerPlaceRuleComponent } from "./place-rule.js";
 import { registerDressingComponent } from "./dressing.js";
 import { registerDecalComponent } from "./decal.js";
 import { landmarkComponentSchema } from "./landmark.js";
+import { placeStreamSchema } from "./place-stream.js";
 import { loadingScreenSchema, portalAnchorSchema } from "../portal.js";
 import { polyMeshSourceSchema } from "../poly-mesh/types.js";
 
@@ -176,6 +179,7 @@ export const cullingProfileSchema = z
 export type CullingProfileData = z.infer<typeof cullingProfileSchema>;
 
 export { landmarkComponentSchema, type LandmarkComponentData } from "./landmark.js";
+export { placeStreamSchema, type PlaceStreamData } from "./place-stream.js";
 
 /**
  * Vertex-shader wind for a model, shared by the `mesh` component and the voxel
@@ -1290,6 +1294,14 @@ export const materialSchema = z.preprocess(waterColorFromColor, z.object({
       "Texture asset id — GREYSCALE opacity mask (black = cut away). Needs `transparent: true` for soft " +
         "edges, or `alphaTest` > 0 for hard cutout; with neither it has no visible effect.",
     ),
+  edgeFade: z.object({
+    shape: z.enum(["quad", "triangle"]).default("quad").describe("Whole-sheet perimeter: quad uses a 0..1 rectangle; triangle uses u>=0, v>=0, u+v<=1. Internal mesh triangle edges never fade."),
+    width: z.tuple([z.number().positive().max(0.5), z.number().positive().max(0.5)]).default([0.08, 0.15]).describe("Fade width on each coverage-UV axis, as fractions of the full sheet. Independent of map repeat and uvOffset."),
+    noise: z.number().min(0).max(1).default(0.25).describe("Uneven soft-edge width; 0 gives a regular edge. Noise is continuous over the whole sheet, never repeated per texture tile."),
+    noiseScale: z.number().min(0).max(128).default(8).describe("Noise frequency across the coverage coordinates."),
+    power: z.number().positive().max(8).default(1.2).describe("Opacity falloff exponent; larger makes the wispy perimeter softer and fainter."),
+    uvChannel: z.union([z.literal(0), z.literal(1)]).default(1).describe("Untransformed coverage coordinates: 1 is glTF TEXCOORD_1 / geometry uv1, leaving UV0 free for physical tiling. Missing coverage UVs render fully transparent; no tiled-UV fallback."),
+  }).optional().describe("Soft irregular perimeter opacity for standard, unlit and toon sheets. Multiplies material opacity and texture alpha. Use transparent:true (or alphaHash for stipple); alphaTest clips the soft fade. Supply continuous coverage UVs over the full sheet, not per subdivision or texture tile."),
   alphaHash: z
     .boolean()
     .optional()
@@ -1459,6 +1471,7 @@ export const materialSchema = z.preprocess(waterColorFromColor, z.object({
     .boolean()
     .default(false)
     .describe("Enable alpha blending. Auto-on when opacity < 1; set true for textures with alpha."),
+  depthWrite: z.boolean().optional().describe("Override depth-buffer writes on standard/unlit/toon materials. Default true preserves existing surfaces; use false for overlapping softly transparent silk or mist sheets, with depth testing still enabled."),
   splat: z
     .object({
       dominantAxis: z.boolean().default(false).describe("Select one triplanar projection per face instead of blending axes. Pair with flatShading for masonry to prevent doubled mortar on bevels; leaves geometry and colliders unchanged. Organic terrain defaults to blended projection."),
@@ -1632,6 +1645,12 @@ export const materialSchema = z.preprocess(waterColorFromColor, z.object({
         .max(1)
         .optional()
         .describe("Sun glint / sheen, 0-1 (default 0.3). 0 is matte, 1 the old glassy surface (roughness 0.35); waterfall curtains are always matte."),
+      roughness: z
+        .number()
+        .min(0.04)
+        .max(1)
+        .optional()
+        .describe("Surface roughness override, 0.04-1 (default from `specular`). Still indoor water wants ~0.08-0.15: each point light (a brazier, a candle) then mirrors as a tight bright spot on the surface where a reflection would sit. Open water with waves keeps the default."),
       /** Camera distance (world units) where the surface starts fading toward
        * fully transparent — should end well before the mesh's own physical
        * edge so a large-but-finite water plane never shows a hard cutoff, no
@@ -1954,6 +1973,10 @@ export const clothSwaySchema = z.object({
   panelAttachMax: z.number().min(0).max(1).default(0.72),
 });
 
+/** The player's mixer channels: each is a gain stage under the master volume. */
+export const AUDIO_CHANNELS = ["music", "ambience", "effects", "interface", "voice"] as const;
+export type AudioChannel = (typeof AUDIO_CHANNELS)[number];
+
 /** Sound emitter. `src` is an audio asset id (assets/audio/). */
 export const audioSchema = z.object({
   src: z.string().min(1),
@@ -1964,6 +1987,7 @@ export const audioSchema = z.object({
   /** 3D positional vs flat. */
   positional: z.boolean().default(true),
   refDistance: z.number().positive().default(8),
+  channel: z.enum(AUDIO_CHANNELS).optional().describe("Mixer channel the player's Audio settings control. Unset: a loop is ambience, anything else effects."),
 });
 
 /**
@@ -2011,6 +2035,16 @@ export const skySchema = z.object({
         .describe(
           "exponential/height modes only: fog per world unit. Scale-sensitive — 0.015 suits a ~200-unit " +
             "view; halve it for every doubling of the space, or the far wall of a large hall vanishes.",
+        ),
+      maxOpacity: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(1)
+        .describe(
+          "exponential/height modes only: the most the fog ever hides, 0..1. Below 1 the air stays as thick near " +
+            "you, but distant land stops vanishing and stands as a hazy shape: what makes a far peak a place to " +
+            "go. 0.8 is a heavy haze you can still read mountains through. Only the sea's far end fogs past it.",
         ),
       heightFalloff: z
         .number()
@@ -2191,6 +2225,11 @@ export const skySchema = z.object({
         ),
     })
     .optional(),
+  modelFill: z.number().min(0).max(0.25).optional().describe(
+    "Matte texture-coloured readability floor for players, NPCs, skinned monsters and moving model entities. " +
+    "Independent of camera angle; does not illuminate the room or brighten fire, water or other effects. " +
+    "0/omitted = off; start at 0.02-0.05 for dark interiors. Preserves painted dark colours; excessive values flatten lighting.",
+  ),
   rim: z
     .object({
       color: hexColor.default("#8fa6d8").describe("Edge light colour on characters. Cold blue reads as moonlight against warm torches."),
@@ -2886,7 +2925,7 @@ export const particlesSchema = z.object({
   space: z
     .enum(["local", "world"])
     .default("world")
-    .describe("world = particles trail behind a moving emitter; local = they ride it."),
+    .describe("world = particles stay where they were born, so they trail behind a moving emitter (drips, smoke); local = they ride it (fire on a carried blade). Gravity is world-down in both."),
   ground: z
     .object({
       mode: z
@@ -2959,6 +2998,39 @@ export const vfxComponentSchema = z.object({
       "Smoke is OFF by default: the effect plays without its smoke layers (a normal-blended smoke/plume/column layer, " +
         "or a whole smoke effect such as env/smoke-column). true plays them. Owner ruling 2026-10-30: no smoke until " +
         "the smoke effect works (docs/vfx-architecture.md).",
+    ),
+  standingLight: z
+    .boolean()
+    .optional()
+    .describe(
+      "Unset = true. false drops the effect's own light modules for this instance (no standing point light). A fire PREFAB that carries " +
+        "its own light (a beacon's `light` component) sets it: two point lights per fire is waste, and the flame's light " +
+        "adds a second halo and fog glow its prefab cannot tune (o-gates 2026-10-30, the wash gate).",
+    ),
+  farDraw: z
+    .boolean()
+    .optional()
+    .describe(
+      "Keep this standing play's emitters awake to its cullDistance; for a few landmark beacons only, since each one costs " +
+        "particle sim at range. Unset, a flame sleeps past the particle system's 220 m and only its light shows (o-gates " +
+        "2026-10-30: grand entrances must read by their fires from 300 m+).",
+    ),
+  farGrow: z
+    .number()
+    .min(0)
+    .optional()
+    .describe(
+      "Metres. Past this camera distance the play's flame keeps its screen size: each particle and its offset from the emitter grow " +
+        "with distance / farGrow, so a small fire (a cold spirit flame whose blue rim is under a pixel at 300 m) still reads " +
+        "by its flame far off. Up close nothing changes. Only with farDraw (a sleeping emitter draws nothing); unset/0 = off.",
+    ),
+  lightGlow: z
+    .number()
+    .min(0)
+    .optional()
+    .describe(
+      "Halo + lamp-fog glow of the effect's standing light (the light component's `glow`: 0 = none). Unset = the default " +
+        "halo every vfx light has had. Lower it where a place's fires veil its dusk frames.",
     ),
   cullDistance: z
     .number()
@@ -3436,6 +3508,7 @@ export const spawnMixEntrySchema = z.object({
     .default([1, 1])
     .describe("[min, max] creatures spawned together by one roll: [1,1] a single, [1,2] a single or a pair. More than 2 reads as a pack, not ambient life."),
   temperament: z.enum(MOB_TEMPERAMENTS).optional().describe("This row's temperament (overrides the area's `temperament`)."),
+  behaviorArchetype: mobBehaviorArchetypeSchema.optional().describe("This row's fight policy overrides the area's policy and the template. A row temperament without a preset restores legacy temperament behavior instead of inheriting a lower-scope preset."),
   near: z.number().min(0).default(4).describe("Metres the members of one roll stand from the first of them (a pair grazing together)."),
   with: z
     .array(z.string().min(1))
@@ -3480,6 +3553,7 @@ export const spawnRareSchema = z.object({
     .optional()
     .describe("Shared key: rares with the same id are one creature — at most one alive across every area naming it (and one lockout). Default: one per area and template."),
   temperament: z.enum(MOB_TEMPERAMENTS).optional().describe("The rare's own temperament (a rare is usually hostile or territorial). Unset = its placeholder slot's."),
+  behaviorArchetype: mobBehaviorArchetypeSchema.optional().describe("The rare's fight policy overrides its placeholder slot and template. A rare temperament without a preset restores legacy temperament behavior."),
   territory: z.number().min(0).optional().describe("The rare's own `territory` metres (territorial). Unset = the area's."),
   props: z
     .record(z.string(), z.unknown())
@@ -3518,6 +3592,8 @@ export const spawnAreaSchema = z
           template: z.string().min(1).describe("NPC template: the id of an npc-tagged scene subtree, or a name registered on the server at runtime."),
           count: z.number().int().min(1).default(1),
           spread: z.number().min(0).default(6).describe("Metres around the origin the pack is scattered in (uniform disc)."),
+          temperament: z.enum(MOB_TEMPERAMENTS).optional().describe("This member's legacy mood overrides the area's mood/preset."),
+          behaviorArchetype: mobBehaviorArchetypeSchema.optional().describe("This member's fight policy overrides the area's mood/preset and template."),
         }),
       )
       .default([]),
@@ -3612,8 +3688,10 @@ export const spawnAreaSchema = z
         "Default temperament for every creature of the area (a `mix` row's own wins), handed to mob-brain as the " +
           "`temperament` param: hostile (attacks on sight, today's mobs), territorial (attacks only who comes within " +
           "`territory` metres of it or its home), passive (never starts a fight; hit it and it fights back, then wanders off; " +
-          "never shouts — the server hands passive creatures `alertRadius` 0). Unset = whatever the template's brain says (hostile).",
+          "its default alert radius is 0, while an explicitly positive template alertRadius opts into defending same-faction " +
+          "packmates). Unset = whatever the template's brain says (hostile).",
       ),
+    behaviorArchetype: mobBehaviorArchetypeSchema.optional().describe("Area fight policy, overridden by spawn/mix/rare rows. Overrides template policy. An area temperament without a preset cancels a template preset; unset both to inherit the template."),
     territory: z
       .number()
       .min(0)
@@ -3636,14 +3714,24 @@ export const spawnAreaSchema = z
 
 export type SpawnAreaData = z.infer<typeof spawnAreaSchema>;
 
+export const npcRespawnSchema = z.object({
+  seconds: z.number().min(0).default(0).describe(
+    "NPC-root respawn delay after death, in simulated seconds. 0 disables automatic respawning (bosses). " +
+    "A positive value overrides the server's normal delay (e.g. 3600 for dungeon trash). " +
+    "Omit this component to keep the server default. Explicit nonrespawning summons remain nonrespawning.",
+  ),
+});
+
 
 export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("transform", transformSchema);
   registry.register("spawnArea", spawnAreaSchema);
+  registry.register("npcRespawn", npcRespawnSchema);
   registry.register("visibility", visibilitySchema);
   registry.register("culling", cullingSchema);
   registry.register("cullingProfile", cullingProfileSchema);
   registry.register("landmark", landmarkComponentSchema);
+  registry.register("placeStream", placeStreamSchema);
   registry.register("mesh", meshSchema);
   registry.register("light", lightSchema);
   registry.register("camera", cameraSchema);
@@ -3663,6 +3751,7 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("portalAnchor", portalAnchorSchema);
   registry.register("loadingScreen", loadingScreenSchema);
   registerPlacementComponent(registry);
+  registerPlaceRuleComponent(registry);
   registerDressingComponent(registry);
   registerDecalComponent(registry);
   registerPhysicsComponents(registry);

@@ -4,6 +4,7 @@ export {
   geometryFor,
   loadGltf,
   gltfLoadingCount,
+  invalidateModelRenderCaches,
   makeMaterial,
   patchMaterial,
   materialForId,
@@ -13,7 +14,8 @@ export {
   type BuildOptions,
   type MaterialData,
 } from "./scene-builder.js";
-export { buildHlodProxy, type HlodProxy, type HlodProxyStats } from "./hlod-proxy.js";
+export { buildHlodProxy, hlodMaterial, type HlodProxy, type HlodProxyStats } from "./hlod-proxy.js";
+export { HorizonTerrain, HORIZON_STEP } from "./horizon-terrain.js";
 export { reconcileScene, type ReconcileHooks } from "./reconcile.js";
 export { attachPhysicsDebug, detachPhysicsDebug } from "./physics-debug.js";
 export { attachLightDebug, detachLightDebug } from "./light-debug.js";
@@ -21,7 +23,7 @@ export { attachSkeletonDebug, collectBones, countAttachedSkeletonDebug, setSkele
 export { extractCollisionGeometry, makeMeshGeometryProvider, type CollisionGeometry } from "./collision-geometry.js";
 export { AnimationSystem, CROWD_POSE_LOD, type AnimatorData } from "./animation.js";
 export { ClothSwaySystem, DEFAULT_CLOTH_SWAY, markClothVertices, type ClothSwayOptions, type IslandReport } from "./cloth-sway.js";
-export { ParticleSystem, type ParticlesData, type ParticleValue } from "./particles.js";
+export { ParticleSystem, setWeatherParticleScale, setWeatherViewCull, type ParticlesData, type ParticleValue } from "./particles.js";
 export {
   AmbientVfx,
   VfxSystem,
@@ -44,6 +46,7 @@ export {
 } from "./billboards.js";
 export { applyFoliageNormals, foliageNormals, type FoliageNormalOptions } from "./foliage-normals.js";
 export { applyModelBrightness } from "./model-brightness.js";
+export { addModelFill } from "./model-fill.js";
 export {
   APPEARANCE_DATA,
   APPEARANCE_FLOATS,
@@ -85,12 +88,13 @@ export {
 } from "./appearance.js";
 export { applyInstanceAppearance, applyInstanceHang, INSTANCE_APPEARANCE_ATTRIBUTES, INSTANCE_HANG_ATTRIBUTES } from "./instancing.js";
 export { vegetationMaterialRole, VEGETATION_TINT_ATTRIBUTES } from "./vegetation-tint.js";
-export { applyModelEmissive, applyModelMap, applyModelPartMask, modelPartIndex, partBounds, partMaskFromNames, partSize, resolvePartAnchor, type PartAnchor } from "./ubermesh.js";
+export { applyModelDepthPull, applyModelEmissive, applyModelMap, applyModelPartMask, modelPartIndex, partBounds, partMaskFromNames, partSize, resolvePartAnchor, type PartAnchor } from "./ubermesh.js";
 export { MovingInstanceSystem, type MovingInstanceEntry, type MovingInstanceGlow, type MovingInstanceLook } from "./moving-instances.js";
 export { findSocketBone, socketParamsFrom, socketWorldPose, type SocketParams } from "./socket-pose.js";
 export { applyFoliageWind, setFoliageWindScale, windMaterialMatches, FOLIAGE_WIND, type FoliageWindMode, type FoliageWindOptions } from "./foliage-wind.js";
 export { applyFoliageFade, setFoliageFade, FOLIAGE_FADE, type FoliageFadeState } from "./foliage-fade.js";
 export { asNodeMaterial, cloneMaterial, editMeshMaterials } from "./node-material.js";
+export { edgeFadeCoverage, type EdgeFadeData } from "./edge-fade.js";
 export {
   GrassSystem,
   crossQuadGeometry,
@@ -120,6 +124,7 @@ export {
   TAA_FALLBACK_REASON,
   evaluateGrade,
   needsPipeline,
+  bloomCadence,
   passPlan,
   pipelineSignature,
   resolvePostFx,
@@ -193,6 +198,10 @@ export {
   type CascadeShadowStats,
   type ShadowSettings,
   type SliceSphere,
+  cascadeStagger,
+  shadowSunStep,
+  setSunShadowQuality,
+  type SunShadowQuality,
 } from "./csm.js";
 export {
   DEFAULT_VOLUMETRIC_SETTINGS,
@@ -241,6 +250,7 @@ export { currentMaterialEnvironment, setEnvironment, applyModelTextureFilter, wa
 export { cachedSkyEnvironmentTexture, clearSkyEnvironmentCache } from "./environment.js";
 export {
   batchStaticMeshes,
+  shadowMerge,
   mergeModelSubmeshes,
   ownerOfFace,
   BATCH_OWNERS,
@@ -249,6 +259,8 @@ export {
   type StaticBatchHandle,
   type StaticBatchStats,
 } from "./static-batch.js";
+export { AdaptiveResolution, renderScaleFromSearch, type AdaptiveResolutionOptions } from "./adaptive-resolution.js";
+export { PropSheets, sheetPageOf, SHEET_RECT_ATTRIBUTE, type SheetPlacement, type PropSheetOptions } from "./prop-sheet.js";
 export {
   InstancedProps,
   applyInstancedProps,
@@ -323,3 +335,5 @@ export {
   SHADOW_CAMERA_LAYERS,
   type HorizonOptions,
 } from "./horizon.js";
+export { FirstDrawWarm } from "./first-draw-warm.js";
+export { asyncPipelines, SHADER_BUILD_BUDGET_MS } from "./async-pipelines.js";

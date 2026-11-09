@@ -7,6 +7,10 @@ description: Light an instanced dungeon so it reads — the shared readability f
 
 Sources: `tools/dungeon-pipeline/README.md` "Lighting stage" and the gate table; `docs/culling.md` "Interior scenes";
 `apps/playground/tools/light-buckets.json` (its `about` is the rule). Building the dungeon: `dungeon-build`.
+Read [the Weeping Sun placement review](../dungeon-standards/references/placement-review.md) for fixture restraint,
+orphan effects and actual entity-lighting checks. Do not add fixtures to satisfy a count or hide a material defect.
+Compare environment, player/trash/boss lighting, weapon effect size and local spill separately; exact Weeping Sun
+light values are not a universal preset.
 
 ## Commands (from apps/playground unless noted)
 ```
@@ -37,7 +41,8 @@ exposure 1, vignette <= 0.25; the interior `cullingProfile`.
 
 ## Judgment
 - Mood is tone and fixtures, never darkness, and never so flat there are no pools.
-- One place, one light bucket (tomb, manor, delve, camp, street); several kinds from it are wanted. Candles carry a barrow.
+- One place, one light bucket (tomb, manor, delve, camp, street); choose fixture kinds for their scale and job,
+  without a variety quota. Candles carry a barrow and can use selected supported upper/lower shelves.
 - Big rooms take floor tiles of at least ~50 luma: dark tiles read dark at any fill.
 - Lights match the scale/culture: a giant room needs giant fixtures (a torch or fire bowl of its own), not human lanterns.
 - A window the player cannot see through is not drawn as open.

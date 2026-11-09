@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
 import { z } from "zod";
 import {
@@ -14,6 +14,8 @@ import {
   registerCoreComponents,
   registerCoreEvents,
   registerLandingNetState,
+  petKey,
+  petStateSchema,
   type Op,
 } from "@hitreg/core";
 import {
@@ -26,7 +28,7 @@ import {
   type SimLike,
 } from "../src/index.js";
 import { GROUND_LAYERS, OBSTACLE_LAYERS } from "../src/steering.js";
-import { ALERT_SIGHT_GRACE, MOVE_TARGET_RULES } from "../src/mob-brain.js";
+import { ALERT_SIGHT_GRACE, MOVE_TARGET_RULES, UNHEARD_ATTACK_WARNING } from "../src/mob-brain.js";
 
 const coreRegistry = new ComponentRegistry();
 registerCoreComponents(coreRegistry);
@@ -52,6 +54,8 @@ function harness(opts: {
     tags?: string[];
     script?: { name: string; params: Record<string, unknown> };
   }>;
+  /** false = nothing subscribes to mob.attack (a scene missing the game's attack join). */
+  listenAttack?: boolean;
 }) {
   const events = new EventRegistry();
   registerCoreEvents(events);
@@ -161,7 +165,7 @@ function harness(opts: {
   const runtime = new ScriptRuntime({ doc, objects, sim, registry, input: noInput, events: bus, netState });
 
   const heard: Array<{ name: string; payload: Record<string, unknown> }> = [];
-  for (const name of ["mob.state", "mob.attack", "mob.alert"]) {
+  for (const name of opts.listenAttack === false ? ["mob.state", "mob.alert"] : ["mob.state", "mob.attack", "mob.alert"]) {
     bus.on(name, (payload) => heard.push({ name, payload: payload as Record<string, unknown> }));
   }
   runtime.start();
@@ -383,6 +387,23 @@ describe("mob-brain in melee", () => {
     const ids = new Set(h.attacks().map((a) => a.payload["abilityId"]));
     expect(ids.size).toBeGreaterThan(0);
     for (const id of ids) expect(["cleave", "bite"]).toContain(id);
+  });
+
+  it("warns ONCE when it swings and nothing listens to mob.attack (no attack join in the scene)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness({ params: { roam: 0, aggroRange: 20, attackRange: 3, attackInterval: 0.5 }, playerAt: [0, 0, 2], listenAttack: false });
+      h.step(600);
+      expect(warn.mock.calls.filter((c) => c[0] === UNHEARD_ATTACK_WARNING)).toHaveLength(1);
+      // a scene that has the join hears nothing of it
+      warn.mockClear();
+      const heard = harness({ params: { roam: 0, aggroRange: 20, attackRange: 3, attackInterval: 0.5 }, playerAt: [0, 0, 2] });
+      heard.step(600);
+      expect(heard.attacks().length).toBeGreaterThan(1);
+      expect(warn.mock.calls.filter((c) => c[0] === UNHEARD_ATTACK_WARNING)).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("holds its distance when it is a ranged mob", () => {
@@ -1209,6 +1230,44 @@ describe("mob-brain temperament", () => {
     expect(Math.hypot(sx, sz)).toBeGreaterThan(0.5); // passive with alertRadius set: joins in
   });
 
+  it("two neutral ants assist only after provocation, while two nearby beetles each retaliate alone", () => {
+    const ant = { roam: 0, temperament: "passive", alertRadius: 14, faction: "ant-foragers", hostileTo: "player", speed: 4, leash: 100 };
+    const beetle = { ...ant, faction: "wild", alertRadius: 0 };
+    const h = harness({ params: ant, playerAt: [0, 0, 8], extras: [
+      { id: "ant2", at: [4, 0, 0], tags: ["npc"], script: { name: "mob-brain", params: ant } },
+      { id: "beetle1", at: [-4, 0, 0], tags: ["npc"], script: { name: "mob-brain", params: beetle } },
+      { id: "beetle2", at: [-7, 0, 0], tags: ["npc"], script: { name: "mob-brain", params: beetle } },
+    ] });
+    h.step(90);
+    expect(h.attacks()).toHaveLength(0);
+    expect(h.alerts()).toHaveLength(0);
+    for (const id of ["mob", "ant2", "beetle1", "beetle2"]) expect(h.driveOf(id)).toEqual([0, 0]);
+
+    h.threat({ sourceId: "player", amount: 10 });
+    h.step(45);
+    expect(h.alerts().some(a => a.payload["mobId"] === "mob")).toBe(true);
+    expect(Math.hypot(...h.driveOf("ant2"))).toBeGreaterThan(0.5);
+    expect(h.driveOf("beetle1")).toEqual([0, 0]);
+    expect(h.driveOf("beetle2")).toEqual([0, 0]);
+
+    h.bus.emit("mob.threat", { mobId: "beetle1", sourceId: "player", amount: 10 });
+    h.step(45);
+    expect(Math.hypot(...h.driveOf("beetle1"))).toBeGreaterThan(0.5);
+    expect(h.driveOf("beetle2")).toEqual([0, 0]);
+    expect(h.alerts().filter(a => String(a.payload["mobId"]).startsWith("beetle"))).toHaveLength(0);
+    h.runtime.dispose();
+  });
+
+  it("passive defensive assistance respects faction even when another nearby species also opts in", () => {
+    const h = harness({ params: { roam: 0, temperament: "passive", alertRadius: 14, faction: "ant-foragers" }, playerAt: [0, 0, 10], extras: [
+      { id: "other-species", at: [5, 0, 0], tags: ["npc"], script: { name: "mob-brain", params: { roam: 0, temperament: "passive", alertRadius: 14, faction: "wild" } } },
+    ] });
+    h.step(30);h.threat({ sourceId: "player", amount: 10 });h.step(30);
+    expect(h.alerts().some(a => a.payload["mobId"] === "mob")).toBe(true);
+    expect(h.driveOf("other-species")).toEqual([0, 0]);
+    h.runtime.dispose();
+  });
+
   it("territorial: lets a player pass outside its territory, attacks one who steps inside", () => {
     const h = harness({ params: { roam: 0, temperament: "territorial", territory: 7, aggroRange: 16, speed: 4, leash: 100 }, playerAt: [0, 0, 12] });
     h.step(60);
@@ -1230,6 +1289,95 @@ describe("mob-brain temperament", () => {
     const h = harness({ params: { roam: 0, temperament: "grumpy", aggroRange: 16 }, playerAt: [0, 0, 10] });
     h.step(20);
     expect(h.states()).toContain("chase");
+  });
+});
+
+describe("mob-brain behavior archetypes", () => {
+  const common = { roam: 0, speed: 4, leash: 100, faction: "colony", hostileTo: "player" };
+  it("neutral remains solitary even with positive legacy alerts; protective allies assist only after provocation", () => {
+    const h = harness({ params: { ...common, behaviorArchetype: "protective", alertRadius: 0 }, playerAt: [0, 0, 9], extras: [
+      { id: "worker", at: [4, 0, 0], tags: ["npc"], script: { name: "mob-brain", params: { ...common, behaviorArchetype: "protective" } } },
+      { id: "beetle", at: [-4, 0, 0], tags: ["npc"], script: { name: "mob-brain", params: { ...common, behaviorArchetype: "neutral", alertRadius: 50 } } },
+    ] });
+    h.step(30); expect(h.alerts()).toHaveLength(0); expect(h.driveOf("worker")).toEqual([0, 0]);
+    h.threat({ sourceId: "player", amount: 10 }); h.step(30);
+    expect(h.alerts().find(a => a.payload["mobId"] === "mob")!.payload["cause"]).toBe("defense");
+    expect(Math.hypot(...h.driveOf("worker"))).toBeGreaterThan(.5);
+    expect(h.driveOf("beetle")).toEqual([0, 0]);
+    h.bus.emit("mob.threat", { mobId: "beetle", sourceId: "player", amount: 10 }); h.step(20);
+    expect(Math.hypot(...h.driveOf("beetle"))).toBeGreaterThan(.5);
+    expect(h.alerts().filter(a => a.payload["mobId"] === "beetle")).toHaveLength(0);
+    h.runtime.dispose();
+  });
+  it("an aggressive soldier's sight pull does not recruit protective workers, but subsequent direct threat does", () => {
+    const h = harness({ params: { ...common, behaviorArchetype: "aggressive", temperament: "passive" }, playerAt: [0, 0, 10], extras: [
+      { id: "worker", at: [4, 0, 0], tags: ["npc"], script: { name: "mob-brain", params: { ...common, behaviorArchetype: "protective" } } },
+    ] });
+    h.step(20);
+    expect(h.states()).toContain("chase"); expect(h.alerts()[0]!.payload["cause"]).toBe("acquisition");
+    expect(h.driveOf("worker")).toEqual([0, 0]);
+    h.threat({ sourceId: "player", amount: 10 }); h.step(20);
+    expect(h.alerts().some(a => a.payload["mobId"] === "mob" && a.payload["cause"] === "defense")).toBe(true);
+    expect(Math.hypot(...h.driveOf("worker"))).toBeGreaterThan(.5);
+    h.runtime.dispose();
+  });
+  it("defensive assistance keeps its provenance when passed to a second ally", () => {
+    const params = { ...common, behaviorArchetype: "protective", alertRadius: 7 };
+    const h = harness({ params, playerAt: [0, 0, 14], extras: [
+      { id: "near", at: [6, 0, 0], tags: ["npc"], script: { name: "mob-brain", params } },
+      { id: "far", at: [12, 0, 0], tags: ["npc"], script: { name: "mob-brain", params } },
+    ] });
+    h.threat({ sourceId: "player", amount: 10 });h.step(30);
+    expect(h.alerts().find(a => a.payload["mobId"] === "near")!.payload["cause"]).toBe("defense");
+    expect(Math.hypot(...h.driveOf("far"))).toBeGreaterThan(.5);
+    h.runtime.dispose();
+  });
+  it("indirect healing threat does not turn an unprovoked sight pull into a defensive call", () => {
+    const h = harness({ params: { ...common, behaviorArchetype: "aggressive" }, playerAt: [0, 0, 10], extras: [
+      { id: "worker", at: [4, 0, 0], tags: ["npc"], script: { name: "mob-brain", params: { ...common, behaviorArchetype: "protective" } } },
+      { id: "healer", at: [0, 0, 12], tags: ["player"] },
+    ] });
+    h.step(20);h.threat({ sourceId: "healer", amount: 100, provoked: false });h.step(20);
+    expect(h.alerts().filter(a => a.payload["targetId"] === "healer").every(a => a.payload["cause"] === "acquisition")).toBe(true);
+    expect(h.driveOf("worker")).toEqual([0, 0]);
+    h.threat({ sourceId: "healer", amount: 10 });h.step(20);
+    expect(h.alerts().some(a => a.payload["targetId"] === "healer" && a.payload["cause"] === "defense")).toBe(true);
+    expect(Math.hypot(...h.driveOf("worker"))).toBeGreaterThan(.5);h.runtime.dispose();
+  });
+  it("territorial preset keeps the existing intrusion boundary", () => {
+    const h = harness({ params: { ...common, behaviorArchetype: "territorial", temperament: "passive", territory: 5 }, playerAt: [0, 0, 10] });
+    h.step(20);expect(h.drive()).toEqual([0, 0]);h.movePlayer(0, 0, 4);h.step(20);expect(h.states()).toContain("chase");h.runtime.dispose();
+  });
+  it("inherit retains a passive group's explicit social opt-in and accepts legacy alerts", () => {
+    const h = harness({ params: { ...common, behaviorArchetype: "inherit", temperament: "passive", alertRadius: 14 }, playerAt: [0, 0, 10] });
+    h.step(20);expect(h.drive()).toEqual([0, 0]);
+    h.bus.emit("mob.alert", { mobId: "ally", targetId: "player", at: [2, 0, 0], radius: 14, faction: "colony" });
+    h.step(20);expect(h.states()).toContain("chase");h.runtime.dispose();
+  });
+  it("protective allies without factions require the same population area", () => {
+    const h = harness({ params: { roam: 0, behaviorArchetype: "protective", spawnArea: "nest-a" }, playerAt: [0, 0, 10] });
+    const alert = { mobId: "ally", targetId: "player", at: [2, 0, 0], radius: 10, faction: "", cause: "defense" };
+    h.bus.emit("mob.alert", { ...alert, spawnArea: "nest-b" });h.step(20);expect(h.drive()).toEqual([0, 0]);
+    h.bus.emit("mob.alert", { ...alert, spawnArea: "nest-a" });h.step(20);expect(h.states()).toContain("chase");h.runtime.dispose();
+  });
+  it("inherit preserves the legacy once-per-target shout even when its sight pull later takes damage", () => {
+    const h = harness({ params: { ...common, behaviorArchetype: "inherit" }, playerAt: [0, 0, 10] });
+    h.step(20);expect(h.alerts()).toHaveLength(1);h.threat({ sourceId: "player", amount: 10 });h.step(20);
+    expect(h.alerts()).toHaveLength(1);h.runtime.dispose();
+  });
+  it.each(["neutral", "protective", "aggressive", "territorial"])("%s leaves pet passive stance and direct attack orders intact", behaviorArchetype => {
+    const h = harness({ params: { roam: 0, owner: "owner", behaviorArchetype, targetTags: "player", leash: 100 }, playerAt: [0, 0, 10], extras: [{ id: "owner", at: [0, 0, -2] }] });
+    h.netState.define("pet", petStateSchema);
+    h.netState.set(petKey("mob"), { owner: "owner", source: "test", stance: "passive", order: "stay", at: [0, 0, 0] });
+    h.threat({ sourceId: "player", amount: 10 });h.step(20);expect(h.attacks()).toHaveLength(0);expect(h.states()).not.toContain("chase");expect(h.alerts()).toHaveLength(0);
+    h.netState.set(petKey("mob"), { owner: "owner", source: "test", stance: "passive", order: "attack", orderTarget: "player" });
+    h.step(20);expect(h.states()).toContain("chase");expect(h.alerts()).toHaveLength(0);h.runtime.dispose();
+  });
+  it("a neutral preset does not erase a pet's legacy defensive alert response", () => {
+    const h = harness({ params: { ...common, owner: "owner", behaviorArchetype: "neutral", alertRadius: 14 }, playerAt: [0, 0, 10], extras: [{ id: "owner", at: [0, 0, -2] }] });
+    h.netState.define("pet", petStateSchema);h.netState.set(petKey("mob"), { owner: "owner", source: "test", stance: "defend", order: "stay", at: [0, 0, 0] });
+    h.bus.emit("mob.alert", { mobId: "ally", targetId: "player", at: [2, 0, 0], radius: 14, faction: "colony" });h.step(20);
+    expect(h.states()).toContain("chase");expect(h.alerts().filter(a => a.payload["mobId"] === "mob")).toHaveLength(0);h.runtime.dispose();
   });
 });
 

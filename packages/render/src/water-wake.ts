@@ -104,6 +104,11 @@ interface Stamp {
 
 /** Seconds per simulation step. Fixed, so ripples travel at one speed on any machine. */
 const STEP = 1 / 60;
+/**
+ * Seconds after the last stamp that the field keeps stepping. By then the damping has taken it to nothing, so a town with
+ * nobody swimming stops paying a render pass a frame (up to four on a slow frame) to simulate still water.
+ */
+const SETTLE_SECONDS = 8;
 
 export class WaterWake {
   readonly size: number;
@@ -130,6 +135,8 @@ export class WaterWake {
   private wantZ = 0;
   private placed = false;
   private accum = 0;
+  /** Seconds since the last stamp. Starts at 0, so the targets exist before anything samples them. */
+  private quiet = 0;
 
   constructor(options: WaterWakeOptions = {}) {
     const resolution = options.resolution ?? 512;
@@ -303,7 +310,8 @@ export class WaterWake {
   update(renderer: THREE.WebGPURenderer, dt: number): void {
     const previous = renderer.getRenderTarget();
     const autoClear = renderer.autoClear;
-    this.accum += Math.min(Math.max(dt, 0), 0.25);
+    this.quiet = this.pending.length > 0 ? 0 : this.quiet + dt;
+    this.accum = this.quiet < SETTLE_SECONDS ? this.accum + Math.min(Math.max(dt, 0), 0.25) : 0;
     let steps = 0;
     while (this.accum >= STEP && steps < 4) {
       this.accum -= STEP;

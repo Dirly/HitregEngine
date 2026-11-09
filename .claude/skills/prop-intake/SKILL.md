@@ -28,6 +28,9 @@ command). Tool manual: header of `apps/playground/tools/props.mts`. Vocabulary: 
   reskin-plan` names the route (a/b/c), `props reskin <id> --route ... [--role wood|stone]`. Large built surfaces use
   the town role tiles.
 - `props dupes`: `DUPLICATE of <id>` -> use that one.
+- `props status` `blank-uv` (islands sample white / black padding / all-clear texels) -> the page is upside down for its
+  material (glTF page = row v*H, engine material map = (1-v)*H: flip the page, or the UVs of a GLB that embeds an engine
+  page) or the islands fall in empty cells; render the prop and look. Never `blankUvExempt` a real hole.
 - Coverage/dependency check of `docs/prop-cataloging.md` fails -> finish source, UV, material and behaviour records.
 - `scale-undeclared` / hidden from menus -> the prop has no `scale`/`cultures`: declare them.
 

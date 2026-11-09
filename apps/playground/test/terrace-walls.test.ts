@@ -133,6 +133,19 @@ test("inserts: a stair-turn and an arched doorway are placed, the door carved, t
   assert.ok(Math.ceil(roof / 2) * 2 <= s.topY - 0.15 + 1e-9, `no lattice row between ${roof} and ${s.topY}`);
 });
 
+test("inserts: an axial stair stands on a level foot reaching 2 m past each cheek (k-town5: a body beside it wedged on the fillet)", { skip: !haveKit && "world-kit retaining-wall kit not installed" }, () => {
+  const recipe = hillside();
+  const kit = loadTerraceKit("proving", () => {});
+  const fit = fitTerraceWall(recipe, doc({ id: "t5", ...footprintFromPath([[0, 6], [28, 6]], 10), height: 2, inserts: [{ role: "stair-axial", edge: 0, at: 10 }] }) as never, kit);
+  const s = fit.doc.solved!;
+  const st = s.pieces.find((p) => p.role === "stair-axial");
+  assert.ok(st, s.pieces.map((p) => p.role).join(","));
+  applyTerraceFit(recipe, fit);
+  const field = createWorldField(recipe);
+  // the flight runs x 10..16 into +z; 2.5 m outside either cheek, 5.2 m out from the face (past the face strip), the ground is the wall foot
+  for (const x of [7.5, 18.5]) assert.ok(Math.abs(field.height(x, 11.2) - s.baseY) < 0.1, `beside the flight at x ${x}: ${field.height(x, 11.2).toFixed(2)} vs foot ${s.baseY}`);
+});
+
 test("natural style fails clearly without the shelf kit, and builds its masonry fallback", { skip: !haveKit && "world-kit retaining-wall kit not installed" }, () => {
   const recipe = hillside();
   const real = loadTerraceKit("proving", () => {});

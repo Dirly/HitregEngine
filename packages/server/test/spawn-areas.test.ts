@@ -222,7 +222,7 @@ describe.skipIf(!handle)("spawn areas", () => {
       expect(p["roam"]).toBeLessThanOrEqual(50);
       expect(p["leash"]).toBeGreaterThanOrEqual((p["roam"] as number) + 20);
       expect(["passive", "territorial"]).toContain(p["temperament"]);
-      if (p["temperament"] === "passive") expect(p["alertRadius"]).toBe(0);
+      if (p["temperament"] === "passive") expect(p["alertRadius"]).toBeUndefined(); // inherit the template's deliberate solo/assist choice
       else expect(p["territory"]).toBe(8);
       expect(p["spawnArea"]).toBe("meadow");
     }

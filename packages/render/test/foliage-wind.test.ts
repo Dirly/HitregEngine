@@ -59,6 +59,25 @@ describe("node-material conversion", () => {
 });
 
 describe("foliage wind", () => {
+  // the per-placement clone of a glTF shares its source materials: every copy must get the SAME edited material back,
+  // or each placed copy is its own shader build and its own draw (p-perf 2026-11-02: 94 builds for one planter set)
+  it("gives every clone of a model one shared wind (and fade) material", () => {
+    const model = plant();
+    const a = model.clone();
+    const b = model.clone();
+    expect(applyFoliageWind(a, { mode: "sway", strength: 0.1, speed: 1 })).toBe(1);
+    expect(applyFoliageWind(b, { mode: "sway", strength: 0.1, speed: 1 })).toBe(1);
+    const ma = (a.children[0] as THREE.Mesh).material;
+    expect((b.children[0] as THREE.Mesh).material).toBe(ma);
+    applyFoliageFade(a);
+    applyFoliageFade(b);
+    expect((b.children[0] as THREE.Mesh).material).toBe((a.children[0] as THREE.Mesh).material);
+    // different wind settings are a different material
+    const c = model.clone();
+    applyFoliageWind(c, { mode: "sway", strength: 0.3, speed: 1 });
+    expect((c.children[0] as THREE.Mesh).material).not.toBe(ma);
+  });
+
   it("attaches a vertex displacement and tags the material", () => {
     const root = plant();
     expect(applyFoliageWind(root, { mode: "sway", strength: 0.1, speed: 1 })).toBe(1);

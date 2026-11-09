@@ -12,7 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runBlender } from "../../../../tools/blender-lock.mjs";
 import { DEFAULT_KIND_SIZES, realSizeIssue } from "../_prop-real-size.mts";
-import { CATEGORIES, LANDMARK_TRIANGLES, LIMITS, type ScaleInfo } from "./brief.mts";
+import { CATEGORIES, LANDMARK_TRIANGLES, LIMITS, landmarkSide, type ScaleInfo } from "./brief.mts";
 import {readReusePolicy,reuseFaults} from '../_prop-reuse.mts';
 
 export const BLENDER = process.env.HITREG_BLENDER ?? "P:/Program Files/Blender Foundation/Blender 5.2/blender.exe";
@@ -20,21 +20,26 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 export interface GeometryRecord {
   name: string; error?: string; design?: string; category?: string; mount?: string; solid?: boolean; setting?: string; cultures?: string[];
-  centrepiece?: boolean; size?: number[]; triangles?: number; parts?: { part: string; role: string; faces: number; extent?: number[] }[]; texel?: number;
+  centrepiece?: boolean; size?: number[]; triangles?: number;
+  /** Horizontal faces pointing DOWN with nothing of the mesh above them (build.py inverted_top_faces): upside-down walkable tops. */
+  invertedTops?: number; parts?: { part: string; role: string; faces: number; extent?: number[] }[]; texel?: number;
   rooms?: string[] | null; use?: string[] | null; against?: string; shift?: number[];
   /** An engine water disc in glTF frame (Y up, origin-relative): centre [x, y, z], radius, depth. */
   water?: { centre: number[]; radius: number; depth: number } | null;
   paintPlan?: import('./paint.mts').PaintPlan | null;
   paint?: (Omit<import('./paint.mts').PaintPlan,'surfaces'> & {ready: boolean; size: number; atlasSha256: string; artSha256: string; layoutSha256: string; surfaces: (import('./paint.mts').PaintPlan['surfaces'][number] & {texel?: number})[]}) | null;
 }
-export interface Job { name: string; culture: string; scale: ScaleInfo; worldKit: string; /** a landmark request's height, m */ landmark?: number }
+export interface Job { name: string; culture: string; scale: ScaleInfo; worldKit: string; /** a landmark request's height, m */ landmark?: number; /** its declared plan [w, d], m */ footprint?: [number, number] }
 
 /** Every rule a built design breaks (empty = pass). Pure: the gate wiring's unit under test. */
 export function gateFaults(rec: GeometryRecord, job: Job, scales: ScaleInfo[]): string[] {
   if (rec.error) return [`build failed: ${rec.error}`];
   const out: string[] = [];
-  const f = job.scale.height / 1.8, size = rec.size ?? [0, 0, 0], max = Math.max(...size);
+  // an `any`-scale piece (height 0: nest matter, rocks) is gated at human proportions, never at 0 m (c-mound 2026-10-30)
+  const f = (job.scale.height || 1.8) / 1.8, size = rec.size ?? [0, 0, 0], max = Math.max(...size);
   const lm = job.landmark, triMax = lm ? LANDMARK_TRIANGLES : LIMITS.trianglesMax;
+  // a walkable top wound upside down is a ceiling to the character controller (o-gates 2026-10-30: every Codex stair tread)
+  if ((rec.invertedTops ?? 0) > 0) out.push(`inverted tops: ${rec.invertedTops} horizontal face(s) point down with open air above (a tread, podium or sill wound upside down): fix the box winding`);
   if ((rec.triangles ?? 0) > triMax) out.push(`triangles: ${rec.triangles} > ${triMax}; simplify (fewer segments, fewer parts)`);
   const fussy = (rec.parts ?? []).filter((p) => p.extent && Math.max(...p.extent) < LIMITS.partMinExtent);
   if (fussy.length) out.push(`sub-5 cm detail: ${fussy.length} part(s) under ${LIMITS.partMinExtent * 100} cm (${[...new Set(fussy.map((p) => p.part))].slice(0, 6).join("; ")}): remove them, the texture paints them`);
@@ -43,7 +48,7 @@ export function gateFaults(rec: GeometryRecord, job: Job, scales: ScaleInfo[]): 
   const issue = lm ? null : realSizeIssue(job.name, [size[0]!, size[1]!, size[2]!], job.scale.id, scales, DEFAULT_KIND_SIZES);
   if (issue) out.push(issue);
   if (lm && Math.abs(size[1]! - lm) > 0.1 * lm) out.push(`height: ${size[1]!.toFixed(2)} m; the landmark is ${lm} m tall (within 10%)`);
-  const cap = lm ? 1.1 * lm : 6 * f;
+  const cap = lm ? landmarkSide(lm, job.footprint) : 6 * f;
   if (max > cap) out.push(`size: ${max.toFixed(2)} m on its largest side; a ${job.scale.id}-scale prop is at most ${cap.toFixed(1)} m`);
   if (max < 0.08) out.push(`size: ${max.toFixed(2)} m is too small to read as a prop`);
   if (!["floor", "wall", "surface", "ceiling"].includes(rec.mount ?? "")) out.push(`mount "${rec.mount}": one of floor, wall, surface, ceiling`);

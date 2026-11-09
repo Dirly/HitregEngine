@@ -43,6 +43,7 @@ import {
 import { insideFloorY, interiorUnitFor, placeUnder, RESIDENT_CULLING } from "./town-npc-placement.mts";
 import { assetIds, assetPath, findAsset } from "./_closure.mjs";
 import { readJsonTracked, writeJsonFile } from "./_scene-write.mts";
+import { readNameDatabase, resolveNameDatabase, validateNameClaim, validateNameDatabase } from "./_names.mts";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const arg = (name: string, fallback: string): string => {
@@ -70,7 +71,7 @@ interface Resident {
   title: string;
   role: string;
   /** `inside`: a scene entity id — the building (or its `culling.interior` unit) the resident stands in; they go under that unit, hidden from outside. */
-  place: { at: [number, number]; face?: [number, number]; yaw?: number; inside?: string };
+  place: { at: [number, number]; face?: [number, number]; yaw?: number; inside?: string; y?: number };
   anim?: string;
   appearance: Record<string, string>;
   wear: string[];
@@ -90,7 +91,10 @@ interface TownDoc {
   town: string;
   /** Prefab whose held-item sockets (bone-socket + equipment-look per model and slot) residents' held items copy. */
   weaponRig?: string;
-  world: string;
+  /** the world recipe the residents stand on; absent for an INSTANCE scene (a dungeon), which gives `floorY` instead */
+  world?: string;
+  /** an instance scene with no world (a dungeon's captives): every resident stands on this floor height (a resident's place.y overrides) */
+  floorY?: number;
   scene: string;
   name: string;
   creation: string;
@@ -118,6 +122,15 @@ const exists = (kind: string, id: string): boolean => findAsset(projectName, `${
 // -- lint ----------------------------------------------------------------------------
 const residents = new Map(doc.residents.map((r) => [r.id, r]));
 if (residents.size !== doc.residents.length) problems.push("duplicate resident id");
+// Worlds with a name database require identity ownership, not merely an unused display label.
+// Worlds without one retain the existing workflow until they opt into a shared namespace.
+const namesFile = resolveNameDatabase(projectName);
+if (namesFile) {
+  const names = readNameDatabase(namesFile);
+  problems.push(...validateNameDatabase(names));
+  for (const r of doc.residents) problems.push(...validateNameClaim(names, projectName, r.id, r.name));
+  for (const conflict of names.conflicts) warn.push(`unresolved name ${conflict.name}: ${conflict.reason}`);
+}
 const itemIds = assetIds(projectName, "items");
 for (const id of itemIds) {
   const parsed = itemSchema.safeParse(readJson(shared(`items/${id}.json`)));
@@ -269,10 +282,10 @@ const placesTable: Places = { origin: [0, 0], places: {} };
     };
     regions?: Array<{ id: string; name?: string; landmarks?: string[] }>;
   };
-  const world = readJson(path.join(assets, "worlds", `${doc.world}.json`)) as WorldLite;
+  const world = (doc.world ? readJson(path.join(assets, "worlds", `${doc.world}.json`)) : {}) as WorldLite;
   const towns = world.features?.towns ?? [];
   const town = towns.find((t) => t.id === doc.town);
-  if (!town) problems.push(`town "${doc.town}" is not in world "${doc.world}"`);
+  if (!town) { if (doc.world) problems.push(`town "${doc.town}" is not in world "${doc.world}"`); else if (doc.floorY === undefined) problems.push("no world and no floorY: a town names its world, an instance scene its floorY"); }
   else {
     placesTable.origin = [town.center[0], town.center[1]];
     const put = (id: string, at: [number, number], name: string, kind: string): void => {
@@ -493,16 +506,15 @@ function ensureUi(scene: SceneDoc): void {
 }
 
 // the town itself: residents on real ground
-const recipe = worldRecipeSchema.parse(readJson(path.join(assets, "worlds", `${doc.world}.json`)));
-const field = createWorldField(recipe);
-const ground = (x: number, z: number): number => field.surfaceCast(x, z) ?? field.height(x, z);
+const field = doc.world ? createWorldField(worldRecipeSchema.parse(readJson(path.join(assets, "worlds", `${doc.world}.json`)))) : null;
+const ground = (x: number, z: number): number => (field ? field.surfaceCast(x, z) ?? field.height(x, z) : doc.floorY!);
 const sceneFile = path.join(assets, "scenes", `${doc.scene}.scene.json`);
 const scene = readJsonTracked(sceneFile) as SceneDoc; // tracked: the write below refuses if another tool wrote the scene since
 clearTown(scene);
 for (const r of doc.residents) {
   const [x, z] = r.place.at;
   // indoors: the building's floor (a stilted or raised floor stands metres over the terrain under it)
-  const y = (r.place.inside ? insideFloorY(scene.entities, r.place.inside) : null) ?? ground(x, z);
+  const y = r.place.y ?? (r.place.inside ? insideFloorY(scene.entities, r.place.inside) : null) ?? ground(x, z);
   const face = r.place.face;
   const yaw = r.place.yaw ?? (face ? Math.atan2(face[0] - x, face[1] - z) : 0);
   const wear = addResident(scene, r, [x, y + 0.9, z], yaw);

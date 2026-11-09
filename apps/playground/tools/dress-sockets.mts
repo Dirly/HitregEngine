@@ -764,6 +764,8 @@ export const MARKER_MOUNTS: Record<string, { mount: "floor" | "wall" | "ceiling"
   lantern: { mount: "wall" },
   "candle-niche": { mount: "wall" },
   chandelier: { mount: "ceiling" },
+  // a structural beam or joist line (position = middle of its underside, yaw = the way the marker faces, across the beam; size [length, 0, depth]): chandeliers declaring `hangFrom: "beam"` hang from it (`beam-hang`)
+  beam: { mount: "ceiling" },
   "chimney-top": { mount: "floor", outdoor: true },
 };
 /**
@@ -786,8 +788,13 @@ export function applyMarkers(map: SocketMap, markers: FixtureMarker[]): string[]
     if (!Array.isArray(m.position) || m.position.length !== 3 || m.position.some((v) => !Number.isFinite(v))) { lines.push(`marker ${m.id}: no usable position, skipped`); continue; }
     if (m.kind === "window") { // the opening (centre, [w, h, depth]): the sign-over-door check keeps signs out of in front of it
       const [w = 1, h0 = 0, d0 = 0] = m.size ?? [], h = h0 || d0 || 1;
+      // A tall open nave has wall storeys without floors. Keep high windows attached to the
+      // actual room below instead of inventing a missing level (and losing its daylight culling).
+      const floor = map.levels.some(l => l.level === level) ? undefined
+        : map.levels.filter(l => l.floorY <= m.position[1]).sort((a, b) => b.floorY - a.floorY)[0];
+      const windowLevel = floor?.level ?? level;
       let id = m.id; for (let k = 2; ids.has(id); k++) id = `${m.id}-${k}`; ids.add(id);
-      map.anchors.push({ id, kind: "window", level, position: [m.position[0], m.position[1], m.position[2]], yaw, mount: "wall", outdoor: true, size: [w, h, 0.1] });
+      map.anchors.push({ id, kind: "window", level: windowLevel, position: [m.position[0], m.position[1], m.position[2]], yaw, mount: "wall", outdoor: true, size: [w, h, 0.1] });
       lines.push(`marker ${m.id}: window ${w} x ${h} m -> anchor "${id}"`);
       continue;
     }

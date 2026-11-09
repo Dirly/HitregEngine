@@ -115,6 +115,7 @@ import {
 import { controllerLimits } from "./dress-steps.mts";
 import { applyBatchesToSceneFile, applyOpsToSceneFile } from "./_scene-write.mts";
 import { fieldOfScene, seatPlaced } from "./float.mts";
+import { repeatsInOps, solveLine, solveScenePieces, spreadSpots, type SolveRow } from "./_place-solve.mts";
 import { skinPlacedOps } from "./rock-skins.mts";
 import { measure, prefabGeometry } from "./_prop-geometry.mts";
 import { dressPoiId, poiJobIds, retagOps } from "./_dress-poi.mts";
@@ -827,7 +828,12 @@ function apply(): void {
         name: room ? `${plan.id} ${room}${role ? ` (${role})` : ""}` : `${plan.id} outside`,
         parent,
         tags: ["dressing", `dress:${plan.id}`, ...poiTags],
-        components: { transform: {}, culling: room && !siteMap ? { interior: true, reveal: 12 } : { minScreenPx: 6 } },
+        components: {
+          transform: {}, culling: room && !siteMap ? { interior: true, reveal: 12 } : { minScreenPx: 6 },
+          // Build a room ahead of its reveal distance, rather than fetching/decoding every hidden interior with
+          // the whole town. A generous keep band prevents doorway or street-boundary rebuilds.
+          ...(room && !siteMap ? { placeStream: { distance: 32, keepPadding: 48, footprintPadding: 2 } } : {}),
+        },
       },
     });
   }
@@ -897,6 +903,56 @@ function apply(): void {
     }
     console.log(`seat: ${moved} re-seats of ${placed.size} props on the real floor${seat.unsupported.length ? `; ${seat.unsupported.length} with NO support (move them in the plan): ${seat.unsupported.slice(0, 6).map((r) => r.id.slice(prefix.length)).join(", ")}` : ""}`);
   }
+  // THE PLACEMENT SOLVER (t-place 2026-10-30, Derek: "Am I close to a doorway? I should delete myself"): every floor prop
+  // this apply placed is judged in plan against the scene's structure data — door / gate / stair / hearth clear zones
+  // (the WFC buildings' markers, props' declared openings) and every solid structure's base — and moved out (its
+  // placeRule tolerance, 1.5 m by default) or DROPPED with the reason; a moved prop is seated again on the real floor.
+  // Owner-fixed props and quest objects are where their owner put them. `--no-solve` skips it.
+  let solverRows: SolveRow[] = [];
+  // OPT-IN (`--solve`) until it matches legacy on Red Dial and the smalls (coordinator 2026-10-30: its unsupported-prop
+  // relocation pushed three heaps into one 5 m cell, failing site-spread)
+  if (flag("solve") && !flag("no-solve")) {
+    const floorIds = new Set(result.placements.filter((p) => !own.fixed.has(p.id) && !quests.has(p.id) && (src.prop(p.prop)?.mount ?? "floor") === "floor").map((p) => entityOf(p.id)));
+    const sv = solveScenePieces(path.basename(proj), doc as never, () => 0, floorIds, { movable: true, removeDropped: true, keepY: true });
+    solverRows = sv.rows.filter((r) => r.status !== "ok");
+    if (sv.ops.length) {
+      const fourth = applyOps(doc, sv.ops as Op[], reg);
+      batches.push(sv.ops as Op[]);
+      doc = fourth.doc;
+      inverse = [...fourth.inverse, ...inverse];
+      // a moved prop stands on the real floor at its new spot
+      const moved = new Set(sv.rows.filter((r) => r.status === "moved").map((r) => r.id));
+      const again = moved.size ? seatPlaced(path.basename(proj), doc as never, moved) : { ops: [] as unknown[] };
+      if (again.ops.length) { const fifth = applyOps(doc, again.ops as Op[], reg); batches.push(again.ops as Op[]); doc = fifth.doc; inverse = [...fifth.inverse, ...inverse]; }
+    }
+    // NO SUPPORT on the real floor (a heap straddling a step, a crate over a lip): the solver's candidate spots, nearest
+    // first within 1.5 m, each seated on the real floor; the first one the seat supports is kept, else the prop is DROPPED
+    // with its reason (never left floating for the float gate to catch)
+    const loose = seatPlaced(path.basename(proj), doc as never, floorIds).unsupported.map((r) => r.id).filter((id) => doc.entities[id]);
+    // SPREAD (site-spread, coordinator 2026-10-30: three heaps pushed into one 5 m cell): the nearest supported spot that
+    // never puts 3+ of the plan's props in one 5 m cell (spreadSpots), else the prop is dropped
+    const others = (id: string): [number, number][] => [...floorIds].filter((o) => o !== id && doc.entities[o]).map((o) => { const q = (doc.entities[o]!.components.transform as { position: number[] }).position; return [q[0]!, q[2]!]; });
+    for (const id of loose) {
+      const t0 = doc.entities[id]!.components.transform as { position: number[] };
+      let fixed = false;
+      for (const [dx, dz] of spreadSpots([t0.position[0]!, t0.position[2]!], others(id))) {
+        const tryOps = [{ op: "set-component", id, component: "transform", data: { ...t0, position: [t0.position[0]! + dx, t0.position[1]!, t0.position[2]! + dz] } }] as Op[];
+        const trial = applyOps(doc, tryOps, reg).doc, st = seatPlaced(path.basename(proj), trial as never, new Set([id]));
+        if (st.unsupported.length) continue;
+        const all = [...tryOps, ...(st.ops as Op[])], app = applyOps(doc, all, reg);
+        batches.push(all); doc = app.doc; inverse = [...app.inverse, ...inverse]; fixed = true;
+        solverRows.push({ id, prefab: String((doc.entities[id]!.components.prefab as { prefabId?: string } | undefined)?.prefabId ?? ""), status: "moved", notes: [`no support on the real floor at its spot: moved ${Math.round(Math.hypot(dx, dz) * 100) / 100} m`], moved: Math.round(Math.hypot(dx, dz) * 100) / 100 });
+        break;
+      }
+      if (fixed) continue;
+      const rm = [{ op: "remove-entity", id }] as Op[], app = applyOps(doc, rm, reg);
+      batches.push(rm); doc = app.doc; inverse = [...app.inverse, ...inverse];
+      solverRows.push({ id, prefab: "", status: "dropped", reason: "no support on the real floor within 1.5 m (a step, a lip or a hole under it)", notes: [] });
+    }
+    if (solverRows.length) console.log(`solver: ${solverRows.filter((r) => r.status === "moved").length} moved, ${solverRows.filter((r) => r.status === "dropped").length} dropped of ${floorIds.size} floor props:\n  ${solverRows.slice(0, 12).map(solveLine).join("\n  ")}`);
+    const lint = repeatsInOps(ops);
+    if (lint.length) console.log(`REPEATS: this apply writes ${lint.length} repeated inline structure(s) (anything repeated is one prefab): ${lint.map((f) => `${f.rule} ${f.key} x${f.ids.length}`).join("; ")}`);
+  }
   // SKIN (voxel/rock-cap.ts): a placed rock is the stone of its place and wears the ground's cap, as the scatter rocks
   // beside it do: the world's rock material + the resolver's rockCap per instance (no material per instance)
   {
@@ -921,7 +977,7 @@ function apply(): void {
   if (flag("dry")) return;
   inverse = applyBatchesToSceneFile(sceneFile, batches, (d, o) => applyOps(d, o, reg), { label: `dress apply ${plan.id}`, trailer: "" }).inverse;
   // the frame is recorded so the editor can write the owner's edits back in the plan's own (map-local) frame
-  fs.writeFileSync(inverseFile, JSON.stringify({ plan: plan.id, scene: path.relative(PLAYGROUND, sceneFile), hash, frame: { at, yaw: yawDeg }, parent, ops: inverse, ...(clearing ? { clearings: clearing } : {}) }, null, 1));
+  fs.writeFileSync(inverseFile, JSON.stringify({ plan: plan.id, scene: path.relative(PLAYGROUND, sceneFile), hash, frame: { at, yaw: yawDeg }, parent, ops: inverse, ...(clearing ? { clearings: clearing } : {}), ...(solverRows.length ? { solver: solverRows } : {}) }, null, 1));
   console.log(`inverse -> ${path.relative(PLAYGROUND, inverseFile)}`);
 }
 

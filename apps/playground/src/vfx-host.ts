@@ -49,7 +49,7 @@ export function createVfx(assets: AssetLibrary): VfxSystem {
 export function warmVfx(
   vfx: VfxSystem,
   assets: AssetLibrary,
-  precompile: (group: THREE.Object3D) => Promise<void>,
+  precompile: (group: THREE.Object3D, collected?: () => void) => Promise<void>,
   camera?: THREE.Camera,
 ): Promise<void> {
   const mask = assets.textureIds().find((id) => id.startsWith("fx/masks/"));

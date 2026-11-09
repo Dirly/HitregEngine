@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { artBlock, deliversArt, finalReviewBlock, footprintPoints, jobHandoff, jobParent, measureSize, ownerApproval, readReview, rubricCodes, sizeBlock, deliversMaterialModels, deliversStructures, flatArtBlock, installBlock, terrainFineBlock, fineExceptionsFile, isMonumentSite, monumentApproachBlock, ownerOverrideScenes, opsHash, recordFix, recordReview, requireFinalReview, seeThroughBlock, setStage, stageBlock, catalogueIds, designBlock, designCodes, designFaults, designHash, recordDesignReview, jobArt } from "./job.mjs";
+import { frozenSample, artBlock, deliversArt, finalReviewBlock, footprintPoints, jobHandoff, jobParent, measureSize, ownerApproval, readReview, rubricCodes, sizeBlock, deliversMaterialModels, deliversStructures, flatArtBlock, installBlock, terrainFineBlock, fineExceptionsFile, isMonumentSite, monumentApproachBlock, ownerOverrideScenes, opsHash, recordFix, recordReview, requireFinalReview, seeThroughBlock, setStage, stageBlock, catalogueIds, designBlock, designCodes, designFaults, designHash, recordDesignReview, jobArt, jobExceptions, exceptFaults, draftInstallBlock, DRAFT_GEOMETRY_GATES } from "./job.mjs";
 import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership } from "./concept-site.mjs";
 
 // image-request records live in a scratch folder for the whole file (concept-site.mjs reads HITREG_IMAGE_REQUESTS)
@@ -69,9 +69,9 @@ function designJson(dir, patch = {}) {
   return design;
 }
 /** A design review file: verdict, design hash, reviewer and every Place line. */
-function designReviewText(dir, { verdict = "PASS", reviewer = "REV-D1", skip = [], fault = [], na = [] } = {}) {
+function designReviewText(dir, { verdict = "PASS", reviewer = "REV-D1", skip = [], fault = [], na = [], live = false } = {}) {
   const lines = designCodes().filter((c) => !skip.includes(c)).map((c) => `- ${c}: ${fault.includes(c) ? "fault" : na.includes(c) ? "n/a" : "pass"} — evidence/design/yard-12.png shows it`);
-  return ["# Design review", `Verdict: ${verdict}`, `Design hash: ${designHash(dir)}`, ...(reviewer ? [`Reviewer: ${reviewer}`] : []), "", ...lines, ""].join("\n");
+  return ["# Design review", `Verdict: ${verdict}`, `Design hash: ${designHash(dir, undefined, { live })}`, ...(reviewer ? [`Reviewer: ${reviewer}`] : []), "", ...lines, ""].join("\n");
 }
 function passDesign(dir) {
   designJson(dir);
@@ -100,6 +100,26 @@ test("footprint measures transformed contents, not an empty dressing origin or u
     assert.ok(!points.some(([x, z]) => x === 1 && z === 1), "unknown parent transforms cannot be treated as world coordinates");
   } finally {
     assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a masked height patch measures the samples it moves, not its rectangle's corners (o-wild3 camp pads)", () => {
+  const dir = job();
+  try {
+    fs.writeFileSync(path.join(dir, "clearings.json"), "[]");
+    const cols = 24, rows = 24, weights = [];
+    for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) weights.push(Math.hypot(i - 11.5, j - 11.5) <= 9 ? 1 : 0);
+    const patch = { edit: "add-feature", kind: "heightPatches", feature: { id: "pad", origin: [100, 100], size: [46, 46], columns: cols, rows, heights: weights.map(() => 5), weights, filter: 2 } };
+    fs.writeFileSync(path.join(dir, "world-ops.json"), JSON.stringify([patch]));
+    const masked = footprintPoints(dir);
+    assert.ok(!masked.some(([x, z]) => x === 100 && z === 100), "an unweighted corner is not footprint");
+    const span = Math.max(...masked.map(([x]) => x)) - Math.min(...masked.map(([x]) => x));
+    assert.ok(span < 46 && span > 36, `the round pad spans its weighted samples plus the filter (${span})`);
+    delete patch.feature.weights;
+    fs.writeFileSync(path.join(dir, "world-ops.json"), JSON.stringify([patch]));
+    assert.ok(footprintPoints(dir).some(([x, z]) => x === 146 && z === 146), "an unmasked patch still counts its whole rectangle");
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -564,13 +584,23 @@ test("gate 16: no detail and no install before the design is written, one area i
   assert.equal(stageBlock(dir, "detail"), null);
   assert.equal(setStage(dir, "detail").stage, "detail");
   assert.match(installBlock(dir), /no final review/);
-  // editing the design, or its sample frame, re-opens the review
+  // the review FROZE its sample frame (reviews/<place>/): a later shots run rewriting the live frame does not re-open it
+  // (r-found 2026-10-31, coordinator ruling: Red Dial failed gate 16 for 12 rounds on its own re-shoots)
+  assert.deepEqual(rec.frozen, [`reviews/${path.basename(dir)}/yard-12.png`]);
+  assert.equal(fs.readFileSync(frozenSample(dir, "evidence/design/yard-12.png"), "utf8"), "png");
   fs.writeFileSync(path.join(dir, "evidence", "design", "yard-12.png"), "png2");
-  assert.match(stageBlock(dir, "final-review"), /changed after the design review/);
+  assert.equal(stageBlock(dir, "final-review"), null, "a re-shot sample frame does not re-open the review");
+  assert.notEqual(designHash(dir, undefined, { live: true }), designHash(dir), "the live frame differs from the frozen one");
+  // ... a reviewer shown the NEW frame names the live hash, and recording it re-freezes
   assert.throws(() => recordDesignReview(dir, file), /reviewed design/);
+  // editing the design re-opens it
+  const d0 = JSON.parse(fs.readFileSync(path.join(dir, "design.json"), "utf8"));
+  fs.writeFileSync(path.join(dir, "design.json"), JSON.stringify({ ...d0, premise: `${d0.premise} Rewritten.` }, null, 2));
+  assert.match(stageBlock(dir, "final-review"), /changed after the design review/);
   // and the final review must answer the Place lines on the whole place
-  fs.writeFileSync(path.join(dir, "design-review.md"), designReviewText(dir));
+  fs.writeFileSync(path.join(dir, "design-review.md"), designReviewText(dir, { live: true }));
   recordDesignReview(dir, file);
+  assert.equal(fs.readFileSync(frozenSample(dir, "evidence/design/yard-12.png"), "utf8"), "png2", "the re-review froze the new frame");
   fs.writeFileSync(path.join(dir, "final-review.md"), reviewText(dir, { skip: ["P2"] }));
   assert.throws(() => recordReview(dir, path.join(dir, "final-review.md")), /does not answer rubric line\(s\) P2/);
   fs.writeFileSync(path.join(dir, "final-review.md"), reviewText(dir, { fault: ["P4"] }));
@@ -784,4 +814,108 @@ test("gate 16 concept on site: once the world-order ledger records the concept a
     fs.writeFileSync(ledger, JSON.stringify({ version: 1, places: [{ id: "t", stages: { ...stages, "design-review": { at: "y", by: "reviewer" } } }] }));
     assert.deepEqual(faults(), []);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("quality exceptions: a dated, reasoned row with a matcher excepts only the faults it names; a row without date, reason or matcher excepts nothing", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "poi-exc-"));
+  const row = (o) => ({ id: "skirt", gates: ["art"], pieces: [], match: { rule: "scale", what: "built/tomb-ashlar" }, why: "the skirt reads as the ruin's foundation course", ruling: "2026-10-30, coordinator: accept", ...o });
+  const write = (rows) => fs.writeFileSync(path.join(dir, "quality-exceptions.json"), JSON.stringify({ version: 1, exceptions: rows }));
+  const faults = [
+    { rule: "scale", piece: "pb-x-skirt-core-as-h6", what: "built/tomb-ashlar", detail: "1.6 m courses" },
+    { rule: "scale", piece: "pb-x-skirt-core-t1-e1", what: "built/other-stone", detail: "1.6 m courses" },
+    { rule: "texel", piece: "ground:pb-x-seat-core-pyre", what: "surface:ground", detail: "1.8x" },
+  ];
+  assert.deepEqual(jobExceptions(dir, "art"), [], "no file: no rows");
+  write([row()]);
+  let r = exceptFaults(faults, jobExceptions(dir, "art"));
+  assert.equal(r.excepted.length, 1); assert.equal(r.excepted[0].exception, "skirt"); assert.equal(r.kept.length, 2, "another stone and a texel fault stay");
+  assert.deepEqual(jobExceptions(dir, "wash"), [], "a row counts only for the gates it names");
+  write([row({ pieces: ["t1-e1"] })]);
+  assert.equal(exceptFaults(faults, jobExceptions(dir, "art")).excepted.length, 0, "pieces narrow the match");
+  for (const bad of [{ ruling: "coordinator: accept it" }, { ruling: "2026-10-30" }, { why: "" }, { match: undefined }, { match: {} }]) {
+    write([row(bad)]);
+    assert.equal(jobExceptions(dir, "art").length, 0, `refused: ${JSON.stringify(bad)}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("gate 12: the approach is arrival (a plain 4 m tread with nothing built on it never counts, inside the disc or not); a view cut never counts (o-coast drowned-mole 2026-10-31)", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "poi-approach-"));
+  try {
+    const zone = path.join(root, "zonegen", "w", "zones", "z"), d = path.join(zone, "pois", "mole");
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(zone, "reservations.json"), JSON.stringify({ reservations: [{ location: "mole", center: [0, 0], radius: 60 }] }));
+    fs.writeFileSync(path.join(d, "brief.json"), JSON.stringify({ id: "mole", adventureSize: "small" }));
+    fs.writeFileSync(path.join(d, "handoff.json"), JSON.stringify({ integration: { sceneOps: "ops.json", worldOps: "world-ops.json", clearings: "clearings.json" } }));
+    const world = (width) => fs.writeFileSync(path.join(d, "world-ops.json"), JSON.stringify([
+      { edit: "add-feature", kind: "roads", feature: { id: "road-pb-mole-approach", width, points: [[370, 0], [200, 0], [50, 0], [10, 0]] } },
+      { edit: "add-feature", kind: "roads", feature: { id: "road-pb-mole-to-tower", width: 3, points: [[0, 0], [-80, 0]] } },
+    ]));
+    const ops = (at) => fs.writeFileSync(path.join(d, "ops.json"), JSON.stringify([
+      { op: "add-entity", id: "poi-mole", entity: { components: { transform: { position: [0, 0, 0] } } } },
+      { op: "add-entity", id: "mole-hut", entity: { parent: "poi-mole", components: { transform: { position: [at[0], 0, at[1]] }, prefab: { prefabId: "x/hut" } } } },
+    ]));
+    fs.writeFileSync(path.join(d, "clearings.json"), JSON.stringify([{ id: "mole-lane-approach", polygon: [[360, 4], [360, -4], [20, -4], [20, 4]] }, { id: "mole-sightline-cut-3", center: [45, 20], radius: 12 }, { id: "mole-heath-beach", center: [-30, 0], radius: 10 }]));
+    const xs = () => footprintPoints(d).map((p) => p[0]);
+    world(4); ops([5, 10]);
+    assert.equal(Math.max(...xs()), 5, "neither the approach (inside the disc or out), its lane nor the view cut counts");
+    assert.equal(Math.min(...xs()), -80, "the place's own footpath and heath clearing still count");
+    world(6);
+    assert.equal(Math.max(...xs()), 370, "a track wider than the 4 m tread counts in full");
+    world(4); ops([200, 1]);
+    assert.equal(Math.max(...xs()), 370, "a piece built on the track makes it count in full");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// r-found 2026-10-31 (coordinator ruling): a review recorded before reviews froze their frames lost them to later shots;
+// it is back-filled only when design.json alone proves the reviewed body (written no later than the review).
+test("gate 16: design-backfill freezes the current sample under an old review only when design.json predates it", async () => {
+  const { backfillDesignSample, designBlock } = await import("./job.mjs");
+  const dir = job(); // passDesign: reviewed, frames frozen
+  const old = () => { // turn it into a pre-freeze review: no frozen copy, recorded `at` after the design.json write
+    const p = JSON.parse(fs.readFileSync(path.join(dir, "progress.json"), "utf8"));
+    delete p.designReview.frozen; p.designReview.at = new Date(Date.now() + 60_000).toISOString();
+    fs.writeFileSync(path.join(dir, "progress.json"), JSON.stringify(p));
+    fs.rmSync(path.join(dir, "reviews"), { recursive: true, force: true });
+  };
+  old();
+  fs.writeFileSync(path.join(dir, "evidence", "design", "yard-12.png"), "re-shot");
+  assert.match(designBlock(dir), /changed after the design review/, "the old review lost its frames");
+  assert.throws(() => backfillDesignSample(dir, "fix it"), /dated ruling/);
+  // design.json written AFTER the review: not proven
+  const p = JSON.parse(fs.readFileSync(path.join(dir, "progress.json"), "utf8"));
+  p.designReview.at = new Date(Date.now() - 3_600_000).toISOString(); fs.writeFileSync(path.join(dir, "progress.json"), JSON.stringify(p));
+  assert.throws(() => backfillDesignSample(dir, "2026-10-31 coordinator: frames lost to re-shoots"), /written .* after the review/);
+  old();
+  const rec = backfillDesignSample(dir, "2026-10-31 coordinator: frames lost to re-shoots");
+  assert.equal(rec.designHash, designHash(dir));
+  assert.notEqual(rec.reviewedHash, rec.designHash, "the reviewer's named hash is kept apart");
+  assert.equal(designBlock(dir), null, "back-filled: passes");
+  assert.throws(() => backfillDesignSample(dir, "2026-10-31 coordinator: again"), /already froze/);
+  fs.writeFileSync(path.join(dir, "evidence", "design", "yard-12.png"), "re-shot again");
+  assert.equal(designBlock(dir), null, "later shots stay out");
+  const d0 = JSON.parse(fs.readFileSync(path.join(dir, "design.json"), "utf8"));
+  fs.writeFileSync(path.join(dir, "design.json"), JSON.stringify({ ...d0, premise: `${d0.premise} Rewritten.` }, null, 2));
+  assert.match(designBlock(dir), /changed after the design review/, "a design edit re-opens it");
+});
+
+test("draft install (i-drafts 2026-11-03): no review asked, every geometry report and gates-table geometry row must be ok and current", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "poi-draft-"));
+  try {
+    fs.writeFileSync(path.join(dir, "ops.json"), JSON.stringify([{ op: "add-entity", id: "poi-t", entity: { name: "T", parent: null, tags: ["poi:t"], components: {} } }]));
+    const later = (f, v) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(v)); const t = new Date(Date.now() + 5000); fs.utimesSync(f, t, t); };
+    later(path.join(dir, "reports", "float.json"), { ok: true });
+    later(path.join(dir, "reports", "water-edges.json"), { ok: true });
+    later(path.join(dir, "reports", "walk.json"), { ok: true });
+    const rows = DRAFT_GEOMETRY_GATES.map((gate) => ({ gate, ok: true })).concat([{ gate: "design", ok: false }, { gate: "size", ok: false }]);
+    later(path.join(dir, "reports", "gates.json"), { ok: false, rows });
+    assert.equal(draftInstallBlock(dir), null, "design / size open: a draft still installs");
+    assert.ok(installBlock(dir), "the normal install is still refused");
+    later(path.join(dir, "reports", "gates.json"), { ok: false, rows: rows.map((r) => (r.gate === "seated" ? { ...r, ok: false, detail: "gap 0.4 m" } : r)) });
+    assert.match(draftInstallBlock(dir), /seated: gap 0.4 m/, "a geometry row never skipped");
+    later(path.join(dir, "reports", "gates.json"), { ok: false, rows: rows.filter((r) => r.gate !== "lips") });
+    assert.match(draftInstallBlock(dir), /no lips row/);
+    later(path.join(dir, "reports", "float.json"), { ok: false, counts: { off: 2, unsupported: 0 } });
+    assert.match(draftInstallBlock(dir), /float gate failed/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

@@ -214,10 +214,10 @@ export interface InterpolationClockOptions {
  * and clock skew without any explicit time synchronization.
  */
 export class InterpolationClock {
-  private readonly hz: number;
-  private readonly delayTicks: number;
+  private hz: number;
+  private delayTicks: number;
   private readonly catchupRate: number;
-  private readonly snapThresholdTicks: number;
+  private snapThresholdTicks: number;
   private renderTick: number | null = null;
   private newest: number | null = null;
 
@@ -226,6 +226,20 @@ export class InterpolationClock {
     this.delayTicks = options.delayTicks ?? 2;
     this.catchupRate = options.catchupRate ?? 2;
     this.snapThresholdTicks = options.snapThresholdTicks ?? 8;
+  }
+
+  /**
+   * How fast the host's tick NUMBERS run, once known: a dedicated server stamps snapshots with its 60 Hz sim tick
+   * however often it sends them. The delay and the snap line keep their time. A clock counting slower than its ticks
+   * falls behind the target until it snaps: every remote body stepped forward about four times a second.
+   */
+  setTickRate(hz: number): void {
+    if (!(hz > 0) || hz === this.hz) return;
+    const scale = hz / this.hz;
+    this.hz = hz;
+    this.delayTicks *= scale;
+    this.snapThresholdTicks *= scale;
+    this.renderTick = null; // the old position counted other ticks
   }
 
   onSnapshot(tick: number): void {

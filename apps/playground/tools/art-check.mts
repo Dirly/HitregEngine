@@ -22,6 +22,8 @@
  *   node node_modules/tsx/dist/cli.mjs tools/art-check.mts <jobDir> [--out <file>] [--thresholds <json>] [--culture giant|human] [--quiet]
  *
  * Writes `<jobDir>/reports/art-check.json` (or --out): { ok, counts, faults[], pieces[], thresholds }. Exit 1 on faults.
+ * Exceptions: a dated coordinator ruling in `<jobDir>/quality-exceptions.json` (gates ["art"], match { rule, what? }, pieces,
+ * why, ruling "YYYY-MM-DD <who>") moves the matching faults to `excepted` (job.mjs jobExceptions / exceptFaults).
  * Thresholds: tools/_art-check.mts artThresholdsSchema defaults, overridden by <project>/authoring/art-check.json or --thresholds.
  */
 import fs from "node:fs";
@@ -33,11 +35,15 @@ import { applyRecipeEdits, compileLandmarkSpec, compileLandmarkOperator, landmar
 import { operatorReader } from "./worldgen-operators.mts";
 import { architecturalBindings, varietyDiagnostics } from "./_art-check.mts";
 import { boxTris, gltfTris, locate, materialTex, preferJobAssets, prefabGeometry, projectedTexels, readJson, texelDensity, trs, type M4, type PropGeometry, type Tri } from "./_prop-geometry.mts";
-import { artDoorSchema, artFaults, passageGroundSamples, detailScale, nearPropInstances, artTarget, builtOpPieces, isPortalVeil, mergeJobEntities, unburiedTris, uvRepeatsByMaterial, uvFootprintMean, uvStretchByMaterial, unmeasuredAreas, artThresholdsSchema, materialLstar, ownedEntityIds, textureStats, visibleTris, type ArtInput, type ArtMaterial, type ArtOpening, type ArtPiece, type ArtPortal, type CultureScale, type FormNode, type FormUnit, type TextureStats, specUnits } from "./_art-check.mts";
+import { artDoorSchema, artFaults, NOT_PROPS_RE, passageGroundSamples, detailScale, nearPropInstances, artTarget, builtOpPieces, isPortalVeil, mergeJobEntities, unburiedTris, uvRepeatsByMaterial, uvFootprintMean, uvStretchByMaterial, unmeasuredAreas, artThresholdsSchema, materialLstar, ownedEntityIds, textureStats, visibleTris, type ArtInput, type ArtMaterial, type ArtOpening, type ArtPiece, type ArtPortal, type CultureScale, type FormNode, type FormUnit, type TextureStats, specUnits } from "./_art-check.mts";
 // @ts-expect-error plain JS module
 import { decodePng } from "./_png.mjs";
 // @ts-expect-error plain JS module
-import { deliveredOps, jobParent, jobTier } from "../../../tools/poi-review/job.mjs";
+import { deliveredOps, exceptFaults, jobExceptions, jobParent, jobTier } from "../../../tools/poi-review/job.mjs";
+import { placeRuleFor } from "./_place-solve.mts";
+import { contrastFindings, groundBandFree } from "./_art-check.mts";
+/** The catalogue dressing block of a prefab (its `shelter` flag for `groundBandFree`), null when unreadable. */
+const prefabDressing = (pid?: string): { shelter?: boolean } | null => { if (!pid) return null; try { const j = readJson(locate(ASSETS, "prefabs", `${pid}.json`)); return (Object.values(j?.entities ?? {}) as any[]).map((e) => e?.components?.dressing).find(Boolean) ?? null; } catch { return null; } };
 
 type V3 = [number, number, number];
 type Op = Record<string, any>;
@@ -51,7 +57,8 @@ const parts = jobDir.split(/[\\/]/);
 // measured in the job's own project world, or the preview lab it was built in (--project/--world: _art-check artTarget)
 const { project, world } = artTarget(jobDir, { project: flag("project"), world: flag("world") });
 const zone = parts[parts.indexOf("zones") + 1];
-const home = artTarget(jobDir), HOME = path.join(PG, "projects", home.project); // the job's own project: thresholds, zone brief
+// a job COPY (place-build --job) names its real project with --home / --home-world
+const home = (() => { try { return artTarget(jobDir); } catch (e) { if (!flag("home")) throw e; return { project: flag("home")!, world: flag("home-world") ?? world }; } })(), HOME = path.join(PG, "projects", home.project); // the job's own project: thresholds, zone brief
 const PROJ = path.join(PG, "projects", project), ASSETS = path.join(PROJ, "assets");
 // the job's own materials/textures first, then the project closure (a job's materials reach the project at install)
 preferJobAssets(ASSETS, jobDir);
@@ -102,8 +109,22 @@ const texImage = (map: unknown) => {
   if (!imgCache.has(f)) { try { imgCache.set(f, /.png$/i.test(f) && fs.existsSync(f) ? decodePng(fs.readFileSync(f)) : null); } catch { imgCache.set(f, null); } }
   return imgCache.get(f)!;
 };
+/** A glTF-EMBEDDED image (`<model>#image<n>`, no material asset: a Codex prop's painted atlas) measured from its own
+ *  bytes: value = the mean of the texels its triangles sample. L (w-temple10 2026-11-03: the sunken temple's three
+ *  atlases were mean L* ~22 and read as black blocks at noon, but their L* was null, so the value rule never judged them). */
+const embeddedCache = new Map<string, { width: number; height: number; data: Uint8Array } | null>();
+function embeddedMaterial(id: string, area: number, texels: number, projected: boolean, natural: boolean, tris: Tri[]): ArtMaterial | null {
+  const mine = tris.filter((t) => t.tex?.key === id), bytes = mine.find((t) => t.tex?.bytes)?.tex?.bytes;
+  if (!bytes || bytes.readUInt32BE(0) !== 0x89504e47) return null;
+  if (!embeddedCache.has(id)) { try { embeddedCache.set(id, decodePng(bytes)); } catch { embeddedCache.set(id, null); } }
+  const img = embeddedCache.get(id); if (!img) return null;
+  const tex = textureStats(img), m = uvFootprintMean(mine, img, mine[0]?.tex?.flipY ?? false);
+  const lstar = materialLstar({ color: "#ffffff" }, m ? { ...tex, mean: m } : tex, null);
+  return { id, area, texels, projected, natural, lstar, colours: tex.colours ?? null, lumaSd: tex.lumaSd ?? null, px: [img.width, img.height], map: null, mapHash: createHash("sha1").update(bytes).digest("hex").slice(0, 16), course: null, periodicity: tex.periodicity, seen: null };
+}
 function describeMaterial(id: string, area: number, texels: number, projected: boolean, natural: boolean, tris?: Tri[]): ArtMaterial {
   const known = matJson(id), md = known ?? {};
+  if (!known && tris?.length) { const e = embeddedMaterial(id, area, texels, projected, natural, tris); if (e) return e; }
   const tex = md.shader === "terrain-splat" || md.shader === "rock-cap" ? null : texStats(md.map);
   // a UV-laid material is judged by the texels its own triangles sample, not its whole page (an atlas)
   const own = tex && !projected && !md.triplanar && tris?.length ? (() => { const img = texImage(md.map); const m = img ? uvFootprintMean(tris.filter((t) => (t.material ?? t.tex?.key) === id), img) : null; return m ? { ...tex, mean: m } : null; })() : null;
@@ -112,7 +133,7 @@ function describeMaterial(id: string, area: number, texels: number, projected: b
   const uvTris = !projected && !md.triplanar ? tris?.filter(t => (t.material ?? t.tex?.key) === id) : null;
   const uvImage = uvTris?.length ? texImage(md.map) : null;
   const ds = tex ? (uvTris && uvImage ? uvFootprintDetailScale(uvTris, uvImage) : null) ?? detailOf(md.map) : null;
-  return { id, area, texels, projected, natural, lstar, colours: tex?.colours ?? null, px: tex ? [tex.width, tex.height] : null, map: typeof md.map === "string" ? md.map : null, mapHash: tex ? texHash(md.map) : null, course, periodicity: tex?.periodicity, seen: ds && Number.isFinite(texels) ? texels / ds : null };
+  return { id, area, texels, projected, natural, lstar, colours: tex?.colours ?? null, lumaSd: tex?.lumaSd ?? null, px: tex ? [tex.width, tex.height] : null, map: typeof md.map === "string" ? md.map : null, mapHash: tex ? texHash(md.map) : null, course, periodicity: tex?.periodicity, seen: ds && Number.isFinite(texels) ? texels / ds : null };
 }
 
 /** The materials texelDensity could not measure (flat colours, or a mapped material on triangles with no UVs and no
@@ -142,20 +163,20 @@ const surf = recipe.surfaces.map((s, i) => {
   const st = map ? texStats(map) : null;
   return { name: s.name, texels: st ? st.width / uv : NaN, lstar: materialLstar({ color: l?.color ?? (map ? "#ffffff" : s.color) }, st, null), stats: st, uvScale: uv, map };
 });
-function terrainAround(cx: number, cz: number, r: number): { texels: number; steep: number | null; lstar: number | null } {
+function terrainAround(cx: number, cz: number, r: number): { texels: number; steep: number | null; lstar: number | null; steepSd: number | null } {
   const n = 9, step = (2 * r) / (n - 1);
-  let tw = 0, tv = 0, sw = 0, sv = 0, lw = 0, lv = 0;
+  let tw = 0, tv = 0, sw = 0, sv = 0, lw = 0, lv = 0, dw = 0, dv = 0;
   for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
     const x = cx - r + i * step, z = cz - r + j * step;
     const b = referenceField.biome(x, z), slope = referenceField.slope(x, z);
     b.surface.forEach((w, k) => {
       const s = surf[k]!; if (!(w > 0) || !Number.isFinite(s.texels)) return;
       tw += w; tv += w * s.texels;
-      if (slope >= 0.5) { sw += w; sv += w * s.texels; }
+      if (slope >= 0.5) { sw += w; sv += w * s.texels; if (s.stats?.lumaSd != null) { dw += w; dv += w * s.stats.lumaSd; } }
       else if (slope < 0.35) { lw += w; lv += w * s.lstar; }
     });
   }
-  return { texels: tw ? tv / tw : NaN, steep: sw > 0.5 ? sv / sw : null, lstar: lw ? lv / lw : null };
+  return { texels: tw ? tv / tw : NaN, steep: sw > 0.5 ? sv / sw : null, lstar: lw ? lv / lw : null, steepSd: dw > 0.5 ? dv / dw : null };
 }
 
 // ---- world positions of scene entities (job scene ops + the world scene)
@@ -242,8 +263,8 @@ function propTexels(prefabId: string) {
   if (!densCache.has(prefabId)) { try { const d = texelDensity(prefabGeometry(ASSETS, prefabId), { projected: proj }); densCache.set(prefabId, Number.isFinite(d.median) ? { median: d.median, area: d.texturedArea } : null); } catch { densCache.set(prefabId, null); } }
   return densCache.get(prefabId)!;
 }
-// creatures (mobs/*, populated spawns) are not "the props around it": a ghost knight at 100 texels/m beside a gate is not the prop scale
-const propInstances = Object.entries(allEnts).filter(([, e]) => typeof e?.components?.prefab?.prefabId === "string" && !/^(landmarks|mobs)\//.test(String(e.components.prefab.prefabId)));
+// creatures (mobs/*, populated spawns) and characters are not "the props around it" (_art-check NOT_PROPS_RE)
+const propInstances = Object.entries(allEnts).filter(([, e]) => typeof e?.components?.prefab?.prefabId === "string" && !NOT_PROPS_RE.test(String(e.components.prefab.prefabId)));
 
 // landmark ops and every operator that bakes to a landmark (wall: retaining, ramp…) are built pieces (_art-check builtOpPieces)
 const builtPieces = new Map(builtOpPieces(worldOps, recipeLandmarks).map((b) => [b.op, b]));
@@ -347,7 +368,7 @@ const meshMaterials = (geo: PropGeometry, k: number): ArtMaterial[] => {
   return out;
 };
 const ownedForm: FormNode[] = [];
-const prefabGroups = new Map<string, { kind: "mesh" | "prop"; at: [number, number][]; mats: Map<string, ArtMaterial> }>();
+const prefabGroups = new Map<string, { kind: "mesh" | "prop"; pid?: string; at: [number, number][]; mats: Map<string, ArtMaterial>; setIn?: boolean }>();
 let ownedGeometry = 0;
 for (const id of owned) {
   if (isPortalVeil(id, allEnts)) continue; // the portal's dark mouth (portal-veil's house material), judged by the portal rule
@@ -369,7 +390,9 @@ for (const id of owned) {
     ownedGeometry++;
     const mats = meshMaterials({ tris, min: [0, 0, 0], max: [0, 0, 0], effects: [], lights: 0, nested: [], warnings: [] }, 1);
     if (mat && !matJson(mat)) for (const m of mats) if (m.id === mat) m.missing = true;
-    pieces.push({ id, kind: "mesh", at, materials: mats });
+    // a still WATER sheet (a `water` component: a layout `waters` sheet in a dark passage) is not matched to the ground
+    // band (the lake it continues is not either); the near-black floor still judges it. L (w-temple10 2026-11-03)
+    pieces.push({ id, kind: "mesh", at, materials: mats, ...(c.water ? { bandFree: true } : {}) });
     terrain[id] = terrainAround(at[0], at[1], T.texel.radius);
     // form lint where geometry is available: world bounds per owned mesh (primitive boxes are judged as raw boxes)
     const lo: V3 = [Infinity, Infinity, Infinity], hi: V3 = [-Infinity, -Infinity, -Infinity];
@@ -391,8 +414,10 @@ for (const id of owned) {
     const k = Math.max(Math.abs(w.s[0]), Math.abs(w.s[1]), Math.abs(w.s[2])) || 1;
     const big = Math.max(...[0, 1, 2].map((a) => geo.max[a]! - geo.min[a]!)) * k >= T.measure.structureSize;
     const key = `${big ? "mesh" : "prop"}:${pid}`;
-    const g = prefabGroups.get(key) ?? { kind: big ? "mesh" as const : "prop" as const, at: [], mats: new Map<string, ArtMaterial>() };
+    const g = prefabGroups.get(key) ?? { kind: big ? "mesh" as const : "prop" as const, pid, at: [], mats: new Map<string, ArtMaterial>() };
     g.at.push(at);
+    // SET INTO the ground (layout `bedded` tag, or the prefab's placeRule seat `set-in`): judged against the stone round it
+    if ((e?.tags ?? []).includes("bedded") || (e?.tags ?? []).includes("set-in") || placeRuleFor(project, pid)?.seat === "set-in") g.setIn = true;
     if (!g.mats.size || g.at.length === 1) {
       // one instance measured, area scaled by k^2; UV texels thin out by 1/k (a projected material keeps its density)
       for (const m of meshMaterials(geo, k * k)) g.mats.set(m.id, m.projected ? m : { ...m, texels: m.texels / k });
@@ -403,7 +428,7 @@ for (const id of owned) {
 for (const [key, g] of prefabGroups) {
   const at: [number, number] = [g.at.reduce((t, p) => t + p[0], 0) / g.at.length, g.at.reduce((t, p) => t + p[1], 0) / g.at.length];
   const r = Math.max(0, ...g.at.map((p) => Math.hypot(p[0] - at[0], p[1] - at[1])));
-  pieces.push({ id: key, kind: g.kind, at, materials: [...g.mats.values()] });
+  pieces.push({ id: key, kind: g.kind, at, materials: [...g.mats.values()], ...(g.setIn ? { setIn: true } : {}), ...(groundBandFree(g.kind, g.pid, prefabDressing(g.pid)) ? { bandFree: true } : {}) });
   terrain[key] = terrainAround(at[0], at[1], r + T.texel.radius);
 }
 if (ownedForm.length) forms[`scene:${tier.id}`] = ownedForm;
@@ -420,10 +445,18 @@ for (const p of pieces) if (p.kind === "mesh") {
 const GROUND_KINDS = ["heightPatches", "passages", "operators", "groundPaints", "blobs"];
 const jobFeatureOps = worldOps.filter((o) => o.edit === "add-feature" && GROUND_KINDS.includes(String(o.kind)));
 const missingOps = jobFeatureOps.filter((o) => !((recipe.features as unknown as Record<string, { id: string }[] | undefined>)[o.kind] ?? []).some((f) => f.id === o.feature?.id));
-const groundField = missingOps.length ? createWorldField(applyRecipeEdits(recipe, missingOps as never).recipe) : field;
+const groundRecipe = missingOps.length ? applyRecipeEdits(recipe, missingOps as never).recipe : recipe;
+const groundField = missingOps.length ? createWorldField(groundRecipe) : field;
+// the same ground WITHOUT the job's own paint (its groundPaints): what the zone's paint shows there. A pad's surface is
+// judged against the built work only for the weight the job's paint added (_art-check ArtMaterial.painted)
+const jobPaintIds = new Set(jobFeatureOps.filter((o) => o.kind === "groundPaints").map((o) => String(o.feature?.id)));
+const zonePaintField = jobPaintIds.size
+  ? createWorldField({ ...groundRecipe, features: { ...groundRecipe.features, groundPaints: ((groundRecipe.features as unknown as { groundPaints?: { id: string }[] }).groundPaints ?? []).filter((g) => !jobPaintIds.has(g.id)) } } as WorldRecipe)
+  : groundField;
+const zoneSplat = new Float32Array(recipe.surfaces.length + 8);
 const splatOut = new Float32Array(recipe.surfaces.length + 8);
 type GSample = { x: number; y: number; z: number; ny: number; area: number };
-const groundSets: { id: string; samples: GSample[] }[] = [];
+const groundSets: { id: string; samples: GSample[]; zonePaint?: boolean }[] = [];
 for (const o of jobFeatureOps) {
   const ft = o.feature ?? {};
   if (o.kind === "heightPatches" && Array.isArray(ft.weights) && ft.columns > 1 && ft.rows > 1) {
@@ -441,7 +474,7 @@ for (const o of jobFeatureOps) {
       const wy = groundField.waterY(x, z); if (wy != null && y < wy - 0.3) continue;
       samples.push({ x, y, z, ny: Math.max(0, 1 - groundField.slope(x, z)), area: cs * rs * stride * stride });
     }
-    if (samples.length) groundSets.push({ id: `ground:${ft.id}`, samples });
+    if (samples.length) groundSets.push({ id: `ground:${ft.id}`, samples, zonePaint: true });
   } else if (o.kind === "passages" && Array.isArray(ft.start)) {
     // a passage's two walls at half height and its ceiling, never a point in the air over an open cut (_art-check passageGroundSamples)
     let set = groundSets.find((g) => g.id === "ground:passages"); if (!set) { set = { id: "ground:passages", samples: [] }; groundSets.push(set); }
@@ -450,22 +483,28 @@ for (const o of jobFeatureOps) {
 }
 const surfSeen = surf.map((s) => { const ds = s.map ? detailOf(s.map) : null; return ds && Number.isFinite(s.texels) ? s.texels / ds : null; });
 for (const g of groundSets) {
-  const acc = new Map<number, number>(); let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  const acc = new Map<number, number>(), painted = new Map<number, number>(); let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
   for (const s of g.samples) {
     groundField.splatAt(s.x, s.y, s.z, s.ny, splatOut, 0);
-    for (let k = 0; k < recipe.surfaces.length; k++) if (splatOut[k]! > 0.02) acc.set(k, (acc.get(k) ?? 0) + splatOut[k]! * s.area);
+    if (g.zonePaint) zonePaintField.splatAt(s.x, s.y, s.z, s.ny, zoneSplat, 0);
+    for (let k = 0; k < recipe.surfaces.length; k++) {
+      if (splatOut[k]! > 0.02) acc.set(k, (acc.get(k) ?? 0) + splatOut[k]! * s.area);
+      if (g.zonePaint) { const add = splatOut[k]! - zoneSplat[k]!; if (add > 0.02) painted.set(k, (painted.get(k) ?? 0) + add * s.area); }
+    }
     x0 = Math.min(x0, s.x); z0 = Math.min(z0, s.z); x1 = Math.max(x1, s.x); z1 = Math.max(z1, s.z);
   }
   const at: [number, number] = [(x0 + x1) / 2, (z0 + z1) / 2];
   pieces.push({ id: g.id, kind: "ground", at, materials: [...acc].sort((a, b) => b[1] - a[1]).map(([k, a]) => {
     const s = surf[k]!;
-    return { id: `surface:${s.name}`, area: a, texels: s.texels, projected: true, natural: true, lstar: null, colours: s.stats?.colours ?? null, px: s.stats ? [s.stats.width, s.stats.height] as [number, number] : null, map: s.map ?? null, course: null, seen: surfSeen[k] };
+    return { id: `surface:${s.name}`, area: a, texels: s.texels, projected: true, natural: true, lstar: null, colours: s.stats?.colours ?? null, px: s.stats ? [s.stats.width, s.stats.height] as [number, number] : null, map: s.map ?? null, course: null, seen: surfSeen[k], ...(g.zonePaint ? { painted: Math.round((painted.get(k) ?? 0) * 10) / 10 } : {}) };
   }) });
   terrain[g.id] = terrainAround(at[0], at[1], T.texel.radius);
   // the built work beside it: owned structures / landmark bakes standing inside its sample box (+ radius)
   let w = 0, v = 0;
   for (const p of pieces) {
     if (p.kind !== "mesh" && p.kind !== "landmark") continue;
+    // L (careening-strand 2026-10-31): a ship, boat or shelter is not masonry: never the built reference a pad's texels match
+    if (p.bandFree) continue;
     if (p.at[0] < x0 - T.texel.radius || p.at[0] > x1 + T.texel.radius || p.at[1] < z0 - T.texel.radius || p.at[1] > z1 + T.texel.radius) continue;
     for (const m of p.materials) if (!m.natural && m.seen != null && m.seen > 0 && m.area > 0) { w += m.area; v += m.area * m.seen; }
   }
@@ -509,7 +548,11 @@ const input: ArtInput = {
   dungeon: place?.dungeon && doorAt ? { name: place.dungeon.name ?? "dungeon", at: doorAt } : null, portals, doors, forms, units, built,
 };
 if (place?.dungeon && !doorAt) notes.push(`place has a dungeon but no door position (no handoff.json doors[{name:"dungeon",at}], landmark opening or landmark): the portal check was skipped`);
-const faults = artFaults(input, T);
+// the job's dated coordinator rulings (<job>/quality-exceptions.json, gate "art", match { rule, what? }): excepted, never counted
+type ArtFault = ReturnType<typeof artFaults>[number];
+const { kept: faults, excepted } = exceptFaults(artFaults(input, T), jobExceptions(jobDir, "art")) as { kept: ArtFault[]; excepted: (ArtFault & { exception: string; ruling: string })[] };
+// FINDINGS (never faults): set-in pieces whose picture contrast is well over the stone they are set into (o-gates 2026-10-30)
+for (const f of contrastFindings(input, T)) notes.push(`FINDING contrast: ${f}`);
 const diagnostics = varietyDiagnostics(input, T);
 const architecturalPieces = pieces.filter((p) => ["landmark", "mesh"].includes(p.kind) && p.materials.some((m) => !m.natural));
 const architectureCoverage = {
@@ -524,7 +567,7 @@ for (const f of faults) counts[f.rule] = (counts[f.rule] ?? 0) + 1;
 const report = {
   materialPolicy: T.variety.mode, architectureCoverage, diagnostics,
   architecturalAssignments: Object.fromEntries(pieces.filter((p) => p.architecture !== undefined).map((p) => [p.id, p.architecture])),
-  tool: "art-check", job: path.relative(PG, jobDir).replace(/\\/g, "/"), ok: faults.length === 0, measured: pieces.length, owned: owned.size, ownedWithGeometry: ownedGeometry, counts, faults,
+  tool: "art-check", job: path.relative(PG, jobDir).replace(/\\/g, "/"), ok: faults.length === 0, measured: pieces.length, owned: owned.size, ownedWithGeometry: ownedGeometry, counts, faults, excepted,
   context: { tier: input.tier, culture, groundL: input.groundL && Math.round(input.groundL * 10) / 10, dungeon: input.dungeon, portalsInScene: portals.length, doors },
   pieces: pieces.map((p) => ({ id: p.id, kind: p.kind, terrain: terrain[p.id], props: props[p.id], ...(p.kind === "ground" ? { builtSeen: built[p.id] == null ? null : Math.round(built[p.id]! * 10) / 10 } : {}), materials: p.materials.map((m) => ({ ...m, area: Math.round(m.area), texels: Math.round(m.texels * 10) / 10, seen: m.seen == null ? null : Math.round(m.seen * 10) / 10, lstar: m.lstar == null ? null : Math.round(m.lstar * 10) / 10, course: m.course == null ? null : Math.round(m.course * 100) / 100 })) })),
   openings, notes, thresholds: T,
@@ -533,9 +576,10 @@ const out = flag("out") ?? path.join(jobDir, "reports", "art-check.json");
 fs.mkdirSync(path.dirname(out), { recursive: true });
 fs.writeFileSync(out, JSON.stringify(report, null, 2) + "\n");
 if (!argv.includes("--quiet")) {
-  console.log(`art-check ${report.job}: ${report.ok ? "ok" : `${faults.length} fault(s) ${JSON.stringify(counts)}`} (tier ${input.tier ?? "?"}, culture ${culture}, ground L* ${report.context.groundL ?? "?"})`);
+  console.log(`art-check ${report.job}: ${report.ok ? "ok" : `${faults.length} fault(s) ${JSON.stringify(counts)}`}${excepted.length ? ` (${excepted.length} excepted by ${path.basename(jobDir)}/quality-exceptions.json)` : ""} (tier ${input.tier ?? "?"}, culture ${culture}, ground L* ${report.context.groundL ?? "?"})`);
   for (const p of report.pieces) console.log(`  ${p.kind} ${p.id}: terrain ${p.terrain ? `${Math.round(p.terrain.texels)} tx/m (steep ${p.terrain.steep == null ? "-" : Math.round(p.terrain.steep)}, L* ${p.terrain.lstar == null ? "-" : Math.round(p.terrain.lstar)})` : "-"}${p.props != null ? `, props ${Math.round(p.props)} tx/m` : ""}${"builtSeen" in p ? `, built beside it ${p.builtSeen ?? "-"} tx/m seen` : ""} | ${p.materials.map((m) => `${m.id} ${m.area} m2 ${m.texels} tx/m${m.seen != null ? ` (seen ${m.seen})` : ""} L* ${m.lstar ?? "-"}${m.course != null ? ` course ${m.course} m` : ""}${m.stretch ? ` stretched ${Math.round(m.stretch.share * 100)}% (worst ${m.stretch.worst}:1)` : ""}`).join("; ")}`);
   for (const f of faults) console.log(`  FAULT ${f.rule} ${f.piece} ${f.what}: ${f.detail}`);
+  for (const f of excepted) console.log(`  excepted (${f.exception}, ${f.ruling}) ${f.rule} ${f.piece} ${f.what}: ${f.detail}`);
   for (const d of diagnostics) console.log(`  diagnostic ${d.rule} ${d.piece} ${d.what}: ${d.detail}`);
   for (const n of notes) console.log(`  note: ${n}`);
   console.log(`  -> ${out}`);

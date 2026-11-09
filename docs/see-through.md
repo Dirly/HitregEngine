@@ -36,7 +36,11 @@ The see-through gate looks at the screen instead.
      - its cluster is **enclosed** (it touches no border of the view) and small (at most 4% of the view): a slit
        through a wall, roof, arch or overhang.
 
-     Big enclosed sky, such as an archway, does not count.
+     Big enclosed sky, such as an archway, does not count. Nor does sky framed by things that never meet: a near frame
+     and a far one (far >= 3x near and >= 20 m behind, `gapBetweenDepths`), or two or more pieces whose nearest frame
+     hits are all more than max(4 m, 0.15 x the frame's median depth) apart in 3D (`framesApart`: an arch's sky closed
+     below by a wall top 25 m in front; listed in the report as `framesApart`, never counted). A real seam's two sides sit
+     a pixel or two apart, so it still counts.
    - **enclosed** (prop mode): only enclosed clusters count, at any size. This is light through a hull.
 4. **Allowed openings.** Walk-through portal triggers (the `portal` script's box, grown by 1.5 m) are always allowed. List
    real openings (a cave mouth to the outside, a skylight) in `<project>/authoring/see-through-openings.json` as

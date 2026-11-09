@@ -24,8 +24,8 @@ import {
 import { projectClosure, readAssetJsonBatch, resolveAssetFile, sceneOwnerProject } from "./tools/_asset-resolve.mts";
 import { ownerCatalog, ownerInfo, recordOwnerEdits, sceneProject } from "./tools/_owner-edit-bridge.mts";
 import { voxelCodeKey } from "./tools/_voxel-code-key.mts";
-import { lockFileOf, lockIsStale } from "./tools/_scene-write.mts";
-import { assetChangePublisher, assetSourceProject, scopedAssetChange } from "./tools/_asset-watch.mts";
+import { writeAssetGuarded } from "./tools/_scene-write.mts";
+import { assetChangePublisher, binaryAssetChangePublisher, assetSourceProject, scopedAssetChange } from "./tools/_asset-watch.mts";
 import { assertPlayerModules } from "./tools/_player-boundary.mjs";
 import {propReview,savePropReview,reviewImage,propPreview} from './tools/_prop-review.mts';
 
@@ -76,11 +76,11 @@ const BRIDGE_ENDPOINTS = [
   { method: "POST", path: "/__hitreg/camera", purpose: "Aim the editor camera — this is how an agent looks at its own work (screenshots, \"show me what you mean\"). Body: { position:[x,y,z], target?:[x,y,z] } or { frame: \"<entityId>\" } (or frame:\"selection\"), plus transitionMs (default 0 = snap this frame, which is what a screenshot tool wants; >0 eases over roughly that long and holds the request open until the camera actually comes to rest). Returns the pose the camera ACTUALLY reached: { ok, id, cmdId, camera:{position,target}, playMode }. FOOTGUN: this drives the EDITOR camera. In play mode that camera is often not what is on screen — a follow/chase rig re-aims it every frame, and a scene camera or a script's active camera replaces it outright — so the move can be instantly overwritten or simply not rendered. Trust the returned `camera` over the one you asked for; if it snapped back, something else owns the view. Same per-tab keying as /__hitreg/context: pass ?id=<id>, and with several tabs live and no id this answers 409 { ok:false, multipleClients, clients } rather than aiming somebody else's window." },
   { method: "POST", path: "/__hitreg/owner-edit", purpose: "The editor reports the OWNER's hand edits of placed props ({ scene, edits: [{ entity, tags, name, parent, before, after }] }, scene frame; after:null = deleted). Each is written as an owner override on what placed it: a dressed prop (tag dress:<plan>) -> <plan>.owner.json in the plan's map frame; any other catalogued prop -> projects/<p>/authoring/owner-overrides/<scene>.json. Agents never POST here: owner overrides are the owner's. Schema: spec dataAssets['owner-overrides']; read them with `dress overrides <project>`." },
   { method: "GET", path: "/__hitreg/owner-edit?scene=<s>&entity=<id>&tags=<a,b>&name=<n>", purpose: "Who placed this prop (plan item or scene), the place's scale/cultures and the owner override on it, for the editor's Prop panel. ?catalog=<project> instead returns the swap catalogue (the closure's prop index) and the real-size kinds table." },
-  { method: "GET", path: "/__hitreg/assets-index", purpose: "Every asset file on disk, bucketed by kind (scenes, prefabs, materials, models, chunks, …)." },
+  { method: "GET", path: "/__hitreg/assets-index", purpose: "Every asset file on disk, bucketed by kind (scenes, prefabs, materials, models, chunks, …). Optional revisions=1 returns {index,revisions} with scoped binary file versions for live reload." },
   { method: "GET", path: "/__hitreg/asset-file?file=<rel>", purpose: "Read one asset file fresh from disk (bypasses Vite's cache)." },
   { method: "POST", path: "/__hitreg/asset-json?project=<owner>", purpose: "Read up to 64 JSON assets fresh in one request: { files: [relative paths] }. Returns [{data} | {error}] in request order, resolving in the project's dependency closure." },
   { method: "GET", path: "/__hitreg/voxel-code-key", purpose: "Current generation source fingerprint for the disposable browser terrain cache. Changes to generation code invalidate cached cell docs and meshes." },
-  { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content, project?}); live-syncs into the running app. An existing file is overwritten where it lives; a NEW file goes into projects/<project>/assets/ when `project` names one." },
+  { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content, project?, base?}); live-syncs into the running app. An existing file is overwritten where it lives; a NEW file goes into projects/<project>/assets/ when `project` names one. Writes take the tools' `<file>.lock` (409 `locked` while a tool holds it). An EXISTING scene file needs `base` = contentTag (@hitreg/core) of the text you last read or wrote; when the file changed since, 409 `stale` returns {tag, content}: rebase your edits onto content (rebaseSceneEdits) and resend with base = tag. 200 returns the new `tag`." },
   { method: "GET", path: "/__hitreg/scene-menu", purpose: "The editor's scene menu: { groups: [{ title, projects: [{ name, label, main, listed: [{id,label,note,depth}], other }] }] }, built from each project.json's `group`, `menuOrder` and `scenes` (the menu order; variants nest under their base) plus the scene files on disk. `name: null` is the flat assets/ tree. A scene id is its file path under assets/scenes/ without .scene.json." },
   { method: "POST", path: "/__hitreg/scene-menu", purpose: "Add a scene to a project's menu in its project.json: { project, id, label?, note?, variantOf? }. `variantOf` lists it as a stage under that scene (and lists an unlisted base too). Writes the menu entry only; write the scene file itself with /__hitreg/write-asset { file: \"scenes/<id>.scene.json\", content, project }. 400 with the reason if the id is already listed or the manifest would be invalid." },
   { method: "GET", path: "/__hitreg/tools", purpose: "List installed editor/asset tool manifests. The same definitions drive the editor UI and the tools block in this spec." },
@@ -582,10 +582,11 @@ function hitregBridge(): Plugin {
         req.on("data", (chunk: Buffer) => (body += chunk));
         req.on("end", () => {
           try {
-            const { file, content, project } = JSON.parse(body) as {
+            const { file, content, project, base } = JSON.parse(body) as {
               file: string;
               content: string;
               project?: string;
+              base?: string;
             };
             let target = resolveAssetPath(file, project ? projectClosure(projectsRoot, project) : null);
             // A NEW file with a named project goes into that project. Without
@@ -600,21 +601,13 @@ function hitregBridge(): Plugin {
               target = path.resolve(projectsRoot, project, "assets", file);
             }
             if (!withinKnownRoot(target)) throw new Error("path outside assets/ or projects/");
-            // a tool is mid read-modify-write of this file (tools/_scene-write.mts): refuse, never interleave with it
-            const lf = lockFileOf(target);
-            if (fs.existsSync(lf)) {
-              let info: any = null;
-              try { info = JSON.parse(fs.readFileSync(lf, "utf8")); } catch { /* being written */ }
-              if (!lockIsStale(info)) {
-                res.statusCode = 409;
-                res.end(JSON.stringify({ ok: false, error: `locked by ${info?.label ?? "a tool"} (pid ${info?.pid ?? "?"}): retry after it finishes` }));
-                return;
-              }
-            }
-            fs.mkdirSync(path.dirname(target), { recursive: true });
-            fs.writeFileSync(target, content, "utf8");
+            // under the tools' lock (tools/_scene-write.mts): a tool mid read-modify-write -> 409 locked; a scene
+            // file whose disk text is no longer the client's `base` -> 409 stale with the current text (the client
+            // rebases its own edits onto it and saves again: a stale autosave never erases another writer's work)
+            const out = writeAssetGuarded(target, content, { base, requireBase: /\.scene\.json$/.test(target), label: "dev-server write-asset" });
+            res.statusCode = out.status;
             res.setHeader("content-type", "application/json");
-            res.end(JSON.stringify({ ok: true, file }));
+            res.end(JSON.stringify(out.status === 200 ? { ...out.body, file } : out.body));
           } catch (error) {
             res.statusCode = 400;
             res.end(JSON.stringify({ ok: false, error: String(error) }));
@@ -663,7 +656,17 @@ function hitregBridge(): Plugin {
           }
         }
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify(index));
+        if (params.get("revisions") === "1") {
+          const revisions: Record<string, string> = {};
+          for (const kind of ["models", "textures"]) for (const file of new Set(index[kind] ?? [])) {
+            const virtual = `${kind}/${file}`;
+            try {
+              const stat = fs.statSync(resolveAssetPath(virtual, scope));
+              revisions[virtual] = `${stat.mtimeMs}:${stat.size}`;
+            } catch { /* A concurrent exporter may be replacing the file; retry on its next event. */ }
+          }
+          res.end(JSON.stringify({ index, revisions }));
+        } else res.end(JSON.stringify(index));
       });
 
       server.middlewares.use("/__hitreg/voxel-code-key", (_req, res) => {
@@ -1575,14 +1578,23 @@ function hitregBridge(): Plugin {
         }
       });
       const assetWatchers: fs.FSWatcher[] = [];
+      const binaryPublisher = binaryAssetChangePublisher((root, filename) => {
+        const file = filename.split(path.sep).join("/"), project = assetSourceProject(projectsRoot, root);
+        for (const client of server.ws.clients) {
+          const payload = scopedAssetChange({ file, content: null, project }, assetScopes.get(client));
+          if (payload) client.send("hitreg:asset-changed", payload);
+        }
+      });
       server.httpServer?.once("close", () => {
         assetPublisher.close();
+        binaryPublisher.close();
         for (const watcher of assetWatchers) watcher.close();
       });
       try {
         assetWatchers.push(fs.watch(assetsRoot, { recursive: true }, (_event, filename) => {
-          if (!filename || !filename.endsWith(".json")) return;
-          assetPublisher.enqueue(assetsRoot, filename);
+          if (!filename) return;
+          if (filename.endsWith(".json")) assetPublisher.enqueue(assetsRoot, filename);
+          else binaryPublisher.enqueue(assetsRoot, filename);
         }));
       } catch (error) {
         console.warn("[hitreg] assets watcher failed:", error);
@@ -1594,12 +1606,14 @@ function hitregBridge(): Plugin {
       try {
         fs.mkdirSync(projectsRoot, { recursive: true });
         assetWatchers.push(fs.watch(projectsRoot, { recursive: true }, (_event, filename) => {
-          if (!filename || !filename.endsWith(".json")) return;
+          if (!filename) return;
           const parts = filename.split(path.sep);
           const assetsIdx = parts.indexOf("assets");
           if (assetsIdx === -1 || assetsIdx === parts.length - 1) return;
           const projectAssetsDir = path.join(projectsRoot, ...parts.slice(0, assetsIdx + 1));
-          assetPublisher.enqueue(projectAssetsDir, parts.slice(assetsIdx + 1).join(path.sep));
+          const relative = parts.slice(assetsIdx + 1).join(path.sep);
+          if (filename.endsWith(".json")) assetPublisher.enqueue(projectAssetsDir, relative);
+          else binaryPublisher.enqueue(projectAssetsDir, relative);
         }));
       } catch (error) {
         console.warn("[hitreg] projects watcher failed:", error);
@@ -1683,6 +1697,9 @@ export default defineConfig({
     watch: {
       ignored: [
         "**/assets/**",
+        // build output: a publish deletes these folders, and a deleted folder left the watcher firing ~2000 events a second
+        "**/dist/**",
+        "**/dist-game/**",
         (file: string) => {
           const parts = file.split(/[\\/]/);
           const at = parts.indexOf("projects");

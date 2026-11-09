@@ -3,7 +3,8 @@
  *
  * `checkDesign` is what `town-design check` prints and what `worldgen terrace --from-plan` refuses to cut without:
  *   fit       every building inside its terrace by the kit margins (1.5 m off a wall edge, 1 m off a bank), 1 m air
- *             between lots, off the streets and squares
+ *             between lots (a party-wall row's neighbours instead: exactly the kit's row pitch and a pair its row-fit
+ *             proof passed, `rowPairFault`), off the streets and squares
  *   door      every door on its street (ground-envelope front <= 4 m from the street edge, facing it, same level)
  *   reach     every terrace reachable from the gate by stairs/ramps at most 12 % (ramp) / 50 % (stair)
  *   street    every street on designed ground; a level change only through a stair/ramp
@@ -17,6 +18,8 @@
  *   across    a ramp on a slope over 10 % climbs across it (within 45 deg of the contour)
  * plus kit-fit (MMO/WFC/wfc/kit_fit.py), run by the CLI.
  */
+import fs from "node:fs";
+import path from "node:path";
 import { riserRule, type RiserVerdict } from "./worldgen-riser-rule.mts";
 import { DESIGN_RULE, type DesignBuilding, type DesignTerrace, type EdgeTreatment, type TownDesign } from "./town-design-schema.mts";
 
@@ -164,6 +167,60 @@ export interface Footprint {
   storeys: number;
   features: string[];
 }
+/** The pairs a kit's row-fit proof passed ("<left model> | <right model>"), read from projects/<p>/authoring/<kit>/row-fit.json
+ *  (`town-kit-check row-fit --json`); null when no project has a proof for the kit. */
+/** A row-fit proof: the clean pairs, plus (k-town9) the lot width each model was proven at, when the proof records it. */
+export type RowFitProof = Set<string> & { lots?: Record<string, number> };
+const rowFitCache = new Map<string, RowFitProof | null>();
+export function rowFitProof(prefab: string): RowFitProof | null {
+  const kit = prefab.split("/")[0]!;
+  if (rowFitCache.has(kit)) return rowFitCache.get(kit)!;
+  let found: RowFitProof | null = null;
+  const root = path.resolve("projects");
+  for (const proj of fs.existsSync(root) ? fs.readdirSync(root) : []) {
+    const f = path.join(root, proj, "authoring", kit, "row-fit.json");
+    if (!fs.existsSync(f)) continue;
+    const j = JSON.parse(fs.readFileSync(f, "utf8")) as { lots?: Record<string, number>; pairs?: { pair: string; findings: string[] }[] };
+    found = new Set((j.pairs ?? []).filter((x) => !x.findings.length).map((x) => x.pair.replace(/'$/, ""))) as RowFitProof;
+    if (j.lots) found.lots = j.lots;
+    break;
+  }
+  rowFitCache.set(kit, found);
+  return found;
+}
+
+/**
+ * Two buildings of one party-wall `row`: null = a proven neighbour pair (no lot air needed); "apart" = not neighbours
+ * (the ordinary rules judge them); else the fault. Neighbours stand at EXACTLY the row pitch (2 cm), facing one way with
+ * their street fronts on one line (2 cm), and their prefabs are a pair the kit's row-fit proof measured clean — the
+ * only arrangement that proof covers (Bell Strand 10-30: a relaxed skip let unproven neighbours poke through).
+ */
+export function rowPairFault(design: Pick<TownDesign, "buildings">, a: DesignBuilding, b: DesignBuilding, pa: Footprint, pb: Footprint, proof: (prefab: string) => RowFitProof | Set<string> | null = rowFitProof): string | null | "apart" {
+  const CELL = DESIGN_RULE.cell, tol = 0.02;
+  const right: V2 = [pa.facing[1], -pa.facing[0]];
+  const dx = pb.centre[0] - pa.centre[0], dz = pb.centre[1] - pa.centre[1];
+  const lat = dx * right[0] + dz * right[1];
+  // k-town9: the pitch is half the two LOTS the proof measured each model at (a corner type's lot is its built width,
+  // centred on the model origin = the design's `at`); a proof without lots falls back to the walls (cells x 3.2 m)
+  const lotOf = (pr: string | undefined, f: Footprint) => { const l = pr ? (proof(pr) as RowFitProof | null)?.lots?.[pr.split("/").pop()!] : undefined; return l ?? f.size[0] * CELL; };
+  const pitch = (lotOf(a.prefab, pa) + lotOf(b.prefab, pb)) / 2;
+  if (Math.abs(lat) > pitch + 1 || Math.abs(dx * pa.facing[0] + dz * pa.facing[1]) > 3) return "apart";
+  // the party sides that meet: the left house's +x and the right one's -x (a corner type has one party side and ends a row)
+  const [left, rightB] = lat > 0 ? [a, b] : [b, a];
+  const has = (r: unknown, side: string) => !!(r as { party?: string[] } | undefined)?.party?.includes(side);
+  if (!has(requestOf(design, left), "+x") || !has(requestOf(design, rightB), "-x")) return `not a party-wall pair (the left house's request party needs "+x", the right one's "-x"): a row needs its kit's party-wall pieces on the sides that meet`;
+  if (pa.facing[0] * pb.facing[0] + pa.facing[1] * pb.facing[1] < Math.cos((0.5 * Math.PI) / 180)) return "neighbours face different ways: a row is straight (start a new row, with lot air between)";
+  if (Math.abs(Math.abs(lat) - pitch) > tol) return `neighbours ${Math.abs(lat).toFixed(2)} m apart centre to centre; the row pitch is ${pitch.toFixed(2)} m (the kit's row-fit is measured at the pitch only)`;
+  const along = dx * pa.facing[0] + dz * pa.facing[1] + (pb.size[1] * CELL) / 2 - (pa.size[1] * CELL) / 2;
+  if (Math.abs(along) > tol) return `street fronts ${along.toFixed(2)} m out of line (the kit's row-fit is measured with the fronts on one line)`;
+  if (!a.prefab || !b.prefab) return `no prefab on ${a.prefab ? b.id : a.id}: the pair cannot be matched to the kit's row-fit proof`;
+  const [L, R] = lat > 0 ? [a.prefab, b.prefab] : [b.prefab, a.prefab];
+  const ok = proof(L);
+  if (!ok) return `the kit of ${L} has no row-fit proof (town-kit-check row-fit --json <kit authoring>/row-fit.json)`;
+  const key = `${L.split("/").pop()} | ${R.split("/").pop()}`;
+  return ok.has(key) ? null : `the pair ${key} is not in the kit's row-fit proof (or failed it)`;
+}
+
 export function requestOf(design: Pick<TownDesign, "buildings">, b: DesignBuilding): NonNullable<DesignBuilding["request"]> | undefined {
   if (b.request) return b.request;
   return design.buildings.find((q) => q.id === b.model)?.request;
@@ -260,7 +317,7 @@ export interface ResolvedEdge {
   blocker: string | null;
   /** the outside is a terrace: the median gap (m) from this edge to it (the wall's foot strip is levelled across it) */
   gap: number | null;
-  style?: "masonry-common" | "masonry-stone";
+  style?: "masonry-common" | "masonry-stone" | "masonry-strand";
 }
 
 export function resolveEdges(design: TownDesign, site: DesignSite, prints: Map<string, Footprint>): ResolvedEdge[] {
@@ -558,6 +615,12 @@ export function checkDesign(design: TownDesign, site: DesignSite, envelopes: Env
   for (let i = 0; i < list.length; i++)
     for (let j = i + 1; j < list.length; j++) {
       const p = list[i]!, q = list[j]!;
+      const bp = design.buildings.find((b) => b.id === p.id)!, bq = design.buildings.find((b) => b.id === q.id)!;
+      if (bp.row && bp.row === bq.row) {
+        const why = rowPairFault(design, bp, bq, p, q);
+        if (why === null) { facts.push(`row ${bp.row}: ${p.id} | ${q.id} at the kit's row pitch, row-fit proven`); continue; }
+        if (why !== "apart") { fault("fit", `${p.id} and ${q.id} (row ${bp.row}): ${why}`); continue; }
+      }
       if (quadsOverlap(p.ground, q.ground, R.lotAir)) fault("fit", `${p.id} and ${q.id}: ground envelopes under ${R.lotAir} m apart`);
       else if (quadsOverlap(p.full, q.full, 0)) fault("fit", `${p.id} and ${q.id}: roofs / eaves intersect`);
     }
@@ -626,6 +689,22 @@ export function checkDesign(design: TownDesign, site: DesignSite, envelopes: Env
     }
     if (leftAt) fault("street", `${st.id}: leaves the designed ground at ${at(leftAt)} (every point on a terrace, a square or a stair/ramp)`);
     facts.push(`street ${st.id} (${st.kind}, ${st.width} m): ${lineLength(st.points).toFixed(0)} m, ${len} m on terraces`);
+  }
+  // An AXIAL stair is entered at its FOOT, head-on: its sides are cheek walls (0.6 m over the nosings) beside the wall
+  // foot. A street drawn to the wall face beside the flight (k-town5: Bell Strand's Y-fork met the close wall at the
+  // stair head) sends walkers up the side of the cheek, where they wedge between it and the wall (town-walk in:gate).
+  for (const c of design.connections) {
+    if (c.form !== "axial" || c.points.length < 2) continue;
+    const a = c.points[0]!, b = c.points[c.points.length - 1]!;
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, u: V2 = [(b[0] - a[0]) / L, (b[1] - a[1]) / L], v: V2 = [-u[1], u[0]];
+    const half = c.width / 2;
+    const sides: [V2, V2][] = [1, -1].map((k) => [[a[0] + v[0] * half * k, a[1] + v[1] * half * k], [b[0] + v[0] * half * k, b[1] + v[1] * half * k]] as [V2, V2]);
+    for (const st of design.streets) {
+      for (let i = 0; i + 1 < st.points.length; i++) {
+        const p = st.points[i]!, q = st.points[i + 1]!;
+        if (sides.some(([s0, s1]) => segsCross(p, q, s0, s1))) { fault("street", `${st.id}: crosses the side of the axial stair ${c.id} (a cheek wall): end the street at the stair's FOOT ${at(a)} on its axis, in front of the flight`); break; }
+      }
+    }
   }
 
   // ---- squares

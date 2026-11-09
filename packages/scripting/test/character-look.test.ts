@@ -42,7 +42,7 @@ const creation = {
           texture: "base-f.png",
           parts: ["HumanFemale_ChestFront", "HumanFemale_Foot"],
           skin: true,
-          remap: { prefixes: { HumanMale_: "HumanFemale_" }, sheetSuffix: "-f" },
+          remap: { prefixes: { HumanMale_: "HumanFemale_", Glow_: "F_Glow_" }, sheetSuffix: "-f" },
         },
       ],
     },
@@ -142,7 +142,7 @@ function harness(hang: { socket?: string } = { socket: "Chest" }) {
   };
   const lastLook = (id: string) => looks.filter((l) => l.entityId === id).at(-1)?.look;
   const sheet = () => netState.get("character/player") as CharacterSheet;
-  return { runtime, bus, tick, lastLook, sheet, objects, chest, head: bone };
+  return { runtime, bus, tick, lastLook, sheet, objects, chest, head: bone, assets, netState };
 }
 
 describe("character-look builtin", () => {
@@ -162,6 +162,7 @@ describe("character-look builtin", () => {
       skinTint: "#a2704a",
       skinSheets: [{ texture: "base.png" }, { texture: "base-f.png" }],
       scale: 0.96,
+      glow: null,
     });
     expect(h.lastLook("head")).toMatchObject({ parts: ["F_HeadFace"], groups: [{ parts: ["F_HeadFace"], texture: "head-f1.png" }], skinTint: "#a2704a" });
     expect(h.lastLook("helm")).toMatchObject({ parts: [], groups: [] });
@@ -274,6 +275,49 @@ describe("character-look builtin", () => {
     h.bus.emit("inventory.unequip", { actorId: "player", slot: "helm" });
     h.tick(120);
     expect(h.lastLook("head")).toMatchObject({ parts: ["F_HeadFace"] });
+    h.runtime.dispose();
+  });
+
+  it("wears a hood and native eye item on one model with two paint groups, only selected eye parts glowing; removal clears it", async () => {
+    const h = harness();h.tick();await new Promise((r) => setTimeout(r, 0));
+    h.assets.addDataAsset({ id: "hood", type: "item", name: "hood", data: { name: "Hood", slots: ["helm"], appearance: { model: HELM, parts: ["Hood"], texture: "hood.png" } } });
+    h.assets.addDataAsset({ id: "eyes", type: "item", name: "eyes", data: { name: "Eyes", slots: ["trinket"], appearance: { model: HELM, parts: ["Glow_Left", "Glow_Right"], texture: "eyes.png", glow: { color: "#bedfff", intensity: 5, parts: ["Glow_Left", "Glow_Right", "Hood"] } } } });
+    for (const itemId of ["hood", "eyes"]) h.bus.emit("inventory.give", { actorId: "player", itemId, qty: 1 });
+    h.tick();
+    for (const [itemId, slot] of [["hood", "helm"], ["eyes", "trinket"]]) {
+      const uid = Object.entries(h.sheet().items).find(([, s]) => s.itemId === itemId)![0];
+      h.bus.emit("inventory.equip", { actorId: "player", uid, slot });h.tick(120);
+    }
+    expect(h.lastLook("helm")).toMatchObject({
+      parts: ["Hood", "F_Glow_Left", "F_Glow_Right"],
+      groups: [{ parts: ["Hood"], texture: "hood.png" }, { parts: ["F_Glow_Left", "F_Glow_Right"], texture: "eyes.png" }],
+      glow: { color: "#bedfff", intensity: 5, parts: ["F_Glow_Left", "F_Glow_Right"] },
+    });
+    expect(h.lastLook("visual")?.glow).toBeNull();expect(h.lastLook("head")?.glow).toBeNull();
+    h.bus.emit("inventory.unequip", { actorId: "player", slot: "trinket" });h.tick(120);
+    expect(h.lastLook("helm")).toMatchObject({ parts: ["Hood"], groups: [{ parts: ["Hood"], texture: "hood.png" }], glow: null });
+    h.runtime.dispose();
+  });
+
+  it("merges same-style fixed-wear glows, selects the last relevant conflicting style, and drops overwritten or hidden parts", async () => {
+    const h = harness();h.tick();await new Promise((r) => setTimeout(r, 0));
+    for (const [id, model, parts, glow] of [
+      ["left", HELM, ["Glow_Left"], { color: "#bedfff", intensity: 5 }],
+      ["right", HELM, ["Glow_Right"], { color: "#bedfff", intensity: 5 }],
+      ["red", HELM, ["Glow_Right"], { color: "#ff4400", intensity: 2 }],
+      ["cover", HELM, ["Glow_Left"], undefined],
+      ["face-light", HEAD, ["F_HeadFace"], { color: "#bedfff", intensity: 5 }],
+    ] as const) h.assets.addDataAsset({ id, type: "item", name: id, data: { name: id, slots: ["trinket"], appearance: { model, parts, texture: "eyes.png", ...(glow ? { glow } : {}) } } });
+    const wear = (ids: string[]) => {
+      for (const entity of ["body-look", "head", "helm"]) h.runtime.updateParams(entity, "character-look", { actor: "player", creation: "rules", appearance: { sex: "female" }, wear: ids });
+      h.netState.set("character/player", structuredClone(h.sheet()));
+    };
+    wear(["left", "right"]);expect(h.lastLook("helm")?.glow).toEqual({ color: "#bedfff", intensity: 5, parts: ["F_Glow_Left", "F_Glow_Right"] });
+    wear(["left", "red"]);expect(h.lastLook("helm")?.glow).toEqual({ color: "#ff4400", intensity: 2, parts: ["F_Glow_Right"] });
+    wear(["red", "left"]);expect(h.lastLook("helm")?.glow).toEqual({ color: "#bedfff", intensity: 5, parts: ["F_Glow_Left"] });
+    wear(["left", "cover"]);expect(h.lastLook("helm")?.parts).toEqual(["F_Glow_Left"]);expect(h.lastLook("helm")?.glow).toBeNull();
+    wear(["face-light", "visor"]);expect(h.lastLook("head")?.parts).toEqual([]);expect(h.lastLook("head")?.glow).toBeNull();expect(h.lastLook("helm")?.glow).toBeNull();
+    wear(["face-light"]);expect(h.lastLook("head")?.glow).toMatchObject({ parts: ["F_HeadFace"] });expect(h.lastLook("helm")?.glow).toBeNull();
     h.runtime.dispose();
   });
 });
