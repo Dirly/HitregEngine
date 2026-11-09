@@ -213,6 +213,11 @@ app mounts `@hitreg/comms`) — `send(channel, text)`, `announce(text)` (authori
 lines this tab was allowed to see; team/party membership is plain netState
 (`comms.team/<peerId>`, `comms.party/<peerId>`) — see `docs/comms.md`.
 
+Project scripts may call `ctx.netState.define(namespace, zodSchema)` before using
+their own replicated state. All copies declare the same schema; the runtime
+ignores repeated declarations during hot reload. A schema change needs a new
+play session. Registered namespaces validate writes and appear in the live spec.
+
 **Ragdoll deaths.** A prefab opts in with a child entity carrying the
 `ragdoll` builtin (params in the spec; voxel-demo mob prefabs do by default,
 see `docs/mob-ai.md` "Death: ragdoll or clip" for the flow and which families).
@@ -496,6 +501,11 @@ Attach the `day-night` builtin script to any entity (the sky is the natural
 home) and the scene's existing sky, sun and ambient become the DAY look; the
 script derives dawn, dusk and night from its params and drives everything
 through `ctx.setSky` — uniforms and light properties only, never a rebuild.
+Temporary effects can also publish `ctx.setSky({ clouds: { openings } })`.
+These world-anchored apertures cut every cloud layer, including overcast, while
+day/night and weather writes continue independently. The publishing script owns
+the list: retain its other active apertures and publish an empty list on cleanup.
+The `sky.clouds.openings` schema is the field and limit reference.
 One directional light plays both bodies: it dims to zero at sunset, swings
 under the horizon and comes back cool and faint as the moon, so shadows
 switch owner for free. The moon itself is a disc on the gradient dome

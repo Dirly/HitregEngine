@@ -2037,6 +2037,24 @@ cells within 145 m whose trees can only be HLOD impostors; and the frame itself 
 before/after on a changed scene (wandering mobs arrived between runs: speed p50 7 -> 3.7 m/s, combat VFX) was not
 comparable; that is why the harness has the in-session A/B.
 
+### 2026-11-08: the HLOD block stayed over full detail until the player stopped
+
+Owner report: "running up to an object that has a LOD will not despawn the LOD until you stop running". When a cell is
+promoted to full detail, the HLOD block that holds it keeps drawing it (impostors and coarse terrain over the real cell)
+until a `replace` re-bake of that block lands. That re-bake was starved. The residency pass queues promotion re-bakes
+first and the still-missing far ring after them, and the queue is newest-first, so the far ring went ahead. The far ring
+is never finished on Redstrand: 40-60 bakes queue for minutes and the 2 bake slots stay busy. A moving player runs a pass
+on every cell crossing, so the queue kept refilling ahead of the re-bake. Standing still let it drain. Fix
+(`ChunkManager.queueSupercell` / `pumpSupercellQueue`): a promotion re-bake is `urgent`. It goes ahead of every normal
+entry, can use one reserved bake slot (`URGENT_SUPERCELL_BAKES`), and fetches its cells at `near` priority.
+`chunkManager.urgentPromotions = false` restores the old behaviour for an A/B.
+
+Measured on Redstrand, after the far ring had settled: sprint east from the spawn at 9 m/s for 25 s, then stop. 29 cells
+were promoted on the way. Off: 17 of them stayed doubled until after the stop, lag p50 18 s, p90 32 s, and the HLOD still
+drew a cell 34 m from the player. On: 2 of 29 cleared after the stop (both were promoted within 5 s of it), lag p50
+2.0 s, p90 5.0 s, nearest doubled cell 128 m. A frame timing comparison between the arms was inconclusive because the
+probe's own per-frame scan dominated it.
+
 ## React dev-build performance tracks ate the tab on a big scene (2026-10-21)
 
 **Symptom:** the headless shot harness died at play-mode entry on the live Skelmorrow scene with

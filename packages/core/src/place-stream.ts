@@ -283,3 +283,40 @@ export function shadowlessEntities(doc: SceneDoc, hide: ReadonlyMap<string, numb
   for (const id of Object.keys(doc.entities)) if (inside(id)) out.add(id);
   return out;
 }
+
+/** A room's light: the structure enclosing it and the `culling.interior` room it stands in. */
+export interface InteriorEnclosure {
+  structure: string;
+  room: string;
+}
+
+/**
+ * Light entity id -> the structure enclosing it (the parent of its nearest `culling.interior` root: a dressed room's
+ * house) and that room. The renderer holds such a light to the structure's box above the room's floor, so a room's
+ * lamp lights nothing outside the building it stands in (render light-confine.ts: a point light without a shadow map
+ * otherwise lights the street through the wall). Skipped in an interior scene (a `cullingProfile`, a dungeon): there
+ * the rooms are the whole world.
+ */
+export function interiorEnclosures(doc: SceneDoc): Map<string, InteriorEnclosure> {
+  const out = new Map<string, InteriorEnclosure>();
+  if (Object.values(doc.entities).some((e) => "cullingProfile" in e.components)) return out;
+  const memo = new Map<string, InteriorEnclosure | null>();
+  const enclosure = (id: string | null | undefined): InteriorEnclosure | null => {
+    if (!id) return null;
+    const known = memo.get(id);
+    if (known !== undefined) return known;
+    const entity = doc.entities[id];
+    const culling = entity?.components["culling"] as { interior?: boolean } | undefined;
+    let value: InteriorEnclosure | null = null;
+    if (entity && culling?.interior === true) value = entity.parent && doc.entities[entity.parent] ? { structure: entity.parent, room: id } : null;
+    else if (entity) value = enclosure(entity.parent);
+    memo.set(id, value);
+    return value;
+  };
+  for (const [id, entity] of Object.entries(doc.entities)) {
+    if (!("light" in entity.components)) continue;
+    const found = enclosure(id);
+    if (found) out.set(id, found);
+  }
+  return out;
+}

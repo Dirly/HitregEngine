@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import { propRevealIndex, shadowlessEntities, type SceneDoc } from "@hitreg/core";
+import { interiorEnclosures, propRevealIndex, shadowlessEntities, type InteriorEnclosure, type SceneDoc } from "@hitreg/core";
 import {
   batchStaticMeshes,
   cullRootIndex,
@@ -84,7 +84,19 @@ export function createStillness(getDoc: () => SceneDoc | null, scriptClass: (nam
     subtreeStillMemo.set(id, still);
     return still;
   };
-  return { isAutoStatic, isShadowless, subtreeStill };
+  // a room's light -> the structure that encloses it (core interiorEnclosures): the light budget holds it to that box
+  let enclosureDoc: SceneDoc | null = null;
+  let enclosures = new Map<string, InteriorEnclosure>();
+  const lightEnclosure = (id: string): InteriorEnclosure | undefined => {
+    const doc = getDoc();
+    if (enclosureDoc !== doc) {
+      enclosureDoc = doc;
+      enclosures = doc ? interiorEnclosures(doc) : new Map();
+    }
+    return enclosures.get(id);
+  };
+
+  return { isAutoStatic, isShadowless, subtreeStill, lightEnclosure };
 }
 
 export interface PlacedBatcherOptions {

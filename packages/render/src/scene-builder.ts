@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import type { VegetationTint } from "@hitreg/core";
+import type { VegetationTint, CloudOpening } from "@hitreg/core";
 import { RAPIDS_FOAM_SPEED, RAPIDS_FOAM_MAX, RAPIDS_SOLID_SPEED } from "@hitreg/core";
 import { applyInstanceVegetationTint, encodeVegetationTint } from "./vegetation-tint.js";
 import { applyInstanceRockCap, buildRockCapMaterial, instanceTintOf, isRockCapMaterial, rockImpostorLook } from "./rock-cap.js";
@@ -853,6 +853,7 @@ function buildSkyDome(
   moon?: { direction: [number, number, number]; color: string; size: number; intensity: number },
   stars?: { intensity: number; density: number; size: number },
   clouds?: {
+    openings?: readonly CloudOpening[];
     coverage: number;
     scale: number;
     speed: [number, number];
@@ -917,6 +918,14 @@ function buildSkyDome(
     cloudLight: uniform(1),
     cloudNight: uniform(0),
     cloudTexOn: uniform(0),
+    cloudOpenings: Array.from({ length: 4 }, (_, i) => {
+      const o = clouds?.openings?.[i];
+      return uniform(new THREE.Vector4(o?.center[0] ?? 0, o?.center[1] ?? 0, o?.center[2] ?? 0, o?.radius ?? 0));
+    }),
+    cloudOpeningLooks: Array.from({ length: 4 }, (_, i) => {
+      const o = clouds?.openings?.[i], c = new THREE.Color(o?.color ?? "#80d4ff");
+      return uniform(new THREE.Vector4(c.r, c.g, c.b, o?.intensity ?? 0));
+    }),
     horizonOpacity: uniform(0),
   };
   // Painted layers are built against empty textures and filled on load (a
@@ -1081,7 +1090,27 @@ function buildSkyDome(
   const silver: any = mul(mul(u.moonColor, pow(moonFacing, float(24))), mul(u.moonIntensity, float(0.35)));
   const moonlit: any = mul(add(mul(skyGradient, float(1.3)), silver), sub(float(1), mul(thickness, float(0.25))));
   cloudColor = mix(cloudColor, max(cloudColor, moonlit), u.cloudNight);
+  // Project each view ray onto a WORLD-height deck. A camera-relative hole
+  // would slide away from a beacon when the player walked around it.
+  const uncutCloudAlpha: any = cloudAlpha;
+  let openingGlow: any = vec3(0, 0, 0);
+  for (let i = 0; i < 4; i++) {
+    const opening: any = u.cloudOpenings[i], look: any = u.cloudOpeningLooks[i];
+    const rayDistance: any = opening.y.sub(cameraPosition.y).div(max(dir.y, float(.02)));
+    const hit: any = cameraPosition.xz.add(dir.xz.mul(max(rayDistance, float(0))));
+    const delta: any = hit.sub(opening.xz);
+    const ripple: any = sin(atan(delta.y, delta.x).mul(7).add(time.mul(.6))).mul(opening.w.mul(.006));
+    const distance: any = length(delta).add(ripple);
+    const feather: any = max(opening.w.mul(.18), float(1));
+    const enabled: any = step(float(.01), opening.w).mul(step(float(.03), dir.y)).mul(step(float(0), rayDistance));
+    const hole: any = float(1).sub(smoothstep(opening.w.sub(feather), opening.w.add(feather), distance)).mul(enabled);
+    cloudAlpha = cloudAlpha.mul(float(1).sub(hole));
+    const edge: any = smoothstep(opening.w.sub(feather), opening.w, distance)
+      .mul(float(1).sub(smoothstep(opening.w, opening.w.add(feather.mul(1.8)), distance))).mul(enabled);
+    openingGlow = openingGlow.add(look.rgb.mul(edge).mul(look.w).mul(uncutCloudAlpha));
+  }
   colorNode = mix(colorNode, cloudColor, mul(cloudAlpha, float(0.96)));
+  colorNode = add(colorNode, openingGlow);
   /* eslint-enable @typescript-eslint/no-explicit-any */
   material.colorNode = colorNode;
   const mesh = new THREE.Mesh(geometry, material);

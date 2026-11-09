@@ -56,6 +56,14 @@ The server stream itself was smooth in every run: 0.0161 m and at most 8.9 degre
 | Walking unit's shadow stepped | cascades past the first redrew every 2nd/4th frame, and cascade 0 ends at 20.6 m | a cascade whose slice starts inside `skinnedShadowLimit()` renders every frame | 108 m cascade 99 of 99 frames; 284 m stays 27 of 99 |
 | Gear and contact patch a frame behind the body; remote bodies snapped 4 times a second | see "What the film showed" | `setTickRate` from the server's `simMs`; network sampled before animation | gear lag 641 of 641 frames to 0, snaps 80 to 0 |
 | Shadow edges crawled | sun moved a sliver each frame, turning every cascade's texel grid | held sun, stepped (`stepHeldSun`) | edges changed per frame with the clock on, not frozen |
+| Far shadows gone at the edge of the view while running or turning | a skipped (staggered) cascade keeps its old map; the slice slid past that map's edge, and a fragment outside the map reads as lit. The 8%-of-extent drift test never fired for it | `cascadeCovers`: a skipped cascade renders at once when its light-space slice box leaves the box it was drawn in | redstrand run, 221 frames: cascade 2 uncovered on 7 of 130 skipped frames (up to 1.9 m) before, 0 of 253 after, still skipping 2 frames in 3 |
+
+## glitch1.mp4 (2026-11-08, `Gifs/glitch1.mp4`, 40 fps, redstrand)
+
+- Frames 0-110: camera close under a tree; the tree draws as its blocky impostor until frame 86, then as the mesh. That is the LOD swap, not a shadow fault.
+- Frames 177-318: camera and player still (idle). Three `mmo/nature/DeadDriedTree` trees, about 30 m off (prop-pool instances, one page), lose their ground shadow AND the shade on their own trunks at frames 182-184 and 216-231, then get both back. The tree meshes are unchanged pixel for pixel in shape (not an impostor swap); only the shadow term at them is gone. Nothing else in that view casts (the pool rocks are `castShadow: false`), so "map does not cover there" and "casters missing from the map" cannot be told apart from the film.
+- **Not reproduced headless** (5-9 fps on a busy machine): standing at the grove (665,62,-232) and running through it, the DeadDriedTree page was drawn in every pass of every cascade (0 misses in 212 + 174 frames), the in-box drop probe found no visible caster leaving a cascade it was still inside, and a 45 s film of the static view (13 sun steps) showed no shadow blink. Shadow-pass draws skipped by pipelines: 13 of 45,932 in a 40 s run from the spawn, all first draws of new objects (hair instances, a POI landmark).
+- Still open for the static-view blink: something in Derek's live session that headless runs lack (Auto tier changes, adaptive resolution steps, the dev host's extra renders). Ask for an F8 capture with `?shadowWatch=1` at the moment it happens; the watcher now exposes `window.__shadowWatch` for probes.
 
 ## Tried, and did not find the open blink
 

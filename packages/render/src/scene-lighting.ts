@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import type { CloudOpening } from "@hitreg/core";
 import {
   CascadeShadowSystem,
   applyShadowSettings,
@@ -78,6 +79,7 @@ export interface SkyData extends SkyEnvironmentSource {
         sunAmount?: number;
         texture?: string | undefined;
         pixel?: number;
+        openings?: readonly CloudOpening[];
       }
     | undefined;
   horizon?: { texture: string; height: number; repeat: number; offset: number; opacity: number; depth: number } | undefined;
@@ -118,6 +120,9 @@ export interface SkyDomeUniforms {
   cloudNight: { value: number };
   /** 1 once the painted cloud texture has loaded (until then the layer is the procedural deck alone). */
   cloudTexOn: { value: number };
+  /** Four world XYZ/radius slots and their linear RGB/edge intensity. Radius zero disables. */
+  cloudOpenings: Array<{ value: THREE.Vector4 }>;
+  cloudOpeningLooks: Array<{ value: THREE.Vector4 }>;
   /** Horizon backdrop opacity, held at 0 until its texture has loaded. */
   horizonOpacity: { value: number };
 }
@@ -156,6 +161,7 @@ export interface LiveSkyOptions {
    * cold), and the wind.
    */
   clouds?: {
+    openings?: readonly CloudOpening[];
     coverage?: number;
     light?: number;
     color?: string;
@@ -373,6 +379,7 @@ export class SceneLighting {
   private readonly litTint = new THREE.Color();
   private readonly aimQuaternion = new THREE.Quaternion();
   private readonly aimVector = new THREE.Vector3();
+  private readonly aimCloudOpeningColor = new THREE.Color();
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -548,6 +555,13 @@ export class SceneLighting {
     }
     if (live.clouds && dome) {
       const c = live.clouds;
+      if (c.openings !== undefined) for (let i = 0; i < 4; i++) {
+        const opening = c.openings[i], target = dome.cloudOpenings[i]!, look = dome.cloudOpeningLooks[i]!;
+        if (!opening) { target.value.w = 0; look.value.w = 0; continue; }
+        target.value.set(...opening.center, Math.max(0, opening.radius));
+        const color = this.aimCloudOpeningColor.set(opening.color);
+        look.value.set(color.r, color.g, color.b, Math.max(0, opening.intensity));
+      }
       if (c.coverage !== undefined) req.cloudCoverage = Math.min(1, Math.max(0, c.coverage));
       if (c.light !== undefined) req.cloudLight = Math.max(0, c.light);
       if (c.color !== undefined) (req.cloudColor ??= new THREE.Color()).set(c.color);

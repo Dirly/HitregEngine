@@ -1,4 +1,4 @@
-import type { AudioChannel, ItemEffect, ItemGlow, RegionAmbientLayer, RegionSound } from "@hitreg/core";
+import type { AudioChannel, ItemEffect, ItemGlow, RegionAmbientLayer, RegionSound, CloudOpening } from "@hitreg/core";
 import type * as THREE from "three";
 import type { z } from "zod";
 import type { EntityDoc, EventRegistrationOptions, PlayerDataService } from "@hitreg/core";
@@ -21,6 +21,8 @@ export interface LiveSkyOptions {
   stars?: { intensity?: number; density?: number; size?: number; rotation?: { axis: [number, number, number]; angle: number } };
   /** `sun`/`sunAmount` are the DIRECTIONAL dawn/dusk glow: the dome resolves them per pixel against the sun's own azimuth, so only that side of the deck burns. */
   clouds?: {
+    /** Replace up to four world-anchored cloud apertures; [] clears. Omission preserves other scripts' apertures. */
+    openings?: readonly CloudOpening[];
     coverage?: number;
     light?: number;
     color?: string;
@@ -731,6 +733,8 @@ export interface ScriptChat {
  * room: commit durable results into ctx.playerData explicitly.
  */
 export interface ScriptNetState {
+  /** Register a project-owned namespace before writing it. Repeated declarations are ignored for hot reload; changing a schema requires a new session. */
+  define?(namespace: string, schema: z.ZodType): void;
   /** True when this session may write (host or single-player). */
   isAuthority(): boolean;
   get(key: string): unknown;

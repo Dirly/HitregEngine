@@ -10,16 +10,35 @@ const DAY_FOG_GLOW = 0.15;
 export const FOG_LAMP_MAX_INTENSITY = 40;
 import { LightPools } from "./light-pools.js";
 import { FOG_LAMP_COUNT, fogLamps } from "./atmosphere.js";
+import { confineOutside, confinedSlotColor, packConfine, roomConfine, type ConfinedSlotColor, type LightConfine } from "./light-confine.js";
 
 /** Diagnostic switch (ambience setLightLayerEnabled "shading"): false = the budgeted slots shade nothing. */
 export const lightShading = { enabled: true };
 /** Share of the budget line's squared distance at which a light starts to fade (0.5 = ~70 % of its distance). */
 const BUDGET_FADE_FROM = 0.5;
+/**
+ * Seconds a light takes to come on or go out when it starts or stops being a candidate (its room culled or revealed,
+ * `runtimeEnabled` switched). Without it a room revealed or hidden by the interior cull put its hearth into (or took
+ * it out of) the slots in one frame at full strength, and every light ranked after it jumped a place: the lights
+ * around you popped as you walked past the next house (Bell Strand 2026-11-08).
+ */
+export const LIGHT_PRESENCE_FADE_S = 0.45;
+/** A fading light ranks as if this much further away per missing share of presence (presence 0 ranks last). */
+const MIN_RANK_PRESENCE = 0.02;
+/** Metres outside its confine at which a confined light's glow in the fog is gone. */
+const CONFINE_FOG_FADE = 1.5;
+/** Metres inside its confine over which a confined light's halo regains its push toward the camera. */
+const HALO_NUDGE_DEPTH = 0.6;
+/** Resolves a room light's enclosing structure and its room (light-confine.ts); a missing structure = not confined (yet). */
+export type LightConfineSource = () => { structure: THREE.Object3D | null | undefined; room?: THREE.Object3D | null | undefined } | null | undefined;
 
 interface Entry {
   light: THREE.PointLight;
   importance: number;
   distanceSq: number;
+  /** 0..1: how far this light has faded in (LIGHT_PRESENCE_FADE_S); scales everything it draws. */
+  presence: number;
+  confine: LightConfine | null;
 }
 
 /**
@@ -129,6 +148,8 @@ export class LightBudgetSystem {
   private readonly cameraPosition = new THREE.Vector3();
   /** Stable proxy lights the renderer actually sees. Identity never changes. */
   private readonly slots: THREE.PointLight[] = [];
+  /** Each slot's colour node (its `colorNode`): colour × intensity, masked by the source's confine. */
+  private readonly slotColors: ConfinedSlotColor[] = [];
   /** Reused per-frame scratch: entry objects are overwritten, never re-created. */
   private readonly scratch: Entry[] = [];
   private readonly pruned: THREE.PointLight[] = [];
@@ -139,6 +160,11 @@ export class LightBudgetSystem {
   private readonly glows = new LightGlows();
   /** Screen-space pools for the lights the budget left out. */
   private readonly pools = new LightPools();
+  /** Per light: how far it has faded in (LIGHT_PRESENCE_FADE_S). Absent = never seen: it starts where it should be. */
+  private readonly presence = new WeakMap<THREE.PointLight, number>();
+  /** Per light: what encloses it (an interior room's structure); see light-confine.ts. */
+  private readonly confineSources = new WeakMap<THREE.PointLight, LightConfineSource>();
+  private lastUpdate = -1;
 
   constructor(private maxPointLights = 8) {}
 
@@ -151,15 +177,33 @@ export class LightBudgetSystem {
     this.disposeSlots();
   }
 
-  register(light: THREE.Light, importance = 1): void {
+  /**
+   * `confine`: the structure enclosing an interior light (hosts pass core `interiorEnclosures` resolved to the built
+   * object). The light then lights nothing outside that structure's box (light-confine.ts).
+   */
+  register(light: THREE.Light, importance = 1, confine?: LightConfineSource): void {
     if (!(light instanceof THREE.PointLight)) return;
     light.userData["lightImportance"] = importance;
     light.userData["runtimeEnabled"] ??= true;
+    if (confine) this.confineSources.set(light, confine);
     this.lights.add(light);
+  }
+
+  /** The box a light is held to right now, or null (not confined, or its structure not built yet). */
+  confineOf(light: THREE.PointLight): LightConfine | null {
+    const source = this.confineSources.get(light);
+    if (!source) return null;
+    const found = source();
+    return found?.structure ? roomConfine(found.structure, found.room) : null;
   }
 
   update(scene: THREE.Scene, camera: THREE.Camera): void {
     camera.getWorldPosition(this.cameraPosition);
+    const now = performance.now();
+    // the presence step: real time, clamped (a tab coming back must not snap, a test's back-to-back updates still move)
+    const dt = this.lastUpdate < 0 ? 0 : THREE.MathUtils.clamp((now - this.lastUpdate) / 1000, 1 / 240, 0.1);
+    this.lastUpdate = now;
+    const step = dt / LIGHT_PRESENCE_FADE_S;
     // Reused across frames. This runs every frame against every registered
     // light, so allocating a fresh array plus one entry object per light is
     // ~15k objects/second on a dungeon with a hundred practicals — enough GC
@@ -177,15 +221,12 @@ export class LightBudgetSystem {
         this.pruned.push(light);
         continue;
       }
-      const enabled = light.userData["runtimeEnabled"] !== false;
-      if (!enabled || !ancestorsVisible(light)) {
-        light.visible = false;
-        continue;
-      }
+      const wanted = light.userData["runtimeEnabled"] !== false && ancestorsVisible(light);
       // A shadow caster keeps its own identity and stays lit; see the class
       // comment. It is not a pool candidate and does not spend pool budget.
       if (light.castShadow) {
-        light.visible = true;
+        light.visible = wanted;
+        if (!wanted) continue;
         const onness = timeOfDayScale(light);
         readWorldPosition(light, _lightPosition);
         this.glows.add(light, _lightPosition, _lightPosition.distanceTo(this.cameraPosition), glowOf(light), onness, glowReachOf(light), worldDaylight.sunlit);
@@ -194,15 +235,30 @@ export class LightBudgetSystem {
       // Authored lights are data from here on: hidden once, never toggled
       // again, so they contribute nothing to the renderer's light cache key.
       light.visible = false;
+      // On and off are a fade, not a frame: a light whose room the cull hides keeps shading (less each frame) and
+      // ranks further back as it goes, so neither it nor the lights ranked after it jump (LIGHT_PRESENCE_FADE_S).
+      const target = wanted ? 1 : 0;
+      const was = this.presence.get(light);
+      const presence = was === undefined ? target : was + THREE.MathUtils.clamp(target - was, -step, step);
+      this.presence.set(light, presence);
+      if (presence <= 0) continue;
       // a night lantern by day (or a day light at night) takes no slot at all
-      const onness = timeOfDayScale(light);
-      if (onness < 0.01) continue;
+      const daylit = timeOfDayScale(light);
+      if (daylit < 0.01) continue;
+      const shown = presence * presence * (3 - 2 * presence);
+      const onness = daylit * shown;
       const distanceSq = readWorldPosition(light, _lightPosition).distanceToSquared(this.cameraPosition);
-      this.glows.add(light, _lightPosition, Math.sqrt(distanceSq), glowOf(light), onness, glowReachOf(light), worldDaylight.sunlit);
-      const entry = (candidates[count] ??= { light, importance: 1, distanceSq: 0 });
+      const confine = this.confineOf(light);
+      // a confined halo seen from outside its box stays on the lamp: pushed toward the camera it pokes through the wall
+      // (eased over the last HALO_NUDGE_DEPTH inside, so walking in through the door does not jump the halo)
+      const haloNudge = confine ? THREE.MathUtils.clamp(-confineOutside(confine, this.cameraPosition) / HALO_NUDGE_DEPTH, 0, 1) : 1;
+      this.glows.add(light, _lightPosition, Math.sqrt(distanceSq), glowOf(light), onness, glowReachOf(light), worldDaylight.sunlit, haloNudge);
+      const entry = (candidates[count] ??= { light, importance: 1, distanceSq: 0, presence: 1, confine: null });
       entry.light = light;
-      entry.importance = Math.max(0.001, Number(light.userData["lightImportance"]) || 1);
+      entry.importance = Math.max(0.001, Number(light.userData["lightImportance"]) || 1) * Math.max(MIN_RANK_PRESENCE, shown);
       entry.distanceSq = distanceSq;
+      entry.presence = shown;
+      entry.confine = confine;
       count++;
     }
     for (const light of this.pruned) this.lights.delete(light);
@@ -220,19 +276,25 @@ export class LightBudgetSystem {
     const slotLine = allowed < live.length ? rankOf(live[allowed]!) : null;
     for (let i = 0; i < this.slots.length; i++) {
       const slot = this.slots[i]!;
-      const source = i < allowed ? live[i]!.light : null;
-      if (!source) {
+      const tint = this.slotColors[i]!;
+      const entry = i < allowed ? live[i]! : null;
+      if (!entry) {
         // Kept in the set (identity is the whole point) but contributing
         // nothing: no intensity, and a range that reaches no fragment.
         slot.intensity = 0;
         slot.distance = 1e-4;
+        tint.color.value.setRGB(0, 0, 0);
         continue;
       }
+      const source = entry.light;
       readWorldPosition(source, slot.position);
       slot.color.copy(source.color);
-      slot.intensity = lightShading.enabled ? source.intensity * timeOfDayScale(source) * budgetEdgeFade(rankOf(live[i]!), slotLine) : 0;
+      slot.intensity = lightShading.enabled ? source.intensity * timeOfDayScale(source) * entry.presence * budgetEdgeFade(rankOf(entry), slotLine) : 0;
       slot.distance = source.distance;
       slot.decay = source.decay;
+      // the slot shades through its colour node (light-confine.ts), which is colour × intensity under the box mask
+      tint.color.value.copy(slot.color).multiplyScalar(slot.intensity);
+      packConfine(entry.confine, tint.a.value, tint.b.value);
     }
     this.active = allowed;
     this.glows.end(scene, camera);
@@ -245,7 +307,7 @@ export class LightBudgetSystem {
       const handover = i < allowed ? 1 - budgetEdgeFade(rankOf(entry), slotLine) : 1;
       if (handover <= 0) continue;
       readWorldPosition(entry.light, _lightPosition);
-      if (!this.pools.add(entry.light, _lightPosition, Math.sqrt(entry.distanceSq), timeOfDayScale(entry.light) * handover)) break;
+      if (!this.pools.add(entry.light, _lightPosition, Math.sqrt(entry.distanceSq), timeOfDayScale(entry.light) * entry.presence * handover, entry.confine)) break;
     }
     this.pools.end(scene);
 
@@ -263,9 +325,11 @@ export class LightBudgetSystem {
       // capped like the halo and mostly gone in open daylight (Red Dial 2026-10-30: 19 beacons at intensity 90 x glow 4
       // lit the noon haze over a quarter of a street frame)
       const air = DAY_FOG_GLOW + (1 - DAY_FOG_GLOW) * (1 - worldDaylight.sunlit);
+      // a room's lamp lights the air of its room: from the street it glowed on the outside of the wall it stood behind
+      const inside = entry.confine ? 1 - THREE.MathUtils.smoothstep(confineOutside(entry.confine, this.cameraPosition), 0, CONFINE_FOG_FADE) : 1;
       // and the intensity it lights the air with is capped at a bonfire's (FOG_LAMP_MAX_INTENSITY): a 90-unit beacon light lit
       // 6 % of a dusk frame of haze at 20-40 m (Red Dial tower-compounds) where its halo added nothing
-      color.copy(entry.light.color).multiplyScalar(Math.min(entry.light.intensity, FOG_LAMP_MAX_INTENSITY) * timeOfDayScale(entry.light) * Math.min(glowOf(entry.light), MAX_HALO_GLOW) * air * budgetEdgeFade(rankOf(entry), fogLine));
+      color.copy(entry.light.color).multiplyScalar(Math.min(entry.light.intensity, FOG_LAMP_MAX_INTENSITY) * timeOfDayScale(entry.light) * entry.presence * inside * Math.min(glowOf(entry.light), MAX_HALO_GLOW) * air * budgetEdgeFade(rankOf(entry), fogLine));
     }
   }
 
@@ -283,8 +347,12 @@ export class LightBudgetSystem {
       slot.castShadow = false;
       // never let a slot inherit a parent's transform or visibility
       slot.matrixAutoUpdate = true;
+      // read by three's AnalyticLightNode in place of colour × intensity: a stable node, so no cache key moves
+      const tint = confinedSlotColor();
+      (slot as THREE.PointLight & { colorNode?: unknown }).colorNode = tint.node;
       scene.add(slot);
       this.slots.push(slot);
+      this.slotColors.push(tint);
     }
     this.slotHost = scene;
   }
@@ -292,6 +360,7 @@ export class LightBudgetSystem {
   private disposeSlots(): void {
     for (const slot of this.slots) slot.removeFromParent();
     this.slots.length = 0;
+    this.slotColors.length = 0;
     this.slotHost = null;
   }
 
@@ -303,6 +372,7 @@ export class LightBudgetSystem {
     for (const color of fogLamps.color) color.value.setRGB(0, 0, 0);
     this.lights.clear();
     this.active = 0;
+    this.lastUpdate = -1;
   }
 
   stats(): { registered: number; active: number; budget: number; glows: number; pools: number } {

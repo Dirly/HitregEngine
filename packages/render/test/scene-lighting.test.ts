@@ -423,6 +423,23 @@ describe("weather tint follows the daylight", () => {
   });
 });
 
+describe("world-anchored cloud apertures", () => {
+  it("keeps apertures through weather updates and clears all slots without rebuilding the dome", () => {
+    const built = buildScene(doc({sky: skyEntity({environment:{mode:"none"},clouds:{coverage:.9}})}));
+    const lighting=built.lighting,dome=lighting.skyDomeUniforms()!;
+    lighting.setSkyLive({clouds:{openings:[{center:[708,244,-329],radius:32,color:"#73ceff",intensity:.55}]}});
+    expect(dome.cloudOpenings[0]!.value.toArray()).toEqual([708,244,-329,32]);
+    expect(dome.cloudOpeningLooks[0]!.value.w).toBe(.55);
+    lighting.setSkyLive({clouds:{coverage:1},weather:{overcast:1}});
+    expect(lighting.skyDomeUniforms()).toBe(dome);
+    expect(dome.cloudOpenings[0]!.value.w).toBe(32);
+    lighting.setSkyLive({clouds:{openings:[]}});
+    expect(dome.cloudOpenings.every(slot=>slot.value.w===0)).toBe(true);
+    expect(dome.cloudOpeningLooks.every(slot=>slot.value.w===0)).toBe(true);
+    built.lighting.dispose();
+  });
+});
+
 describe("zone mood: dusk cloud burn", () => {
   it("replaces the day/night cloud-burn colour by sunsetAmount, scales the glow, and hands both back on clear", () => {
     const built = buildScene(doc({ sun: sunEntity({ shadow: { enabled: false } }), sky: skyEntity({ environment: { mode: "none" }, clouds: { coverage: 0.4 } }) }));

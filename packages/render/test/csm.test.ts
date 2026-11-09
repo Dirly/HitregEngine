@@ -337,3 +337,24 @@ describe("stepHeldSun", () => {
     expect(held.distanceTo(sunAt(150))).toBeLessThan(1e-9);
   });
 });
+
+import { cascadeCovers, cascadeDue as staggerDue } from "../src/csm.js";
+describe("staggered cascade coverage", () => {
+  const box = (minX: number, maxX: number, minY: number, maxY: number) => ({ min: { x: minX, y: minY }, max: { x: maxX, y: maxY } });
+  it("keeps skipping while the slice still fits the map it was drawn into", () => {
+    expect(cascadeCovers({ x: 0, y: 0, half: 100 }, box(-90, 95, -100, 100))).toBe(true);
+  });
+  it("calls a slice that slid past the drawn map's edge uncovered, however small the slide", () => {
+    // a turn moves the slice's far corner 2 m past the edge: the old 8%-of-extent drift test would not fire
+    expect(cascadeCovers({ x: 0, y: 0, half: 100 }, box(-98, 102, -50, 50))).toBe(false);
+    expect(cascadeCovers({ x: 0, y: 0, half: 100 }, box(-50, 50, -100.5, 40))).toBe(false);
+  });
+  it("calls a cascade never drawn (or reset by a sun step) uncovered", () => {
+    expect(cascadeCovers(null, box(0, 1, 0, 1))).toBe(false);
+  });
+  it("renders an uncovered far cascade on a frame the stagger would have skipped", () => {
+    const skipped = [...Array(8).keys()].filter((f) => !staggerDue(2, f, 0));
+    expect(skipped.length).toBeGreaterThan(0);
+    for (const f of skipped) expect(staggerDue(2, f, 0, false, true)).toBe(true);
+  });
+});

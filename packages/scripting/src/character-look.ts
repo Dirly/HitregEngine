@@ -18,6 +18,9 @@ import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } fro
 
 type WornPiece = LookPiece & { glow?: ItemGlow | undefined };
 
+/** Every part hidden: a socketed piece before it is seated on its bone. */
+const HIDDEN_LOOK: ModelLook = { parts: [] };
+
 /** One glow style per model: final visible item ownership, then last relevant style wins. */
 function wornGlow(pieces: readonly WornPiece[], model: string, visible: readonly string[], remap: LookRemap | null | undefined): ItemGlow | null {
   const shown = new Set(visible), owner = new Map<string, WornPiece>();
@@ -108,6 +111,12 @@ export class CharacterLook extends Script {
   private targetModel = "";
   private bodyId = "";
   private shown = "";
+  /** The look the build asks for; a socketed piece shows it only once {@link seated}. */
+  private wanted: ModelLook | null = null;
+  /** This copy dresses a model on a bone (not the body). */
+  private socketed = false;
+  /** The piece has been placed on its bone at least once (see applyLook). */
+  private seated = false;
   private placement: ModelPlacement | null = null;
   private bone: THREE.Object3D | null = null;
   private boneName = "";
@@ -245,6 +254,21 @@ export class CharacterLook extends Script {
       ...(mine?.tintWhole ? { tintWhole: true } : {}),
       ...(isBody ? { scale: dressed.scale } : {}),
     };
+    this.wanted = look;
+    this.socketed = !isBody;
+    this.applyLook();
+  }
+
+  /**
+   * Hand the host the look — except a socketed piece that has not yet been seated on its bone, which stays hidden.
+   * Until onLateUpdate places it, the piece's holder is the entity's authored transform: scale 1 at the body's feet.
+   * The head, hair, helm and shoulder models are built in the body's frame at about 50 times their worn scale (their
+   * mount scale is ~0.01 of a CC rig), so drawn there a head hangs some 80 m over its body: the "floating giant heads"
+   * over every mob too far away to run its late update (the runtime's mob sleep), or whose body has not loaded.
+   */
+  private applyLook(): void {
+    const look = this.socketed && !this.seated ? HIDDEN_LOOK : this.wanted;
+    if (!look) return;
     const key = JSON.stringify(look);
     if (key === this.shown) return;
     this.shown = key;
@@ -301,6 +325,10 @@ export class CharacterLook extends Script {
     this.poseSeen = version;
     this.placementSeen = at;
     (this.parentSeen ??= parent.matrixWorld.clone()).copy(parent.matrixWorld);
+    if (!this.seated) {
+      this.seated = true;
+      this.applyLook();
+    }
   }
 
   /**

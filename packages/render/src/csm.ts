@@ -383,10 +383,30 @@ const CASCADE_STALE_SHARE = 0.08;
  * Is cascade `index` due on frame `frame`, its fit having moved `movedShare` of its extent since it last rendered?
  * `holdsBodies`: its slice starts inside the reach of animated bodies' shadows.
  */
-export function cascadeDue(index: number, frame: number, movedShare: number, holdsBodies = false): boolean {
-  if (index <= 0 || holdsBodies || movedShare > CASCADE_STALE_SHARE) return true;
+export function cascadeDue(index: number, frame: number, movedShare: number, holdsBodies = false, uncovered = false): boolean {
+  if (index <= 0 || holdsBodies || uncovered || movedShare > CASCADE_STALE_SHARE) return true;
   const period = Math.min(CASCADE_MAX_PERIOD, 2 ** index);
   return frame % period === index % period;
+}
+
+/** Where a cascade's map was drawn, in light space: the snapped centre and the half-width of its ortho box. */
+export interface CascadeCoverage {
+  x: number;
+  y: number;
+  half: number;
+}
+
+/**
+ * Does the map drawn at `rendered` still hold the whole slice whose light-space box is `box`? A skipped cascade keeps
+ * its old map and matrix, and a fragment outside that map reads as lit, so the part of the slice that has slid past the
+ * map's edge lost its shadows until the next scheduled pass (measured 2026-11-08 on a run: cascade 2 left uncovered on
+ * 7 of 130 skipped frames, by up to 1.9 m, while the old 8%-of-extent drift test saw nothing). Exact, so a cascade
+ * whose slice still fits keeps skipping.
+ */
+export function cascadeCovers(rendered: CascadeCoverage | null | undefined, box: { min: { x: number; y: number }; max: { x: number; y: number } }): boolean {
+  if (!rendered) return false;
+  return box.min.x >= rendered.x - rendered.half && box.max.x <= rendered.x + rendered.half &&
+    box.min.y >= rendered.y - rendered.half && box.max.y <= rendered.y + rendered.half;
 }
 
 /**
@@ -431,6 +451,8 @@ class EngineCascadeShadowNode extends CSMShadowNode {
   readonly cascadeExtents: number[] = [];
   /** Where each cascade's fit stood when it last rendered (world), for the stagger's staleness test. */
   private readonly renderedAt: THREE.Vector3[] = [];
+  /** Where each cascade's map was last drawn in light space, for the stagger's coverage test (null = never / reset). */
+  private readonly renderedCover: (CascadeCoverage | null)[] = [];
   private staggerFrame = 0;
   /** The sun direction the cascades aim along; see SHADOW_SUN_STEP_DEGREES. */
   private readonly heldSun = new THREE.Vector3();
@@ -457,6 +479,7 @@ class EngineCascadeShadowNode extends CSMShadowNode {
     this.maxFar = this.authoredFar * sunShadowQuality.reach;
     this.updateFrustums();
     for (const at of this.renderedAt) at.set(Infinity, 0, 0);
+    this.renderedCover.fill(null);
     for (const cascadeLight of this.lights) if (cascadeLight?.shadow) cascadeLight.shadow.needsUpdate = sunShadowQuality.enabled;
   }
 
@@ -522,7 +545,10 @@ class EngineCascadeShadowNode extends CSMShadowNode {
     if (lightWorld.distanceToSquared(targetWorld) < 1e-12) return; // degenerate aim
     lightDirection.subVectors(targetWorld, lightWorld).normalize();
     // every cascade moves together on a step, or their seams would disagree about where the shadow falls
-    if (stepHeldSun(this.heldSun, lightDirection)) for (const at of this.renderedAt) at.set(Infinity, 0, 0);
+    if (stepHeldSun(this.heldSun, lightDirection)) {
+      for (const at of this.renderedAt) at.set(Infinity, 0, 0);
+      this.renderedCover.fill(null);
+    }
     lightDirection.copy(this.heldSun);
     // Matrix4.lookAt builds rotation only, so only the DIRECTION between these
     // two points matters — which is the whole point of using world ones.
@@ -559,6 +585,9 @@ class EngineCascadeShadowNode extends CSMShadowNode {
       cascadeCenter.z = cascadeBox.max.z + this.lightMargin;
       if (texelWidth > 0) cascadeCenter.x = Math.floor(cascadeCenter.x / texelWidth) * texelWidth;
       if (texelHeight > 0) cascadeCenter.y = Math.floor(cascadeCenter.y / texelHeight) * texelHeight;
+      const covered = cascadeCovers(this.renderedCover[i], cascadeBox);
+      const lightX = cascadeCenter.x;
+      const lightY = cascadeCenter.y;
       cascadeCenter.applyMatrix4(lightOrientation);
 
       cascadeAim.copy(cascadeCenter).add(lightDirection);
@@ -569,10 +598,16 @@ class EngineCascadeShadowNode extends CSMShadowNode {
       const extent = this.cascadeExtents[i] ?? 0;
       const moved = extent > 0 ? at.distanceTo(cascadeCenter) / extent : Infinity;
       const sliceNear = i === 0 ? 0 : (this.breaks[i - 1] ?? 0) * Math.min((camera as THREE.PerspectiveCamera).far, this.maxFar);
-      const due = !cascadeStagger.enabled || cascadeDue(i, this.staggerFrame, moved, sliceNear < skinnedShadowLimit());
+      const due = !cascadeStagger.enabled || cascadeDue(i, this.staggerFrame, moved, sliceNear < skinnedShadowLimit(), !covered);
       shadow.autoUpdate = false;
       shadow.needsUpdate = due;
-      if (due) at.copy(cascadeCenter);
+      if (due) {
+        at.copy(cascadeCenter);
+        const half = (shadowCamera.right - shadowCamera.left) / 2;
+        const cover = this.renderedCover[i];
+        if (cover) { cover.x = lightX; cover.y = lightY; cover.half = half; }
+        else this.renderedCover[i] = { x: lightX, y: lightY, half };
+      }
     }
   }
 

@@ -3843,6 +3843,7 @@ class Weather extends Script {
         "softens shadows. Rain and snow close the sky fully whatever this says. Console: /overcast.",
     },
     overcastMax: { default: 0.7, min: 0, max: 1, description: "auto only: the greyest a dry roll can be." },
+    wetGround: { default: false, description: "Rain soaks the ground and town walls (darker, with matte puddle patches). Off by default (Derek 2026-11-08: the puddle patches read as dark shapes on the ground); /ground wet still pins it for a look." },
     cloudCover: {
       default: "auto",
       description:
@@ -4068,7 +4069,7 @@ class Weather extends Script {
     // Ground soaks in over ~20 s of rain and dries over ~2 min after it; snow
     // is its own look and leaves the ground as it was, as does going under water.
     if (!submerged) {
-      const soak = Math.min(1, this.local.rain / 0.4);
+      const soak = this.param<boolean>("wetGround") ? Math.min(1, this.local.rain / 0.4) : 0;
       const rate = soak > this.wetness ? 1 / 20 : 1 / 120;
       this.wetness += Math.sign(soak - this.wetness) * Math.min(Math.abs(soak - this.wetness), rate * dt);
       // snow settles over ~2 min of steady snowfall and melts over ~6 min

@@ -1990,10 +1990,16 @@ export const audioSchema = z.object({
   channel: z.enum(AUDIO_CHANNELS).optional().describe("Mixer channel the player's Audio settings control. Unset: a loop is ambience, anything else effects."),
 });
 
-/**
- * Environment sky: gradient dome + matching background/fog + hemisphere fill.
- * One per scene (first wins).
- */
+/** A world-anchored opening shared by authored sky data and live sky requests. */
+export const cloudOpeningSchema = z.object({
+  center: z.tuple([z.number().finite(), z.number().finite(), z.number().finite()]).describe("World-space centre in metres. Y is the height where the view ray meets the virtual cloud deck; X/Z anchor the opening above a world location as the camera moves."),
+  radius: z.number().min(0).max(2000).describe("Opening radius in metres. Zero disables the slot. The boundary feathers and ripples rather than drawing a solid circle."),
+  color: hexColor.default("#80d4ff").describe("Light caught by cloud around the opening; never fills clear sky."),
+  intensity: z.number().min(0).max(8).default(.6).describe("Edge glow strength; zero keeps the cloud opening without its glow."),
+});
+export type CloudOpening = z.infer<typeof cloudOpeningSchema>;
+
+/** Environment sky: gradient dome + matching background/fog + hemisphere fill. One per scene (first wins). */
 export const skySchema = z.object({
   top: hexColor.default("#39598f"),
   bottom: hexColor.default("#101522"),
@@ -2171,6 +2177,7 @@ export const skySchema = z.object({
    * it (white by day, warm at dawn, dark at night); coverage stays authored. */
   clouds: z
     .object({
+      openings: z.array(cloudOpeningSchema).max(4).optional().describe("Up to four world-anchored apertures through both painted cloud layers and the overcast filler. Live scripts replace this list through ctx.setSky; publish [] on disposal. Other cloud/weather writes preserve it."),
       coverage: z
         .number()
         .min(0)

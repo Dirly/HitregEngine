@@ -906,6 +906,9 @@ export const bloomCadence = { every: 2 };
  * put bloom at 0.35. Denoise then runs on the smaller buffer too.
  */
 const AO_RESOLUTION_SCALE = 0.5;
+/** View distance (m) over which AO fades out; past AO_FADE_FAR it is not applied (see the AO composite). */
+const AO_FADE_NEAR = 40;
+const AO_FADE_FAR = 80;
 
 /* -------------------------------------------------------------------------- */
 /* The chain                                                                   */
@@ -1124,7 +1127,16 @@ export class PostChain {
       const lit = color.rgb.sub(em).max(vec3(0));
       // GTAO's built-in background discard assumes far depth = 1. Our WebGPU
       // buffer is reversed (far = 0), so explicitly leave the sky unoccluded.
-      const visibility = isSkyDepth(depthNode.r).select(float(1), aoTexture.r);
+      // GTAO is a near-field term: its radius is metres in view space, so a few tens of metres out its samples fall
+      // within a pixel or two of the centre and the result is noise from depth precision and depth-reconstructed
+      // normals. It is applied AFTER fog, so on far land that noise drew scanline stripes and a hard-edged dark band
+      // through the fog, seen from any raised view (redstrand 2026-11-08; `ambientOcclusion = false` removed it).
+      // Fade it out by view distance; past the fade it is not read at all (a NaN would survive a mix), so it can
+      // never darken fogged distance again.
+      const viewDistance = scenePass.getViewZNode().negate() as Tsl;
+      const fade = smoothstep(AO_FADE_NEAR, AO_FADE_FAR, viewDistance);
+      const far = isSkyDepth(depthNode.r).or(viewDistance.greaterThanEqual(AO_FADE_FAR));
+      const visibility = far.select(float(1), mix(saturate(aoTexture.r), float(1), fade));
       color = vec4(lit.mul(visibility).add(em), color.a);
     }
 

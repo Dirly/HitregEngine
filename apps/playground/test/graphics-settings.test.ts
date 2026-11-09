@@ -54,10 +54,18 @@ test("presets step in one direction: lower never costs more", () => {
 });
 
 test("garbage in storage never reaches the engine", () => {
-  const out = normalizeGraphics({ preset: "epic", renderScale: 4, shadows: "rtx", grass: "lots", weather: -3, lod: 99, drawDistance: Number.NaN, junk: 1 });
-  assert.deepEqual(out, { ...DEFAULT_GRAPHICS, weather: 0, lod: 1.25 });
+  const out = normalizeGraphics({ preset: "custom", renderScale: 4, shadows: "rtx", grass: "lots", weather: -3, lod: 99, drawDistance: Number.NaN, junk: 1 });
+  assert.deepEqual(out, { ...DEFAULT_GRAPHICS, preset: "custom", weather: 0, lod: 1.25 });
+  assert.deepEqual(normalizeGraphics({ preset: "epic", lod: 99 }), DEFAULT_GRAPHICS);
   assert.deepEqual(loadGraphics(memory({ [GRAPHICS_STORAGE_KEY]: "{not json" })), DEFAULT_GRAPHICS);
   assert.deepEqual(loadGraphics(null), DEFAULT_GRAPHICS);
+});
+
+test("a named preset loads its current values, not the ones stored under its name by an older build", () => {
+  const storage = memory({ [GRAPHICS_STORAGE_KEY]: JSON.stringify({ ...PRESETS.high, preset: "high", autoTier: "high", shadows: "low", lod: 0.6, drawDistance: 0.7 }) });
+  assert.deepEqual(loadGraphics(storage), DEFAULT_GRAPHICS);
+  const auto = memory({ [GRAPHICS_STORAGE_KEY]: JSON.stringify({ ...PRESETS.high, preset: "auto", autoTier: "medium", grass: 1 }) });
+  assert.deepEqual(loadGraphics(auto), { preset: "auto", autoTier: "medium", ...PRESETS.medium });
 });
 
 test("settings survive a save and load, and a storage that throws costs nothing", () => {

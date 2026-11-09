@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three/webgpu";
 import { budgetEdgeFade, LightBudgetSystem } from "../src/light-budget.js";
 
@@ -247,5 +247,109 @@ describe("budgetEdgeFade", () => {
     expect(budgetEdgeFade(75, 100)).toBeCloseTo(0.5);
     expect(budgetEdgeFade(100, 100)).toBe(0);
     expect(budgetEdgeFade(100, null)).toBe(1);
+  });
+});
+
+describe("light presence (Bell Strand 2026-11-08: lights popped as rooms were culled and revealed)", () => {
+  it("fades a light out over LIGHT_PRESENCE_FADE_S when its room hides, instead of dropping it in one frame", async () => {
+    const { LIGHT_PRESENCE_FADE_S } = await import("../src/light-budget.js");
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera();
+    const room = new THREE.Group();
+    const light = new THREE.PointLight(0xffffff, 4, 10);
+    room.add(light);
+    scene.add(room);
+    const budget = new LightBudgetSystem(2);
+    budget.register(light);
+    let now = 1000;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const slotIntensity = () => litPointLights(scene).reduce((a, l) => a + l.intensity, 0);
+    budget.update(scene, camera);
+    // first sight: where it should be, no fade-in from nothing at load
+    expect(slotIntensity()).toBeCloseTo(4);
+    room.visible = false;
+    const seen: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      now += 50;
+      budget.update(scene, camera);
+      seen.push(slotIntensity());
+    }
+    // gone within the fade, and every step on the way is small
+    expect(seen[0]!).toBeGreaterThan(3);
+    expect(seen[seen.length - 1]).toBe(0);
+    for (let i = 1; i < seen.length; i++) expect(Math.abs(seen[i]! - seen[i - 1]!)).toBeLessThan(4 * (0.05 / LIGHT_PRESENCE_FADE_S) * 1.6);
+    // and back
+    room.visible = true;
+    now += 50;
+    budget.update(scene, camera);
+    expect(slotIntensity()).toBeLessThan(1);
+    clock.mockRestore();
+    budget.dispose();
+  });
+
+  it("ranks a light that is fading in behind the lights already lit, so it does not shove them out of their slots", () => {
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera();
+    const budget = new LightBudgetSystem(1);
+    const lit = new THREE.PointLight(0xff0000, 4, 10);
+    lit.position.x = 5;
+    const room = new THREE.Group();
+    room.visible = false;
+    const near = new THREE.PointLight(0x00ff00, 4, 10);
+    near.position.x = 1;
+    room.add(near);
+    scene.add(lit, room);
+    budget.register(lit);
+    budget.register(near);
+    budget.update(scene, camera);
+    room.visible = true; // the nearer room is revealed: its light starts at presence ~0
+    budget.update(scene, camera);
+    const slot = litPointLights(scene)[0]!;
+    expect(slot.color.getHex()).toBe(0xff0000);
+    budget.dispose();
+  });
+});
+
+describe("interior light confine (light-confine.ts)", () => {
+  it("measures a turned structure in its own frame and says how far a point is outside it", async () => {
+    const { structureConfine, confineOutside } = await import("../src/light-confine.js");
+    const house = new THREE.Group();
+    house.position.set(100, 0, 50);
+    house.rotation.y = Math.PI / 4;
+    const shell = new THREE.Mesh(new THREE.BoxGeometry(6, 8, 18), new THREE.MeshBasicMaterial());
+    shell.position.y = 4;
+    house.add(shell);
+    const c = structureConfine(house, 0)!;
+    expect(c.half.x).toBeCloseTo(3);
+    expect(c.half.y).toBeCloseTo(4);
+    expect(c.half.z).toBeCloseTo(9);
+    // a point 1 m beyond the long wall, along the house's own +x
+    const out = new THREE.Vector3(4, 2, 0).applyEuler(house.rotation).add(house.position);
+    expect(confineOutside(c, out)).toBeCloseTo(1);
+    const inside = new THREE.Vector3(2, 2, 8).applyEuler(house.rotation).add(house.position);
+    expect(confineOutside(c, inside)).toBeLessThan(0);
+  });
+
+  it("hands a confined light's box to the pool and holds its halo on the lamp from outside", async () => {
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(20, 1, 0);
+    const house = new THREE.Mesh(new THREE.BoxGeometry(6, 4, 6), new THREE.MeshBasicMaterial());
+    house.position.y = 2;
+    scene.add(house);
+    const lamp = new THREE.PointLight(0xffffff, 4, 6);
+    lamp.position.set(2.5, 1, 0);
+    scene.add(lamp);
+    const budget = new LightBudgetSystem(0); // everything goes to pools
+    budget.register(lamp, 1, () => ({ structure: house }));
+    budget.update(scene, camera);
+    const pools = (budget as any).pools.data as Float32Array;
+    expect(pools[12]).toBeCloseTo(3); // half x of the house box
+    const halos = (budget as any).glows.data as Float32Array;
+    expect(halos[7]).toBe(0); // camera outside the box: no nudge through the wall
+    camera.position.set(0, 1, 0);
+    budget.update(scene, camera);
+    expect(((budget as any).glows.data as Float32Array)[7]).toBe(1);
+    budget.dispose();
   });
 });

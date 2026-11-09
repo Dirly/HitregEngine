@@ -340,7 +340,7 @@ async function main(): Promise<void> {
     modelLooks,
     clipsOf: (entityId) => animations.clipsOf(entityId),
   });
-  const { isAutoStatic, isShadowless, subtreeStill } = createStillness(
+  const { isAutoStatic, isShadowless, subtreeStill, lightEnclosure } = createStillness(
     () => expanded,
     (name) => scriptRegistry.get(name) as { stillWith?: (params: Record<string, unknown>) => boolean } | undefined,
   );
@@ -389,7 +389,11 @@ async function main(): Promise<void> {
     resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onParticles: (entityId, group, data) => particles.register(entityId, group, data, (id: string) => assets.getTexture(id)?.url),
     onVfx: (entityId, group, data) => ambientVfx.register(entityId, group, data),
-    onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
+    // a room's light is held to the box of the structure enclosing it (render light-confine.ts)
+    onLight: (entityId, light, importance) => {
+      const inside = lightEnclosure(entityId);
+      lightBudget.register(light, importance, inside ? () => ({ structure: built?.objects.get(inside.structure), room: built?.objects.get(inside.room) }) : undefined);
+    },
     onBillboard: (entityId, group, data) =>
       billboards.register(entityId, group, data, {
         texture: (id: string) => assets.getTexture(id)?.url,

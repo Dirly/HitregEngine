@@ -90,7 +90,15 @@ claim renderables under an already registered room root, including meshes that a
 Room-root cull verdicts also gate particle simulation, ambient VFX and authored light candidates. Culling leaves
 authored `visible` values alone; a shared hierarchy visibility check carries the verdict to effects whose rendered
 objects live outside their source room. Pooled point-light slots remain present with stable identities; hidden
-sources stop competing for them. This is distance/terrain culling, not building-wall occlusion or room unloading.
+sources stop competing for them, fading out (and revealed ones in) over `LIGHT_PRESENCE_FADE_S` while ranking behind
+lit ones, so a room culled or revealed next door never pops the lights around you. This is distance/terrain culling,
+not building-wall occlusion or room unloading.
+
+A light under a `culling.interior` room is held to its building (`light-confine.ts`): core `interiorEnclosures` names
+the room's parent structure, and the light's slot, pool, halo and fog glow light nothing outside that structure's
+yaw-aligned geometry box, floored at the room's lowest furnishing. Point lights have no shadow maps, so without it a
+hearth lit the street and the neighbour through the wall. A room root with no parent structure, and interior scenes
+(`cullingProfile`), are not confined. A/B: `lightConfine.enabled` (render export).
 Window-daylight fixtures on outward-facing window anchors belong to the room behind the pane, so they follow
 the same room gate rather than becoming a separate outdoor lighting group (`resolveDressing`).
 

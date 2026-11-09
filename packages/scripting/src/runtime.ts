@@ -1003,6 +1003,9 @@ export class ScriptRuntime {
       return tracked;
     };
     return {
+      define: (namespace, schema) => {
+        if (!Object.hasOwn(store.jsonSchemas(), namespace)) store.define(namespace, schema);
+      },
       isAuthority: () => store.isAuthority(),
       get: (key) => store.get(key),
       keys: (prefix) => store.keys(prefix),

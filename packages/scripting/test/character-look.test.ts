@@ -164,13 +164,37 @@ describe("character-look builtin", () => {
       scale: 0.96,
       glow: null,
     });
-    expect(h.lastLook("head")).toMatchObject({ parts: ["F_HeadFace"], groups: [{ parts: ["F_HeadFace"], texture: "head-f1.png" }], skinTint: "#a2704a" });
-    expect(h.lastLook("helm")).toMatchObject({ parts: [], groups: [] });
     // the head rides its bone in the bone's space: 1.5 + 2 up, at the mount's scale
     h.runtime.lateUpdate(1 / 60);
+    expect(h.lastLook("head")).toMatchObject({ parts: ["F_HeadFace"], groups: [{ parts: ["F_HeadFace"], texture: "head-f1.png" }], skinTint: "#a2704a" });
+    expect(h.lastLook("helm")).toMatchObject({ parts: [], groups: [] });
     const head = h.objects.get("head")!;
     expect(head.position.y).toBeCloseTo(3.5);
     expect(head.scale.x).toBeCloseTo(0.5);
+    h.runtime.dispose();
+  });
+
+  it("keeps a socketed piece hidden until it sits on its bone: never drawn at its authored scale over the body", async () => {
+    const h = harness();
+    h.tick();
+    await new Promise((r) => setTimeout(r, 0));
+    const head = h.objects.get("head")!;
+    // no late update yet (a mob asleep past the sleep radius never runs one): the holder is still the
+    // entity's authored transform, scale 1 at the body's feet, so the piece must not show
+    expect(head.scale.x).toBeCloseTo(1);
+    expect(h.lastLook("head")).toEqual({ parts: [] });
+    // the body is still loading: no socket bone to sit on, still hidden
+    h.head.name = "Loading";
+    h.runtime.lateUpdate(1 / 60);
+    expect(h.lastLook("head")).toEqual({ parts: [] });
+    expect(head.scale.x).toBeCloseTo(1);
+    // the bone arrives: placed on it, and only then shown
+    h.head.name = "Head";
+    h.runtime.lateUpdate(1 / 60);
+    expect(head.scale.x).toBeCloseTo(0.5);
+    expect(h.lastLook("head")).toMatchObject({ parts: ["F_HeadFace"] });
+    // the body look never waits for a bone
+    expect(h.lastLook("visual")?.parts?.length).toBeGreaterThan(0);
     h.runtime.dispose();
   });
 
@@ -263,6 +287,7 @@ describe("character-look builtin", () => {
     h.tick(120);
     await new Promise((r) => setTimeout(r, 0));
     h.tick();
+    h.runtime.lateUpdate(1 / 60); // seated on the head bone: shown from here on
     expect(h.sheet().equipment.helm).toBe(uid);
     expect(h.lastLook("helm")).toMatchObject({ parts: ["Visor"], groups: [{ parts: ["Visor"], texture: "helm.png" }] });
     expect(h.lastLook("head")).toMatchObject({ parts: [], groups: [] });
@@ -279,7 +304,7 @@ describe("character-look builtin", () => {
   });
 
   it("wears a hood and native eye item on one model with two paint groups, only selected eye parts glowing; removal clears it", async () => {
-    const h = harness();h.tick();await new Promise((r) => setTimeout(r, 0));
+    const h = harness();h.tick();await new Promise((r) => setTimeout(r, 0));h.runtime.lateUpdate(1 / 60);
     h.assets.addDataAsset({ id: "hood", type: "item", name: "hood", data: { name: "Hood", slots: ["helm"], appearance: { model: HELM, parts: ["Hood"], texture: "hood.png" } } });
     h.assets.addDataAsset({ id: "eyes", type: "item", name: "eyes", data: { name: "Eyes", slots: ["trinket"], appearance: { model: HELM, parts: ["Glow_Left", "Glow_Right"], texture: "eyes.png", glow: { color: "#bedfff", intensity: 5, parts: ["Glow_Left", "Glow_Right", "Hood"] } } } });
     for (const itemId of ["hood", "eyes"]) h.bus.emit("inventory.give", { actorId: "player", itemId, qty: 1 });
@@ -300,7 +325,7 @@ describe("character-look builtin", () => {
   });
 
   it("merges same-style fixed-wear glows, selects the last relevant conflicting style, and drops overwritten or hidden parts", async () => {
-    const h = harness();h.tick();await new Promise((r) => setTimeout(r, 0));
+    const h = harness();h.tick();await new Promise((r) => setTimeout(r, 0));h.runtime.lateUpdate(1 / 60);
     for (const [id, model, parts, glow] of [
       ["left", HELM, ["Glow_Left"], { color: "#bedfff", intensity: 5 }],
       ["right", HELM, ["Glow_Right"], { color: "#bedfff", intensity: 5 }],

@@ -5,6 +5,7 @@ import {
   ComponentRegistry,
   createScene,
   registerCoreComponents,
+  NetStateStore,
   type Op,
   type SceneDoc,
 } from "@hitreg/core";
@@ -13,9 +14,11 @@ import {
   registerBuiltinScripts,
   ScriptRegistry,
   ScriptRuntime,
+  Script,
   type InputLike,
   type SimLike,
 } from "../src/index.js";
+import { z } from "zod";
 
 const coreRegistry = new ComponentRegistry();
 registerCoreComponents(coreRegistry);
@@ -43,6 +46,28 @@ describe("ScriptRegistry", () => {
 });
 
 describe("ScriptRuntime", () => {
+  it("lets project scripts declare validated replicated state across repeated starts", () => {
+    class ProjectState extends Script {
+      static override scriptName = "test-project-state";
+      override onStart(): void {
+        this.ctx.netState?.define?.("projectTimer", z.number().nonnegative());
+      }
+    }
+    const registry = scriptRegistry(); registry.register(ProjectState);
+    const doc = scene([{"op":"add-entity",id:"a",entity:{name:"A",parent:null,tags:[],components:{script:{name:"test-project-state"}}}}]);
+    const netState = new NetStateStore();
+    const runtime = new ScriptRuntime({doc,objects:new Map([["a",new THREE.Object3D()]]),sim:null,registry,input:noInput,netState});
+    runtime.start();
+    expect(netState.set("projectTimer/shrine",20)).toBe(true);
+    expect(netState.set("projectTimer/shrine",-1)).toBe(false);
+    expect(netState.get("projectTimer/shrine")).toBe(20);
+    expect(netState.jsonSchemas()["projectTimer"]).toBeDefined();
+    runtime.dispose();
+    const restarted = new ScriptRuntime({doc,objects:new Map([["a",new THREE.Object3D()]]),sim:null,registry,input:noInput,netState});
+    expect(()=>restarted.start()).not.toThrow();
+    expect(netState.get("projectTimer/shrine")).toBe(20);
+    restarted.dispose();
+  });
   it("spinner rotates its object; params override defaults", () => {
     const doc = scene([
       {

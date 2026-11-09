@@ -38,6 +38,8 @@ export {
   AUDIO_CHANNELS,
   type AudioChannel,
   skySchema,
+  cloudOpeningSchema,
+  type CloudOpening,
   postfxSchema,
   particlesSchema,
   billboardSchema,
@@ -489,4 +491,4 @@ export { COOLDOWN_NETSTATE, cooldownKey, cooldownSchema, registerCooldownNetStat
 export * from "./place-solver/index.js";
 export { placeRuleSchema, placeOpeningSchema, registerPlaceRuleComponent, PLACE_SEATS, type PlaceRule, type PlaceRuleInput, type PlaceSeat, type PlaceOpening } from "./components/place-rule.js";
 
-export { planPlaceStreaming, placeDoc, placeWanted, placeEdgeDistance, placeStreamOf, FOOTPRINT_PAD, propHideDistance, propHideIndex, propRevealIndex, OUTDOOR_PROP_MIN_REVEAL, shadowlessEntities, PROP_HIDE_BUCKETS, PROP_SHADOW_MIN_HIDE, type PlaceSpec, type PlacePlan } from "./place-stream.js";
+export { planPlaceStreaming, placeDoc, placeWanted, placeEdgeDistance, placeStreamOf, FOOTPRINT_PAD, propHideDistance, propHideIndex, propRevealIndex, OUTDOOR_PROP_MIN_REVEAL, shadowlessEntities, interiorEnclosures, PROP_HIDE_BUCKETS, PROP_SHADOW_MIN_HIDE, type InteriorEnclosure, type PlaceSpec, type PlacePlan } from "./place-stream.js";

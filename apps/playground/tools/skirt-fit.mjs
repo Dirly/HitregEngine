@@ -83,7 +83,8 @@ function pairings(table) {
   return panels.map((panel) => ({
     panel,
     back: /Back$/.test(panel),
-    legs: names.filter((n) => /Legs(Front|Back)$/.test(n) && female(n) === female(panel)),
+    // human LegsFront/LegsBack; the kin bodies (CrocKin, FrogKin) name theirs _Leg and _Shin
+    legs: names.filter((n) => /(Legs(Front|Back)|_Leg|_Shin)$/.test(n) && female(n) === female(panel)),
   }));
 }
 
@@ -138,7 +139,8 @@ async function measure(buf, label) {
   });
 
   root.updateMatrixWorld(true);
-  const bone = (n) => mesh.skeleton.bones.find((b) => b.name === n);
+  // the kin rigs have no Pelvis: their Hip stands in
+  const bone = (n) => mesh.skeleton.bones.find((b) => b.name === n) ?? (n === "CC_Base_Pelvis" ? mesh.skeleton.bones.find((b) => b.name === "CC_Base_Hip") : undefined);
   const wp = (n) => bone(n).getWorldPosition(new THREE.Vector3());
   // body frame at rest: up from feet to head, left from the right thigh to the left, forward = left x up
   const up = wp("CC_Base_Head").sub(wp("CC_Base_Pelvis")).normalize();
@@ -202,13 +204,17 @@ async function measure(buf, label) {
       if (args.sheet && clip.name === String(args["sheet-clip"] ?? "Sprint")) {
         const colors = SHEET_PARTS[String(args.outfit ?? "tassets")];
         const tris = [];
-        for (const name of [...SHEET_BODY, ...Object.keys(colors)]) {
+        // the sheet's parts by suffix, so a kin body's prefixed names (CrocKin_TassetFront) draw too
+        const suffixColor = (name) => Object.entries(colors).find(([k]) => name === k || name.endsWith(`_${k}`))?.[1];
+        const body = SHEET_BODY.some((n) => table[n] !== undefined) ? SHEET_BODY : Object.keys(table).filter((n) => /_(Leg|Shin|Foot|Belt)$/.test(n));
+        const panels = Object.keys(table).filter((n) => suffixColor(n) && !/^(F_|HumanFemale_)/.test(n));
+        for (const name of [...body, ...panels]) {
           const hidden = String(args.outfit ?? "tassets").startsWith("robes") && !args["show-covered"] ? coveredBy("RobesBack") : null;
           const ids = trisOf(name).filter((v, k, all) => !hidden?.has(Math.floor(all[k - (k % 3)] / 3)));
           const bias = !args["show-covered"] && depthPull?.parts.includes(name) ? Number(args["pull-preview"] ?? depthPull.cm) / 100 : 0;
           const hang = mesh.geometry.getAttribute("uv1");
           const backWorld = hidden && depthPull?.back ? new THREE.Vector3(...depthPull.back).transformDirection(mesh.matrixWorld) : null;
-          for (let k = 0; k < ids.length; k += 3) tris.push({ hideFrom: backWorld && hang.getY(ids[k]) < -0.5 ? backWorld : null, p: [at(ids[k]), at(ids[k + 1]), at(ids[k + 2])].map((p) => p.clone()), color: colors[name] ?? (args["leg-colors"] && /LegsFront$/.test(name) ? [220, 60, 60] : args["leg-colors"] && /LegsBack$/.test(name) ? [60, 200, 90] : [170, 170, 165]), bias });
+          for (let k = 0; k < ids.length; k += 3) tris.push({ hideFrom: backWorld && hang.getY(ids[k]) < -0.5 ? backWorld : null, p: [at(ids[k]), at(ids[k + 1]), at(ids[k + 2])].map((p) => p.clone()), color: suffixColor(name) ?? (args["leg-colors"] && /LegsFront$/.test(name) ? [220, 60, 60] : args["leg-colors"] && /LegsBack$/.test(name) ? [60, 200, 90] : [170, 170, 165]), bias });
         }
         sheetFrames.push({ tris });
       }

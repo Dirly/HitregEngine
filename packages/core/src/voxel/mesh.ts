@@ -466,19 +466,22 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   // the cell's column (`dualMeshExperiment.seams`), which puts their border on the plane too,
   // and then take the same skirts. Unclipped ("own"), equal-LOD dual
   // neighbours still agree exactly but an LOD step cracks.
-  // Full-detail cells clamp their skirts to the rendered section (what the player sees up close). An HLOD cell keeps
-  // the lattice clamp and hangs COARSE_SKIRT_K x deeper: its strip is what covers the crack where the near cell's
-  // clamped skirt no longer reaches (measured at the 1:4 join on terraced DC cliffs: 138/117/28 visible holes before
-  // the clamp, 156/143/29 clamped on both sides, 136/113/27 like this).
-  const sectionHere = dualMeshExperiment.skirtSection && lodStep === 1;
+  // Every cell clamps its skirts to the rendered section; an HLOD cell also hangs COARSE_SKIRT_K x deeper, so its strip
+  // still covers the crack where the near cell's clamped skirt no longer reaches. HLOD cells used to keep the lattice
+  // clamp alone, but on a coarse lattice the trilinear "rock" around a narrow feature reaches far past the faces MC
+  // draws: redstrand's sea stacks and cliff edges grew 30-60 m skirt slabs standing in the sea and fins on hillsides,
+  // seen from every distance (2026-11-08). A coarse skirt may still run past its own section, but only through rock
+  // the TRUE field has there (the finer neighbour's rock, i.e. the crack it exists to cover), never into real air.
+  const sectionHere = dualMeshExperiment.skirtSection && (lodStep === 1 || dualMeshExperiment.coarseSkirtSection);
+  const trueRock = lodStep > 1 && sectionHere ? (x: number, y: number, z: number): boolean => field.density(x, y, z) < 0 : undefined;
   const skirtK = lodStep > 1 && dualMeshExperiment.skirtSection ? COARSE_SKIRT_K : 1;
   const skirted =
     mesher === "mc" && !dualMeshExperiment.skirtSection
       ? addSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS, block)
       : mesher === "mc"
-      ? addInwardSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS * skirtK, block, true, sectionHere)
+      ? addInwardSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS * skirtK, block, true, sectionHere, trueRock)
       : dualMeshExperiment.seams === "clip"
-      ? addInwardSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, Math.max(step * SKIRT_STEPS * skirtK, dualMeshExperiment.skirtMin), block, false, sectionHere)
+      ? addInwardSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, Math.max(step * SKIRT_STEPS * skirtK, dualMeshExperiment.skirtMin), block, false, sectionHere, trueRock)
       : { ...result, splat, tint };
   const positions = skirted.positions;
   let minX = Infinity;
@@ -689,6 +692,8 @@ function flatCellMesh(field: WorldField, block: SampledBlock): MarchResult | nul
  *   crossing normals spread wider (0 = one averaged normal). 0.6 = 34 deg.
  * - `skirtSection`: clamp every skirt (MC and dual) to the cell's rendered cross-section on its plane as well as to
  *   the lattice ({@link sectionRun}); false is the lattice-only clamp (A/B for the scan and the build-time bench).
+ * - `coarseSkirtSection`: HLOD cells (lodStep > 1) take the section clamp too, extended only through true-field rock;
+ *   false is the pre-2026-11-08 lattice-only clamp for them (the sea-stack slabs and hillside fins).
  * - `skirtMin`: metres; the dual meshers' skirts hang at least this far (0 = SKIRT_STEPS lattice steps). Measured
  *   on terrace cliffs at the 1:4 HLOD join: 0, 12, 16 and 24 m leak alike — the leaks there were the FIELD moving
  *   with the lattice (fixed in sampleBlock: coarse blocks read the full-detail planar function), not skirt depth.
@@ -759,7 +764,7 @@ function squareWallFeet(field: WorldField, result: MarchResult, block: SampledBl
   return moved;
 }
 
-export const dualMeshExperiment: { seams: "clip" | "own"; crease: number; hermiteSteps: number; hermiteGate: number; skirtMin: number; skirtSection: boolean } = { seams: "clip", crease: 0.6, hermiteSteps: 3, hermiteGate: -2, skirtMin: 0, skirtSection: true };
+export const dualMeshExperiment: { seams: "clip" | "own"; crease: number; hermiteSteps: number; hermiteGate: number; skirtMin: number; skirtSection: boolean; coarseSkirtSection: boolean } = { seams: "clip", crease: 0.6, hermiteSteps: 3, hermiteGate: -2, skirtMin: 0, skirtSection: true, coarseSkirtSection: true };
 
 /** Skirt depth in lattice steps: a full-detail cell drops 6 m, an HLOD cell (4x lattice) 24 m. */
 const SKIRT_STEPS = 3;
@@ -1149,6 +1154,11 @@ function addInwardSkirts(
   vertical = false,
   /** Clamp to the rendered section (`dualMeshExperiment.skirtSection`); off = the lattice-only baseline. */
   section = dualMeshExperiment.skirtSection,
+  /**
+   * Coarse (HLOD) cells: is the TRUE field rock here? A run the section clamp cut short may go on through true rock
+   * (up to the lattice run): that is the finer neighbour's rock, the crack the skirt is for. Never through true air.
+   */
+  trueRock?: (x: number, y: number, z: number) => boolean,
 ): SkirtInput & { splat: Float32Array; tint: Float32Array } {
   const { positions, normals, indices, vertexCount, triangleCount } = mesh;
   const eps = 1e-4;
@@ -1230,7 +1240,14 @@ function addInwardSkirts(
     }
     if (run > 0 && section) {
       const s = sections[p]!;
+      const lattice = run;
       run = Math.min(run, sectionRun(s, positions[v * 3 + s.uAxis]!, y, s.uAxis === 2 ? dz : dx, dy, run, probe));
+      if (trueRock && run < lattice) {
+        // walk on through the true field from where the section stopped it; stop a probe short of true air
+        let t = run + probe;
+        while (t <= lattice + 1e-6 && trueRock(x + dx * t, y + dy * t, z + dz * t)) t += probe;
+        run = Math.max(run, Math.min(lattice, t - probe));
+      }
     }
     r = [dx, dy, dz, run];
     runs.set(key, r);
@@ -1282,9 +1299,17 @@ function addInwardSkirts(
       const au = positions[a * 3 + s.uAxis]!, ayy = positions[a * 3 + 1]!, bu = positions[b * 3 + s.uAxis]!, byy = positions[b * 3 + 1]!;
       const adu = s.uAxis === 2 ? az : ax, bdu = s.uAxis === 2 ? bz : bx;
       // the strip's far edge a2-b2 and its diagonal a-b2 (both triangles use it); one-ended, the diagonal alone
+      // coarse cells: a far edge / diagonal that leaves the section is still fine while it lies in true rock
+      const ox = plane.axis === 0 ? plane.at : 0, oz = plane.axis === 2 ? plane.at : 0;
+      const inTrueRock = (u: number, yy: number): boolean => trueRock!(s.uAxis === 0 ? u : ox, yy, s.uAxis === 2 ? u : oz);
+      const segInRock = (u0: number, y0: number, u1: number, y1: number): boolean => {
+        for (let k = 1; k <= 3; k++) if (!inTrueRock(u0 + ((u1 - u0) * k) / 4, y0 + ((y1 - y0) * k) / 4)) return false;
+        return true;
+      };
       const crossesAt = (ra: number, rb: number): boolean => {
-        const fu = bu + bdu * rb, fy = byy + by * rb;
-        return sectionCrossed(s, au + adu * ra, ayy + ay * ra, fu, fy) || (rb > 0 && sectionCrossed(s, au, ayy, fu, fy));
+        const fu = bu + bdu * rb, fy = byy + by * rb, nu = au + adu * ra, ny = ayy + ay * ra;
+        const far = sectionCrossed(s, nu, ny, fu, fy) && !(trueRock && segInRock(nu, ny, fu, fy));
+        return far || (rb > 0 && sectionCrossed(s, au, ayy, fu, fy) && !(trueRock && segInRock(au, ayy, fu, fy)));
       };
       if (crossesAt(runA, runB)) {
         // even the ends out (a long end beside a short one is what cut across a shelf), then keep the longest common

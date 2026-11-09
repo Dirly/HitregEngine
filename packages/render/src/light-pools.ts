@@ -3,6 +3,7 @@ import {
   attribute,
   cameraProjectionMatrixInverse,
   cameraViewMatrix,
+  cameraWorldMatrix,
   cross,
   dFdx,
   dFdy,
@@ -19,6 +20,7 @@ import {
   vec4,
   viewportDepthTexture,
 } from "three/tsl";
+import { confineMask, packConfine, type LightConfine } from "./light-confine.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type N = any;
@@ -27,7 +29,8 @@ type N = any;
 const POOL_FAR = 160;
 /** At most this many pools a frame (nearest first, after the budgeted lights). */
 export const MAX_POOLS = 96;
-const STRIDE = 8;
+/** Floats per pool: centre xyz + range, colour rgb + fade, then the confine (light-confine.ts): centre xyz + cos, half xyz + sin. */
+const STRIDE = 16;
 /** Assumed albedo of whatever the pool lands on (it cannot read the surface's own). */
 const ALBEDO = 0.35;
 
@@ -58,6 +61,8 @@ export function poolMaterial(): THREE.MeshBasicNodeMaterial {
   m.name = "light-pools";
   const a: N = attribute("aPool", "vec4"); // centre xyz, range
   const tint: N = attribute("aPoolColor", "vec4"); // colour * intensity, rgb; camera fade, a
+  const confineA: N = attribute("aPoolConfineA", "vec4");
+  const confineB: N = attribute("aPoolConfineB", "vec4");
   m.positionNode = positionLocal.mul(a.w.mul(2)).add(a.xyz);
 
   const depth: N = viewportDepthTexture();
@@ -73,7 +78,9 @@ export function poolMaterial(): THREE.MeshBasicNodeMaterial {
   const facing: N = dot(n, surface).greaterThan(0).select(n.negate(), n);
   const lambert: N = saturate(dot(facing, toLight.div(d)).mul(0.8).add(0.2));
   const irradiance: N = window.div(d2).mul(lambert).mul(ALBEDO / Math.PI);
-  m.colorNode = vec3(tint.rgb).mul(irradiance).mul(tint.a);
+  // a room's lamp lays no pool outside its building (the street past the wall it stands behind)
+  const world: N = cameraWorldMatrix.mul(vec4(surface, 1)).xyz;
+  m.colorNode = vec3(tint.rgb).mul(irradiance).mul(tint.a).mul(confineMask(world, confineA, confineB));
   sharedMaterial = m;
   return m;
 }
@@ -95,6 +102,8 @@ export class LightPools {
     Object.assign(this.buffer, { name: "light-pools" });
     this.geometry.setAttribute("aPool", new THREE.InterleavedBufferAttribute(this.buffer, 4, 0));
     this.geometry.setAttribute("aPoolColor", new THREE.InterleavedBufferAttribute(this.buffer, 4, 4));
+    this.geometry.setAttribute("aPoolConfineA", new THREE.InterleavedBufferAttribute(this.buffer, 4, 8));
+    this.geometry.setAttribute("aPoolConfineB", new THREE.InterleavedBufferAttribute(this.buffer, 4, 12));
     this.mesh = new THREE.Mesh(this.geometry, poolMaterial());
     this.mesh.name = "__lightPools";
     this.mesh.frustumCulled = false;
@@ -110,8 +119,8 @@ export class LightPools {
     this.count = 0;
   }
 
-  /** Queue one pool; `scale` is the light's on-ness (time of day). False when full. */
-  add(light: THREE.PointLight, position: THREE.Vector3, cameraDistance: number, scale: number): boolean {
+  /** Queue one pool; `scale` is the light's on-ness (time of day), `confine` the box it may light. False when full. */
+  add(light: THREE.PointLight, position: THREE.Vector3, cameraDistance: number, scale: number, confine: LightConfine | null = null): boolean {
     if (this.count >= MAX_POOLS) return false;
     const range = light.distance;
     if (!(range > 0) || scale <= 0.01 || light.intensity <= 0) return true;
@@ -128,6 +137,15 @@ export class LightPools {
     d[o + 5] = light.color.g * k;
     d[o + 6] = light.color.b * k;
     d[o + 7] = fade;
+    packConfine(confine, _a, _b);
+    d[o + 8] = _a.x;
+    d[o + 9] = _a.y;
+    d[o + 10] = _a.z;
+    d[o + 11] = _a.w;
+    d[o + 12] = _b.x;
+    d[o + 13] = _b.y;
+    d[o + 14] = _b.z;
+    d[o + 15] = _b.w;
     this.count++;
     return true;
   }
@@ -156,3 +174,6 @@ export class LightPools {
     return this.count;
   }
 }
+
+const _a = new THREE.Vector4();
+const _b = new THREE.Vector4();

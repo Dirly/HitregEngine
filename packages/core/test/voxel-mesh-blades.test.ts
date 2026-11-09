@@ -204,6 +204,29 @@ describe("skirts at a 1:4 LOD join on terraced cliffs (DC)", () => {
       before += withLatticeOnlySkirts(() => joinHoles(field, fine, coarse));
       after += joinHoles(field, fine, coarse);
     }
-    expect(after).toBeLessThanOrEqual(before);
+    // HLOD cells are section-clamped too since 2026-11-08 (the sea-stack slabs): measured 120 here against 119, one
+    // pinhole for every exposed coarse skirt the next test removes
+    expect(after).toBeLessThanOrEqual(Math.ceil(before * 1.02));
   }, 120_000);
+});
+
+describe("HLOD skirts stay inside the rendered rock (sea-stack slabs, hillside fins)", () => {
+  // On a coarse lattice the trilinear rock around a narrow feature reaches far past the faces MC draws, so the
+  // lattice-only clamp hung coarse skirts in open air: redstrand's 30-60 m slabs standing in the sea.
+  for (const [name, planar] of [["terraced", TERRACE], ["plain", undefined]] as const) {
+    it(`${name} mountains at lodStep 4`, () => {
+      const field = createWorldField(mountains(planar));
+      const cells = steepBlock(field);
+      for (const mesher of ["mc", "dc"] as const) {
+        dualMeshExperiment.coarseSkirtSection = false;
+        let before;
+        try { before = auditVoxelMesh(field, { cells, mesher, lodStep: 4 }); } finally { dualMeshExperiment.coarseSkirtSection = true; }
+        const after = auditVoxelMesh(field, { cells, mesher, lodStep: 4 });
+        expect(before.skirtExposed).toBeGreaterThan(50); // the audit sees the fault
+        expect(after.skirtExposed).toBeLessThanOrEqual(before.skirtExposed * 0.15);
+        expect(after.openEdges).toBe(before.openEdges);
+        expect(after.skirtTriangles).toBeGreaterThan(before.skirtTriangles * 0.9); // the crack cover is still there
+      }
+    }, 60_000);
+  }
 });

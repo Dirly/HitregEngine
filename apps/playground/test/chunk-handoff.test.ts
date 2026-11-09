@@ -255,3 +255,46 @@ test("arrival becomes ready once every scheduled near cell has loaded, on a diag
   }
 });
 
+
+test("a promotion re-bake goes ahead of the far ring and gets a bake slot while it is busy", () => {
+  // Owner report 2026-11-08: running up to something with an LOD did not swap it until you stopped. The block's
+  // re-bake was queued behind every still-missing far-ring bake, and a moving player re-queued those on each pass.
+  const { manager } = fixture();
+  delete manager.queueSupercell; // the real queue
+  delete manager.pumpSupercellQueue;
+  const started: Array<[string, boolean]> = [];
+  manager.loadSupercell = (key: string, _m: unknown, _mode: unknown, _far: unknown, urgent: boolean) => {
+    started.push([key, urgent]);
+    manager.inFlightSupercells.add(key);
+    return new Promise(() => {}); // never finishes: the slots stay busy
+  };
+  // the far ring already holds both normal slots
+  manager.inFlightSupercells.add("f9_9");
+  manager.inFlightSupercells.add("f8_8");
+  proxy(manager, "0_0", ["1_0", "2_0"]);
+  manager.loaded.set("1_0", { rep: "fullRender", simulated: false });
+  manager.update(0, 0);
+  // still-missing blocks were queued in the same pass, after the promotion
+  assert.ok(manager.supercellQueue.length > 1);
+  assert.deepEqual(started, [["0_0", true]], "the promotion re-bake started at once, nothing else did");
+  // another pass re-queues the missing ring without starting it
+  manager.lastFocus = null;
+  manager.update(0, 0);
+  assert.equal(started.length, 1);
+  assert.ok(manager.supercellQueue.every((entry: { urgent: boolean }) => !entry.urgent));
+});
+
+test("urgent supercell entries stay ahead of newer normal ones; the switch restores plain newest-first", () => {
+  const { manager } = fixture();
+  delete manager.queueSupercell;
+  manager.desiredSupercells = new Set(["a", "b", "c"]);
+  manager.queueSupercell("a", new Set(), "replace", false, true);
+  manager.queueSupercell("b", new Set(), "replace", false);
+  manager.queueSupercell("c", new Set(), "replace", false);
+  assert.deepEqual(manager.supercellQueue.map((e: { key: string }) => e.key), ["a", "c", "b"]);
+  manager.supercellQueue.length = 0;
+  manager.urgentPromotions = false;
+  manager.queueSupercell("a", new Set(), "replace", false, true);
+  manager.queueSupercell("b", new Set(), "replace", false);
+  assert.deepEqual(manager.supercellQueue.map((e: { key: string }) => e.key), ["b", "a"]);
+});

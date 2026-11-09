@@ -207,6 +207,14 @@ function supercellFactor(base: number, far: boolean): number {
 const MAX_CONCURRENT_SUPERCELL_BAKES = 2;
 
 /**
+ * Extra bake slots reserved for URGENT supercell bakes: the re-bake of a block whose cell was just promoted to full
+ * detail. Until it lands the block's impostors and coarse terrain keep drawing over the real cell, which is the "LOD"
+ * a player runs up to and sees not swap. The far ring keeps both normal slots busy for minutes at a time (40-60 bakes
+ * queued, measured on Redstrand), so an urgent bake waiting for a free normal slot waited for the far ring to finish.
+ */
+const URGENT_SUPERCELL_BAKES = 1;
+
+/**
  * How many of an HLOD bake's member cells may be in flight at once.
  *
  * The bake used to `await` them one at a time — up to 64 sequential worker
@@ -474,7 +482,15 @@ export class ChunkManager {
   /** The residency the CURRENT focus wants, keyed by cell — the queue reads it at pump time. */
   private desiredCells = new Map<string, ChunkRep>();
   /** Pending supercell bakes, newest-first; drained by pumpSupercellQueue. */
-  private supercellQueue: Array<{ key: string; members: Set<string>; mode: SupercellBakeMode; far: boolean }> = [];
+  private supercellQueue: Array<{ key: string; members: Set<string>; mode: SupercellBakeMode; far: boolean; urgent: boolean }> = [];
+  /** Keys of the in-flight bakes that were started as urgent (a subset of inFlightSupercells). */
+  private inFlightUrgent = new Set<string>();
+  /**
+   * Runtime A/B switch: promotion re-bakes jump the supercell queue and get their own bake slot. Off = the old
+   * single newest-first queue, where every residency pass re-queued the still-missing far ring AHEAD of them, so a
+   * moving player (who triggers a pass on every crossing) starved them until they stopped.
+   */
+  urgentPromotions = true;
   /** Supercell keys the CURRENT focus wants — used to drop stale queue entries. */
   private desiredSupercells = new Set<string>();
   /** Bumped on every unload/reload of a given supercell key so an in-flight
@@ -1162,7 +1178,7 @@ export class ChunkManager {
         for (const key of sc.cellKeys) {
           if (target.has(key) && !nearOwned.has(key) && !this.hasProxyCoverage(key, scKey)) replacement.add(key);
         }
-        this.queueSupercell(scKey, replacement, "replace", sc.far);
+        this.queueSupercell(scKey, replacement, "replace", sc.far, true);
         continue;
       }
       // the far/hlod boundary moved through this far block: an hlod block now
@@ -1643,14 +1659,28 @@ export class ChunkManager {
     members: ReadonlySet<string>,
     mode: SupercellBakeMode,
     far: boolean,
+    /**
+     * A block drawing over cells that are already full detail (a promotion): it goes before every non-urgent entry.
+     * Plain newest-first put it BEHIND them, because the residency pass queues promotions first and the still-missing
+     * far ring after, and a moving player runs a pass on every cell crossing.
+     */
+    urgent = false,
   ): void {
+    urgent &&= this.urgentPromotions;
     const existing = this.supercellQueue.findIndex((item) => item.key === scKey);
     // A queued append is a delta against a proxy that may since have been
     // dropped or replaced, so a later entry for the same key always wins —
     // and merging two appends would lose one of their cell sets. Re-deriving
     // the delta on the next residency pass is both cheaper and always right.
     if (existing >= 0) this.supercellQueue.splice(existing, 1);
-    this.supercellQueue.unshift({ key: scKey, members: new Set(members), mode, far });
+    const entry = { key: scKey, members: new Set(members), mode, far, urgent };
+    if (urgent) this.supercellQueue.unshift(entry);
+    else {
+      // newest-first among the non-urgent, behind every urgent entry
+      let at = 0;
+      while (at < this.supercellQueue.length && this.supercellQueue[at]!.urgent) at++;
+      this.supercellQueue.splice(at, 0, entry);
+    }
     // bound the backlog: a long flight can enqueue the whole far ring, and
     // anything that far down the list is guaranteed stale by the time it runs
     if (this.supercellQueue.length > 64) this.supercellQueue.length = 64;
@@ -1658,10 +1688,11 @@ export class ChunkManager {
 
   /** Start bakes up to the concurrency cap, skipping entries that went stale. */
   private pumpSupercellQueue(): void {
-    while (
-      this.inFlightSupercells.size < MAX_CONCURRENT_SUPERCELL_BAKES &&
-      this.supercellQueue.length > 0
-    ) {
+    while (this.supercellQueue.length > 0) {
+      // urgent entries sit at the front and may use the reserved slot; a normal entry needs a normal one
+      const urgent = this.supercellQueue[0]!.urgent;
+      const normalFree = this.inFlightSupercells.size - this.inFlightUrgent.size < MAX_CONCURRENT_SUPERCELL_BAKES;
+      if (!normalFree && !(urgent && this.inFlightUrgent.size < URGENT_SUPERCELL_BAKES)) break;
       const next = this.supercellQueue.shift()!;
       if (this.inFlightSupercells.has(next.key)) continue;
       // "append" is a DELTA against a specific proxy: if that proxy is gone
@@ -1670,9 +1701,12 @@ export class ChunkManager {
       // is self-sufficient either way, a first build or a consolidation.
       if (next.mode === "append" && !this.loadedSupercells.has(next.key)) continue;
       if (!this.desiredSupercells.has(next.key)) continue; // moved on since it was queued
-      void this.loadSupercell(next.key, next.members, next.mode, next.far).finally(() =>
-        this.pumpSupercellQueue(),
-      );
+      // an urgent bake takes a normal slot when one is free and the reserved one only when none is
+      if (urgent && !normalFree) this.inFlightUrgent.add(next.key);
+      void this.loadSupercell(next.key, next.members, next.mode, next.far, urgent).finally(() => {
+        this.inFlightUrgent.delete(next.key);
+        this.pumpSupercellQueue();
+      });
     }
     // The queue is capped (see queueSupercell) and only a residency pass
     // refills it — and that pass runs only when the focus crosses a cell. A
@@ -1702,6 +1736,7 @@ export class ChunkManager {
     memberKeys: ReadonlySet<string>,
     mode: SupercellBakeMode,
     far = false,
+    urgent = false,
   ): Promise<void> {
     const s = this.streamer;
     if (!s || !this.scene) return;
@@ -1734,7 +1769,8 @@ export class ChunkManager {
           const key = keys[at]!;
           const cellCoords = parseChunkKey(key)!;
           try {
-            const doc = await this.readCell(key, cellCoords[0], cellCoords[1], undefined, "bulk");
+            // an urgent re-bake's cells are near ones the player is looking at: do not queue them behind the far ring
+            const doc = await this.readCell(key, cellCoords[0], cellCoords[1], undefined, urgent ? "near" : "bulk");
             if (doc) cells.push({ cx: cellCoords[0], cz: cellCoords[1], doc });
           } catch (error) {
             console.warn(`[chunks] failed to load ${key}:`, error);

@@ -27,7 +27,7 @@ export const FAR_HALO_ANGLE = 0.005;
  */
 export const HALO_FOG_THROUGH = 0.35;
 const INITIAL_CAPACITY = 64;
-/** Floats per halo: centre xyz + radius, colour rgb + unused. */
+/** Floats per halo: centre xyz + radius, colour rgb + nudge share (toward the camera). */
 const STRIDE = 8;
 
 const cameraRight = uniform(new THREE.Vector3(1, 0, 0));
@@ -61,7 +61,8 @@ export function haloMaterial(): THREE.MeshBasicNodeMaterial {
   m.positionNode = centre
     .add(cameraRight.mul(corner.x))
     .add(cameraUp.mul(corner.y))
-    .add(toCamera.mul(radius.mul(0.6)));
+    // tint.w: the nudge share (0 for a room's lamp seen from outside its building: light-confine.ts)
+    .add(toCamera.mul(radius.mul(0.6).mul(tint.w)));
   const d: N = saturate(length(uv().sub(0.5)).mul(2));
   const skirt: N = pow(float(1).sub(d), float(2.6));
   const core: N = pow(max(float(1).sub(d.mul(2.2)), 0), float(2)).mul(0.5);
@@ -121,7 +122,7 @@ export class LightGlows {
    * `scale` its current on-ness (time of day; a fire's flicker is already in
    * `light.intensity`).
    */
-  add(light: THREE.PointLight, position: THREE.Vector3, cameraDistance: number, glow: number, scale: number, reach?: number, sunlit = 0): void {
+  add(light: THREE.PointLight, position: THREE.Vector3, cameraDistance: number, glow: number, scale: number, reach?: number, sunlit = 0, nudge = 1): void {
     if (glow <= 0 || scale <= 0.01) return;
     // L (Red Dial 2026-10-30, Derek: "so washed out from how bright that lighting is"): glow 4 beacons with glowReach
     // 800 drew halos ~5 m in radius, growing with distance, at full strength at noon — 45-73 % of a street frame
@@ -158,6 +159,7 @@ export class LightGlows {
     d[o + 4] = light.color.r * strength;
     d[o + 5] = light.color.g * strength;
     d[o + 6] = light.color.b * strength;
+    d[o + 7] = nudge;
     this.count++;
   }
 

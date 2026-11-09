@@ -69,9 +69,14 @@ export function normalizeGraphics(raw: unknown): GraphicsSettings {
   const r = (raw && typeof raw === "object" ? raw : {}) as Partial<Record<keyof GraphicsSettings, unknown>>;
   const d = DEFAULT_GRAPHICS;
   const preset = r.preset === "auto" || r.preset === "custom" || PRESET_TIERS.includes(r.preset as PresetTier) ? (r.preset as GraphicsPreset) : d.preset;
+  const autoTier = PRESET_TIERS.includes(r.autoTier as PresetTier) ? (r.autoTier as PresetTier) : d.autoTier;
+  // A named preset is its CURRENT values: stored fields from an older build would otherwise keep running under the
+  // preset's name after the preset changed (Derek 2026-11-09: "High" in the menu, old values on screen, a shadow pop
+  // that stopped once he re-picked High). Only "custom" keeps its own fields.
+  if (preset !== "custom") return { preset, autoTier, ...PRESETS[preset === "auto" ? autoTier : preset] };
   return {
     preset,
-    autoTier: PRESET_TIERS.includes(r.autoTier as PresetTier) ? (r.autoTier as PresetTier) : d.autoTier,
+    autoTier,
     renderScale: renderScaleOf(r.renderScale, d.renderScale),
     shadows: SHADOW_LEVELS.includes(r.shadows as ShadowLevel) ? (r.shadows as ShadowLevel) : d.shadows,
     grass: clamp(finite(r.grass, d.grass), 0, 1),

@@ -2543,6 +2543,54 @@
         "clouds": {
           "type": "object",
           "properties": {
+            "openings": {
+              "description": "Up to four world-anchored apertures through both painted cloud layers and the overcast filler. Live scripts replace this list through ctx.setSky; publish [] on disposal. Other cloud/weather writes preserve it.",
+              "maxItems": 4,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "center": {
+                    "type": "array",
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ],
+                    "description": "World-space centre in metres. Y is the height where the view ray meets the virtual cloud deck; X/Z anchor the opening above a world location as the camera moves."
+                  },
+                  "radius": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 2000,
+                    "description": "Opening radius in metres. Zero disables the slot. The boundary feathers and ripples rather than drawing a solid circle."
+                  },
+                  "color": {
+                    "default": "#80d4ff",
+                    "description": "Light caught by cloud around the opening; never fills clear sky.",
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{6}$"
+                  },
+                  "intensity": {
+                    "default": 0.6,
+                    "description": "Edge glow strength; zero keeps the cloud opening without its glow.",
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 8
+                  }
+                },
+                "required": [
+                  "center",
+                  "radius"
+                ]
+              }
+            },
             "coverage": {
               "default": 0,
               "description": "The fair-weather deck: 0 = no clouds, 0.4 = scattered, 0.8 = broken. Weather closes the sky ON TOP of this with `overcast` (the `weather` script: rain fills the whole dome, hides the sun and turns god rays off; console /overcast 0-1), so author the clear-day look here.",

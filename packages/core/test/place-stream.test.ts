@@ -323,3 +323,33 @@ describe("shadow casters", () => {
     expect(shadowlessEntities(doc).size).toBe(0);
   });
 });
+
+import { interiorEnclosures } from "../src/index.js";
+describe("interior enclosures (room lights held to their building)", () => {
+  const entity = (parent: string | null, components: Record<string, unknown> = {}) => ({ name: "e", parent, tags: [], components });
+  it("maps a room's lights to the room's parent structure and leaves outdoor and rootless rooms alone", () => {
+    const doc = { version: 1, name: "t", entities: {
+      house: entity(null),
+      room: entity("house", { culling: { interior: true, reveal: 12 } }),
+      candle: entity("room"),
+      glow: entity("candle", { light: { kind: "point" } }),
+      lamp: entity("house", { light: { kind: "point" } }),
+      loose: entity(null, { culling: { interior: true } }),
+      looseGlow: entity("loose", { light: { kind: "point" } }),
+    } } as unknown as SceneDoc;
+    const out = interiorEnclosures(doc);
+    expect(out.get("glow")).toEqual({ structure: "house", room: "room" });
+    expect(out.has("lamp")).toBe(false); // the door lamp outside the room
+    expect(out.has("looseGlow")).toBe(false); // no structure to hold it to
+    expect(out.has("candle")).toBe(false); // only lights
+  });
+  it("confines nothing in an interior scene (cullingProfile)", () => {
+    const doc = { version: 1, name: "t", entities: {
+      cfg: entity(null, { cullingProfile: { interiorReveal: 80 } }),
+      hall: entity(null),
+      room: entity("hall", { culling: { interior: true } }),
+      glow: entity("room", { light: { kind: "point" } }),
+    } } as unknown as SceneDoc;
+    expect(interiorEnclosures(doc).size).toBe(0);
+  });
+});

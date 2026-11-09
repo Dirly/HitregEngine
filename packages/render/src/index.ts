@@ -168,7 +168,8 @@ export {
   type ImpostorAtlas,
   type ImpostorInstanceData,
 } from "./impostor.js";
-export { LightBudgetSystem } from "./light-budget.js";
+export { LightBudgetSystem, LIGHT_PRESENCE_FADE_S, type LightConfineSource } from "./light-budget.js";
+export { structureConfine, roomConfine, confineOutside, lightConfine, type LightConfine } from "./light-confine.js";
 export { chimneySmoke, ChimneySmoke } from "./chimney-smoke.js";
 export { updateWorldAmbience, setWorldExtrasEnabled, setLightLayerEnabled, LIGHT_LAYERS, type LightLayer } from "./ambience.js";
 export { cloudShadow } from "./cloud-shadow.js";

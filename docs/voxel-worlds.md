@@ -340,6 +340,15 @@ Two related fixes worth remembering because both failed *silently*:
   `mesher: "auto"` scene does (DC on planar-cliff cells; `--mesher` to pick) and its
   `skirts in air` (core `skirtExposed`, tested against the region's rendered
   surface by ray parity, not the field) must be 0.
+  **2026-11-08 — HLOD skirts are section-clamped too.** The lattice-only clamp
+  on coarse cells hung skirts in open air wherever the coarse trilinear "rock"
+  reached past the faces MC draws: redstrand's sea stacks grew 30-60 m slabs
+  standing in the sea, and hillsides grew fins at LOD joins. Coarse skirts now
+  take the section clamp and may run past it only through TRUE-field rock
+  (`field.density`, i.e. the finer neighbour's rock, the crack they cover).
+  `voxel-blades --lod 4` over the stacks: skirts in air 123 -> 4; the terraced
+  1:4 join test: 120 holes against 119; coarse meshing +~0.8 ms/cell (worker).
+  A/B: `dualMeshExperiment.coarseSkirtSection`.
   **Band limits are per column, not per cell.** Each cell used to seal its
   band at its own flat floor/ceiling, so a tunnel or carve crossing one
   cell's floor but not its neighbour's was capped at two heights: open edges
