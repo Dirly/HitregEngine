@@ -41,6 +41,7 @@ export class BossGateScript extends Script {
     boss: { default: "", description: "Entity id of the boss (its combat netState key, `combat/<boss>.dead`). Empty = the gate never opens." },
     drop: { default: 8, min: 0, max: 100, description: "Metres the gate travels when it opens (at least its full height to clear the passage)." },
     direction: { default: "down", description: "Opening direction: down sinks a slab into the floor; up raises a portcullis. Art and collision move together." },
+    slide: { default: [0, 0, 0], description: "World-space metres the gate travels when it opens, as [x, y, z]. Any non-zero value replaces drop/direction: a stockade gate dragged aside along its fence line instead of sinking or rising. Art and collision move together." },
     seconds: { default: 4, min: 0, max: 60, description: "Seconds the gate takes to open." },
     closeOnAggro: { default: false, description: "Arena entrance: starts open, then closes when target/<boss>.primary contains a target id (actual MobBrain engagement, read through the shared target contract). Walking into the room alone never closes it. Boss defeat permanently opens it, including for late joiners." },
     closeSeconds: { default: 2.5, min: 0, max: 60, description: "Seconds an entrance gate takes to close after boss aggro. Motion remains continuous if the boss dies during closure." },
@@ -99,7 +100,9 @@ export class BossGateScript extends Script {
 
   private drive(): void {
     scratch.copy(this.top);
-    scratch.y += (this.param<string>("direction") === "up" ? 1 : -1) * this.param<number>("drop") * this.progress();
+    const slide = this.param<number[]>("slide"), p = this.progress();
+    if (Array.isArray(slide) && slide.length === 3 && slide.some((v) => v !== 0)) { scratch.x += slide[0]! * p; scratch.y += slide[1]! * p; scratch.z += slide[2]! * p; }
+    else scratch.y += (this.param<string>("direction") === "up" ? 1 : -1) * this.param<number>("drop") * p;
     const sim = this.ctx.sim;
     if (sim?.setKinematicTarget) sim.setKinematicTarget(this.entityId, [scratch.x, scratch.y, scratch.z]);
     else {

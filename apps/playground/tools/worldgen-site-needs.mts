@@ -30,6 +30,7 @@ import { createWorldField, TOWN_SITE_ROLES, type GroundNeedDoc, type TownDoc, ty
 import { farCamera, FAR_MAX_M, groundSpread, GROUNDLESS_STD } from "./_far-camera.mts";
 import { decodePng, encodePng } from "./_png.mjs";
 import { drawText as drawGlyphs } from "./_map-text.mts";
+import { exteriorOrExit, placeOfNeed, projectDirOf } from "./_exterior.mts";
 import { coastalFaults, findCoastalSites, measureCoastalSite } from "./worldgen-coastal-towns.mts";
 import {
   compassWord, measureNeeds, needArea, needGroundOf, needRulingSchema, needsLine, needStillMet, solveCliffFace, solveRoadsideRib, solveWalledNeck, unexcepted,
@@ -489,6 +490,12 @@ export function commandNeeds(host: SiteNeedsHost): void {
   const keepFoot = argv.includes("--keep-foot");
   const needs = (recipe.needs ?? []).filter((n) => !only || n.id === only);
   if (!needs.length) host.fail(only ? `no need ${only} in the recipe` : "the recipe has no `needs` (add one: { id, kind: cliff-face | walled-neck | roadside-rib, near: [x, z] | \"<zone> <side>\", minHeight / radius, neck })");
+  // EXTERIOR CHAIN (tools/_exterior.mts, Derek 2026-11-10 Rustgut): a need FOR a place is that place's build — solved only
+  // after its location, unedited grab, concepts and concept check (or an owner --no-concept-ruling)
+  for (const n of needs) {
+    const place = placeOfNeed(projectDirOf(host.project), host.world, recipe, n.id);
+    if (place) exteriorOrExit(host.project, host.world, place, `worldgen needs --only ${n.id}`, recipe);
+  }
   const ids = new Set(needs.map((n) => `need-${n.id}`));
   // solve on the ground WITHOUT this run's own patches (re-running replaces them) and without town pads
   const base: WorldRecipe = { ...recipe, features: { ...recipe.features, towns: [], heightPatches: recipe.features.heightPatches.filter((p) => !ids.has(p.id)) } };

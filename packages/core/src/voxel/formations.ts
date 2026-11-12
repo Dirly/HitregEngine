@@ -347,6 +347,17 @@ export function waterPlacement(
       const odds = Math.min(1, 0.2 + w.steepness * field.slope(x, z));
       return keep < odds ? scale : null;
     }
+    case "bed": {
+      // wholly under still water (the sea has no surface sample and counts as a lake); never rescaled
+      const y = field.waterY(x, z);
+      if (y === null) return null;
+      const sheet = field.waterSurface(x, z, waterScratch) ? waterScratch.kind : null;
+      if (sheet === "river" || sheet === "marsh") return null;
+      if (keep >= w.keep) return null;
+      const depth = y - ground;
+      if (depth < w.bedDepth[0] || depth > w.bedDepth[1]) return null;
+      return ground + rule.yOffset * scale + height * scale <= y - 0.5 ? scale : null;
+    }
     case "in": {
       const y = field.waterY(x, z);
       if (y === null) return null;

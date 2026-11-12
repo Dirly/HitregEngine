@@ -108,6 +108,16 @@ describe("cover on the lake bed", () => {
     expect(coverWaterGate(field, tall, 5, 0, 8.9, 9, scratch)).toBeNull(); // 1 m deep: a 1.2 m card breaks the surface
     expect(coverWaterGate(field, tall, 5, 0, 8.4, 8.5, scratch)).toBe(8.4); // 1.5 m: fits under
   });
+
+  it("grows on the sea bed only for a layer that names the sea", () => {
+    const kelp = layer({ water: { mode: "bed", depth: [2, 20], kinds: ["sea"] } });
+    const pond = layer({ water: { mode: "bed", depth: [2, 20] } });
+    expect(coverWaterGate(field, kelp, 60, 60, -6.1, -6, scratch)).toBe(-6.1); // 6 m under the sea
+    expect(coverWaterGate(field, kelp, 60, 60, -30, -30, scratch)).toBeNull(); // deeper than the layer goes
+    expect(coverWaterGate(field, kelp, 60, 60, 3, 3, scratch)).toBeNull(); // dry land
+    expect(coverWaterGate(field, kelp, 5, 0, 5, 5, scratch)).toBeNull(); // the lake is not the sea
+    expect(coverWaterGate(field, pond, 60, 60, -6.1, -6, scratch)).toBeNull(); // a lake weed stays out of the sea
+  });
 });
 
 describe("ragged clearance edge", () => {

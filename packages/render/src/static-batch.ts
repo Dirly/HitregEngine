@@ -296,6 +296,11 @@ export function batchStaticMeshes(
      * sheet material, so props painted on different pages share one draw. Unset = merge by material only.
      */
     sheets?: PropSheets;
+    /**
+     * Leave this mesh out of the merge, drawing from its own live node: the editor passes the entities being edited,
+     * so a gizmo drag moves what you see instead of a hidden source under a frozen merged copy.
+     */
+    keepLive?: (mesh: THREE.Mesh) => boolean;
   } = {},
 ): StaticBatchHandle | null {
   const minBatch = options.minBatch ?? 2;
@@ -332,6 +337,7 @@ export function batchStaticMeshes(
         Object.keys(mesh.geometry.morphAttributes).length > 0) return void skipped++;
     const entityId = mesh.userData["entityId"] as string | undefined;
     if (!entityId) return void skipped++;
+    if (options.keepLive?.(mesh)) return;
     const unit = options.groupOf?.(mesh);
     const sheet = options.sheets?.placementFor(mesh.material) ?? null;
     const drawn = sheet?.material ?? mesh.material;

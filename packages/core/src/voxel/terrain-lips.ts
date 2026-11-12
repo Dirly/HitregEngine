@@ -33,6 +33,8 @@ export interface TerrainLipOptions {
   step?: number;
   /** Reconstruction error (m) above the reference's that counts as an alias. Default 0.5. */
   aliasTol?: number;
+  /** Per-cell override of `aliasTol` (cell centre x, z); undefined keeps `aliasTol`. */
+  aliasTolAt?: (x: number, z: number) => number | undefined;
   /** Rise/run between neighbouring lattice samples that counts as a step. Default 1.6 (58 deg). */
   maxSlope?: number;
   /** Per-cell override of `maxSlope` (cell centre x, z); undefined keeps `maxSlope`. */
@@ -141,7 +143,7 @@ export function measureTerrainLips(
         const r = Math.abs(reference.height(x, z) - bilinear(at(R, i, j), at(R, i + 1, j), at(R, i, j + 1), at(R, i + 1, j + 1), fx, fz));
         excess = Math.max(excess, e - r);
       }
-      if (excess > aliasTol) add("alias", i, j, excess);
+      if (excess > (options.aliasTolAt?.(cx + s / 2, cz + s / 2) ?? aliasTol)) add("alias", i, j, excess);
       // STEP: a wall between neighbouring samples that the reference does not have
       let step = 0;
       const cellSlope = options.maxSlopeAt?.(cx + s / 2, cz + s / 2) ?? maxSlope;

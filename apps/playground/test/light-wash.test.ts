@@ -65,6 +65,32 @@ test("a light past the flame's cull distance is not a far fire (no flame is draw
   assert.equal(isFarFire({ d: 2100 }), false);
 });
 
+test("a fire the camera cannot see (its ray blocked short of the light) is not a far fire", async () => {
+  assert.equal(isFarFire({ d: 450, occluded: true }), false);
+  assert.equal(isFarFire({ d: 450, occluded: false }), true);
+  // the run only asks for a fire read when some far fire is SEEN
+  const sharp = (await import("sharp")).default, os = await import("node:os"), path = await import("node:path");
+  const file = path.join(os.tmpdir(), `light-wash-hidden-${process.pid}.png`);
+  await sharp(Buffer.alloc(W * H * 3, 30), { raw: { width: W, height: H, channels: 3 } }).png().toFile(file);
+  const { judgeFrame } = await import("../tools/_light-wash.mts");
+  const f = await judgeFrame(file, "pit", 20, [{ x: 80, y: 45, d: 450, occluded: true }]);
+  (await import("node:fs")).rmSync(file, { force: true });
+  assert.equal(f.fires, undefined);
+  assert.equal(f.firesHidden, 1);
+});
+
+test("sightHits: a wall between the camera and a fire blocks it; the fire's own brazier inside the clear distance does not", async () => {
+  const THREE = await import("three");
+  const { sightHits } = await import("../src/line-of-sight.ts");
+  const scene = new THREE.Scene(), mat = new THREE.MeshBasicMaterial();
+  const wall = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 1), mat); wall.position.set(0, 0, -100); scene.add(wall);
+  const brazier = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), mat); brazier.position.set(30, 0, -199); scene.add(brazier);
+  scene.updateMatrixWorld(true);
+  const [hidden, seen] = sightHits(scene, [{ from: [0, 0, 0], to: [0, 0, -400] }, { from: [0, 0, 0], to: [30, 0, -200] }], 4);
+  assert.ok(hidden && hidden.d > 98 && hidden.d < 101, "the wall hides the first fire");
+  assert.equal(seen, null, "the second fire's brazier is within the clear distance");
+});
+
 test("a cold (spirit) fire reads by its own blue flame, not by warmth", () => {
   const r = frame([40, 30, 30]);
   disc(r, 80, 45, 2, [150, 190, 235]);

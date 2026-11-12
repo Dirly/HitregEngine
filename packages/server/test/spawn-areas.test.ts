@@ -67,7 +67,7 @@ describe.skipIf(!handle)("spawn areas", () => {
           tags: [],
           components: {
             transform: { position: origin, rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
-            spawnArea: { radius: 30, sleepRadius: 40, idleSeconds: 0.5, spawns: [{ template: "hero0", count: 2, spread: 3 }], leash: 20, roam: 5 },
+            spawnArea: { radius: 30, sleepRadius: 40, idleSeconds: 0.5, spawns: [{ template: "hero0", count: 2, spread: 3 }], leash: 20, roam: 5, pack: "fire" },
           },
         },
       },
@@ -96,6 +96,7 @@ describe.skipIf(!handle)("spawn areas", () => {
     expect(child.params["home"]).toEqual(origin);
     expect(child.params["leash"]).toBe(20);
     expect(child.params["spawnArea"]).toBe("camp");
+    expect(child.params["pack"]).toBe("fire"); // a linked pack id reaches every brain in the subtree
     await until(() => a.world.some((m) => m.t === "spawn" && n1 in (m as { entities: Record<string, unknown> }).entities));
     expect(h.world.sim.getLinvel(n1)).not.toBeNull();
     // within sight of an awake pack: not a moment to swap layers

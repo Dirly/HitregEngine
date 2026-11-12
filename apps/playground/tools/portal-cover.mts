@@ -71,7 +71,9 @@ const MASK = (1 << 0) | (1 << 1); // SOLID_WORLD: WORLD | TERRAIN
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
 // ---- boot the world the server sees ----------------------------------------------------------------------------------
-let content = loadContent(playgroundRoots(PG));
+// the scene project closure only, as the dedicated server loads it: a scratch copy of a world in another project
+// (e.g. a lab with its own <world>.json) registers over the real recipe when every project is loaded
+let content = loadContent(playgroundRoots(PG, sceneId));
 const docNow = (): SceneDoc => JSON.parse(fs.readFileSync(sceneFile, "utf8")) as SceneDoc;
 let doc = docNow();
 let portals = walkThroughPortals(doc).filter(([id]) => !only || only.includes(id));
@@ -84,7 +86,7 @@ interface Section { s: number; floor: number; ceil: number | null; rows: Row[]; 
 type H = Awaited<ReturnType<typeof PortalHarness.start>>;
 let h!: H;
 async function boot(): Promise<void> {
-  content = loadContent(playgroundRoots(PG)); // scenes are read lazily: a fresh load sees the file as written
+  content = loadContent(playgroundRoots(PG, sceneId)); // scenes are read lazily: a fresh load sees the file as written
   // the body starts beside the first portal (its ground is made around it) and is never stepped: no script runs
   const first = poseOf(portals[0]![0]);
   h = await PortalHarness.start({ content, scene: sceneId!, at: [first.pos.x, first.pos.y + 40, first.pos.z], projectScripts: false });

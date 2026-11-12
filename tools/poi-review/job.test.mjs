@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { frozenSample, artBlock, deliversArt, finalReviewBlock, footprintPoints, jobHandoff, jobParent, measureSize, ownerApproval, readReview, rubricCodes, sizeBlock, deliversMaterialModels, deliversStructures, flatArtBlock, installBlock, terrainFineBlock, fineExceptionsFile, isMonumentSite, monumentApproachBlock, ownerOverrideScenes, opsHash, recordFix, recordReview, requireFinalReview, seeThroughBlock, setStage, stageBlock, catalogueIds, designBlock, designCodes, designFaults, designHash, recordDesignReview, jobArt, jobExceptions, exceptFaults, draftInstallBlock, DRAFT_GEOMETRY_GATES } from "./job.mjs";
-import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership } from "./concept-site.mjs";
+import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership, uneditedStamp } from "./concept-site.mjs";
 
 // image-request records live in a scratch folder for the whole file (concept-site.mjs reads HITREG_IMAGE_REQUESTS)
 const REQUESTS = fs.mkdtempSync(path.join(os.tmpdir(), "poi-requests-"));
@@ -23,7 +23,7 @@ function siteConcept(dir, file = "concept/01-shrine.png", { textOnly = false, po
   if (!fs.existsSync(worldFile)) fs.writeFileSync(worldFile, JSON.stringify({ seed: 7, terrain: { amp: 40 }, pipeline: {}, features: { roads: [{ id: "road-1", points: [[60, 50], [140, 50]] }], pois: [{ id: "far-cave", position: [5000, 10, 5000] }], clearings: [{ id: "t-yard", center: [100, 50], radius: 10 }] } }));
   const own = ownership(poi);
   const fp = groundFingerprint(JSON.parse(fs.readFileSync(worldFile, "utf8")), { center: reservation.center, radius: reservation.terrainRadius }, own);
-  fs.writeFileSync(path.join(cdir, `${stem}.site.json`), JSON.stringify({ tool: CONCEPT_TOOL, poi, reservation, worldFile, ownership: own, fingerprint: fp.hash, renderedAt: "2026-10-29T00:00:00Z", renders: { approach: { file: path.basename(render), sha256: fileSha(render) } } }));
+  fs.writeFileSync(path.join(cdir, `${stem}.site.json`), JSON.stringify({ tool: CONCEPT_TOOL, poi, reservation, worldFile, ownership: own, fingerprint: fp.hash, unedited: uneditedStamp(JSON.parse(fs.readFileSync(worldFile, "utf8")), { center: reservation.center, radius: reservation.terrainRadius }, own), renderedAt: "2026-10-29T00:00:00Z", renders: { approach: { file: path.basename(render), sha256: fileSha(render) } } }));
   fs.writeFileSync(path.join(REQUESTS, `concept-${path.basename(dir)}-${stem}.json`), JSON.stringify({ id: `concept-${stem}`, status: "done", createdAt: new Date().toISOString(), target: frame, refs: textOnly ? [] : [render] }));
   return { frame, render, worldFile };
 }

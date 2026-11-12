@@ -12,6 +12,8 @@ import fs from "node:fs";
 import path from "node:path";
 import {propPolicy} from './_prop-curation.mts';
 import { readableReportFile } from "./_dress-report.mts";
+import { withFileLock, writeAtomic } from "./_scene-write.mts";
+import { builderOf } from "../../../packages/core/src/scene-sync.ts";
 import {
   entityOwnerState,
   inferApplyFrame,
@@ -31,6 +33,10 @@ export interface OwnerEditRequest {
     tags?: string[];
     name?: string;
     parent?: string | null;
+    /** An agent edit: the owner-held properties it overrides on purpose (editScene `answers`). */
+    overrideOwner?: string[];
+    /** Component names (sorted): the entity's kind when it has no prefab. */
+    kind?: string[];
     before: OwnerTransform | null;
     after: OwnerTransform | null;
     note?: string;
@@ -104,7 +110,25 @@ function loadOwnerFile(file: string, init: { plan?: string; scene?: string; fram
 function writeOwnerFile(file: string, data: OwnerOverrides): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   ownerOverridesSchema.parse(data); // never write an invalid file
-  fs.writeFileSync(file, JSON.stringify(data, null, 1) + "\n");
+  writeAtomic(file, JSON.stringify(data, null, 1) + "\n"); // a sync reading it never sees half a file
+}
+
+/** The scene's EDIT RECORD: owner + agent edits of anything a dressing plan did not place. */
+export const sceneEditRecordFile = (projectsRoot: string, project: string, scene: string): string =>
+  path.join(projectsRoot, project, "authoring", "owner-overrides", `${scene}.json`);
+
+/** Read-modify-write a record file under its lock (the editor's POST and an agent's editScene can race). */
+function updateOwnerFile(file: string, init: { plan?: string; scene?: string; frame: "map" | "scene" }, edit: (d: OwnerOverrides) => OwnerOverrides): OwnerOverrides {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  return withFileLock(
+    file,
+    () => {
+      const next = edit(loadOwnerFile(file, init));
+      writeOwnerFile(file, next);
+      return next;
+    },
+    { label: "edit record", waitMs: 10_000 },
+  );
 }
 
 /** The plan item a dressed entity stands for, and whether it is one the plan places at all. */
@@ -127,7 +151,7 @@ function dressedItem(planFile: string, planId: string, entity: string, name: str
 }
 
 /** Fold the editor's edits into the owners' files. */
-export function recordOwnerEdits(projectsRoot: string, req: OwnerEditRequest, now = new Date().toISOString()): OwnerEditResult[] {
+export function recordOwnerEdits(projectsRoot: string, req: OwnerEditRequest, now = new Date().toISOString(), by: "owner" | "agent" = "owner"): OwnerEditResult[] {
   const sceneProj = sceneProject(projectsRoot, req.scene);
   const sceneFile = sceneProj ? path.join(projectsRoot, sceneProj, "assets", "scenes", `${req.scene}.scene.json`) : null;
   const out: OwnerEditResult[] = [];
@@ -140,33 +164,57 @@ export function recordOwnerEdits(projectsRoot: string, req: OwnerEditRequest, no
       const frame = planFrame(planFile, sceneFile);
       if (!frame) throw new Error(`plan ${planId}: no install frame (re-run dress apply once so it records --at/--yaw)`);
       const file = planFile.replace(/\.json$/, ".owner.json");
-      // the edits already kept move into this frame (exact: the scene positions do not change), and it is recorded
-      const data = rebaseOwnerOverrides(loadOwnerFile(file, { plan: planId, frame: "map" }), frame);
-      const { item, planned } = dressedItem(planFile, planId, e.entity, e.name, data);
-      const roomM = e.parent?.match(new RegExp(`^dress-${idPart(planId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(room-(.+)|outdoor)$`));
-      const next = recordOwnerEdit(
-        data,
-        {
-          item,
-          before: e.before ? sceneToMap(frame, e.before) : null,
-          after: e.after ? sceneToMap(frame, e.after) : null,
-          entity: e.entity,
-          room: roomM ? (roomM[2] ?? "").replace(/--/g, "/") : "",
-          ownerAdded: !planned,
-          note: e.note,
-        },
-        now,
-      );
-      writeOwnerFile(file, next);
+      let item = "";
+      const next = updateOwnerFile(file, { plan: planId, frame: "map" }, (loaded) => {
+        // the edits already kept move into this frame (exact: the scene positions do not change), and it is recorded
+        const data = rebaseOwnerOverrides(loaded, frame);
+        const d = dressedItem(planFile, planId, e.entity, e.name, data);
+        item = d.item;
+        const roomM = e.parent?.match(new RegExp(`^dress-${idPart(planId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(room-(.+)|outdoor)$`));
+        return recordOwnerEdit(
+          data,
+          {
+            item,
+            before: e.before ? sceneToMap(frame, e.before) : null,
+            after: e.after ? sceneToMap(frame, e.after) : null,
+            entity: e.entity,
+            room: roomM ? (roomM[2] ?? "").replace(/--/g, "/") : "",
+            ownerAdded: !d.planned,
+            note: e.note,
+          },
+          now,
+          by,
+        );
+      });
       const o = next.overrides.find((x) => x.item === item);
       out.push({ entity: e.entity, file, owner: "plan", plan: planId, item, reasons: o?.reasons ?? [], ...(o ? {} : { removed: true }) });
     } else {
       if (!sceneProj) throw new Error(`scene ${req.scene} is not in any project`);
-      const file = path.join(projectsRoot, sceneProj, "authoring", "owner-overrides", `${req.scene}.json`);
-      const data = loadOwnerFile(file, { scene: req.scene, frame: "scene" });
-      const prev = data.overrides.find((o) => o.item === e.entity);
-      const next = recordOwnerEdit(data, { item: e.entity, before: e.before, after: e.after, entity: e.entity, ownerAdded: prev ? prev.added : !e.before, note: e.note }, now);
-      writeOwnerFile(file, next);
+      const file = sceneEditRecordFile(projectsRoot, sceneProj, req.scene);
+      const builder = builderOf({ tags: e.tags }) ?? undefined;
+      const next = updateOwnerFile(file, { scene: req.scene, frame: "scene" }, (data) => {
+        const prev = data.overrides.find((o) => o.item === e.entity);
+        return recordOwnerEdit(
+          data,
+          {
+            item: e.entity,
+            before: e.before,
+            after: e.after,
+            entity: e.entity,
+            // added = it exists only because someone placed it by hand (no generator makes it)
+            ownerAdded: prev ? prev.added : !e.before && !builder,
+            note: e.note,
+            builder,
+            name: e.name,
+            kind: e.kind,
+            parent: e.parent ?? null,
+            tags: e.tags,
+            overrideOwner: e.overrideOwner,
+          },
+          now,
+          by,
+        );
+      });
       const o = next.overrides.find((x) => x.item === e.entity);
       out.push({ entity: e.entity, file, owner: "scene", item: e.entity, reasons: o?.reasons ?? [], ...(o ? {} : { removed: true }) });
     }

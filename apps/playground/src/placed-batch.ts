@@ -103,13 +103,18 @@ export interface PlacedBatcherOptions {
   culling: CullingSystem;
   sheets: PropSheets | undefined;
   subtreeStill: (id: string) => boolean;
+  /**
+   * Source entity ids being edited (the editor's selection in edit mode). Their meshes, and their descendants', stay
+   * out of the merge so a gizmo drag shows the object moving live. Unset in play and in the published game.
+   */
+  liveIds?: () => ReadonlySet<string>;
 }
 
 /**
  * Batch a built tree of placed content and register its culling units (the base scene, or one streamed place):
  * authored units merge alone, the rest per STATIC_BATCH_CELL, every unit gated on streamed ground.
  */
-export function createPlacedBatcher({ culling, sheets, subtreeStill }: PlacedBatcherOptions) {
+export function createPlacedBatcher({ culling, sheets, subtreeStill, liveIds }: PlacedBatcherOptions) {
   return (
     root: THREE.Object3D,
     doc: SceneDoc | null,
@@ -152,8 +157,21 @@ export function createPlacedBatcher({ culling, sheets, subtreeStill }: PlacedBat
       const e = mesh.matrixWorld.elements;
       return `hide:${reveal}:${Math.floor(e[12]! / PROP_HIDE_CELL)},${Math.floor(e[14]! / PROP_HIDE_CELL)}`;
     };
+    // an edited entity (or anything under it) draws from its own node; expanded ids read `<source>:<part>`
+    const live = liveIds?.() ?? new Set<string>();
+    const liveMemo = new Map<string, boolean>();
+    const isLive = (id: string | null | undefined): boolean => {
+      if (!id || live.size === 0) return false;
+      const known = liveMemo.get(id);
+      if (known !== undefined) return known;
+      liveMemo.set(id, false); // cycle guard
+      const result = live.has(id.split(":")[0]!) || isLive(doc?.entities[id]?.parent);
+      liveMemo.set(id, result);
+      return result;
+    };
     const batch = batchStaticMeshes(root, {
       sheets,
+      keepLive: (mesh: THREE.Mesh) => isLive(mesh.userData["entityId"] as string | undefined),
       // A room owns its furniture before generic distance buckets: otherwise a 12 m interior's
       // meshes escape into 60/100 m batches and still draw (including every shadow cascade) outside.
       groupOf: (mesh: THREE.Mesh) => authoredUnit(cullRootOf.get(mesh.userData["entityId"] as string)) ?? hideKey(mesh) ?? cellOf(mesh),

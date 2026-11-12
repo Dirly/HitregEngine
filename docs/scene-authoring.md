@@ -41,6 +41,12 @@ follows is the map and the judgment the schema can't encode.
   editable `poly` mesh / `heightmap` terrain), `light`, `camera` (+ optional follow `rig`),
   `material` (a data asset referenced by GUID), `sky`, `postfx`, `particles`, `billboard`.
 - Physics: `rigidbody`, `collider`, `joint`.
+- Water interiors: `waterExclusion` fits a finite dry interior inside a watertight
+  hull. The rendered water, camera effects and client/server swimming use the
+  same transformed volume. Keep it inside the hull and below the deck/gunwale;
+  open wrecks remain flooded. This authors a static dry interior; buoyancy and
+  flooding are separate behavior. The generated component spec defines its
+  convex-volume contract.
 - Behavior / data: `script`, `animator`, `audio`, `prefab`, `netObject`.
 - Streaming: `chunkStreamer`, `subscene`.
 

@@ -7,6 +7,7 @@ import type { WaterData } from "./components/core.js";
 import { expandScene } from "./prefab.js";
 import { worldTransforms, type Vec3, type WorldTransform } from "./math.js";
 import { collectSceneTriangles, raycastTriangles, type TriangleSoup } from "./placement.js";
+import { waterExcluded, type WaterExclusion } from "./water-exclusion.js";
 
 /**
  * Water as CONTAINED volumes, not floating sheets. `waterFillOps` fills a
@@ -408,7 +409,9 @@ export function waterVolumes(
  * free of the thousands of streamed sheets that draw them.
  */
 export class WaterIndex {
-  constructor(readonly volumes: readonly WaterVolume[] = []) {}
+  constructor(readonly volumes: readonly WaterVolume[] = [], readonly exclusions: readonly WaterExclusion[] = []) {}
+
+  excludes(x: number, y: number, z: number): boolean { return waterExcluded(this.exclusions, x, y, z); }
 
   get empty(): boolean {
     return this.volumes.length === 0;
@@ -424,6 +427,7 @@ export class WaterIndex {
    * cistern above a flooded cellar read correctly from inside either.
    */
   sampleAt(x: number, y: number, z: number): WaterSample | null {
+    if (this.excludes(x, y, z)) return null;
     let best: WaterVolume | null = null;
     for (const v of this.volumes) {
       if (x < v.x0 || x > v.x1 || z < v.z0 || z > v.z1) continue;
@@ -499,7 +503,9 @@ export function waterQuery(
   const indexOf: () => WaterIndex | null = typeof index === "function" ? index : () => index ?? null;
   const fieldOf: () => WaterField | null = typeof field === "function" ? field : () => field ?? null;
   return (x, y, z) => {
-    const authored = indexOf()?.sampleAt(x, y, z) ?? null;
+    const at = indexOf();
+    if (at?.excludes(x, y, z)) return null;
+    const authored = at?.sampleAt(x, y, z) ?? null;
     const world = fieldOf();
     let generated: WaterSample | null = null;
     if (world && (world.worldLimit === Infinity || Math.hypot(x, z) <= world.worldLimit)) {

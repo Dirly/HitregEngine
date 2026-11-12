@@ -21,7 +21,7 @@ await MeshoptSimplifier.ready;
  * mesh: { positions, normals, indices, splat, surfaceCount, tint?, vertexCount, triangleCount, min, max }
  * Returns a new mesh of the same shape plus `decimate: { before, after, error }`.
  */
-export function decimateRough(mesh, { error = 0.02, splatWeight = 0.5, normalWeight = 0.25 } = {}) {
+export function decimateRough(mesh, { error = 0.02, splatWeight = 0.5, normalWeight = 0.25, lockWhere = null } = {}) {
   const n = mesh.positions.length / 3;
   const S = mesh.surfaceCount;
   const stride = S + 3;
@@ -45,6 +45,8 @@ export function decimateRough(mesh, { error = 0.02, splatWeight = 0.5, normalWei
     if (c === undefined) { firstAt.set(key, i); canon[i] = i; } else { canon[i] = c; (members.get(c) ?? members.set(c, [c]).get(c)).push(i); }
   }
   let ring = null, out, achieved, rounds = 0, locked = 0;
+  // lockWhere(x, y, z): vertices that must not move (a chunked bake's chunk borders, so neighbours still meet exactly)
+  if (lockWhere) for (let i = 0; i < n; i++) if (lockWhere(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2])) { lock[i] = 1; locked++; }
   for (;;) {
     [out, achieved] = MeshoptSimplifier.simplifyWithAttributes(indices, pos, 3, attrs, stride, weights, locked ? lock : null, 0, error, ["ErrorAbsolute"]);
     const uses = new Map();

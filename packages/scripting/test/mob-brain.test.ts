@@ -56,6 +56,8 @@ function harness(opts: {
   }>;
   /** false = nothing subscribes to mob.attack (a scene missing the game's attack join). */
   listenAttack?: boolean;
+  /** The mob body's collider (its eye is capped at the top of it). */
+  mobCollider?: Record<string, unknown>;
 }) {
   const events = new EventRegistry();
   registerCoreEvents(events);
@@ -79,6 +81,7 @@ function harness(opts: {
         components: {
           transform: { position: opts.mobAt ?? [0, 0, 0] },
           script: { name: "mob-brain", params: opts.params ?? {} },
+          ...(opts.mobCollider ? { collider: opts.mobCollider } : {}),
         },
       },
     },
@@ -132,13 +135,14 @@ function harness(opts: {
   // Every query the brain makes, so a test can assert what it asked for and not
   // only what this stub chose to answer — the stub models walls, while the real
   // sim also has BODIES in the way (see the sight test).
-  const queries: Array<{ maxDistance: number; exclude: string[] }> = [];
+  const queries: Array<{ maxDistance: number; exclude: string[]; origin: number[]; dir: number[] }> = [];
   const sim: SimLike = {
     getLinvel: () => [0, 0, 0],
     setLinvel: () => {},
+    setPosition: (id: string, p: [number, number, number]) => { objects.get(id)?.position.set(p[0], p[1], p[2]); },
     applyImpulse: () => {},
     raycast(origin, dir, maxDistance, query): SimHit | null {
-      queries.push({ maxDistance, exclude: [...((query?.exclude as string[]) ?? [])] });
+      queries.push({ maxDistance, exclude: [...((query?.exclude as string[]) ?? [])], origin: [...origin], dir: [...dir] });
       const layers = query?.layers ?? 0xffff;
       if (dir[1] < -0.5) {
         if ((layers & GROUND_LAYERS) === 0) return null;
@@ -283,6 +287,66 @@ describe("mob-brain aggro", () => {
     h.movePlayer(0, 0, 40);
     h.step(20);
     expect(h.states().at(-1)).toBe("idle");
+  });
+
+  it("leaves a player on another storey alone under aggroHeight, but answers one that strikes it", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 16, aggroHeight: 4, requireLineOfSight: false }, playerAt: [0, 10, 6] });
+    h.step(40);
+    expect(h.states()).not.toContain("chase");
+    h.threat({ sourceId: "player", amount: 5 });
+    h.step(20);
+    expect(h.states()).toContain("chase");
+    const same = harness({ params: { roam: 0, aggroRange: 16, aggroHeight: 4, requireLineOfSight: false }, playerAt: [0, 2, 6] });
+    same.step(20);
+    expect(same.states()).toContain("chase");
+  });
+
+  it("sees from inside its own body and to the target's torso: a tall capsule's feet-measured eyeHeight is capped", () => {
+    // a 4.4 m ogre: origin = capsule centre, eyeHeight 3.87 authored from the feet
+    const h = harness({
+      params: { roam: 0, aggroRange: 16, eyeHeight: 3.87 },
+      mobAt: [0, 2.2, 0],
+      playerAt: [0, 0.9, 10],
+      mobCollider: { shape: "capsule", size: [1.5, 4.4, 1.5] },
+    });
+    h.step(20);
+    const sight = h.queries().filter((q) => q.exclude.includes("player") && Math.abs(q.dir[1]!) < 0.9);
+    expect(sight.length).toBeGreaterThan(0);
+    const q = sight[0]!;
+    expect(q.origin[1]).toBeLessThanOrEqual(2.2 + 4.4 * 0.45 + 1e-6); // not above its head
+    const endY = q.origin[1]! + q.dir[1]! * q.maxDistance;
+    expect(endY).toBeLessThanOrEqual(0.9 + 1.0 + 1e-6); // the player's torso, not 2.3 m over its centre
+  });
+
+  it("does not fire a reaching move (a shot) at a target it cannot see; with a clear line it does", () => {
+    const params = { roam: 0, aggroRange: 16, speed: 0, attackRange: 3, attackInterval: 0.5, leash: 100,
+      moves: [{ ability: "mobShot", range: [5, 20], cooldown: 1, weight: 1, windup: 0.5 }] };
+    const blocked = harness({ params, playerAt: [0, 0, 10], walls: [{ minX: -8, maxX: 8, minZ: 4, maxZ: 5 }] });
+    blocked.threat({ sourceId: "player", amount: 10 });
+    blocked.step(240);
+    expect(blocked.attacks()).toHaveLength(0);
+    const clear = harness({ params, playerAt: [0, 0, 10] });
+    clear.threat({ sourceId: "player", amount: 10 });
+    clear.step(240);
+    expect(clear.attacks().length).toBeGreaterThan(0);
+  });
+
+  it("homeUnstick: a body that cannot get any closer to home while leashing is put back there", () => {
+    const stuck = harness({ params: { roam: 0, leash: 5, home: [0, 0, 20], roamSpeed: 0, homeUnstick: 2 }, playerAt: [0, 0, 200] });
+    stuck.step(60 * 4);
+    expect(stuck.mob.position.z).toBeCloseTo(20, 1);
+    const walker = harness({ params: { roam: 0, leash: 5, home: [0, 0, 20], roamSpeed: 0 }, playerAt: [0, 0, 200] });
+    walker.step(60 * 4);
+    expect(walker.mob.position.z).toBeCloseTo(0, 1); // off: it stays where it is
+  });
+
+  it("a stander (roam 0) that loses its target walks back to its post", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 16, deaggroRange: 20, leash: 100, speed: 4, roamSpeed: 3, attackRange: 2 }, playerAt: [0, 0, 12] });
+    h.step(60 * 2); // it chases
+    expect(h.mob.position.z).toBeGreaterThan(4);
+    h.movePlayer(0, 0, 200); // gone
+    h.step(60 * 8);
+    expect(Math.hypot(h.mob.position.x, h.mob.position.z)).toBeLessThan(1.6);
   });
 
   it("will not aggro through a wall", () => {
@@ -794,6 +858,20 @@ describe("mob-brain packs", () => {
     expect(h.driveOf("boar2")).toEqual([0, 0]);
   });
 
+  it("a linked packmate (same pack) answers past rock and past its alertRadius; an unlinked one does not", () => {
+    const mate = (id: string, at: [number, number, number], pack: string) => ({ id, at, tags: ["npc"], script: { name: "mob-brain",
+      params: { roam: 0, aggroRange: 1, alertRadius: 6, faction: "boar", speed: 4, leash: 100, ...(pack ? { pack } : {}) } } });
+    const h = harness({
+      params: { roam: 0, aggroRange: 16, alertRadius: 6, faction: "boar", speed: 4, pack: "fire" },
+      playerAt: [0, 0, 10],
+      extras: [mate("linked", [12, 0, 0], "fire"), mate("stranger", [12, 0, -14], "")], // the stranger is out of every shout
+      walls: [{ minX: 3, maxX: 5, minZ: -4, maxZ: 12 }],
+    });
+    h.step(60);
+    expect(Math.hypot(...h.driveOf("linked"))).toBeGreaterThan(0.5);
+    expect(h.driveOf("stranger")).toEqual([0, 0]);
+  });
+
   it("a same-level visible packmate still answers", () => {
     const h = harness({
       params: { roam: 0, aggroRange: 16, alertRadius: 20, faction: "boar", speed: 4 },
@@ -1088,6 +1166,13 @@ describe("mob-brain sight cone", () => {
 
   it("sees one in front", () => {
     const h = harness({ params: { roam: 0, aggroRange: 16, sightAngle: 60, hearRadius: 3 }, playerAt: [1, 0, 8] });
+    h.step(40);
+    expect(h.states()).toContain("chase");
+  });
+
+  it("faces the way an authored quaternion past 90 degrees says (not rotation.y, which flips it)", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 16, sightAngle: 60, hearRadius: 3 }, playerAt: [-1.5, 0, -8] });
+    h.mob.quaternion.set(0, Math.sin(-170 * Math.PI / 360), 0, Math.cos(-170 * Math.PI / 360)); // yaw -170: facing about -Z
     h.step(40);
     expect(h.states()).toContain("chase");
   });

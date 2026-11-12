@@ -33,8 +33,13 @@ Derek's judgement, in the order he raised it:
 
 Run everything from `apps/playground`. `<river>` is the fall's river id and
 `<site>` is the site id the template writes (`site-<river>-<fallIndex>`).
-The world file is `projects/proving/assets/worlds/mmo.json`. **Copy it to
-your scratchpad before the first edit.**
+The examples use the proving world (`mmo`, `projects/proving/assets/worlds/mmo.json`); for another world
+swap the world id, `--project` and the recipe path (Redstrand: `redstrand`, `--project redstrand`,
+`projects/redstrand/assets/worlds/redstrand.json`). **Copy the world file to your scratchpad before the first edit.**
+
+**Before crafting anything, check the river material has a `fallTexture`** (`water.fallTexture`,
+`fallTextureScale`, `fallSpeed` on the recipe's `riverMaterial`). Without it every curtain draws the flat river
+texture as a dark see-through slab (Redstrand, 2026-11-10: all 11 falls).
 
 1. **Pick and read the fall.** Fall INDICES shift: crafting a site splits
    its fall into tiers, and every later index moves up. Name a fall by its river
@@ -52,8 +57,11 @@ your scratchpad before the first edit.**
 3. **Set the dressing blocks** on that site in mmo.json:
    ```json
    "walls": { "rule": "<the biome's rock scatter rule>" },
-   "formations": { "wallSurface": "cliff", "accentSurface": "" }
+   "formations": {}
    ```
+   - Leave `formations` empty in a world whose zones restyle the cliff (`regions[].ground.cliff`, an indexed
+     splat): the masses then wear the zone's own cliff stone. Name `wallSurface: "cliff", accentSurface: ""`
+     only in a world with the plain base palette (mmo).
    - `gorge` is on by default; leave it out unless tuning.
    - `walls` is scree only: it rests on terrain, never on steep faces.
    - `accentSurface: ""` keeps one colour family. A `rock` accent paints pale
@@ -73,13 +81,17 @@ your scratchpad before the first edit.**
    tiers than the site has, the course or the tiers did not take.
    **Use a course on almost every site.** Without one the gorge is a
    dead-straight slot, the most common failure.
+   **Not on a river with a split-fall branch (`<river>-split`), and keep it short (under ~90 m, two river
+   segments).** `spliceCourses` tries every site's course against every river, so a course near a branch's head
+   is spliced into the branch too, and a long course flattens the bed between its ends: on Redstrand that erased
+   a 33 m fall and a 43 m branch fall. Re-run `--list` after adding a course and check every drop is still there.
 5. **Bake the formations:**
-   `npx tsx tools/rock-formations.mts voxel-demo mmo <site> --scene mmo`.
+   `npx tsx tools/rock-formations.mts <project> <world> <site> --scene <scene>`.
    - It writes the volume doc, a baked GLB and the scene entity, and drops
      any piece that fails the support checks.
    - **Re-run it after ANY change** to tiers, gorge, course or formations.
      It measures the gorge it sits in.
-6. **Audit:** `npx tsx tools/_site-audit.mts <river> <site>`. All checks must pass:
+6. **Audit:** `npx tsx tools/_site-audit.mts <river> <site> [recipe.json]`. All checks must pass:
 
    | Check | Tests | Usual fix |
    |---|---|---|
@@ -95,8 +107,8 @@ your scratchpad before the first edit.**
      Check the port is free first, and never use 5173 or 5199. The running
      server's terrain worker serves stale core code, so you'd be shooting old
      code.
-   - Then run `node tools/_fall-site-shots.mjs http://localhost:<port>/ <scratch>/shots/r1 <river>`.
-   - Read `sheet.png` (7 views in one image), then open single views only when
+   - Then run `node tools/_fall-site-shots.mjs http://localhost:<port>/ <scratch>/shots/r1 <river> [--scene <scene> --recipe <recipe.json>]`.
+   - Read `sheet.png` (8 views in one image), then open single views only when
      you need detail. Kill the server when you're done.
 8. **Loop until the completion gate passes.** Nobody reviews each fall by hand.
    A world build crafts every fall unattended, so the agent is its own

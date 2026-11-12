@@ -21,6 +21,25 @@ import os from "node:os";
 import path from "node:path";
 import {propPolicy} from './_prop-curation.mts';
 import { contentTag } from "../../../packages/core/src/scene-rebase.ts";
+import { worldRecipeSchema } from "../../../packages/core/src/voxel/recipe.ts";
+// @ts-ignore plain JS engine tool module
+import { exteriorWriteGuard, guardTargetOf } from "../../../tools/poi-review/exterior-chain.mjs";
+
+/**
+ * THE EXTERIOR CHAIN guard (tools/poi-review/exterior-chain.mjs; Derek 2026-11-10, Rustgut): every locked write of a
+ * WORLD recipe or WORLD scene (projects/<p>/assets/worlds/<w>.json, assets/scenes/<w>.scene.json of a zoned world) that
+ * adds or changes an enforced place's own items (its need patches, operators and pieces, landmarks, clearings; entities
+ * tagged poi:<id> or under one) is refused until that place's chain is complete: location -> unedited grab -> concepts
+ * painted from it -> `zonegen concept-check`. Removals pass (an uninstall builds nothing). The only bypass is an owner
+ * ruling on the command line (--no-concept-ruling "YYYY-MM-DD <Derek's words>") or HITREG_NO_CONCEPT_RULING, recorded.
+ */
+export function assertExterior(file: string, beforeText: string | null, after: unknown, label?: string): void {
+  if (!guardTargetOf(file)) return;
+  const before = beforeText == null ? null : JSON.parse(beforeText);
+  const normalize = (d: unknown) => { const r = worldRecipeSchema.safeParse(d); return r.success ? r.data : d; };
+  const why = exteriorWriteGuard(file, before, after, { normalize, label });
+  if (why) throw new Error(why);
+}
 
 /** Gate newly added/swapped prefab references, without disturbing existing placements. */
 export function assertBuilderProps(file:string,ops:readonly any[]){
@@ -198,7 +217,8 @@ export function writeAtomic(file: string, text: string): void {
 /** Read-modify-write a JSON file under its lock (see the file header). Returns what `edit` returned. */
 export function updateJsonFile<T = any, X extends EditResult<T> = EditResult<T>>(file: string, edit: (fresh: T | null) => X, opts: WriteOptions = {}): X {
   return withFileLock(file, () => {
-    const fresh: T | null = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
+    const freshText = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
+    const fresh: T | null = freshText == null ? null : JSON.parse(freshText);
     const count = opts.count ?? countItems, before = fresh == null ? 0 : count(fresh); // before the edit: it may mutate `fresh`
     const out = edit(fresh);
     if (!out || out.doc == null) throw new Error(`scene-write: the edit of ${path.basename(file)} returned no doc (nothing written)`);
@@ -207,6 +227,7 @@ export function updateJsonFile<T = any, X extends EditResult<T> = EditResult<T>>
       const allowed = typeof out.removed === "number" ? out.removed : (out.removed?.length ?? 0);
       if (before - after > allowed) throw new Error(`scene-write: refusing to write ${path.basename(file)}: ${before} -> ${after} items (${before - after} lost, ${allowed} removal(s) declared). Another writer changed it, or the removals were not declared (--allow-removals)`);
     }
+    assertExterior(file, freshText, out.doc, opts.label);
     writeAtomic(file, JSON.stringify(out.doc, null, opts.indent ?? 2) + (opts.trailer ?? "\n"));
     return out;
   }, opts);
@@ -245,6 +266,7 @@ export function writeJsonFile(file: string, doc: unknown, opts: WriteOptions & {
       const allowed = typeof opts.removed === "number" ? opts.removed : (opts.removed?.length ?? 0);
       if (before - after > allowed) throw new Error(`scene-write: refusing to write ${path.basename(file)}: ${before} -> ${after} items (${before - after} lost, ${allowed} removal(s) declared)`);
     }
+    assertExterior(file, text, doc, opts.label);
     const out = JSON.stringify(doc, null, opts.indent ?? 2) + (opts.trailer ?? "\n");
     writeAtomic(file, out);
     noteRead(file, out);

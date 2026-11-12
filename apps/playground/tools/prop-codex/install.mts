@@ -162,6 +162,8 @@ export function install(worldKit: string, opts: { cards?: string[]; sheet?: stri
       collision: g.solid ? "exact static trimesh from published model" : "none (soft)", ...(g.water ? { water: `engine water disc r ${g.water.radius} m, depth ${g.water.depth} m (${POOL_WATER})` } : {}), behavior: "Static decoration; no gameplay.", effects: [],
       // a revision under a new id: dressing-overrides `supersededBy` lands on the row, so menus offer only the successor (props.mts)
       ...(typeof overrides?.[id]?.supersededBy === "string" ? { supersededBy: overrides[id].supersededBy } : {}),
+      // a deliberate off-kind size (a 12 m landmark doorway named "door"): dressing-overrides `realSizeExempt` lands on the row (props status reads it there)
+      ...(typeof overrides?.[id]?.realSizeExempt === "string" ? { realSizeExempt: overrides[id].realSizeExempt } : {}),
       review: `authoring/${COLLECTION}/reports/prop-${g.name}.png`, madeBy: "Codex design via props codex (tools/prop-codex)", sha256: sha(file),
     });
     assets.push({ id: model, path: `assets/models/${model}`, sha256: sha(runtime), source: `authoring/${COLLECTION}/source/${g.name}.glb` });

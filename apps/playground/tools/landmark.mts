@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { dirname, join, resolve } from "node:path";
 import {
   buildLandmarkMesh, buildVolumeMesh, wallLandmarkParams, wallParamsSchema, WALL_SCALE, compileLandmarkOperator, compileLandmarkSpec, createVolume, createWorldField, isNaturalRole, landmarkFootprint, landmarkOperatorSchema,
-  operatorParams, worldRecipeSchema, zoneWallStone, type BuiltGroup, type CsgNode, type VoxelMesh, type WorldRecipe,
+  operatorParams, reduceSplatTop4, worldRecipeSchema, zoneWallStone, type BuiltGroup, type CsgNode, type VoxelMesh, type WorldRecipe,
 } from "@hitreg/core";
 import { colliderReach, type Vec3 } from "./_collider-reach.mts";
 import { operatorReader } from "./worldgen-operators.mts";
@@ -182,6 +182,12 @@ const recipeFile = flag("recipe") ?? join("projects", project, "assets", "worlds
 const recipe: WorldRecipe = worldRecipeSchema.parse(JSON.parse(readFileSync(recipeFile, "utf8")));
 const doc = (recipe.features.operators ?? []).find((o) => o.id === opId) as Record<string, unknown> | undefined;
 if (!doc || (doc.op !== "landmark" && doc.op !== "wall")) throw new Error(`no installed landmark or wall operator "${opId}" in ${recipeFile} (worldgen op --apply first)`);
+// EXTERIOR CHAIN (tools/_exterior.mts, Derek 2026-11-10 Rustgut): a place's landmark is baked only after its location,
+// unedited grab, concepts and concept check (or an owner --no-concept-ruling); a dry run / glb page writes nothing live
+if (!has("dry-run") && !flag("glb-only") && !flag("recipe")) {
+  const { exteriorOrExit, placeOfFeature, projectDirOf } = await import("./_exterior.mts");
+  exteriorOrExit(project, world, placeOfFeature(projectDirOf(project), world, recipe as never, doc), `landmark bake ${opId}`, recipe as never);
+}
 // TOWN WALLS ARE MASONRY (Saltharrow 2026-10-29): a wall the town owns never bakes onto the zone's cliff skin
 { const { townOwnerOf, townWallMaterialFault } = await import("./_town-wall-rules.mts");
   const owner = townOwnerOf(doc as never, recipe.features.towns.map((t) => ({ id: t.id, center: t.center, radius: t.radius })));
@@ -252,7 +258,9 @@ const visible = subMesh(raw, (t) => !(buried(raw.indices[t * 3]!) && buried(raw.
 const error = Number(flag("error") ?? 0.05);
 const groups: { key: string; material: string; mesh: VoxelMesh }[] = [];
 const splatGroup = subMesh(visible, (t) => dominant(visible, t) < names.length);
-if (splatGroup.triangleCount) groups.push({ key: "", material: flag("material") ?? recipe.material ?? "terrain/mmo", mesh: decimate(splatGroup, error) });
+// the splat group carries the INDEXED splat too (four layer ids + weights per vertex): a deep-palette world's terrain
+// material is indexed and reads only those; with the dense weights alone it drew BLACK (zone-splat, Rustgut 2026-11-10)
+if (splatGroup.triangleCount) groups.push({ key: "", material: flag("material") ?? recipe.material ?? "terrain/mmo", mesh: reduceSplatTop4(decimate(splatGroup, error)) });
 extras.forEach((m, j) => { const g = subMesh(visible, (t) => dominant(visible, t) === names.length + j); if (g.triangleCount) groups.push({ key: `.${j + 1}`, material: m, mesh: { ...decimate(g, error), splat: new Float32Array(0), surfaceCount: 0 } as VoxelMesh }); }); // a material group carries no splat weights
 // ---- built roles: meshed directly, real UVs at the role tile (texture px / 40 texels per m), one draw per material
 const builtGroups: { key: string; material: string; mesh: BuiltGroup }[] = [];

@@ -362,6 +362,11 @@ export const NEED_ROCK_MAX_SLOPE = 8;
  *  peaks on the lattice; a fin or slot taller than this is still a fault. */
 export const NEED_ROCK_LIP = 6;
 const NEED_ROCK_LIFT = 3;
+/** Sawtooth (m the 2 m lattice misses the field by) a cliff need's own ROCK may draw: a near-vertical face (rise/run up
+ *  to NEED_ROCK_MAX_SLOPE) cannot be drawn by the lattice without missing it, the same reason its walls may step and its
+ *  lips stand (rustgut-face 2026-11-10: a 46 m face read 8 alias cells of 0.56-0.73 m, all on the rock; coordinator
+ *  ruling: a rule in the tool, as for steps, never a per-site exception). Its apron and fills keep the 0.5 m tolerance. */
+export const NEED_ROCK_ALIAS = NEED_ROCK_LIP;
 
 /** (x, z) (a 2 m lattice cell's centre) -> true inside a solved cliff-face need's rock (its block, lifted more than NEED_ROCK_LIFT m). */
 export function needRockAt(recipe: WorldRecipe, lift: (x: number, z: number) => number): (x: number, z: number) => boolean {
@@ -436,6 +441,7 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
       // steeper than NEED_FACE_MAX_SLOPE counts (2026-10-29 redstrand w6: the weeping-sun scarp read as 1173 steps)
       aliasTol: opts.aliasTol, maxSlope: o.kind === "patch" && o.id.startsWith("need-") ? Math.max(opts.maxSlope ?? 1.6, NEED_FACE_MAX_SLOPE) : opts.maxSlope, lipTol: opts.lipTol,
       lipTolAt: o.kind === "patch" && o.id.startsWith("need-") ? (x, z) => (inRock(x, z) ? Math.max(opts.lipTol ?? 0.75, NEED_ROCK_LIP) : undefined) : undefined,
+      aliasTolAt: o.kind === "patch" && o.id.startsWith("need-") ? (x, z) => (inRock(x, z) ? Math.max(opts.aliasTol ?? 0.5, NEED_ROCK_ALIAS) : undefined) : undefined,
       // a cell a need face also moved is that face's rock wherever it stands: a road cut deepening its toe is charged to
       // the road, at the face's slope (the steepest tolerance of the edits that moved the cell)
       maxSlopeAt: (x, z) => {

@@ -62,7 +62,7 @@ export function assertAtlasBudget(layout:any,entries:{file:string;out:string;kin
  }
 }
 export function packBuiltProps(wk:string,built:GeometryRecord[],log:(s:string)=>void=()=>{},landmarks:ReadonlySet<string>=new Set()){
- const assetsDir=path.join(wk,'assets'),groups=[{atlas:'town-craft',max:1},{atlas:PAINTED_ATLAS,max:4},{atlas:LANDMARK_ATLAS,max:24/* owner 2026-10-30: was 8; a landmark page loads only with the model that uses it, so the cap guards no runtime memory, only runaway packing. o-sunwine5 2026-11-02: 16 -> 24 (the Sunwine temple front was the 17th one-page landmark; every dungeon door now gets its own front) */},...Object.values(SET_ATLASES)].map(g=>({...g,rows:built.filter(r=>atlasFor(r,landmarks)===g.atlas)}));
+ const assetsDir=path.join(wk,'assets'),groups=[{atlas:'town-craft',max:1},{atlas:PAINTED_ATLAS,max:4},{atlas:LANDMARK_ATLAS,max:32/* owner 2026-10-30: was 8; a landmark page loads only with the model that uses it, so the cap guards no runtime memory, only runaway packing. o-sunwine5 2026-11-02: 16 -> 24 (the Sunwine temple front was the 17th one-page landmark; every dungeon door now gets its own front). r-go-flat 2026-11-11: 24 -> 32 (the Fallen Edge blade was the 25th) */},...Object.values(SET_ATLASES)].map(g=>({...g,rows:built.filter(r=>atlasFor(r,landmarks)===g.atlas)}));
  const plans=groups.map(group=>{
   const layoutFile=atlasPaths(assetsDir,group.atlas).layoutFile;
   const existing=fs.existsSync(layoutFile)?JSON.parse(fs.readFileSync(layoutFile,'utf8')):null;

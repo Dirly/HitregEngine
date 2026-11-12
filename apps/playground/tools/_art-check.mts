@@ -776,8 +776,10 @@ export function unmeasuredAreas(tris: { a: number[]; b: number[]; c: number[]; m
 
 /** UV stretch of each material: the share of its UV-laid area whose triangles' world-to-UV map is anisotropic beyond
  *  `limit` (the ratio of the map's singular values: a sheared or squashed face), and the worst ratio. Materials laid by
- *  world projection (no UVs) are left out. */
-export function uvStretchByMaterial(tris: { a: number[]; b: number[]; c: number[]; uv?: [number, number][]; material?: string; tex?: { key: string; repeat?: [number, number] } }[], limit = 1.3): Record<string, { share: number; worst: number }> {
+ *  world projection (no UVs) are left out. `px(material)` gives the texture's [width, height] in pixels: the ratio is taken
+ *  in TEXELS, so a correctly laid non-square picture (a 512 x 128 crown panel on a 13 x 3.2 m face, a 3:1 cornice band)
+ *  is not read as squashed (rustgut-entrance 2026-11-09: every non-square role of a built bake failed at its aspect). */
+export function uvStretchByMaterial(tris: { a: number[]; b: number[]; c: number[]; uv?: [number, number][]; material?: string; tex?: { key: string; repeat?: [number, number] } }[], limit = 1.3, px?: (material: string) => [number, number] | undefined): Record<string, { share: number; worst: number }> {
   const acc = new Map<string, { area: number; bad: number; worst: number }>();
   const sub = (p: number[], q: number[]) => [p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!], dot = (p: number[], q: number[]) => p[0]! * q[0]! + p[1]! * q[1]! + p[2]! * q[2]!;
   for (const t of tris) {
@@ -785,7 +787,7 @@ export function uvStretchByMaterial(tris: { a: number[]; b: number[]; c: number[
     const e1 = sub(t.b, t.a), e2 = sub(t.c, t.a), n = [e1[1]! * e2[2]! - e1[2]! * e2[1]!, e1[2]! * e2[0]! - e1[0]! * e2[2]!, e1[0]! * e2[1]! - e1[1]! * e2[0]!], A = Math.hypot(...n) / 2, l1 = Math.hypot(...e1);
     if (!(A > 1e-6) || !(l1 > 1e-9)) continue;
     const ax = e1.map((v) => v / l1), ay0 = [n[1]! * ax[2]! - n[2]! * ax[1]!, n[2]! * ax[0]! - n[0]! * ax[2]!, n[0]! * ax[1]! - n[1]! * ax[0]!], ly = Math.hypot(...ay0), ay = ay0.map((v) => v / ly);
-    const [rx, ry] = t.tex?.repeat ?? [1, 1], uv = t.uv.map(([u, v]) => [u * rx, v * ry]);
+    const [rx, ry] = t.tex?.repeat ?? [1, 1], [pw, ph] = px?.(t.material ?? t.tex?.key ?? "") ?? [1, 1], uv = t.uv.map(([u, v]) => [u * rx * pw, v * ry * ph]);
     const P = [[l1, dot(e2, ax)], [0, dot(e2, ay)]], Q = [[uv[1]![0]! - uv[0]![0]!, uv[2]![0]! - uv[0]![0]!], [uv[1]![1]! - uv[0]![1]!, uv[2]![1]! - uv[0]![1]!]];
     const det = P[0]![0]! * P[1]![1]! - P[0]![1]! * P[1]![0]!;
     if (Math.abs(det) < 1e-12) continue;
@@ -825,7 +827,7 @@ export function uvRepeatsByMaterial(tris: { uv?: [number, number][]; material?: 
  *  L (PLACES-FIX 2026-10-21): value judged an atlas material by the whole PAGE's mean, so every poi-props piece read
  *  L* 46.1 (crate's own tiles 41, the banner's cloth 49) and a darker tile could never move it. Null when no triangle
  *  of the material has UVs or the picture is unknown. */
-export function uvFootprintMean(tris: { a: number[]; b: number[]; c: number[]; uv?: [number, number][] }[], img: { width: number; height: number; data: Uint8Array }, flipY = true): [number, number, number] | null {
+export function uvFootprintMean(tris: { a: number[]; b: number[]; c: number[]; uv?: [number, number][]; atlas?: { rect: [number, number, number, number]; uv: [number, number][] } }[], img: { width: number; height: number; data: Uint8Array }, flipY = true): [number, number, number] | null {
   const lin = (c: number) => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
   const s = [0, 0, 0]; let W = 0;
   const bary: [number, number][] = [];
@@ -835,10 +837,14 @@ export function uvFootprintMean(tris: { a: number[]; b: number[]; c: number[]; u
     const u = [t.b[0]! - t.a[0]!, t.b[1]! - t.a[1]!, t.b[2]! - t.a[2]!], v = [t.c[0]! - t.a[0]!, t.c[1]! - t.a[1]!, t.c[2]! - t.a[2]!];
     const area = Math.hypot(u[1]! * v[2]! - u[2]! * v[1]!, u[2]! * v[0]! - u[0]! * v[2]!, u[0]! * v[1]! - u[1]! * v[0]!) / 2;
     if (!(area > 1e-9)) continue;
-    const [p, q, r] = t.uv as [[number, number], [number, number], [number, number]];
+    // a town-atlas triangle (_ATLASRECT) repeats its authored UVs INSIDE its page rectangle (rect.xy + fract(uv) * rect.zw, the
+    // runtime material): wrapping the pre-multiplied UV over the whole page sampled the neighbours and the blank page (fort-keep
+    // 2026-11-11: 9 tiles on a 1024 page read L* 56 for red ashlar)
+    const [p, q, r] = (t.atlas?.uv ?? t.uv) as [[number, number], [number, number], [number, number]], rc = t.atlas?.rect;
     for (const [bs, br] of bary) {
       const U = p[0] * (1 - bs - br) + q[0] * bs + r[0] * br, V = p[1] * (1 - bs - br) + q[1] * bs + r[1] * br;
-      const fu = ((U % 1) + 1) % 1, fv = ((V % 1) + 1) % 1;
+      const wu = ((U % 1) + 1) % 1, wv = ((V % 1) + 1) % 1;
+      const fu = rc ? rc[0] + wu * rc[2] : wu, fv = rc ? rc[1] + wv * rc[3] : wv;
       const x = Math.min(img.width - 1, Math.floor(fu * img.width)), y = Math.min(img.height - 1, Math.floor((flipY ? 1 - fv : fv) * img.height));
       const ch = img.data.length / (img.width * img.height), i = (y * img.width + x) * ch;
       if (ch === 4 && img.data[i + 3]! < 128) continue;

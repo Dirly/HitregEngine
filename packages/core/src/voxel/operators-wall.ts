@@ -858,6 +858,9 @@ export function buildWall(input: unknown, reader: OperatorFieldReader, ctx: { id
     // reach targets on the walk (a parapet wall is a walkway): the middle of the wall top
     if (p.parapet && p.parapet.walked) { const m = curve.at(L / 2); const i = stations.findIndex((s) => s >= L / 2); deckTargets.push({ name: "walk-mid", at: [r4(m.x), r4(secs[i]!.top + 0.1), r4(m.z)] }); }
     report.top = { min: r4(Math.min(...tops)), max: r4(Math.max(...tops)) };
+    // the TOP at every station on the line (world x, z, top y incl. the coping): a piece standing ON the wall's cap (place-build
+    // layout `onWall` on a boundary wall: a graveyard's iron railing card) reads its height here, never the ground beside it
+    report.tops = stations.flatMap((s, i) => { if (s < 0 || s > L) return []; const q = curve.at(s); return [[r4(q.x), r4(q.z), r4(tops[i]!)]]; });
     // the SCREEN the wall puts up (apps/playground tools/_town-wall-rules.mts overlook gate): the line every ~4 m with
     // its top + parapet (+ merlon) height, world XZ — what a viewer outside must see over
     {

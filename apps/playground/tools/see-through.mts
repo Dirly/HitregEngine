@@ -191,7 +191,7 @@ type Hole = { sample: number; leg: string; view: string; eye: V3; dir: V3; pixel
 const holes: Hole[] = [];
 let done = 0;
 try {
-  await page.goto(`${base}/?scene=${encodeURIComponent(SCENE)}`, { waitUntil: "load" });
+  await page.goto(`${base}/?scene=${encodeURIComponent(SCENE)}`, { waitUntil: "load", timeout: BOOT_MS }); // a cold vite on a loaded machine took > 30 s to serve the page (rustgut 2026-11-10)
   await waitFor(() => page.evaluate(() => !!(window as any).__hitreg?.playerId), BOOT_MS, "the dev app");
   await waitFor(() => H_((h, s: string) => h.sceneName() === s, SCENE), BOOT_MS, `scene ${SCENE}`);
   await sleep(2000);

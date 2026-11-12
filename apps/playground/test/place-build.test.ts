@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   ribbonsDeclared, footpathTrackId, FOOTPATH_WIDTH_M, approachForBuilt, trackId, trimTrack, trackBand, TRACK_WIDTH_M, TRACK_JOIN_M,
-  applySets, silhouetteHeight, forTier, approachLines, approachRead, approachReadAny, readHeightNeeded, readTargets, installGuard, RESEAT_MAX_M, SMOKE_READ_M, shoreRise, waterLevelNear, SHORE_RISE_M, routeOnTrack, briefCount, expandRows, CAMP_ONLY_RE, ROOM_FILL, cutRing, wallGates, towerSides, withoutDenied, MIN_GATE_M, siteSearch, slopeMap, uniqueItemIds, DENIED_PROPS, fillOk, routeGrid, usableArea, approachSpots, readBand, firstPlanItems, arrangeFirstPlan, fitPocket, footprintRim, hull, pickArchetype, placeArchetypeSchema, planPlace, primitiveMeshes, staleEntities, unclearedStructures, type PlaceGround,
+  applySets, silhouetteHeight, forTier, approachLines, approachRead, approachReadAny, readHeightNeeded, readTargets, installGuard, RESEAT_MAX_M, SMOKE_READ_M, shoreRise, waterLevelNear, SHORE_RISE_M, routeOnTrack, briefCount, expandRows, CAMP_ONLY_RE, ROOM_FILL, cutRing, wallGates, towerSides, withoutDenied, MIN_GATE_M, siteSearch, slopeMap, uniqueItemIds, walkThroughSegs, DENIED_PROPS, fillOk, routeGrid, usableArea, approachSpots, readBand, firstPlanItems, arrangeFirstPlan, fitPocket, footprintRim, hull, pickArchetype, placeArchetypeSchema, planPlace, primitiveMeshes, staleEntities, unclearedStructures, type PlaceGround,
 } from "../tools/_place-archetype.mts";
 import { placeSceneRemoves, placeWorldRebase, caveWalkRoute, placeLayoutSchema, withLayout, layoutCoverage, toWorld, discStats, waterAtMarker, waterSheet, fallStreaks, STREAK_MIN_WIDTH_M, sinkToBase, seatPad, mergeSeatPads, SEAT_PAD_MAX_M, PATH_GRADE_BAND_M, siteScale } from "../tools/_place-archetype.mts";
 import { patchReaches } from "../tools/worldgen-scatter-float.mts";
@@ -147,6 +147,18 @@ test("routes are planned over the ground: round a structure, through a gate gap,
   const via = routeGrid(flat, [0, 15], [0, -15], wall)!;
   for (let i = 0; i + 1 < via.length; i++) for (const [p, q] of wall.segs) assert.ok(!cross(via[i]!, via[i + 1]!, p, q), `leg ${via[i]} -> ${via[i + 1]} crosses the wall`);
   assert.ok(via.some((q) => q[0] > 15 && q[0] < 25), "through the gate");
+});
+
+test("a walk-through piece blocks only its sides, and its opening scales with the piece (a giant rib arch at x2)", () => {
+  // giant-rib-large 5.38 m wide, 1.14 deep, opening 4.6 m prop-local; at x2 the caller passes 9.2 m
+  const segs = walkThroughSegs([0, 0], 0, 5.38, 1.14, 4.6 * 2)!;
+  assert.equal(segs.length, 2);
+  for (const [a, b, r] of segs) { assert.ok(r < 0.5, `side post radius ${r}`); assert.ok(Math.abs(Math.abs(a[0]) - 4.99) < 0.02 && a[0] === b[0], `side at x ${a[0]}`); }
+  const flat: PlaceGround = { height: () => 0, wet: () => false };
+  const through = routeGrid(flat, [0, 10], [0, -10], { discs: [], segs })!;
+  assert.ok(through && through.every((q) => Math.abs(q[0]) < 4), `the route walks under the arch: ${JSON.stringify(through)}`);
+  // an opening as wide as the piece leaves no side: the caller falls back to the piece's own footprint
+  assert.equal(walkThroughSegs([0, 0], 0, 2, 1, 4.2), null);
 });
 
 test("routes keep off steep ground: a steep knoll on the straight line is walked round, never climbed", () => {
@@ -709,6 +721,9 @@ test("seated: an open-court ruin on a big fall stands at the middle of it on LEV
   // a small legged piece (a table) is still sunk, with no terrain edit
   const table = baseOutline([...boxTris([-2, 0, -1], [-1.5, 1, 1]), ...boxTris([1.5, 0, -1], [2, 1, 1])])!;
   assert.ok(seatStructure(table, [0, 0], 0, (x) => slope(x), { sinkMax: 0.6 }).sunk);
+  // ... unless it is a catalogue SHELTER (a lean-to on posts): levelled on its own shelf (r-go2-flat north-flat 2026-11-11)
+  const shelf = seatStructure(table, [0, 0], 0, (x) => slope(x), { sinkMax: 0.6, levelOver: 0.3 });
+  assert.ok(shelf.level && !shelf.sunk && shelf.rect, JSON.stringify(shelf));
 });
 
 test("the planner seats structures on their outline and skirts them on a slope (no structure floats on its low side)", () => {
@@ -2161,4 +2176,32 @@ test("install rebase: placeWorldRebase keeps features another writer added, swap
   assert.equal(r.removed, 2);
   assert.equal(r.doc.features.note, "x");
   assert.equal(fresh.features.heightPatches.length, 3, "pure: the fresh doc is not mutated");
+});
+
+import { questHost } from "../tools/_place-archetype.mts";
+test("questHost: a quest piece `on` a layout piece names its host (the host joins the dressing plan, not the structures)", () => {
+  const l = { pieces: [{ id: "anvil" }, { id: "sword", quest: "anvil-blade", on: "anvil" }, { id: "slab" }, { id: "book", on: "slab" }] };
+  assert.equal(questHost(l, "anvil")?.id, "sword");
+  assert.equal(questHost(l, "slab"), undefined, "a plain piece on a host leaves the host a structure");
+  assert.equal(questHost(l, "sword"), undefined);
+});
+
+test("an impact hollow is ground: a level pit floor, a broken raised rim, back to the ground past rimWidth (r-go2 north-flat 2026-11-11)", async () => {
+  const { hollowPatch } = await import("../tools/_place-archetype.mts");
+  const g = { height: (x: number, _z: number) => 10 + 0.02 * x };
+  const h = { radius: 22, depth: 3.5, rim: 2.2, rimWidth: 10 };
+  const r = hollowPatch("pb-x-hollow-strike", [100, 50], h, g);
+  const f = r.op.feature, at = (x: number, z: number) => { const i = Math.round((x - f.origin[0]) / 2), j = Math.round((z - f.origin[1]) / 2); return { y: f.heights[j * f.columns + i]!, w: f.weights[j * f.columns + i]! }; };
+  assert.equal(f.heights.length, f.columns * f.rows); assert.equal(f.calm, true); assert.equal(f.filter, 2);
+  assert.equal(r.floorY, 12 - 3.5); assert.deepEqual(at(100, 50), { y: 8.5, w: 1 }, "the pit floor under the strike");
+  assert.ok(Math.abs(at(102, 50).y - at(100, 50).y) < 0.15, "the floor is level round the centre");
+  assert.ok(r.crest > 0.9 * h.rim && r.crest <= h.rim + 1e-9, `crest ${r.crest}`);
+  const rim = [0, 1, 2, 3, 4, 5, 6, 7].map((k) => { const a = (k * Math.PI) / 4; let best = -Infinity; for (let d = 16; d <= 28; d += 2) { const x = 100 + Math.round(d * Math.cos(a) / 2) * 2, z = 50 + Math.round(d * Math.sin(a) / 2) * 2; best = Math.max(best, at(x, z).y - g.height(x, z)); } return best; });
+  assert.ok(rim.every((y) => y > 0.3), `a raised rim all round: ${rim.map((y) => y.toFixed(2))}`);
+  assert.ok(Math.max(...rim) - Math.min(...rim) > 0.3, "the rim is broken (not one height all round)");
+  assert.ok(r.profileSlope < 0.6, `walkable profile ${r.profileSlope}`);
+  assert.equal(at(100 + 44, 50).w, 0, "faded out past rim + feather");
+  assert.ok(Math.abs(at(100 + 36, 50).y - g.height(136, 50)) < 0.05, "back on the natural ground past the rim");
+  const lay = placeLayoutSchema.parse({ version: 1, frame: "place", pieces: [{ id: "p", element: "e", kind: "prop", prefab: "a/b", at: [0, 0] }], views: [], ground: [{ id: "strike", kind: "hollow", at: [0, 0], radius: 22 }] });
+  assert.equal(lay.ground[0]!.depth, 3.5); assert.equal(lay.ground[0]!.rimWidth, 10);
 });

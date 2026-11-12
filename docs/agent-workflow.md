@@ -67,6 +67,11 @@ The primary AI channel is **direct file editing** — no MCP required:
   wake within a second of the click instead of polling. Answer by POSTing the
   scene's pins back with your `reply` and `resolved: true`; the reply shows
   up in the editor on the note itself.
+  A note is a DRAFT until the human sends it: one note with **send now**, every draft together with the notes
+  badge's **send N drafts**, or each as it is closed when the badge's **auto-send** is on. Drafts never reach the
+  inbox. The POST is MERGED per note id (`apps/playground/src/pin-merge.ts`: the later `updatedAt` wins, a tie goes to
+  the post, a note left out is kept, only ids in `deleted` are removed), so answer by posting just the notes you
+  changed; the open tab re-reads the file every 3 s and shows your reply without a reload.
 - **Pins** (`focus.pins`, and `curl -s http://localhost:5173/__hitreg/pins?scene=<name>`)
   are notes anchored to a world point — the durable half of the focus channel.
   Someone right-clicked a spot and wrote what's wrong with it; unlike selection,
@@ -77,6 +82,18 @@ The primary AI channel is **direct file editing** — no MCP required:
   `.hitreg/pins/` beside the scene, never inside it — a pin is a conversation
   *about* the level, so it must never ship in one. A note with no `sentAt` is
   a private draft, not a request: read it for context, don't act on it.
+- **A scene the owner edits while you regenerate it** (`apps/playground/tools/_scene-sync.mts`, docs/tools.md
+  "Generated scenes"). A generator never rewrites the file: `syncScene` writes only what changed among its own
+  `built:<builder>` entities (no change = no write, one moved prop = one op). To answer a note on ANY entity
+  (generated, hand-added, anything) use `editScene({ scene, ops, note })`, never a file edit and never the generator:
+  it applies under the scene lock and goes into the scene's edit record, so the next regeneration keeps it.
+  Precedence is **owner > agent > generator**: an edit that changes what the owner set by hand is REFUSED (nothing
+  written) unless you pass `answers: "<his note id or words>"`, and then every owner property you override is printed.
+  Only do that when his note asks for it. `releaseEdits` hands an entity back to the generator, under the same rule.
+  A record a sync prints as STALE matches nothing it generates: tell the owner, never guess. Before working on his
+  notes in a scene he has open, declare it (`npx tsx tools/agent-activity.mts start --scene <s> --what "<doing>"`,
+  `done` after); his editor shows an "agent working" warning, never a lock. Notes (pins) are never written, re-pointed
+  or removed by any of this: a note whose `entityId` no longer exists still has its `point`.
 - **Profiler snapshots** — `apps/playground/.hitreg/profiles/*.json`, newest
   last. The human presses **Shift+P** in the app, then **snapshot → AI**, and one
   lands here; "read the latest profile snapshot" means read that file. It's an

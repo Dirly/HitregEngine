@@ -209,6 +209,7 @@ export const mobEventDecls: readonly MobEventDecl[] = [
       faction: z.string().describe("Who is shouting. A mob only answers its own faction; empty means 'anyone in earshot who shares my spawn area'.").default(""),
       cause: z.enum(["acquisition", "defense"]).optional().describe("Defense = direct threat or a defensive ally assist; acquisition = an unprovoked sight/territory pull. Protective brains answer defense only. Omitted legacy alerts retain legacy listeners' behavior."),
       spawnArea: z.string().optional().describe("Sender's population area. Protective brains without factions require an exact nonempty match; factions remain the primary ally boundary. Omitted preserves legacy listeners' fallback."),
+      pack: z.string().optional().describe("Sender's linked pack (mob-brain `pack`). A body with the same nonempty pack answers whatever the distance (up to its deaggroRange) and whether or not it can see: one pull brings the whole pack."),
     }),
   },
 ];

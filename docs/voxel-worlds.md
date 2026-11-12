@@ -3906,7 +3906,9 @@ terrain step, never trusted from numbers solved earlier (core `voxel/fall-fit.ts
   (a wall, a rock lip, a shore rising out of it) or at a finish the body declares in `water.finishes`: `drain` (the
   water goes down into dark), `lip-fall` (a small curtain over an edge), `dark` (a channel goes on into darkness),
   `built` (flush under a kerb, quay or hull). Anything else is OPEN. The sea at sea level running past the world
-  boundary (`bounds.limit`) is `horizon`, not open (`seaHorizon`); a placed body never is.
+  boundary (`bounds.limit`) is `horizon`, not open (`seaHorizon`); a placed body never is, except a sheet lying ON
+  the sea (a stain or slick 0.05-`SEA_SLICK_M` 0.5 m over sea level, held up so it does not flicker in the sea):
+  where the bed under its edge is under the sea, that edge rests on the sea; over a beach it is judged as any other.
 - **Dark reads as distance, not a wall.** A flat black card filling an arch reads as a cut-out (wreck-hole's sea
   mouth). `--fix` measures how far the channel stays open past the water (`openRun`): 6 m or more gets four veils
   set back down it, each hiding more, so the real walls fall off in steps; less (a tunnel ending in rock a metre

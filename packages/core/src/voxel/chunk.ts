@@ -27,7 +27,7 @@ import { kitWallEntities } from "./kit-walls.js";
 import { landmarkColliderTileRefs, landmarkEntities } from "./ledge-landmark.js";
 import { bridgeSpanEntities } from "./bridge-spans.js";
 import { regionAt } from "./regions.js";
-import { FALL_FACE_CLEAR, columnReachesPool, fallColumn, fallProbeDepth, fitFall, groundAtProfile, profileFace, type FallFitField } from "./fall-fit.js";
+import { FALL_FACE_CLEAR, columnReachesPool, fallColumn, fallProbeDepth, fitFall, groundAtProfile, meshedFallField, profileFace, type FallFitField } from "./fall-fit.js";
 import { resolveCellMesher, type VoxelMesherChoice } from "./mesh.js";
 import type { BridgeDoc, LakeDoc, RiverDoc, ScatterDoc, WorldRecipe } from "./recipe.js";
 
@@ -635,7 +635,9 @@ function mistEntities(field: WorldField, cx: number, cz: number, entities: Chunk
     const height = fall.top - fall.bottom;
     // the water lattice's square at full detail (waterEntities' cellStep): the curtain's top row meets its lip cut
     const grid = size / Math.max(1, Math.round(size / field.voxelSize));
-    if (material) entities[`fall_${index}`] = fallCurtain(fall, x0, z0, material, curtainSpan(field, fall), grid, field);
+    // the hug reads the rock as this cell DRAWS it (MC bridges between lattice samples; fall-fit.ts meshedFallField)
+    const face = resolveCellMesher(field, cx, cz, "auto") === "mc" ? meshedFallField(field, field.voxelSize) : field;
+    if (material) entities[`fall_${index}`] = fallCurtain(fall, x0, z0, material, curtainSpan(field, fall), grid, face);
     const spread = Math.max(4, fall.width * 0.9);
     // Mist: low streaming spray, not one opaque round blob — MIST_STREAMS emitters spaced across the foot,
     // each small, faint and drifting DOWN-GORGE with the water (mostly along the flow, little rise)

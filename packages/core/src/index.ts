@@ -1,4 +1,5 @@
 export { newId, type EntityId } from "./ids.js";
+export { waterExclusionSchema, waterExclusions, waterExcluded, type WaterExclusionData, type WaterExclusion, type WaterPlane } from "./water-exclusion.js";
 export { vegetationTintSchema, type VegetationTint, rockCapSchema, type RockCap } from "./components/core.js";
 export {
   createScene,
@@ -210,6 +211,7 @@ export {
   type SceneIndex,
 } from "./scene-index.js";
 export { diffSceneDocs } from "./diff.js";
+export * from "./scene-sync.js";
 export { contentTag, rebaseSceneEdits, type RebaseResult } from "./scene-rebase.js";
 export {
   spritesheetSchema,

@@ -1059,6 +1059,9 @@ export function scatterCell(
     return grid;
   };
   let wet: boolean | undefined;
+  let underSea: boolean | undefined;
+  const cellUnderSea = (): boolean =>
+    (underSea ??= [[x0, z0], [x1, z0], [x0, z1], [x1, z1], [(x0 + x1) / 2, (z0 + z1) / 2]].some(([sx, sz]) => field.height(sx!, sz!) < recipe.seaLevel));
   const cellWet = (): boolean => (wet ??= field.waterNear(x0 - margin - 8, z0 - margin - 8, x1 + margin + 8, z1 + margin + 8));
   const vegOn = !veg.empty;
 
@@ -1113,7 +1116,9 @@ export function scatterCell(
     const ruleSeed = (recipe.seed + ruleIndex * 7919) | 0;
     // cliff rules need a cliff in the cell (a drop of half their minDrop between survey points), water rules water
     if (rule.cliff && cellRelief() < rule.cliff.minDrop * 0.5) continue;
-    if (rule.water && rule.water.mode !== "shore" && !cellWet()) continue;
+    if (rule.water && rule.water.mode !== "shore" && rule.water.mode !== "bed" && !cellWet()) continue;
+    // bed: inland water near, or sea bed somewhere in the cell (the sea is not in the water buckets)
+    if (rule.water?.mode === "bed" && !cellWet() && !cellUnderSea()) continue;
     // plunge-pool-only rules: a fall must be within reach of this cell
     if (rule.water?.fall.only) {
       const r = rule.water.fall.radius + margin;
@@ -1232,12 +1237,18 @@ export function scatterCell(
           else if (mode === "river") {
             if (!field.waterSurface(wx, wz, riverScratch) || (riverScratch.kind !== "river" && !rule.water.fall.only)) continue;
             level = field.waterY(wx, wz);
-          } else level = coastal() ? field.waterY(wx, wz) : field.lakeY(wx, wz);
+          } else level = mode === "bed" || coastal() ? field.waterY(wx, wz) : field.lakeY(wx, wz);
           if (level === null) continue;
-          // dry, or deeper than any rock of this rule can break the surface from: one height read, before the slope's
-          // four and the surface cast (the fit in waterPlacement still decides, on the cast ground)
-          const depth = level - field.height(wx, wz);
-          if (depth < -0.5 || depth > Math.max(rule.water.maxDepth, rule.water.fall.maxDepth) + 0.5) continue;
+          if (mode === "bed") {
+            if (rule.water.bedWaters !== "any" && field.waterSurface(wx, wz, riverScratch) !== (rule.water.bedWaters === "inland")) continue;
+            const bedDepth = level - field.height(wx, wz);
+            if (bedDepth < rule.water.bedDepth[0] - 0.5 || bedDepth > rule.water.bedDepth[1] + 0.5) continue;
+          } else {
+            // dry, or deeper than any rock of this rule can break the surface from: one height read, before the slope's
+            // four and the surface cast (the fit in waterPlacement still decides, on the cast ground)
+            const depth = level - field.height(wx, wz);
+            if (depth < -0.5 || depth > Math.max(rule.water.maxDepth, rule.water.fall.maxDepth) + 0.5) continue;
+          }
         }
         // cliff stacks sit outside the spacing map: a margin candidate of a cliff rule claims nothing, so it is
         // dropped BEFORE its slope (half the lattice of a cliff rule is margin)

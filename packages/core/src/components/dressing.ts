@@ -236,6 +236,16 @@ export const dressingSchema = z
           "overhang the seat's edge. Omitted = derived (`defaultSeatContact`): wall mount -> wall, ceiling -> hang, rocks -> embed, tables/chairs/benches -> " +
           "legs, else base.",
       ),
+    structure: z
+      .enum(["support", "span"])
+      .optional()
+      .describe(
+        "What it does structurally, checked by `tools/structure.mts` (every placed copy, against rock and every other object's " +
+          "triangles, 5 cm). `support`: a post, prop or frame that carries something (a shoring, an A-frame, a deck's leg): its " +
+          "top AND its feet touch a solid. `span`: a piece that runs between two things (a chute, a ladder, a scaffold, a " +
+          "plank bridge): BOTH ends of its long axis touch a solid. Omitted = no structural job (a freestanding torch pole " +
+          "or a pike is not a support).",
+      ),
     use: z
       .array(z.enum(DRESSING_USES))
       .default([])

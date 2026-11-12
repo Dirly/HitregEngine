@@ -194,9 +194,18 @@ function footprintOf(g: SceneEntityGeometry): { x: number; y: number; z: number;
   const m = g.m;
   const sx = Math.hypot(m[0]!, m[1]!, m[2]!), sy = Math.hypot(m[4]!, m[5]!, m[6]!), sz = Math.hypot(m[8]!, m[9]!, m[10]!);
   if (sy > 0 && m[5]! / sy < 0.98 && g.world.length >= 9) {
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (let k = 0; k < g.world.length; k += 3) for (let a = 0; a < 3; a++) { const v = g.world[k + a]!; if (v < lo[a]!) lo[a] = v; if (v > hi[a]!) hi[a] = v; }
-    return { x: (lo[0]! + hi[0]!) / 2, y: lo[1]!, z: (lo[2]! + hi[2]!) / 2, halfX: (hi[0]! - lo[0]!) / 2, halfZ: (hi[2]! - lo[2]!) / 2, yaw: 0, height: hi[1]! - lo[1]! };
+    // a LEANED piece: its footprint is its mesh's box in its own HEADING (the horizontal of its x axis, else of its z
+    // axis), never the world-axis box (Rustgut 2026-11-10: 6 m log curbs laid along a ramp at a diagonal heading read a
+    // 4.7 x 4.7 m world box whose corners hung over the trench beside the ramp: "a foot over nothing")
+    const hx = Math.hypot(m[0]!, m[2]!), yaw = hx > 0.2 * sx ? Math.atan2(-m[2]!, m[0]!) : Math.atan2(m[8]!, m[10]!);
+    const c = Math.cos(yaw), s = Math.sin(yaw);
+    let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (let k = 0; k + 2 < g.world.length; k += 3) {
+      const x = g.world[k]!, y = g.world[k + 1]!, z = g.world[k + 2]!, a = x * c - z * s, b = x * s + z * c;
+      if (a < a0) a0 = a; if (a > a1) a1 = a; if (b < b0) b0 = b; if (b > b1) b1 = b; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    const am = (a0 + a1) / 2, bm = (b0 + b1) / 2;
+    return { x: am * c + bm * s, y: y0, z: -am * s + bm * c, halfX: (a1 - a0) / 2, halfZ: (b1 - b0) / 2, yaw, height: y1 - y0 };
   }
   const cx = (g.min[0] + g.max[0]) / 2, cz = (g.min[2] + g.max[2]) / 2, by = g.min[1];
   return {

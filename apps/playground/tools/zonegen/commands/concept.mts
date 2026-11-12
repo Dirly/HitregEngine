@@ -58,7 +58,9 @@ import { approachView, conceptBrief, EXTRA_VIEWS, paintingCamera, farView, GATEH
 import { extentSchema, groundAxes, groundHit, pixelRay, polyArea, projector, type ScaleCamera } from "../../_place-scale.mts";
 import { z } from "zod";
 // @ts-ignore plain JS engine tool module
-import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership, ownsFeature, stampOf } from "../../../../../tools/poi-review/concept-site.mjs";
+import { CONCEPT_TOOL, fileSha, groundFingerprint, ownership, ownsFeature, stampOf, uneditedRecipe, uneditedStamp } from "../../../../../tools/poi-review/concept-site.mjs";
+// @ts-ignore plain JS engine tool module
+import { placeOwnership } from "../../../../../tools/poi-review/exterior-chain.mjs";
 import { decodePng, encodePng } from "../../_png.mjs";
 import * as order from "../../world-order.mts";
 // @ts-expect-error untyped helper module
@@ -106,7 +108,7 @@ export async function run(ctx: Ctx): Promise<number> {
   const recipe = worldRecipeSchema.parse(raw);
 
   // ---- the site: a reservation, or a town ----------------------------------------------------------------------------
-  let id: string, center: V2, radius: number, terrainRadius: number, approachPts: V2[] = [], fromIds: string[] = [], entrance = false, outDir: string;
+  let id: string, center: V2, radius: number, terrainRadius: number, approachPts: V2[] = [], fromIds: string[] = [], entrance = false, outDir: string, reservation: J | null = null;
   let size: string | undefined, text: PromptText, townName: string | null = null;
   const brief = ctx.zone ? tryJson(P.brief(ctx.zone)) : null;
   const quests = ctx.zone ? tryJson(P.quests(ctx.zone)) : null;
@@ -115,6 +117,7 @@ export async function run(ctx: Ctx): Promise<number> {
     const res = tryJson(P.reservations(ctx.zone));
     const r = (res?.reservations ?? []).find((x: J) => x.location === id);
     if (!r) { console.error(`zonegen concept: no reservation for ${id} in ${P.reservations(ctx.zone)} (zonegen reserve first)`); return 2; }
+    reservation = r;
     center = [r.center[0], r.center[1]]; radius = r.radius; // a reservation's terrainRadius 0 means "no terrain of its own", not "measure nothing": the probe still reads the
     // reservation (2026-10-30 w15: both entrance sheets said "tallest face: none" over a 73 m face)
     terrainRadius = Math.max(r.radius, r.terrainRadius ?? 0);
@@ -158,12 +161,18 @@ export async function run(ctx: Ctx): Promise<number> {
   const jobDir = ctx.zone ? path.join(P.zoneDir(ctx.zone), "pois", id) : "";
   const worldOpIds = ((tryJson(path.join(jobDir, "world-ops.json")) ?? []) as J[]).flatMap((o) => (typeof o?.feature?.id === "string" ? [o.feature.id] : []));
   const name = text.name.replace(/^the\s+/i, "");
-  const own = ownership(id, { prefixes: [...new Set([slug(name), ...subSites].filter((s) => s && s !== id).map((s) => `${s}-`))], ids: [...subSites, ...worldOpIds] });
-  const bareRaw: J = { ...raw, features: Object.fromEntries(Object.entries(raw.features ?? {}).map(([k, v]) => [k, Array.isArray(v) ? v.filter((f) => !ownsFeature(own, f)) : v])) };
-  const ownedFeatures = Object.values(raw.features ?? {}).reduce((n: number, v) => n + (Array.isArray(v) ? v.filter((f) => ownsFeature(own, f)).length : 0), 0);
+  const ownBase = { prefixes: [...new Set([slug(name), ...subSites].filter((s) => s && s !== id).map((s) => `${s}-`))], ids: [...subSites, ...worldOpIds] };
+  // THE UNEDITED GROUND (Derek 2026-11-10, Rustgut: concepts were painted on the place's own stamped cliff block): a POI's
+  // bare render leaves out EVERY edit of the place — its needs and need patches, its operators and their pieces, landmarks,
+  // clearings, roads made for it (exterior-chain.mjs placeOwnership, concept-site.mjs uneditedRecipe). Towns keep the
+  // older feature ownership (their terraces and walls are judged by the town chain).
+  const own: J = poiArg ? placeOwnership(raw, { id, center, radius, terrainRadius, reservation }, ownBase) : ownership(id, ownBase);
+  const bareOf = (doc: J): J => (poiArg ? uneditedRecipe(doc, own).recipe : { ...doc, features: Object.fromEntries(Object.entries(doc.features ?? {}).map(([k, v]) => [k, Array.isArray(v) ? v.filter((f) => !ownsFeature(own, f)) : v])) });
+  const bareRaw: J = bareOf(raw);
+  const ownedFeatures = poiArg ? uneditedRecipe(raw, own).excluded.length : Object.values(raw.features ?? {}).reduce((n: number, v) => n + (Array.isArray(v) ? v.filter((f) => ownsFeature(own, f)).length : 0), 0);
   const t0 = Date.now();
   const field = createWorldField(worldRecipeSchema.parse(bareRaw));
-  console.log(`field: ${((Date.now() - t0) / 1000).toFixed(1)} s (bare: ${ownedFeatures} feature(s) of ${id} left out)`);
+  console.log(`field: ${((Date.now() - t0) / 1000).toFixed(1)} s (bare: ${ownedFeatures} edit(s) of ${id} left out${poiArg ? `: ${uneditedRecipe(raw, own).excluded.slice(0, 12).join(", ")}` : ""})`);
   // an entrance stands at a face's foot: its face is the one rising from the door, not a drop behind the massif
   const fit: SiteFit = measureSite(field, center, radius, terrainRadius, { rising: entrance });
   // L (o-smalls 2026-10-30: a farm's approach and far eyes stood among town-1's houses on the road out of its gate): a
@@ -280,22 +289,25 @@ export async function run(ctx: Ctx): Promise<number> {
   // ---- render the bare site ------------------------------------------------------------------------------------------
   const fpRes = { center, radius, terrainRadius };
   const fingerprint = groundFingerprint(raw, { center, radius: terrainRadius }, own);
+  // the unedited stamp (gate 16 and the exterior chain read it): the ground WITHOUT the place's edits, and what was left out
+  const unedited = uneditedStamp(raw, { center, radius: terrainRadius }, own);
   const fitRec = (v: View) => ({ from: v.from, px: v.px, note: v.note });
   if (!ctx.flag("paint-only")) {
     fs.writeFileSync(renders.plan!, encodePng(...planCrop(field, raw, center, radius, terrainRadius, approachPts, roads, allViews, plan)));
-    const shot = await renderBare(ctx, id, own, views, terrainRadius);
+    const shot = await renderBare(ctx, id, own, views, terrainRadius, bareOf);
     if (!shot.ok) { console.error(`zonegen concept: the bare render failed — ${shot.why}`); return 1; }
     for (const v of views) {
       if (plan && (NEAR_VIEWS as readonly string[]).includes(v.name)) fs.writeFileSync(renders[v.name]!, encodePng(...staked(decodePng(fs.readFileSync(shot.files[v.name]!)) as Img, field, plan, v)));
       else fs.copyFileSync(shot.files[v.name]!, renders[v.name]!);
     }
     // a partial run (--views) keeps the other views' records when the ground has not moved
-    const keep = want && prior && prior.fingerprint === fingerprint.hash ? (prior.renders ?? {}) : {};
-    if (want && prior && prior.fingerprint !== fingerprint.hash) console.warn(`WARN: the ground under ${id} changed since ${prior.renderedAt}: the views not re-rendered now are dropped from the manifest`);
+    // (and only renders made of the same UNEDITED ground: a view rendered before the 2026-11-10 rule is never carried)
+    const keep = want && prior && prior.fingerprint === fingerprint.hash && prior.unedited?.fingerprint === unedited.fingerprint ? (prior.renders ?? {}) : {};
+    if (want && prior && (prior.fingerprint !== fingerprint.hash || prior.unedited?.fingerprint !== unedited.fingerprint)) console.warn(`WARN: the ground under ${id} changed since ${prior.renderedAt}: the views not re-rendered now are dropped from the manifest`);
     const rec = (v: View) => ({ file: path.basename(renders[v.name]!), sha256: fileSha(renders[v.name]!), ...cam(v), ...(plan && (NEAR_VIEWS as readonly string[]).includes(v.name) ? { staked: true } : {}) });
     writeJson(manifestFile, {
       tool: CONCEPT_TOOL, version: 1, poi: id, project: ctx.project, world: ctx.world, zone: ctx.zone || null, town: townName,
-      reservation: fpRes, worldFile: rel(P.recipe), ownership: own, ...stampOf(fingerprint),
+      reservation: fpRes, worldFile: rel(P.recipe), ownership: own, ...stampOf(fingerprint), unedited,
       renderedAt: new Date().toISOString(), bare: shot.bare,
       renders: { ...keep, ...Object.fromEntries(views.map((v) => [v.name, rec(v)])), plan: { file: path.basename(renders.plan!), sha256: fileSha(renders.plan!) } },
       fit: { ...fit, read, height, ...Object.fromEntries(allViews.map((v) => [v.name, fitRec(v)])), wall },
@@ -304,6 +316,7 @@ export async function run(ctx: Ctx): Promise<number> {
     });
   } else if (!prior || views.some((v) => !exists(renders[v.name]!))) { console.error(`zonegen concept: --paint-only needs the renders + ${rel(manifestFile)} (run without it first)`); return 2; }
   else if (prior.fingerprint !== fingerprint.hash) console.warn(`WARN: the ground under ${id} changed since ${prior.renderedAt}: repainting stale renders (gate 16 will refuse them; re-render)`);
+  if (ctx.flag("paint-only") && poiArg && prior && prior.unedited?.fingerprint !== unedited.fingerprint) { console.error(`zonegen concept: the bare renders of ${id} were not made of its UNEDITED ground (${prior.unedited ? "the unedited ground moved" : "made before the 2026-11-10 rule"}): re-render first (--renders-only), then paint`); return 3; }
 
   // ---- repaint -------------------------------------------------------------------------------------------------------
   if (!rendersOnly) {
@@ -494,7 +507,7 @@ function brokenInstances(scene: J, project: string, skip: Set<string>): Set<stri
 }
 
 /** Shoot the two fixed cameras on the BARE site in play mode at noon (light-shots, its own vite on --port). */
-async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRadius: number): Promise<{ ok: true; files: Record<string, string>; bare: string } | { ok: false; why: string }> {
+async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRadius: number, bareOf: (doc: J) => J): Promise<{ ok: true; files: Record<string, string>; bare: string } | { ok: false; why: string }> {
   const P = ctx.paths;
   const sceneFile = path.join(P.projectDir, "assets", "scenes", `${ctx.world}.scene.json`);
   if (!exists(sceneFile)) return { ok: false, why: `no scene ${sceneFile}` };
@@ -502,7 +515,8 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
   const mine = new Set(Object.entries(scene.entities ?? {}).filter(([eid, e]: [string, any]) => (e.tags ?? []).some((t: string) => t === `poi:${id}` || own.ids.includes(t.replace(/^poi:/, ""))) || eid.startsWith(`dress-${id}-`)).map(([eid]) => eid));
   for (let grew = true; grew;) { grew = false; for (const [k, e] of Object.entries(scene.entities ?? {}) as [string, any][]) if (e.parent && mine.has(e.parent) && !mine.has(k)) { mine.add(k); grew = true; } }
   const raw = readJson(P.recipe) as J;
-  const ownedF = Object.values(raw.features ?? {}).reduce((n: number, v) => n + (Array.isArray(v) ? v.filter((f) => ownsFeature(own, f)).length : 0), 0);
+  const count = (doc: J) => Object.values(doc.features ?? {}).reduce((n: number, v) => n + (Array.isArray(v) ? v.length : 0), 0) + (Array.isArray(doc.needs) ? doc.needs.length : 0);
+  const ownedF = count(raw) - count(bareOf(raw));
   // L (dogfood 2026-10-29: proving's live scene no longer boots, a merchant-cart instance override names a path its
   // prefab lost): an instance that does not expand would fail the whole bare render, so it is left out of the copy
   const broken = brokenInstances(scene, ctx.project, mine);
@@ -524,7 +538,7 @@ async function renderBare(ctx: Ctx, id: string, own: J, views: View[], terrainRa
     writeJson(path.join(scratch, "project.json"), { version: 1, name: lab, title: `concept on site: ${id} (scratch)`, description: `Scratch bare copy of ${ctx.world} for zonegen concept ${id}; deleted after the run.`, group: "Worlds", menuOrder: 99,
       scenes: [{ id: labWorld, label: `concept ${id}`, variants: [] }], engine: pj.engine ?? "^0.1", multiplayer: pj.multiplayer ?? "server", tools: [], dependsOn: [...new Set([...(pj.dependsOn ?? []), ctx.project])] });
     const box = labBox([...views.flatMap((v) => viewPoints({ camera: v.eye, target: v.target })), ...views.flatMap((v) => [[v.target[0] - terrainRadius, v.target[2] - terrainRadius], [v.target[0] + terrainRadius, v.target[2] + terrainRadius]] as V2[])]);
-    const crop = cropRecipe({ ...raw, features: Object.fromEntries(Object.entries(raw.features ?? {}).map(([k, v]) => [k, Array.isArray(v) ? v.filter((f) => !ownsFeature(own, f)) : v])) }, box, { log: (l) => console.log(l) });
+    const crop = cropRecipe(bareOf(raw), box, { log: (l) => console.log(l) });
     writeJson(path.join(scratch, "assets", "worlds", `${labWorld}.json`), crop.recipe);
     const tdir = path.join(P.projectDir, "assets", "materials", "terrain"), tout = path.join(scratch, "assets", "materials", "terrain");
     const named = new Set(JSON.stringify(crop.recipe).match(new RegExp(`terrain/${ctx.world}[a-z0-9-]*`, "g")) ?? []);

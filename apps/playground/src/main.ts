@@ -50,6 +50,7 @@ import {
   WaterIndex,
   waterQuery,
   waterVolumes,
+  waterExclusions,
   type ApplyResult,
   type WorldField,
   type TerrainHeightfield,
@@ -73,6 +74,7 @@ import {
   ClothSwaySystem,
   WaterWake,
   waterWakeUniforms,
+  setWaterExclusions,
   DEFAULT_CLOTH_SWAY,
   type ClothSwayOptions,
   type IslandReport,
@@ -236,7 +238,7 @@ import {
 import { loadAssets, loadedProjectScope } from "./asset-loader.js";
 import { saveAsset, clientLog } from "./dev-log.js";
 import { createSceneSaver } from "./scene-save.js";
-import { firstClearPose, type SightPose } from "./line-of-sight.js";
+import { firstClearPose, sightHits, type SightPose, type V3 as SightV3 } from "./line-of-sight.js";
 import { applyBodyState } from "./physics-sync.js";
 import { bakeImpostorAtlas } from "./impostor-bake.js";
 import { renderThumbnails } from "./thumbnails.js";
@@ -1323,7 +1325,9 @@ async function main(): Promise<void> {
   let staticBatchPendingSince: number | null = null;
   /** The scene the last whole-scene precompile ran on (see rebuildStaticBatch). */
   let precompiledScene: THREE.Scene | null = null;
-  const batchPlacedContent = createPlacedBatcher({ culling, sheets: propSheets, subtreeStill: (id) => subtreeStill(id) });
+  /** Entities the editor has selected (edit mode only): kept out of the merge so drags draw live (syncLiveEdit). */
+  let liveEditIds: ReadonlySet<string> = new Set();
+  const batchPlacedContent = createPlacedBatcher({ culling, sheets: propSheets, subtreeStill: (id) => subtreeStill(id), liveIds: () => liveEditIds });
   const rebuildStaticBatch = (): void => {
     staticBatchPending = false;
     for (const unit of baseCullUnits) culling.unregister(unit);
@@ -2202,7 +2206,8 @@ async function main(): Promise<void> {
     // scene, rather than when somebody dives: rebuilding the post chain
     // mid-dive recreates the scene pass and recompiles every material behind
     // it (docs/performance-lessons.md).
-    waterIndex = new WaterIndex(waterVolumes(expanded, worlds));
+    waterIndex = new WaterIndex(waterVolumes(expanded, worlds), waterExclusions(expanded));
+    setWaterExclusions(waterIndex.exclusions);
     const hasWater = !waterIndex.empty || activeWorldHasWater;
     renderer.setWaterPresent(hasWater);
     // Wakes: one world-space height field that swimmers (and later boats,
@@ -2425,6 +2430,20 @@ async function main(): Promise<void> {
   const settings = createEditorSettings(); // persisted: gizmos/grid/snap choices survive reloads
   const gizmoMode = observable<GizmoMode>("translate");
   const playMode = observable<PlayMode>("edit");
+  // The selection draws from its own live meshes, out of the static merge: otherwise a gizmo drag moves a hidden
+  // source (frozen matrix) under a merged copy, and the object only jumps to its new place on release.
+  const syncLiveEdit = (): void => {
+    const ids = playMode.get() === "edit" ? multiSelection.get().length > 0 ? multiSelection.get() : [selection.get()].filter((id): id is string => !!id) : [];
+    const next = new Set(ids);
+    if (next.size === liveEditIds.size && [...next].every((id) => liveEditIds.has(id))) return;
+    liveEditIds = next;
+    if (!built) return;
+    const endBatch = profiler.span("scene.staticBatch");
+    try { rebuildStaticBatch(); } finally { endBatch(); }
+  };
+  selection.subscribe(syncLiveEdit);
+  multiSelection.subscribe(syncLiveEdit);
+  playMode.subscribe(syncLiveEdit);
   const contextMenu = createContextMenu();
   const assetSelection = createAssetSelection();
   const grayboxActive = observable(false);
@@ -2758,6 +2777,7 @@ async function main(): Promise<void> {
     },
     onPinUpdate: (id, patch) => pinStore.update(id, patch),
     onPinDelete: (id) => pinStore.remove(id),
+    onPinSendDrafts: () => void pinStore.sendDrafts(),
     onFocusPoint: (point) => void controls.setTarget(point[0], point[1], point[2], true),
     saveAsset,
     tools: editorTools,
@@ -4049,6 +4069,23 @@ async function main(): Promise<void> {
       },
     );
     if (!ok) return false; // the full rebuild that follows re-plans and rebuilds every place
+    // Dry hulls follow scene/ancestor gizmo edits through the same world planes
+    // on CPU and GPU. Ignore unrelated edits instead of rescanning water.
+    const waterEntities = new Set([...waterIndex.volumes.map(v => v.entity), ...waterIndex.exclusions.map(v => v.entity)]);
+    const waterChanged = [...result.changedEntities].some(id => {
+      const components = expanded.entities[id]?.components;
+      if (components && ("water" in components || "waterExclusion" in components)) return true;
+      for (const candidate of waterEntities) {
+        let at: string | null = candidate;
+        while (at) { if (at === id) return true; at = expanded.entities[at]?.parent ?? null; }
+      }
+      return false;
+    });
+    if (waterChanged) {
+      const world = worldTransforms(expanded);
+      waterIndex = new WaterIndex(waterVolumes(expanded, world), waterExclusions(expanded));
+      setWaterExclusions(waterIndex.exclusions);
+    }
     lastExpanded = expanded;
     lastBaseDoc = placeStreamer.baseDoc();
     for (const id of touchedPlaces) {
@@ -4990,6 +5027,12 @@ async function main(): Promise<void> {
         const player = localPlayerId();
         if (player && built.objects.get(player)) skip.add(built.objects.get(player)!);
         return firstClearPose(built.scene, poses, { ignore: (o) => skip.has(o) });
+      },
+      // per ray, the first drawn face short of its end by clearM (null = seen); the local player is never counted.
+      // light-shots asks it of every fire light for the wash gate's far-fire rule (a fire hidden from the camera is not judged)
+      sightHits: (rays: { from: SightV3; to: SightV3 }[], clearM = 4) => {
+        const player = localPlayerId(), body = player ? built.objects.get(player) : undefined;
+        return sightHits(built.scene, rays, clearM, { ignore: (o) => o === body });
       },
       // submit an ops batch exactly as the inspector does — a probe can then
       // test an edit's real path (live script-param patching during play)

@@ -129,6 +129,7 @@ import { COASTAL_TOWN, TERRACE_DEFAULTS, coastalTownFindings, findCoastalSites, 
 import { commandVegetation } from "./worldgen-vegetation.mts";
 import { commandNeeds, commandSitingMap, commandTownsPick, commandTownsPropose, needsStageCheck, townNeedsFindings, type SiteNeedsHost } from "./worldgen-site-needs.mts";
 import { commandRoad, commandRoadWater } from "./worldgen-road.mts";
+import { keepSitePaths, strandedSitePaths } from "./_site-paths.mts";
 import { cellNetworkDistance, cellsAlong, connectedRoads, nearestOn, networkDistancesFrom, isNetworkRoad, loopWanted, mergeIntoNetwork, networkCost, nextToJoin, REDUNDANT_RATIO, treadAt, type NetPlace, type NetRoad } from "./_road-network.mts";
 import { commandRoadNet, roadsStageCheck, readNetExceptions } from "./worldgen-road-net.mts";
 import { commandFine, commandOp, commandOpPreview, fineStatusLine, stampGateStage } from "./worldgen-operators.mts";
@@ -6801,6 +6802,14 @@ function commandPaths(): void {
   // which quietly deleted every road a town builder had written — the lanes,
   // the foundations and the gate approach of a baked WFC town, gone on the
   // next `worldgen paths`.
+  // …but a SITE path (`--to` of an earlier run, `path-<a>-site-<name>`) is kept unless this run re-cuts its site or its
+  // town is gone (t2-town 2026-11-12: a plain run for a new town deleted the seven red-dial / weeping-sun links and
+  // staled every place on them). Kept paths join the network the new links route onto (tools/_site-paths.mts).
+  const recut = new Set(towns.filter((t) => t.tags.includes("site")).map((t) => t.id));
+  const sitePick = keepSitePaths(recipe.features.roads.filter((r) => r.id.startsWith("path-")), recipe.features.towns.map((t) => t.id), recut);
+  for (const d of sitePick.drop) console.log(`  site path ${d.id} re-cut: ${d.why}`);
+  const keptSiteIds = new Set(sitePick.keep.map((r) => r.id));
+  const keptSiteBridges = recipe.features.bridges.filter((b) => b.id.startsWith("bridge-path-") && [...keptSiteIds].some((id) => b.id.startsWith(`bridge-${id}-`)));
   recipe.features.roads = recipe.features.roads.filter((r) => !r.id.startsWith("path-"));
   recipe.features.bridges = recipe.features.bridges.filter((b) => !b.id.startsWith("bridge-path-"));
   // --under-barriers: route and grade on the ground WITHOUT the zone-border ridges (barrier-*). `barriers` rewrites them
@@ -6881,7 +6890,7 @@ function commandPaths(): void {
   // round is LOOP_DETOUR x the straight line and the new link saves REDUNDANT_RATIO x. The network starts with every road
   // a stage does not own (road-*, place tracks), town streets left out. tools/_road-network.mts; `roads` status row.
   const townIds = recipe.features.towns.map((t) => t.id);
-  const netRoads: NetRoad[] = routedOn.features.roads.filter((r) => !/^(path|trail|barrier|pass)-/.test(r.id) && isNetworkRoad(r, townIds));
+  const netRoads: NetRoad[] = [...routedOn.features.roads.filter((r) => !/^(path|trail|barrier|pass)-/.test(r.id) && isNetworkRoad(r, townIds)), ...sitePick.keep];
   const onRoad = new Set<number>();
   for (const r of netRoads) for (const c of cellsAlong(r.points, (x, z) => grid.nearest(x, z), grid.step)) onRoad.add(c);
   const baseCross = option("max-cross", 1.0);
@@ -7082,8 +7091,17 @@ function commandPaths(): void {
     );
     paths.splice(0, paths.length, ...passed.trails);
   }
-  recipe.features.roads = [...paths, ...recipe.features.roads];
-  recipe.features.bridges = [...bridges, ...recipe.features.bridges];
+  // the kept site paths must still meet something at one end (a road, a town gate, a site of this run)
+  const anchors: [number, number][] = [
+    ...recipe.features.towns.flatMap((t) => (t.gates ?? []).map((g) => [g.at[0], g.at[1]] as [number, number])),
+    ...towns.filter((t) => t.tags.includes("site")).map((t) => [t.center[0], t.center[1]] as [number, number]),
+  ];
+  const stranded = strandedSitePaths(sitePick.keep, [...paths, ...sitePick.keep, ...recipe.features.roads], anchors);
+  for (const d of stranded.drop) console.warn(`  ! site path ${d.id} dropped: ${d.why}`);
+  if (stranded.keep.length) console.log(`  kept ${stranded.keep.length} site path(s) this run does not re-cut: ${stranded.keep.map((r) => r.id).join(", ")}`);
+  const keptIds = new Set(stranded.keep.map((r) => r.id));
+  recipe.features.roads = [...paths, ...stranded.keep, ...recipe.features.roads];
+  recipe.features.bridges = [...bridges, ...keptSiteBridges.filter((b) => [...keptIds].some((id) => b.id.startsWith(`bridge-${id}-`))), ...recipe.features.bridges];
   if (bridges.length > 0 && !recipe.bridgeMaterial) {
     // a plain timber deck for the placeholder spans
     const id = `${recipe.name}-bridge`;

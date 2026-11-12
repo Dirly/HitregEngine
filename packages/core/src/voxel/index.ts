@@ -113,6 +113,7 @@ export {
   decodeHeightfieldValues,
   createVolume,
   buildVolumeMesh,
+  VOLUME_MESH_BLOCK,
   registerVolume,
   registerVolumeDoc,
   registerVolumeLoader,
@@ -416,7 +417,7 @@ export {
   type BridgeSpanDoc,
   type BridgeSpanSolved,
 } from "./bridge-spans.js";
-export { measureFallLip, fitFall, shiftFall, fallFace, fallColumn, columnReachesPool, profileFace, groundAtProfile, fallProbeDepth, FALL_LIP_SEARCH, FALL_FACE_CLEAR, type FallLip, type FallFitField } from "./fall-fit.js";
+export { measureFallLip, fitFall, shiftFall, fallFace, fallColumn, columnReachesPool, meshedFallField, profileFace, groundAtProfile, fallProbeDepth, FALL_LIP_SEARCH, FALL_FACE_CLEAR, type FallLip, type FallFitField } from "./fall-fit.js";
 export { fallSiteSchema, applyFallSites, fallSiteLedge, FALL_SITE_MIN_TIER, type FallSiteDoc, type SolvedFallSite } from "./fall-sites.js";
 export { rockFormations, rockFormationSolid, rockMassNodes, zoneWallStone, type RockShapeContext, type RockFormationSolid, type RockFormationSite, type RockFormationOptions, type RockFormationResult, type RockMass } from "./rock-formations.js";
 export { fallSiteRockInstances, rockSetInstances, meshDensity, type SiteRockInstance, type MeshDensity } from "./fall-site-rocks.js";

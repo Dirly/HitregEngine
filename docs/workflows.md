@@ -31,6 +31,11 @@ references and the limits of current outdoor automation.
   dressing, protected fight/travel space, a removal pass and checks drawn from its corrections. Both Claude and
   Codex route there. Legacy recipe prop/type count floors must not cause filler; use the documented scoped
   exceptions until the shared gate is revised. This direction does not authorize reworking other dungeons.
+- **Dungeon style, image and size passes:** keep a visual `authoring/style-guide.md`, inspect actual candidate-prop
+  images, and use post-layout room screenshots for sparse prop/effect concepts before installation. Generate useful
+  missing effect artwork/runtime assemblies, then catalogue and review them in motion. The existing `concept-scale`
+  stage verifies marked concept dimensions against plan/build sizes before export; stair headroom, transformed prop
+  fit and posed equipped geometry are separate checks. The shared skill reference records their coverage and gaps.
 - **Dungeon rooms and tunnels are modeled in Blender** (Blender MCP) and imported
   through the `tools/mesh-dc` bridge; read `docs/blender-dc-authoring.md` first. The
   DC construction tools carve, add stairs and fit portals inside imported stamps.
@@ -76,6 +81,7 @@ references and the limits of current outdoor automation.
   `zonegen stages <world> --project <p> [--next]` (`tools/world-order.mts`, `authoring/stages/<world>.json`): each place
   stage stands on the place's LOCAL ground (its site + concept camera lines; a far world write never stales it), a
   painted place's concept is approved before a design, and a catalogue place (small / roadside / camp) has no painting. The commands that do the work refuse out of order; `zonegen approve` records approvals.
+- **Exterior chain (every dungeon door and painted place):** location -> `zonegen concept --renders-only` (the bare grab of the UNEDITED ground) -> `--paint-only` -> `zonegen concept-check ... --target <frame>` -> build. Every exterior build path refuses before that (`tools/poi-review/exterior-chain.mjs`; status `zonegen exterior <world> --project <p>`), and a dungeon pipeline is BLOCKED at its first stage `exterior` until its door's chain is complete. Bypass: an owner ruling only, `--no-concept-ruling "YYYY-MM-DD <Derek's words, verbatim>"` (recorded).
 - **Running a whole zone** (design, look, places, life, quests, review): read `docs/zone-creation.md` (the
   `zone-creator` skill wraps it). Places are designed in the zone brief before any quest; reviewers use
   `docs/world-standards/review-rubric.md`.

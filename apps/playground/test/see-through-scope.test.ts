@@ -53,3 +53,10 @@ test("a rope bridge span's rope and rag parts are the rope-rail class; its tar s
   assert.equal(ropeRailOpening({ entities: [C, `${C}:mesh-rope`] }), false); // the bare segment is the wood: deck, posts, lintel
   assert.equal(ropeRailOpening({ entities: ["__chunk:w:0_0/bs_old-arch_0"] }), false); // an arch span's stone
 });
+
+test("an iron railing or gate card's cutout is an allowed opening (graveyard standard, 2026-11-10); anything else on it is not", () => {
+  assert.equal(ropeRailOpening({ entities: ["widows-cairn-core-iron-gate:p04-gate-leaf"], cause: "cutout" }), true);
+  assert.equal(ropeRailOpening({ entities: ["widows-cairn-core-railing-25:p00-railing"], cause: "cutout" }), true);
+  assert.equal(ropeRailOpening({ entities: ["widows-cairn-core-railing-25:p00-railing"], cause: "seam" }), false);
+  assert.equal(ropeRailOpening({ entities: ["widows-cairn-core-railing-25:p00-railing", "Mesh"], cause: "cutout" }), false);
+});

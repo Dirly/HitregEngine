@@ -209,6 +209,9 @@ const WEATHER_DRAW_PAD = 0.6;
  */
 const COLUMN_SIDE = 128;
 const COLUMN_LIFE = 20;
+// A camera-following emitter can sit inside a tall roof or cave. Weather
+// starts in the sky, so its cover query must begin above the emitter too.
+const WEATHER_COVER_HEADROOM = 256;
 class GroundColumns {
   private readonly xs = new Int32Array(COLUMN_SIDE * COLUMN_SIDE);
   private readonly zs = new Int32Array(COLUMN_SIDE * COLUMN_SIDE);
@@ -224,11 +227,9 @@ class GroundColumns {
     if (this.expires[slot]! > this.now && this.xs[slot] === ix && this.zs[slot] === iz) {
       const h = this.heights[slot]!;
       if (h !== h) return null;
-      // the answer is the first surface under whoever asked first; from beneath it, ask afresh
-      if (h <= y) return h;
-      return this.groundAt(x, y, z);
+      return h;
     }
-    const h = this.groundAt(x, y, z);
+    const h = this.groundAt(x, y + WEATHER_COVER_HEADROOM, z);
     this.xs[slot] = ix;
     this.zs[slot] = iz;
     this.heights[slot] = h === null ? NaN : h;
@@ -500,7 +501,7 @@ class Emitter {
   private weather = false;
   /** Height of whatever is under a falling particle: the column cache for weather. */
   private fallGround(x: number, y: number, z: number): number | null {
-    return this.weather && weatherViewCull && this.columns ? this.columns.at(x, y, z) : this.groundAt!(x, y, z);
+    return this.weather && this.columns ? this.columns.at(x, y, z) : this.groundAt!(x, y, z);
   }
   get sleeping(): boolean {
     return this.asleep;
@@ -698,6 +699,9 @@ class Emitter {
       // Rain culling: a drop whose flight stays out of view is simply not born — no slot, no ground ray, no quad. Judged
       // at the middle of its flight, since a gale carries it metres from where it starts.
       if (viewLimited && !weatherBirthInView(tmpPos.x + tmpDir.x * speed * life * 0.5, tmpPos.z + tmpDir.z * speed * life * 0.5)) continue;
+      const birthGround = this.data.ground && this.groundAt && world ? this.fallGround(tmpPos.x, tmpPos.y, tmpPos.z) : null;
+      // Never manufacture rain/snow beneath a roof, nor a splash inside it.
+      if (this.weather && birthGround !== null && birthGround >= tmpPos.y) continue;
       this.alive++;
       this.pos[i * 3] = tmpPos.x;
       this.pos[i * 3 + 1] = tmpPos.y;
@@ -719,7 +723,7 @@ class Emitter {
       this.seed[i] = Math.random();
       this.landed[i] = 0;
       this.rechecked[i] = 0;
-      this.groundY[i] = this.data.ground && this.groundAt && world ? (this.fallGround(tmpPos.x, tmpPos.y, tmpPos.z) ?? NaN) : NaN;
+      this.groundY[i] = birthGround ?? NaN;
     }
   }
 
@@ -887,12 +891,23 @@ class Emitter {
         vel[i * 3 + 1] = vel[i * 3 + 1]! * damp;
         vel[i * 3 + 2] = vel[i * 3 + 2]! * damp;
       }
+      const fallFromY = pos[i * 3 + 1]!;
       pos[i * 3] = pos[i * 3]! + vel[i * 3]! * dt;
       pos[i * 3 + 1] = pos[i * 3 + 1]! + vel[i * 3 + 1]! * dt;
       pos[i * 3 + 2] = pos[i * 3 + 2]! + vel[i * 3 + 2]! * dt;
       if (d.spin !== 0) rot[i] = rot[i]! + d.spin * dt;
       // terrain contact (world-space emitters only; groundY is NaN otherwise)
       if (ground) {
+        // Wind may carry a drop from an open column into covered space well
+        // before its old ground trigger. Cached column lookups stay cheap;
+        // retire an already sheltered drop without creating an indoor splash.
+        if (this.weather && this.columns) {
+          const cover = this.columns.at(pos[i * 3]!, fallFromY, pos[i * 3 + 2]!);
+          groundY[i] = cover ?? NaN;
+          if (cover !== null && cover > fallFromY + ground.offset) {
+            this.retire(i);i--;continue;
+          }
+        }
         let g = groundY[i]!;
         /**
          * The ground was sampled straight down from where this particle was

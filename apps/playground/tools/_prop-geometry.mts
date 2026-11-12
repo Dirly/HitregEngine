@@ -198,7 +198,9 @@ export function gltfTris(file: string, m: M4, material: string | undefined, out:
     for (const c of n.children ?? []) walk(c, w);
   };
   // a mesh source's `node` (one named node of a model, as the renderer draws it: getObjectByName) walks that node only
-  const roots: number[] = node ? (json.nodes as any[]).flatMap((n, i) => (n.name === node ? [i] : [])).slice(0, 1) : json.scenes[json.scene ?? 0].nodes;
+  // three's GLTFLoader names objects PropertyBinding.sanitizeNodeName(name): whitespace -> "_", reserved "[].:/" dropped
+  const sanitized = (s: string | undefined) => (s ?? "").replace(/\s/g, "_").replace(/[[\].:/]/g, "");
+  const roots: number[] = node ? (json.nodes as any[]).flatMap((n, i) => (n.name === node || sanitized(n.name) === node ? [i] : [])).slice(0, 1) : json.scenes[json.scene ?? 0].nodes;
   for (const r of roots) walk(r, m);
 }
 /** Primitive meshes: their `size` is the full bounding box on every shape; a box stands in for the shape. */
@@ -282,7 +284,7 @@ export function prefabGeometry(assets: string, id: string): PropGeometry {
       if (c.mesh?.source?.kind === "asset") {
         const f = locate(assets, "models", c.mesh.source.assetId);
         if (!fs.existsSync(f)) geo.warnings.push(`missing model ${c.mesh.source.assetId}`);
-        else { const mat = typeof c.mesh.material === "string" ? c.mesh.material : undefined; gltfTris(f, m, mat, geo.tris, materialTex(assets, mat)); }
+        else { const mat = typeof c.mesh.material === "string" ? c.mesh.material : undefined; gltfTris(f, m, mat, geo.tris, materialTex(assets, mat), c.mesh.source.node); } // node: one named part of the model (a prefab drawing each part with its own material)
       } else if (c.mesh?.source?.kind === "primitive") {
         const mat = typeof c.mesh.material === "string" ? c.mesh.material : undefined;
         boxTris(c.mesh.source.size ?? [1, 1, 1], m, geo.tris, { material: mat, tex: materialTex(assets, mat), box: (c.mesh.source.shape ?? "box") === "box", plane: c.mesh.source.shape === "plane", uv: c.mesh.source.uv ?? c.mesh.uv });
@@ -775,4 +777,41 @@ export function sceneGeometry(assets: string, doc: { entities: Record<string, an
     out.push({ id: eid, name: e.name, prefabId, m, min: mn, max: mx, world: w, draws, parts });
   }
   return out;
+}
+
+/**
+ * Modelled thin detail: round parts (rope, lacing, cords, thin rods) under `maxDiameter` metres across. A part is a set of
+ * triangles joined by shared corners; it counts when its principal extents read as a tube: long (> 4x its width), with
+ * its two short extents both under maxDiameter and similar (a round section: flat cards and crossed alpha planes never
+ * count). House rule (texture-led PSX, docs/art-direction.md): rope, lacing, ties, cords and stitching are TEXTURE on
+ * flat cards; geometry carries silhouette and structure only.
+ */
+export function thinParts(geo: PropGeometry, maxDiameter = 0.08): { count: number; length: number; parts: { at: V3; length: number; across: number }[] } {
+  const key = (p: V3) => `${Math.round(p[0] * 1000)},${Math.round(p[1] * 1000)},${Math.round(p[2] * 1000)}`;
+  const parent = new Map<string, string>();
+  const find = (k: string): string => { let r = k; while (parent.get(r) !== r) r = parent.get(r)!; let c = k; while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; } return r; };
+  const union = (a: string, b: string) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); };
+  for (const t of geo.tris) { const ks = [key(t.a), key(t.b), key(t.c)]; for (const k of ks) if (!parent.has(k)) parent.set(k, k); union(ks[0]!, ks[1]!); union(ks[1]!, ks[2]!); }
+  const groups = new Map<string, V3[]>();
+  for (const t of geo.tris) { const r = find(key(t.a)); let g = groups.get(r); if (!g) groups.set(r, (g = [])); g.push(t.a, t.b, t.c); }
+  const parts: { at: V3; length: number; across: number }[] = [];
+  for (const pts of groups.values()) {
+    if (pts.length < 18) continue;
+    const c: V3 = [0, 0, 0]; for (const p of pts) { c[0] += p[0] / pts.length; c[1] += p[1] / pts.length; c[2] += p[2] / pts.length; }
+    const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (const p of pts) { const d = [p[0] - c[0], p[1] - c[1], p[2] - c[2]]; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) C[i]![j]! += d[i]! * d[j]!; }
+    // Jacobi eigenvectors of the 3x3 covariance
+    const V = [[1, 0, 0], [0, 1, 0], [0, 0, 1]], A = C.map((r) => [...r]);
+    for (let sweep = 0; sweep < 12; sweep++) for (const [p, q] of [[0, 1], [0, 2], [1, 2]] as const) {
+      if (Math.abs(A[p]![q]!) < 1e-12) continue;
+      const th = (A[q]![q]! - A[p]![p]!) / (2 * A[p]![q]!), t = Math.sign(th || 1) / (Math.abs(th) + Math.sqrt(th * th + 1)), cs = 1 / Math.sqrt(t * t + 1), sn = t * cs;
+      for (let k = 0; k < 3; k++) { const akp = A[k]![p]!, akq = A[k]![q]!; A[k]![p] = cs * akp - sn * akq; A[k]![q] = sn * akp + cs * akq; }
+      for (let k = 0; k < 3; k++) { const apk = A[p]![k]!, aqk = A[q]![k]!; A[p]![k] = cs * apk - sn * aqk; A[q]![k] = sn * apk + cs * aqk; }
+      for (let k = 0; k < 3; k++) { const vkp = V[k]![p]!, vkq = V[k]![q]!; V[k]![p] = cs * vkp - sn * vkq; V[k]![q] = sn * vkp + cs * vkq; }
+    }
+    const ext = [0, 1, 2].map((e) => { let lo = Infinity, hi = -Infinity; for (const p of pts) { const s = p[0] * V[0]![e]! + p[1] * V[1]![e]! + p[2] * V[2]![e]!; lo = Math.min(lo, s); hi = Math.max(hi, s); } return hi - lo; }).sort((a, b) => b - a);
+    const [L, w1, w2] = ext as [number, number, number];
+    if (w1 < maxDiameter && w2 > 0.5 * w1 && L > 4 * w1 && L > 0.2) parts.push({ at: c.map((v) => Math.round(v * 100) / 100) as V3, length: Math.round(L * 100) / 100, across: Math.round(w1 * 1000) / 1000 });
+  }
+  return { count: parts.length, length: Math.round(parts.reduce((s, p) => s + p.length, 0) * 100) / 100, parts };
 }

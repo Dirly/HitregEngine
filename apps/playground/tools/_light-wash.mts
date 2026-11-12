@@ -36,7 +36,11 @@ export const FAR_FIRE_M = 300;
  *  night light still projects, but no flame can read there, so it is not judged (Weeping Sun 2026-10-30: 7 of 15 "far
  *  fires" were other places' lights 1.9-2.4 km out) */
 export const FAR_FIRE_MAX_M = 1200;
-export const isFarFire = (f: { d: number }) => f.d >= FAR_FIRE_M && f.d <= FAR_FIRE_MAX_M;
+/** L (Rustgut 2026-11-10: a dungeon door at the bottom of a pit, its working fire and the lip camp's fire hidden by the pit
+ *  walls and rim by design, were judged "far fires that do not read"): a fire whose flame the camera cannot see — the ray
+ *  from the camera to its light hits something solid well before the fire (light-shots marks it `occluded`) — is not a
+ *  far fire in that frame. Only a fire the camera can see is judged by its flame. */
+export const isFarFire = (f: { d: number; occluded?: boolean }) => !f.occluded && f.d >= FAR_FIRE_M && f.d <= FAR_FIRE_MAX_M;
 /** a far fire reads when its flame peak is this much over the ring around it (luma) and warm (r - b) */
 export const FIRE_CONTRAST = 25;
 export const FIRE_WARM = 12;
@@ -51,7 +55,10 @@ export const FIRE_READ_MIN_SHARE = 0.75;
 
 export type WashMetrics = { luma: number; lower: number; clip: number; glare: number };
 /** `cold`: the fire's light is blue-white (b > r: a spirit fire, the Moon's): its flame is judged by its own hue, b - r */
-export type FireSpot = { x: number; y: number; d: number; id?: string; cold?: boolean };
+/** `occluded`: the camera-to-light ray hits a surface more than OCCLUDER_CLEAR_M short of the light (light-shots) */
+export type FireSpot = { x: number; y: number; d: number; id?: string; cold?: boolean; occluded?: boolean };
+/** a hit this close to the light is the fire's own brazier, logs or basin, never an occluder (m) */
+export const OCCLUDER_CLEAR_M = 4;
 export type FireRead = FireSpot & { reads: boolean; peak: number; bg: number; glowPx: number; why: string };
 
 export type Raw = { data: Buffer; w: number; h: number; ch: number };
@@ -151,7 +158,7 @@ export function oneLightPerFire(fires: FireSpot[], frameH: number): FireSpot[] {
   return out;
 }
 
-export type FrameWash = { spot: string; time: number | null; wash: WashMetrics; washOk: boolean; washWhy: string; fires?: { far: number; read: number; wideGlow: number; rows: FireRead[] }; veil?: { luma: number; lit: number } };
+export type FrameWash = { spot: string; time: number | null; wash: WashMetrics; washOk: boolean; washWhy: string; firesHidden?: number; fires?: { far: number; read: number; wideGlow: number; rows: FireRead[] }; veil?: { luma: number; lit: number } };
 
 /** A light-shots frame: its wash and its far fires. */
 export async function judgeFrame(file: string, spot: string, time: number | null, fires: FireSpot[] = []): Promise<FrameWash> {
@@ -159,6 +166,8 @@ export async function judgeFrame(file: string, spot: string, time: number | null
   const wash = washMetrics(r), v = washVerdict(wash, time);
   const far = oneLightPerFire(fires.filter(isFarFire), r.h);
   const out: FrameWash = { spot, time, wash, washOk: v.ok, washWhy: v.why };
+  const hidden = fires.filter((f) => f.occluded && f.d >= FAR_FIRE_M && f.d <= FAR_FIRE_MAX_M).length;
+  if (hidden) out.firesHidden = hidden;
   if (far.length) {
     const rows = far.map((f) => fireRead(r, f));
     out.fires = { far: far.length, read: rows.filter((x) => x.reads).length, wideGlow: rows.filter((x) => x.reads && x.glowPx > FAR_GLOW_PX_MAX).length, rows };

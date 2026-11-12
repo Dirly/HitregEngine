@@ -82,6 +82,8 @@ export interface AppProps {
   onPinCreateForEntity?: (entityId: string) => void;
   onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
   onPinDelete?: (id: string) => void;
+  /** Send every written draft note to the agent inbox in one batch. */
+  onPinSendDrafts?: () => void;
   onFocusPoint?: (point: [number, number, number]) => void;
   /** Resizable dock sizes; the host resizes the viewport canvas from these. */
   dockSizes: Observable<DockSizes>;
@@ -139,6 +141,10 @@ export function App(props: AppProps) {
   const visible = useObservable(props.visible);
   const docks = useObservable(props.dockSizes);
   const [showResolvedPins, setShowResolvedPins] = useState(false);
+  // Notes are DRAFTS until sent (one by one, or all together from the badge). With this on, a note goes to the agent
+  // inbox as soon as its card is closed: the fly-around-and-have-it-edited-live mode. Per browser, off by default.
+  const [autoSendNotes, setAutoSendNotes] = useState(() => { try { return localStorage.getItem("hitreg.notes.autoSend") === "1"; } catch { return false; } });
+  const toggleAutoSendNotes = () => setAutoSendNotes((v) => { try { localStorage.setItem("hitreg.notes.autoSend", v ? "0" : "1"); } catch { /* private mode */ } return !v; });
   const editingPrefab = useObservable(props.editingPrefab ?? nullEditingPrefab);
   const editingChunk = useObservable(props.editingChunk ?? nullEditingChunk);
   if (!visible) return null;
@@ -308,7 +314,7 @@ export function App(props: AppProps) {
             />
           )}
           {editingChunk && <ChunkEditBanner cell={editingChunk} onClose={props.onCloseChunkEdit} />}
-          {props.pins && <PinBadge pins={props.pins} showResolved={showResolvedPins} onToggle={() => setShowResolvedPins((v) => !v)} />}
+          {props.pins && <PinBadge pins={props.pins} showResolved={showResolvedPins} onToggle={() => setShowResolvedPins((v) => !v)} autoSend={autoSendNotes} onToggleAutoSend={toggleAutoSendNotes} onSendDrafts={props.onPinSendDrafts} />}
           {props.meshEdit && (
             <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "space-between", pointerEvents: "none" }}>
               <MeshEditPanel
@@ -452,6 +458,7 @@ export function App(props: AppProps) {
           camera={props.camera}
           canvas={props.canvas}
           showResolved={showResolvedPins}
+          autoSend={autoSendNotes}
           onUpdate={(id, patch) => props.onPinUpdate?.(id, patch)}
           onDelete={(id) => props.onPinDelete?.(id)}
           onFocusPoint={props.onFocusPoint}
@@ -568,12 +575,26 @@ function ChunkEditBanner(props: {
  * viewport hole rather than the toolbar so pins stay a property of the world
  * you're looking at, not another panel to go find.
  */
-function PinBadge(props: { pins: Pins; showResolved: boolean; onToggle: () => void }) {
+function PinBadge(props: { pins: Pins; showResolved: boolean; onToggle: () => void; autoSend: boolean; onToggleAutoSend: () => void; onSendDrafts?: () => void }) {
   const pins = useObservable(props.pins);
   if (pins.length === 0) return null;
   const open = pins.filter((pin) => !pin.resolved).length;
+  const drafts = pins.filter((pin) => !pin.resolved && !pin.sentAt && pin.text.trim().length > 0).length;
+  const chip = { ...buttonStyle, pointerEvents: "auto" as const, padding: "2px 8px", font: "11px ui-monospace, monospace", background: "rgba(13, 17, 23, 0.9)" };
   return (
-    <div style={{ display: "flex", justifyContent: "flex-end", padding: 6 }}>
+    <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, padding: 6 }}>
+      {drafts > 0 && props.onSendDrafts && (
+        <button onClick={props.onSendDrafts} title="Put every draft note in the agent inbox together" style={{ ...chip, borderColor: "#79c0ff", color: "#e6edf3" }}>
+          ↑ send {drafts} draft{drafts === 1 ? "" : "s"}
+        </button>
+      )}
+      <button
+        onClick={props.onToggleAutoSend}
+        title={props.autoSend ? "Auto-send is ON: a note goes to the agent as soon as you close it. Click to keep notes as drafts instead." : "Auto-send is OFF: notes stay drafts until you send them (one by one, or all together). Click to send each note as soon as you close it."}
+        style={chip}
+      >
+        auto-send: {props.autoSend ? "on" : "off"}
+      </button>
       <button
         onClick={props.onToggle}
         title={

@@ -108,7 +108,7 @@ export function compileLandmark(p: LandmarkOperatorParams, reader: OperatorField
 function place(p: LandmarkOperatorParams, reader: OperatorFieldReader, ctx: { id: string }, cells: [number, number][], at: [number, number], digest: string, radius: number,
   footOverride: number | undefined, groundOverride: OperatorPiece | null | undefined, extra: Record<string, unknown>): OperatorOutput {
   if (p.blend.area) cells = landmarkAreaCells(p.blend.area, at, p.yaw, p.scale);
-  const g = landmarkGround(cells, at, p.blend, reader, footOverride ?? p.y);
+  const g = landmarkGround(cells, at, p.blend, reader, footOverride ?? p.y, { yaw: p.yaw, scale: p.scale });
   const patch = groundOverride !== undefined ? groundOverride : g.patch;
   const prefab = landmarkPrefabId(ctx.id, digest);
   return {

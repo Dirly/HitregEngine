@@ -1433,16 +1433,25 @@ export type ScatterFormationDoc = z.infer<typeof scatterFormationSchema>;
 /** Water-aware placement (field.waterY / waterSurface / marshTable: the gates ground cover uses). */
 export const scatterWaterSchema = z.object({
   mode: z
-    .enum(["shore", "in", "river", "marsh"])
+    .enum(["shore", "in", "river", "marsh", "bed"])
     .describe(
       "shore: on lake/sea banks, standing half in the water (denser on steep banks and headlands, sparse on gentle " +
         "beaches). in: on the bed of shallow lake/sea water, the top breaking the surface. river: in a river's shallow " +
-        "runs (the deep centre stays clear), bigger below waterfalls. marsh: on a marsh's water table, rare.",
+        "runs (the deep centre stays clear), bigger below waterfalls. marsh: on a marsh's water table, rare. " +
+        "bed: on the lake/sea BED, wholly under water `bedDepth` deep (reef heads, sunken boulders); never rescaled, dropped if its top would come within 0.5 m of the surface.",
     ),
   top: z
     .tuple([z.number(), z.number()])
     .default([0.2, 1.5])
     .describe("in/river/marsh: metres the rock's top must stand above the water surface; the instance is rescaled within the rule's range to fit or dropped. Never a submerged blob."),
+  bedDepth: z
+    .tuple([z.number().min(0), z.number().min(0)])
+    .default([3, 40])
+    .describe("bed: water depth [min, max] metres (surface minus bed) the rock is placed under."),
+  bedWaters: z
+    .enum(["any", "sea", "inland"])
+    .default("any")
+    .describe("bed: which water's bed. sea = the sea only (coral, reef heads: never a lake or a river); inland = lakes and rivers only; any = both."),
   maxDepth: z.number().positive().default(1.6).describe("in/river: deepest water (surface minus bed, metres) a rock is placed in."),
   reach: z.number().positive().default(4).describe("shore: metres from the candidate to look for the water's edge."),
   steepness: z.number().min(0).default(1.6).describe("shore: how much a steep bank raises the odds (keep = 0.2 + steepness x slope)."),

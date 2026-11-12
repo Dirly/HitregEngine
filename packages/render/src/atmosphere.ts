@@ -715,6 +715,7 @@ export class ScreenShafts {
     private readonly camera: THREE.Camera,
     private readonly sun: { light: THREE.DirectionalLight; direction: THREE.Vector3 },
     private settings: VolumetricSettings,
+    emissiveNode?: any,
   ) {
     const sunUv = this.sunUv;
     const strength = this.strength;
@@ -733,7 +734,13 @@ export class ScreenShafts {
         const weight: any = float(1).toVar();
         Loop(n, () => {
           pos.subAssign(step);
-          const sky: any = isSkyDepth(depthNode.sample(pos).r);
+          const skyDepth: any = isSkyDepth(depthNode.sample(pos).r);
+          // Transparent magic writes no depth, so depth alone mistakes an orb,
+          // portal glyph or beam for open sky. Its existing MRT emission marks
+          // those pixels; only actual sky/cloud gaps may feed sun shafts.
+          const sky: any = emissiveNode
+            ? skyDepth.and(dot(emissiveNode.sample(pos).rgb, vec3(.299,.587,.114)).lessThan(.0001))
+            : skyDepth;
           const lum: any = dot(colorNode.sample(pos).rgb, vec3(0.299, 0.587, 0.114));
           // linear HDR: the slate sky is ~0.03, lit cloud ~0.2, the sun disc >1 — weight by brightness, capped
           sum.addAssign(select(sky, lum.min(2), float(0)).mul(weight));

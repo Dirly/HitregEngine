@@ -1,7 +1,7 @@
 /**
  * portal-play --dungeon <instance scene> [--world <scene>]                 (the dungeon pipeline's last stage)
  * portal-play --scene <world scene> --portal <portal id> --exit <exit portal id>
- *   [--url http://localhost:<p>] [--port <p>] [--out <dir>] [--no-inside] [--headed] [--exit-from x,y,z] [--walk-s <s>]
+ *   [--url http://localhost:<p>] [--port <p>] [--out <dir>] [--no-inside] [--headed] [--exit-from x,y,z] [--walk-s <s>] [--keep-mobs]
  * --walk-s: seconds a walk-in may take before it fails (default 30). w-temple9 2026-11-03: live redstrand ran at 0-3 fps
  *   in the client, so a 10 m walk from a causeway return anchor took longer than 30 s while the headless trip passed.
  *
@@ -51,6 +51,19 @@ type V3 = [number, number, number];
 type Params = Record<string, unknown>;
 
 // -- scene files -----------------------------------------------------------------------------------
+type Ent = { parent: string | null; tags?: string[]; components: Record<string, unknown> };
+/** A scene file's text with its creatures taken out: spawn areas, combatants (their parent when they have one) and mobs/
+ *  prefab instances, with everything under them (light-shots mobRemovalOps). Served to the page only; nothing is written. */
+function withoutMobs(text: string): string {
+  const raw = JSON.parse(text) as { entities: Record<string, Ent> }, E = raw.entities, pick = new Set<string>();
+  for (const [id, e] of Object.entries(E)) {
+    if (e.components["spawnArea"]) pick.add(id);
+    if ((e.tags ?? []).includes("combatant")) pick.add(e.parent && E[e.parent] ? e.parent : id);
+    if ((e.components["prefab"] as { prefabId?: string } | undefined)?.prefabId?.startsWith("mobs/")) pick.add(id);
+  }
+  for (const id of Object.keys(E)) for (let p: string | null = id; p; p = E[p]?.parent ?? null) if (pick.has(p)) { delete E[id]; break; }
+  return JSON.stringify(raw);
+}
 function sceneFile(id: string): { file: string; project: string } | null {
   for (const p of fs.readdirSync(path.join(PG, "projects"))) {
     const file = path.join(PG, "projects", p, "assets", "scenes", `${id}.scene.json`);
@@ -240,11 +253,20 @@ async function openInPlay(scene: string, travelNext = false): Promise<void> {
   page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   // a test client never writes authoring files: its autosave of the scene it booted with erased later installs
   await page.route(/\/__hitreg\//, dropAuthoringWrites);
+  // scene files served WITHOUT their creatures (mobs + spawn areas, as light-shots serves them; --keep-mobs keeps them):
+  // the test body is a fresh traveller, and at a hostile camp's door it died before it reached the box (rustgut-entrance
+  // 2026-11-09: a populate hyena at Rustgut's camp, "You died" 9 m from the door). This test is about doors, not fights.
+  if (!process.argv.includes("--keep-mobs")) await page.route((u: URL) => u.pathname === "/__hitreg/asset-file" && /^scenes\/[^/]+\.scene\.json$/.test(u.searchParams.get("file") ?? ""), async (route: { request(): { url(): string }; fulfill(o: unknown): Promise<void>; continue(): Promise<void> }) => {
+    const id = (new URL(route.request().url()).searchParams.get("file") ?? "").replace(/^scenes\//, "").replace(/\.scene\.json$/, "");
+    const f = sceneFile(id);
+    if (!f) return route.continue();
+    return route.fulfill({ status: 200, contentType: "application/json", body: withoutMobs(fs.readFileSync(f.file, "utf8")) });
+  });
   // tsx keeps function names with an injected __name() helper: the functions evaluated in the page need it too
   await page.addInitScript(() => { (window as unknown as { __name: (f: unknown) => unknown }).__name = (f: unknown) => f; });
   page.on("console", (m: { text(): string }) => { const t = m.text(); if (/portal|refus|could not open/i.test(t)) logs.push(t); });
   page.on("pageerror", (e: Error) => logs.push("pageerror: " + e.message));
-  await page.goto(`${base}/?scene=${encodeURIComponent(scene)}`, { waitUntil: "load" });
+  await page.goto(`${base}/?scene=${encodeURIComponent(scene)}`, { waitUntil: "load", timeout: 180000 }); // a cold vite on a loaded machine took > 30 s (rustgut 2026-11-10)
   if (!(await waitUntil(async () => page.evaluate(() => !!(window as unknown as { __hitreg?: { playerId?: unknown } }).__hitreg?.playerId), 180000))) throw new Fail("the dev app never came up (or it has no __hitreg.playerId: a dev build is needed)");
   await waitUntil(async () => (await state()).scene === scene, 120000);
   await sleep(1500);

@@ -30,7 +30,7 @@ export function EntityNotes(props: {
         </strong>
         <button
           style={buttonStyle}
-          title="Attach a note to this entity and send it to an agent"
+          title="Attach a note to this entity (a draft until you send it)"
           onClick={() => props.onCreate(props.entityId)}
         >
           + note
@@ -39,7 +39,8 @@ export function EntityNotes(props: {
       {mine.length === 0 ? (
         <div style={{ color: "#8b949e", fontSize: 10, marginTop: 2 }}>
           none — a note is how you tell an agent what to change about this
-          entity, in place. "Send to AI" puts it in the agent inbox immediately.
+          entity, in place. It is saved as a draft; "send now" puts that one in the agent
+          inbox, and the notes badge in the viewport sends every draft together.
         </div>
       ) : (
         mine.map((pin) => (
@@ -81,8 +82,12 @@ function NoteRow(props: {
       </div>
       <textarea
         value={text}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={() => dirty && props.onUpdate({ text })}
+        onChange={(e) => {
+          // saved as it is typed (the store debounces the write): a blur-only save lost text when the selection changed first
+          setText(e.target.value);
+          props.onUpdate({ text: e.target.value });
+        }}
+        onKeyDown={(e) => e.stopPropagation()}
         rows={2}
         placeholder="what should change about this?"
         style={{
@@ -134,7 +139,7 @@ function NoteRow(props: {
               )
             }
           >
-            {props.pin.sentAt ? "↑ re-send" : "↑ send to AI"}
+            {props.pin.sentAt ? "↑ re-send" : "↑ send now"}
           </button>
         )}
         <button

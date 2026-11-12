@@ -62,6 +62,31 @@ function poolScene(): SceneDoc {
   return doc;
 }
 
+it("keeps an authoritative player on a dry ship floor below the surrounding waterline", async () => {
+  const doc = poolScene();
+  doc.entities["hold"] = { name: "watertight hold", parent: null, tags: [], components: {
+    transform: {}, waterExclusion: { min: [-3, -2.1, -6], max: [3, 1, 6], planes: [] },
+  } };
+  doc.entities["deck"] = { name: "hold floor", parent: null, tags: [], components: {
+    transform: { position: [0, -2, 0] }, mesh: { source: { kind: "primitive", shape: "box", size: [6, .2, 12] } },
+    collider: { shape: "box", size: [6, .2, 12] },
+  } };
+  const world = await HeadlessWorld.create({ doc, assets: new AssetLibrary(), registry: defaultRegistry(), exclude: (_id, e) => e.tags.includes("player") });
+  const hub = new LoopbackHub({ manualFlush: true });
+  const server = new GameServer({ world, transport: hub.connect("server"), reconnectGraceSeconds: 0 });
+  const transport = hub.connect("dry-sailor");
+  const client = new RoomClient(transport, "server");
+  try {
+    client.join("Dry sailor"); await flush(hub);
+    for (let i = 0; i < 300; i++) server.tick();
+    // The wet pool test floats at +0.8. A dry hold must walk on its floor
+    // around -1.0 instead, despite authored water still covering this XZ.
+    expect(world.positionOf("player:dry-sailor")![1]).toBeLessThan(-.6);
+    expect(world.positionOf("player:dry-sailor")![1]).toBeGreaterThan(-1.4);
+    expect(world.anims.get("player:dry-sailor") ?? "").not.toMatch(/swim/i);
+  } finally { client.leave(); server.close(); world.dispose(); }
+}, 30_000);
+
 describe("swimming on the authority", { timeout: 30_000 }, () => {
   let world: HeadlessWorld;
   let server: GameServer;

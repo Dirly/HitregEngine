@@ -11,6 +11,9 @@ Read [the Weeping Sun placement review](../dungeon-standards/references/placemen
 orphan effects and actual entity-lighting checks. Do not add fixtures to satisfy a count or hide a material defect.
 Compare environment, player/trash/boss lighting, weapon effect size and local spill separately; exact Weeping Sun
 light values are not a universal preset.
+The post-layout image pass can propose new light shafts, motes, sparks, steam or fire assemblies. Generate needed
+art and author the actual runtime VFX/prefab, then catalogue and inspect a moving in-room sequence. A concept PNG
+is not a working effect; review source attachment, envelope, loop/culling and light spill as well as appearance.
 
 ## Commands (from apps/playground unless noted)
 ```

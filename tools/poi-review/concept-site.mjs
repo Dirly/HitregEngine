@@ -14,9 +14,10 @@
  *  - a `*.site.json` manifest beside that render lists it (same sha256: the render is the one this tool made) for the
  *    same place, and the reservation it was shot for is the one in the zone's reservations.json now (same centre and
  *    radius);
- *  - the ground under the reservation has not changed since (`groundFingerprint`: the recipe's non-feature fields and
- *    every world feature that reaches inside the terrain radius, the place's OWN features left out, so building the place
- *    never stales its concept).
+ *  - the manifest carries an `unedited` stamp (rule UNEDITED_RULE: the render was made of the recipe WITHOUT the place's
+ *    own edits, `uneditedRecipe`) and the UNEDITED ground under the reservation has not changed since (`uneditedStamp`:
+ *    the recipe's non-feature fields and every world feature that reaches inside the terrain radius, the place's OWN
+ *    edits left out, so building the place never stales its concept).
  * Plain JS (job.mjs, the zonegen command and tests share it); no world field.
  */
 import fs from "node:fs";
@@ -55,11 +56,60 @@ export function ownership(poi, { prefixes = [], ids = [] } = {}) {
   const pre = [...new Set([`pb-${poi}-`, `op:pb-${poi}-`, `road-pb-${poi}-`, `bridge-road-pb-${poi}-`, `${poi}-`, ...prefixes])].sort();
   return { poi, prefixes: pre, ids: [...new Set([poi, ...ids])].sort() };
 }
-export function ownsFeature(own, f) {
+/**
+ * Is a recipe feature (or a need) the place's own edit? `owner` / `poi` / `for` naming the place, an exact id, an id
+ * prefix; and, for an ownership made by `placeOwnership` (exterior-chain.mjs), the TOKEN rule: the place id as a whole
+ * token of the feature's id (`talus-rustgut-apron`, `woodland-keep-rustgut`, `road-rustgut-track`) for a feature that
+ * reaches the place (`own.near`). `{ strong: true }` skips the token rule (the write guard: a world-wide pass that
+ * rewrites a keep-clearing is not the place's build). `own.disowns` lists ids that are never the place's.
+ */
+export function ownsFeature(own, f, { strong = false } = {}) {
   if (!f || typeof f !== "object") return false;
-  if (f.owner === own.poi || f.poi === own.poi) return true;
   const id = typeof f.id === "string" ? f.id : "";
-  return !!id && (own.ids.includes(id) || own.prefixes.some((p) => id.startsWith(p)));
+  if (id && (own.disowns ?? []).includes(id)) return false;
+  if (f.owner === own.poi || f.poi === own.poi || f.for === own.poi) return true;
+  if (id && (own.ids.includes(id) || own.prefixes.some((p) => id.startsWith(p)))) return true;
+  // the token rule reads an operator doc's source / toe / site too (`from`, `to`, `near`): a named-for-it feature far away is not its
+  if (!strong && id && own.near && (own.tokens ?? []).some((t) => hasToken(id, t))) return reaches({ ...f, points: [f.points ?? [], f.from ?? [], f.to ?? [], f.near ?? []] }, own.near.center[0], own.near.center[1], own.near.r);
+  return false;
+}
+/** Is `token` (a place id, itself hyphenated) a whole run of the id's tokens (split on - : / . _)? */
+export function hasToken(id, token) {
+  const a = String(id).toLowerCase().split(/[-:/._]+/).filter(Boolean), b = String(token).toLowerCase().split(/[-:/._]+/).filter(Boolean);
+  if (!b.length || b.length > a.length) return false;
+  for (let i = 0; i + b.length <= a.length; i++) if (b.every((t, k) => a[i + k] === t)) return true;
+  return false;
+}
+
+/**
+ * THE UNEDITED GROUND (Derek 2026-11-10, Rustgut: "you need to always build it off of a location, a screen grab of that
+ * location"): the recipe with every edit attributable to the place taken out — its features (need patches, operator
+ * pieces, landmarks, clearings, its own roads, dressing clearings), its operator docs and its `needs` (`for` = the
+ * place). The bare render and its fingerprint are made of THIS, so a concept is never painted on the place's own stamped
+ * block, and building the place (solving its need, applying its operator) never stales the grab.
+ * Returns { recipe, excluded: ["heightPatches/need-x", "needs/x", ...] }.
+ */
+export function uneditedRecipe(recipe, own) {
+  const excluded = [];
+  const features = {};
+  for (const [kind, list] of Object.entries(recipe.features ?? {})) {
+    if (!Array.isArray(list)) { features[kind] = list; continue; }
+    features[kind] = list.filter((f) => { const mine = ownsFeature(own, f); if (mine) excluded.push(`${kind}/${f?.id ?? "?"}`); return !mine; });
+  }
+  const needs = Array.isArray(recipe.needs) ? recipe.needs.filter((n) => { const mine = (own.needs ?? []).includes(n?.id) || ownsFeature(own, n); if (mine) excluded.push(`needs/${n?.id ?? "?"}`); return !mine; }) : recipe.needs;
+  return { recipe: { ...recipe, features, ...(needs !== undefined ? { needs } : {}) }, excluded: excluded.sort() };
+}
+/** The rule name an unedited stamp carries (a later change of the rule re-renders, never silently matches). */
+export const UNEDITED_RULE = "unedited-2026-11-10";
+/**
+ * The manifest's `unedited` stamp: the ground fingerprint of the UNEDITED recipe under the reservation (needs are
+ * declarations: their solved patches are features, so the `needs` list itself is left out), plus the excluded edits.
+ */
+export function uneditedStamp(recipe, { center, radius }, own) {
+  const u = uneditedRecipe(recipe, own);
+  const { needs: _needs, ...ground } = u.recipe;
+  const fp = groundFingerprint(ground, { center, radius }, own);
+  return { rule: UNEDITED_RULE, fingerprint: fp.hash, parts: fp.parts, featuresUnder: fp.features, excluded: u.excluded };
 }
 
 /** Every [x, z] a feature's top-level coordinate keys hold, and the reach round them. */
@@ -208,8 +258,10 @@ export function conceptSiteFault(file, site, playground = PLAYGROUND) {
     const wf = path.resolve(playground, m.worldFile ?? "");
     const recipe = tryJson(wf);
     if (!recipe) { faults.push(`its world ${m.worldFile} cannot be read`); continue; }
-    const fp = groundFingerprint(recipe, { center: m.reservation.center, radius: m.reservation.terrainRadius ?? m.reservation.radius }, m.ownership ?? ownership(m.poi));
-    if (fp.hash !== m.fingerprint) { const moved = movedParts(m, fp); faults.push(`the world changed under the reservation since its site render (${m.renderedAt})${moved.length ? `: ${moved.join(" and ")} moved` : ""}`); continue; }
+    // the UNEDITED ground (2026-11-10): a render made before the rule may show the place's own stamped terrain
+    if (m.unedited?.rule !== UNEDITED_RULE) { faults.push(`its site render ${path.basename(ref)} was made before the unedited-ground rule (2026-11-10: the place's own needs, patches, operators and clearings are taken out of the bare render) — re-render it`); continue; }
+    const st = uneditedStamp(recipe, { center: m.reservation.center, radius: m.reservation.terrainRadius ?? m.reservation.radius }, m.ownership ?? ownership(m.poi));
+    if (st.fingerprint !== m.unedited.fingerprint) { const moved = movedParts({ fingerprintParts: m.unedited.parts }, { parts: st.parts }); faults.push(`the world changed under the reservation (its unedited ground) since its site render (${m.renderedAt})${moved.length ? `: ${moved.join(" and ")} moved` : ""}`); continue; }
     return null;
   }
   return `concept frame ${name}: ${faults.join("; ")} — re-run ${CONCEPT_COMMAND}`;

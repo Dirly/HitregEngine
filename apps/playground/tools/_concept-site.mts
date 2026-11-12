@@ -284,6 +284,9 @@ export function approachView(g: Ground, c: V2, height: number, read: number, roa
  * The far view: from [read, 1.15 read] on 36 bearings, the dry spot that shows most of a `height` m mark at player
  * height, ties to the side nearest `prefer` (the approach). Raised 10 m at a time (to 60 m) when nothing shows 3 m.
  */
+/** Steepest ground (rise/run) the far eye may stand on: a walker's slope, not a cliff face. */
+export const FAR_EYE_MAX_SLOPE = 0.6;
+
 export function farView(g: Ground, c: V2, height: number, read: number, prefer: V2 | null, canopy?: (x: number, z: number) => number, clutter?: (x: number, z: number) => number, obstacles?: readonly Obstacle[]): View {
   const foot = g.height(c[0], c[1]), top = foot + height, target: V3 = [c[0], foot + height * 0.4, c[1]];
   for (let lift = EYE_M; lift <= 60; lift = lift === EYE_M ? 10 : lift + 10) {
@@ -291,10 +294,14 @@ export function farView(g: Ground, c: V2, height: number, read: number, prefer: 
     for (let k = 0; k < 36; k++) for (const f of [1, 1.07, 1.15]) {
       const a = (k / 36) * Math.PI * 2, d = read * f, p: V2 = [c[0] + Math.sin(a) * d, c[1] - Math.cos(a) * d];
       if (wet(g, p[0], p[1])) continue;
+      // L (rustgut 2026-11-11): never stand the far eye ON a cliff face (the west ridge: the eye sat on the wall, the frame was rock)
+      if (Math.hypot(g.height(p[0] + 4, p[1]) - g.height(p[0] - 4, p[1]), g.height(p[0], p[1] + 4) - g.height(p[0], p[1] - 4)) / 8 > FAR_EYE_MAX_SLOPE) continue;
       const eye: V3 = [p[0], g.height(p[0], p[1]) + lift, p[1]], r = readPixels(g, eye, { at: c, foot, top });
       if (canopyBlock(g, eye, target, canopy) > CANOPY_BLOCK) { r.px = 0; r.visible = 0; }
       else if (nearClutter(eye, target, clutter) > NEAR_CLUTTER_MAX) { r.px *= 0.5; r.visible *= 0.5; } // prefer a clear foreground, never refuse every eye in a wood
       if (nearObstacle(eye, target, obstacles) || nearWall(g, eye, target) > NEAR_WALL_MAX) { r.px *= 0.25; r.visible *= 0.25; } // a rock flank filling the frame beside the eye
+      // L (rustgut 2026-11-11): an eye standing above the place's top looks DOWN its own ridge, not at the place (the far frame was the crest)
+      if (eye[1] - lift > top) { r.px *= 0.25; r.visible *= 0.25; }
       const near = prefer ? 1 - dist(p, prefer) / (2 * d + 1) : 0;
       const score = r.visible + near * 2;
       if (!best || score > best.score) best = { name: "far", eye, target, from: Math.round(d), px: r.px, visible: r.visible, note: "", score };

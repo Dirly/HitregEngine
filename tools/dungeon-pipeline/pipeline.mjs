@@ -22,6 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { GATES, gateInputs, gateReport } from "./quality.mjs";
+import { dungeonExterior, exteriorStage } from "./exterior.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // the build stage runs Blender through the machine-wide lock (tools/blender-lock.mjs: one headless Blender at a time)
@@ -106,8 +107,10 @@ export function gateStage(name) {
  * The standard stage list. `id` names the project (projects/<id>/), its stamp (authoring/<id>.mesh-stamp.json) and
  * every (pg) command path. `override` merges fields into a stage by name ({ run, note, inputs, ... }; null drops the
  * stage); `insert` adds project stages ({ after: "<stage>", stage }); `exportInputs` adds builder files to the export.
+ * `door` ({ world, poi, project? }) names the world door's place for the FIRST stage, `exterior` (exterior.mjs: found from
+ * the world scene's portal when absent); it is always first and cannot be overridden away.
  */
-export function standardStages({ id, blender = BLENDER, exportInputs = [], override = {}, insert = [] }) {
+export function standardStages({ id, blender = BLENDER, exportInputs = [], override = {}, insert = [], door }) {
   const pj = `projects/${id}/authoring`;
   const stamp = `authoring/${id}.mesh-stamp.json`;
   const big = "NODE_OPTIONS=--max-old-space-size=8192";
@@ -168,7 +171,8 @@ export function standardStages({ id, blender = BLENDER, exportInputs = [], overr
   ];
   for (const { after, stage } of insert) { const i = stages.findIndex((s) => s.name === after); stages.splice(i < 0 ? stages.length : i + 1, 0, stage); }
   stages = stages.flatMap((s) => (s.name in override ? (override[s.name] === null ? [] : [{ ...s, ...override[s.name] }]) : [s]));
-  return stages;
+  // the exterior chain of the world door comes FIRST, always (Derek 2026-11-10, Rustgut): never overridden or dropped
+  return [exteriorStage(id, door), ...stages.filter((s) => s.name !== "exterior")];
 }
 
 /** sha256 (hex) of a file's bytes; null when absent. */
@@ -193,7 +197,19 @@ export function digestCurrent(root, s, input) {
 /** Evaluate every stage of a project (root = the project folder). */
 export function evaluate(root, stages) {
   const full = (rel) => path.resolve(root, rel);
+  let exteriorBlock = null;
   return stages.map((s) => {
+    // the exterior stage is judged live (the world door's chain), never by an artifact; until it is ok every later stage
+    // is BLOCKED (its own state kept in `was`)
+    if (s.exterior) {
+      const x = dungeonExterior(root, s.exterior.id, s.exterior.door);
+      if (x.status !== "ok") exteriorBlock = x;
+      return { ...s, inputs: [], run: x.run, status: x.status, out_mtime: null, failures: x.status === "ok" ? [] : [x.why], why: x.why };
+    }
+    if (exteriorBlock) {
+      const run = typeof s.run === "function" ? s.run(root) : s.run;
+      return { ...s, inputs: typeof s.inputs === "function" ? s.inputs(root) : s.inputs ?? [], run, status: "BLOCKED", out_mtime: mtimeOf(full(s.out)), failures: [`BLOCKED by exterior: ${exteriorBlock.why}`] };
+    }
     const inputs = typeof s.inputs === "function" ? s.inputs(root) : s.inputs ?? [];
     // a command may depend on the project (the plan's portalPlay.exitFrom): run(root)
     const run = typeof s.run === "function" ? s.run(root) : s.run;
@@ -229,8 +245,13 @@ export function runPipeline(metaUrl, stages, { argv = process.argv, before } = {
   console.log("stage          status   artifact                                        updated");
   console.log("-".repeat(92));
   for (const r of rows) console.log(`${(r.name + (r.gate ? " *" : "")).padEnd(14)} ${r.status.padEnd(8)} ${r.out.padEnd(47)} ${when(r.out_mtime)}`);
+  const ext = rows.find((r) => r.exterior);
+  if (ext) console.log(`
+exterior: ${ext.why}`);
   console.log("  (* = quality gate, tools/dungeon-pipeline/quality.mjs; thresholds.json holds the numbers)\n");
   if (!blocking.length) console.log("every stage is present and current.");
+  else if (ext && ext.status !== "ok") console.log(`the world door's exterior chain comes first (every later stage BLOCKED):
+  exterior       ${ext.run}`);
   else { console.log(`${blocking.length} stage(s) need running, in order:`); for (const b of blocking) console.log(`  ${b.name.padEnd(14)} ${b.run}`); }
   const failedGates = rows.filter((r) => r.gate && r.status === "FAILED");
   for (const g of failedGates) { console.log(`\n${g.name} FAILED (${g.report}):`); for (const f of g.failures.slice(0, 12)) console.log(`  - ${f}`); if (g.failures.length > 12) console.log(`  ... ${g.failures.length - 12} more`); }

@@ -7,20 +7,22 @@
  * the scene store (undo/redo as always); the gizmo, Delete and Ctrl+D act on the same props.
  *
  * Every owner change to a placed prop — from this panel, the gizmo, the inspector, Delete, Ctrl+D, undo/redo — is ALSO
- * reported to the dev server (POST /__hitreg/owner-edit), which writes it as an OWNER OVERRIDE on what placed it
+ * reported to the dev server (POST /__hitreg/owner-edit), which writes it as an OWNER OVERRIDE on what placed it.
+ * In a GENERATED scene (entities tagged `built:<builder>`, tools/_scene-sync.mts) every entity edit is reported, props
+ * or not (transform, prefab, and any other component such as a light), so a regeneration keeps it
  * (packages/core dressing/owner.ts). Changes that arrive from disk (live-sync: an agent's `dress apply`) are not the
  * owner's and are never reported. Keys while a placed prop is selected: G drop to surface, [ / ] turn 15° (Shift 5°).
  */
 import * as THREE from "three/webgpu";
 import {
+  builderOf,
   defaultSeatContact,
   DRESSING_VOCABULARY,
-  entityOwnerState,
+  entityEditsOf,
   ownerScaleRange,
-  sameOwnerTransform,
   seatObject,
+  type EntityEdit,
   type Op,
-  type OwnerTransform,
   type SceneDoc,
   type SceneStore,
   type SeatContact,
@@ -28,6 +30,7 @@ import {
 } from "@hitreg/core";
 import type { Observable, PlayMode, Selection } from "@hitreg/editor";
 import { rankSwaps, type SwapRow } from "./prop-swap-rank.js";
+import { mountAgentActivity } from "./agent-activity.js";
 
 export interface PropEditOptions {
   store: SceneStore;
@@ -115,9 +118,14 @@ export function mountPropEdit(opts: PropEditOptions): { onTranslateMove(id: stri
 
   // ---- recording: owner edits -> /__hitreg/owner-edit ----------------------------------------
   let prev = store.doc;
-  const queue = new Map<string, { entity: string; tags: string[]; name: string; parent: string | null; before: OwnerTransform | null; after: OwnerTransform | null }>();
+  const queue = new Map<string, EntityEdit>();
   let flushTimer = 0;
   let lastSaved = "";
+  /** A GENERATED scene (some entity carries `built:<builder>`, packages/core scene-sync): every entity edit is recorded. */
+  const generated = (doc: SceneDoc): boolean => {
+    for (const e of Object.values(doc.entities)) if (builderOf(e)) return true;
+    return false;
+  };
   disposers.push(
     store.subscribe((change) => {
       const before = prev;
@@ -125,14 +133,14 @@ export function mountPropEdit(opts: PropEditOptions): { onTranslateMove(id: stri
       if (change.kind !== "ops" || change.origin) return; // replace / live-sync from disk: not the owner's
       if (before.name !== store.doc.name || opts.isWorkspaceScene?.(store.doc.name)) return;
       const r = change.result;
-      for (const id of new Set([...r.changedEntities, ...r.addedEntities, ...r.removedEntities])) {
-        const eb = before.entities[id], ea = store.doc.entities[id];
-        if (!tracked(eb) && !tracked(ea)) continue;
-        const sb = eb ? entityOwnerState(eb) : null, sa = ea ? entityOwnerState(ea) : null;
-        if (sb && sa && sameOwnerTransform(sa, sb) && sa.prop === sb.prop) continue;
-        const e = (ea ?? eb)!;
-        const q = queue.get(id);
-        queue.set(id, { entity: id, tags: e.tags ?? [], name: e.name ?? "", parent: e.parent ?? null, before: q ? q.before : sb, after: sa });
+      let gen: boolean | undefined;
+      const ids = [...new Set([...r.changedEntities, ...r.addedEntities, ...r.removedEntities])].filter(
+        (id) => tracked(before.entities[id]) || tracked(store.doc.entities[id]) || (gen ??= generated(store.doc) || generated(before)),
+      );
+      // transform + prefab for anything; any other component too (a light's colour) except on a dressed prop
+      for (const edit of entityEditsOf(before, store.doc, ids)) {
+        const q = queue.get(edit.entity);
+        queue.set(edit.entity, { ...edit, before: q ? q.before : edit.before });
       }
       if (queue.size) {
         clearTimeout(flushTimer);
@@ -549,6 +557,9 @@ export function mountPropEdit(opts: PropEditOptions): { onTranslateMove(id: stri
   disposers.push(opts.editorVisible.subscribe(() => render()));
   disposers.push(store.subscribe(() => { if (opts.project() !== catalogFor) void loadCatalog(); render(); }));
   void loadCatalog();
+  // the "agent working in this scene" warning (src/agent-activity.ts): mounted with the owner-edit UI it qualifies
+  const activity = mountAgentActivity({ store, editorVisible: opts.editorVisible, isWorkspaceScene: opts.isWorkspaceScene, dockSizes: opts.dockSizes });
+  disposers.push(() => activity.dispose());
 
   return {
     onTranslateMove,

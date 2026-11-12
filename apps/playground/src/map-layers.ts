@@ -221,7 +221,8 @@ export function collectMapData(recipe: RecipeLike, scene: SceneLike | null, extr
         markers.push({ kind: "spawn", id, name: `${creature}${count > 1 ? ` ×${count}` : ""}`, x: p[0], z: p[2], radius: spawn.radius, level: Number.isFinite(level) ? level : undefined, detail: tagValue(tags, "pop") });
       } else if (isPoiRoot) {
         placed.add(tagValue(tags, "poi")!);
-        markers.push({ kind: "place", id, name: e.name ?? id, x: p[0], z: p[2] });
+        // a DRAFT install (place-build install --draft) tags its root `draft`: the map draws it in the draft colour
+        markers.push({ kind: "place", id, name: e.name ?? id, x: p[0], z: p[2], detail: tags.includes("draft") ? "draft" : undefined });
       } else if (isGiver) {
         const npc = scripts.find((s) => s.name === "npc");
         markers.push({ kind: "quest", id, name: String(npc?.params?.["name"] ?? e.name ?? id), x: p[0], z: p[2] });
@@ -318,6 +319,13 @@ const LAYER_OF: Record<MarkerKind, LayerId> = {
   site: "sites",
 };
 const colourOf = (id: LayerId): string => LAYERS.find((l) => l.id === id)!.colour;
+/**
+ * Places that are not final (Derek 2026-11-11: "color code that they are in draft mode"): a live DRAFT install
+ * (filled magenta + dashed ring) or a PLANNED place not built yet (hollow magenta ring). The label also says
+ * "(draft)" / "(planned)", so the state never rests on colour alone.
+ */
+export const DRAFT_COLOUR = "#ff4fd8";
+const isDraftLike = (m: { kind: MarkerKind; detail?: string }): boolean => m.kind === "place" && (m.detail === "draft" || m.detail === "planned");
 
 // ---------------------------------------------------------------------------
 // drawing
@@ -690,7 +698,16 @@ export function drawMapLayers(ctx: CanvasRenderingContext2D, data: MapData, view
         break;
       }
       case "place":
-        dot(ctx, px, py, 4.5 * k, m.detail === "planned" ? "rgba(255,179,71,0.35)" : colourOf("places"));
+        if (isDraftLike(m)) {
+          if (m.detail === "draft") dot(ctx, px, py, 4.5 * k, DRAFT_COLOUR);
+          ctx.beginPath();
+          ctx.arc(px, py, (m.detail === "draft" ? 8 : 5.5) * k, 0, Math.PI * 2);
+          ctx.setLineDash(m.detail === "draft" ? [3, 2] : []);
+          ctx.strokeStyle = DRAFT_COLOUR;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.setLineDash([]);
+        } else dot(ctx, px, py, 4.5 * k, colourOf("places"));
         break;
       case "dungeon":
         ctx.beginPath();
@@ -785,7 +802,7 @@ export function drawMapLayers(ctx: CanvasRenderingContext2D, data: MapData, view
       if ((m.kind === "spawn" || m.kind === "pack" || m.kind === "mob") && m.level !== undefined) text += ` L${m.level}`;
       if (m.kind === "dungeon" && !compact) text += " (dungeon)";
       if (m.kind === "reservation" && m.radius) text += ` r${Math.round(m.radius)}`;
-      if (m.detail === "planned") text += " (planned)";
+      if (m.kind === "place" && (m.detail === "planned" || m.detail === "draft")) text += ` (${m.detail})`;
       const big = m.kind === "town";
       const fs = big ? size + 2 : m.kind === "spawn" || m.kind === "site" || m.kind === "mob" ? size - 2 : size;
       ctx.font = `${big ? 700 : 500} ${fs}px ${font}`;
@@ -796,7 +813,7 @@ export function drawMapLayers(ctx: CanvasRenderingContext2D, data: MapData, view
       for (const [x, y] of spots) {
         if (!free(x - 1, y - fs, w + 2, fs + 3)) continue;
         placed.push([x - 1, y - fs, w + 2, fs + 3]);
-        const colour = m.kind === "town" ? "#ffe0d8" : m.kind === "quest" ? "#fff2a8" : m.kind === "dungeon" ? "#e6d2ff" : m.kind === "reservation" ? "#bfeeff" : m.kind === "spawn" || m.kind === "mob" ? levelColour(m.level) : m.kind === "site" ? "#c9ced4" : "#ffe2bd";
+        const colour = m.kind === "town" ? "#ffe0d8" : m.kind === "quest" ? "#fff2a8" : m.kind === "dungeon" ? "#e6d2ff" : m.kind === "reservation" ? "#bfeeff" : m.kind === "spawn" || m.kind === "mob" ? levelColour(m.level) : m.kind === "site" ? "#c9ced4" : isDraftLike(m) ? "#ffc2f3" : "#ffe2bd";
         write(text, x, y, fs, colour, big ? 700 : 500);
         break;
       }
@@ -900,7 +917,8 @@ function dot(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, fil
 export function drawLegend(ctx: CanvasRenderingContext2D, layers: ReadonlySet<LayerId>, x: number, y: number, title: string, counts: Partial<Record<LayerId, number>> = {}): void {
   const rows = LAYERS.filter((l) => layers.has(l.id) && l.id !== "labels");
   const w = 250;
-  const h = 34 + rows.length * 18 + (layers.has("spawns") || layers.has("packs") ? 22 : 0);
+  const drafts = layers.has("places");
+  const h = 34 + (rows.length + (drafts ? 1 : 0)) * 18 + (layers.has("spawns") || layers.has("packs") ? 22 : 0);
   ctx.save();
   ctx.fillStyle = "rgba(10,13,18,0.88)";
   ctx.fillRect(x, y, w, h);
@@ -916,8 +934,20 @@ export function drawLegend(ctx: CanvasRenderingContext2D, layers: ReadonlySet<La
     ctx.fillStyle = "#e6e9ef";
     ctx.fillText(`${l.label}${counts[l.id] !== undefined ? `  (${counts[l.id]})` : ""}`, x + 34, ry);
   });
+  if (drafts) {
+    const ry = y + 40 + rows.length * 18;
+    ctx.beginPath();
+    ctx.arc(x + 18, ry - 4, 5, 0, Math.PI * 2);
+    ctx.setLineDash([3, 2]);
+    ctx.strokeStyle = DRAFT_COLOUR;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#e6e9ef";
+    ctx.fillText("draft / planned place (not final)", x + 34, ry);
+  }
   if (layers.has("spawns") || layers.has("packs")) {
-    const ry = y + 40 + rows.length * 18 + 2;
+    const ry = y + 40 + (rows.length + (drafts ? 1 : 0)) * 18 + 2;
     ctx.fillStyle = "#e6e9ef";
     ctx.fillText("level", x + 10, ry);
     for (let i = 0; i < 8; i++) {

@@ -182,10 +182,15 @@ export function coverWaterGate(
   if (water.mode === "bed") {
     // under the water: the sheet must cover this point, deep enough to be
     // under it and shallow enough to see; a torrent grows nothing
-    if (!field.waterSurface(x, z, scratch)) return null;
-    const allowed = coverKindAllowed(water.kinds, scratch.kind);
-    if (!allowed || Math.hypot(scratch.flowX, scratch.flowZ) > water.maxFlow) return null;
-    const depth = scratch.y - bed;
+    let surface: number;
+    if (field.waterSurface(x, z, scratch)) {
+      const allowed = coverKindAllowed(water.kinds, scratch.kind);
+      if (!allowed || Math.hypot(scratch.flowX, scratch.flowZ) > water.maxFlow) return null;
+      surface = scratch.y;
+    } else if (water.kinds.includes("sea") && bed < sea) {
+      surface = sea; // the sea has no sheet of its own: its bed is everything under sea level
+    } else return null;
+    const depth = surface - bed;
     // the tallest card this layer can draw must stay under the sheet, or the
     // weed tips poke out of the shallows like reeds
     const top = (layer.bladeHeight ?? 0) * (layer.scaleRange?.[1] ?? 1.3) + 0.15;

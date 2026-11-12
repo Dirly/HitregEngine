@@ -101,20 +101,21 @@ describe("weather particles", () => {
     };
     const { particles, camera } = setup(ground);
     particles.setValue("rain", { weather: true, direction: [0.3, -1, 0] });
-    run(particles, camera, 3);
+    run(particles, camera, 6);
     const cached = queries;
 
     queries = 0;
     setWeatherViewCull(false);
     const direct = setup(ground);
-    direct.particles.setValue("rain", { weather: true, direction: [0.3, -1, 0] });
-    run(direct.particles, direct.camera, 3);
+    direct.particles.setValue("rain", { direction: [0.3, -1, 0] });
+    run(direct.particles, direct.camera, 6);
     expect(queries).toBeGreaterThan(1500);
     expect(cached).toBeLessThan(queries / 2);
   });
 
-  it("re-asks when a particle is below the remembered surface", () => {
-    // a roof at 10 everywhere, floor at 0: rain above it remembers the roof, rain born under it must still find the floor
+  it("keeps weather dry beneath a roof, including an emitter born below it", () => {
+    // Previously, rain born below a remembered roof deliberately re-queried
+    // the indoor floor. A camera-following weather box must not do that.
     let underRoof = 0;
     const ground = (_x: number, y: number) => {
       if (y < 10) underRoof++;
@@ -126,7 +127,36 @@ describe("weather particles", () => {
     expect(underRoof).toBe(0);
     group.position.y = 5;
     scene.updateMatrixWorld(true);
-    run(particles, camera, 0.5);
-    expect(underRoof).toBeGreaterThan(0);
+    run(particles, camera, 1.5);
+    expect(underRoof).toBe(0);
+    expect(particles.stats().particles).toBe(0);
+  });
+
+  it("finds a tall roof above the weather box with view culling disabled", () => {
+    setWeatherViewCull(false);
+    const { particles, camera } = setup((_x,y)=>y>=26?26:0);
+    particles.setValue('rain',{weather:true});
+    run(particles,camera,1);
+    expect(particles.stats().particles).toBe(0);
+  });
+
+  it("does not turn sheltered scene effects into weather", () => {
+    const {particles,camera}=setup((_x,y)=>y>=26?26:0);
+    run(particles,camera,.5);
+    expect(particles.stats().particles).toBeGreaterThan(0);
+  });
+
+  it("retires a windblown drop as it enters cover before its old ground trigger", () => {
+    setWeatherViewCull(false);
+    const {particles,camera,group,scene}=setup((x,y)=>x>=1.5&&y>=20?20:0);
+    // One drop begins outdoors at18m, then drifts beneath a20m roof.
+    group.position.set(0,18,0);camera.position.set(0,18,10);camera.lookAt(0,18,0);scene.updateMatrixWorld(true);
+    particles.register('rain',group,{...rain,emitting:false,shapeSize:[0,0,0],direction:[1,-.3,0]});
+    particles.update(0,camera);
+    particles.setValue('rain',{weather:true,burst:1});
+    particles.update(.001,camera);
+    expect(particles.stats().particles).toBe(1);
+    run(particles,camera,.2);
+    expect(particles.stats().particles).toBe(0);
   });
 });

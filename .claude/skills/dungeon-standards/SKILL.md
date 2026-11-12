@@ -13,6 +13,17 @@ owner-approved quality bar (2026-11-08); the `compare` gate's older reference li
 remains useful construction evidence, not a prop-density target. Open values:
 `docs/world-standards/README.md` "Not encoded yet".
 
+## Style and scale before dressing
+
+- Keep the dungeon's own visual `authoring/style-guide.md`: materials, palette, shape/culture, texel reference,
+  density, effects and explicit rejected examples. A "crypt" tag does not make a dark coffin fit a sandstone temple.
+- Inspect actual rendered prop images at intended scale, including an in-room view. Record keep/rework/reject and
+  source hashes. After layout, use actual room screenshots for sparse prop/effect concepts; generated images are
+  proposals that must be reconciled with the measured architecture and usable space.
+- Measure painted room/door/column dimensions with the existing `concept-scale` stage before export, using a
+  figure of known height and inspected overlays. Review prop, statue/pedestal, shelf/body and equipped-boss scale
+  separately. The shared reference describes the working gates and what is not yet automatically covered.
+
 ## How many, how big
 - 3-5 dungeons per zone; a zone with a capital carries 5 (zone brief lint warns outside 3-5). Every landmark owns
   one; capitals and starter towns get one nearby or tied in (sewers, haunted house, abandoned mine, sunken ship).
@@ -62,7 +73,7 @@ remains useful construction evidence, not a prop-density target. Open values:
 
 ## Known limits
 - Water: one still level at the lowest point of the dungeon, nothing moving (2026-10-25: a plunge pot under an inner fall, the Weep Hole, did not work). Plan a flooded bottom, never a stepped or weeping water feature.
-- No stacked fight floors (ground found by a ray straight down); storeys side by side, joined by real stairs.
+- Verticality and depth (Derek 2026-11-09): stack storeys round a shared void so one level is seen from another (a pit with a spiral ledge, grates, overlooks); fight floors that overlap in plan stay >= 10 m apart. Offshoots: dead ends and side loops with a reason to enter, not one corridor. A giant dungeon has no player-only pocket to cheese from (see dungeon-build). Reference: projects/rustgut.
 - One recorded way back per traveller: no dungeon-to-dungeon doors.
 - Noised caves have no straight wall spans: no wall-backed props; posted lights at exact floor spots.
 

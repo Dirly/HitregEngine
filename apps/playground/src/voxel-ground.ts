@@ -438,7 +438,11 @@ export function voxelGroundProbes(field: () => WorldField | null, worldId?: () =
         coverWantsInland(water.kinds) &&
         f.waterNear(x0 - reach, z0 - reach, x1 + reach, z1 + reach);
       const half = Math.hypot(x1 - x0, z1 - z0) / 2 + reach;
-      const sea = water.kinds.includes("sea") && f.shoreDistance((x0 + x1) / 2, (z0 + z1) / 2) < half;
+      // a sea-bed layer grows far from the shoreline too: open sea counts, not only the coast band
+      const sea =
+        water.kinds.includes("sea") &&
+        (f.shoreDistance((x0 + x1) / 2, (z0 + z1) / 2) < half ||
+          (water.mode === "bed" && f.height((x0 + x1) / 2, (z0 + z1) / 2) < f.recipe.seaLevel));
       if (!inland && !sea) return false;
     }
     const clump = (data as CoverGateData).clump;

@@ -26,6 +26,8 @@
  *                               scenes: the rig camera gave black frames against static massing boxes); a fixed camera
  *                               under the ground is refused (exit 2) on every run
  *     [--keep-mobs] [--headed] [--pick-only]   (--pick-only: write the auto spots and stop)
+ *     [--server ws://127.0.0.1:<p>]   join a running dedicated server (packages/server serve) instead of the local
+ *                               sim: its spawn areas, named and bosses stand in the frames (implies --keep-mobs)
  *     [--no-clear-view]         skip the clear-view step (tools/_clear-view.mts): by default a fixed camera (or a spot with
  *                               "aim" [x,y,z], the place centre) is tested for a clear line of sight through the drawn
  *                               world (terrain, meshes, vegetation instances) and moved to the nearest clear pose
@@ -87,7 +89,7 @@ import { frameWatchdog } from "./_frame-watchdog.mts";
 import { CLEAR_RIG_MIN_M, clearViewCandidates, sightRays, type ClearViewRecord } from "./_clear-view.mts";
 import { SHOT_SPOT_TIMEOUT_S, withSpotTimeout } from "./_run-capped.mts";
 import { changedShare, showVerdict, type ShowRect, type ShowResult } from "./_shot-shows.mts";
-import { isFarFire, judgeFrame, layerDelta, washRun, type FireSpot } from "./_light-wash.mts";
+import { OCCLUDER_CLEAR_M, isFarFire, judgeFrame, layerDelta, washRun, type FireSpot } from "./_light-wash.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -231,9 +233,10 @@ let spots: Spot[];
 /** --scope [m]: scene-scoped load radius in metres (null = the whole world as authored). */
 const SCOPE: number | null = (() => { const i = argv.indexOf("--scope"); if (i < 0) return null; const v = Number(argv[i + 1]); return Number.isFinite(v) && v > 0 ? v : 250; })();
 /** The dev-app query for a scene-scoped load (src/scene-scope.ts), or "". */
-const scopeQuery = (): string => (SCOPE !== null && spots[0] ? `&at=${Math.round(spots[0].x)},${Math.round(spots[0].z)}&streamRadius=${SCOPE}` : "") + placesQuery() + (argv.includes('--sync-pipelines') ? '&precompile=0&asyncPipelines=0' : '');
+const scopeQuery = (): string => serverQuery() + (SCOPE !== null && spots[0] ? `&at=${Math.round(spots[0].x)},${Math.round(spots[0].z)}&streamRadius=${SCOPE}` : "") + placesQuery() + (argv.includes('--sync-pipelines') ? '&precompile=0&asyncPipelines=0' : '');
 // --places all|none|stream: the dev app's place streaming (src/place-streamer.ts `?places=`). A batch that hops over places
 // far apart passes `all`: streamed, a far view shows only the landmark subtrees (i-drafts2 2026-11-03)
+const serverQuery = (): string => (arg("server") ? `&server=${encodeURIComponent(arg("server"))}` : "");
 const placesQuery = (): string => { const v = arg("places"); return v === "all" || v === "none" || v === "stream" ? `&places=${v}` : ""; };
 const spotsArg = arg("spots");
 if (spotsArg) spots = JSON.parse(fs.readFileSync(spotsArg, "utf8")) as Spot[];
@@ -354,7 +357,7 @@ function refOps(at: V3): unknown[] {
 /** Mobs and their spawn areas, as top-most removable roots: in play they would walk into the frame and fight the
  *  hidden player (removed from the in-memory doc only; nothing is saved). --keep-mobs leaves them. */
 function mobRemovalOps(): unknown[] {
-  if (argv.includes("--keep-mobs")) return [];
+  if (argv.includes("--keep-mobs") || argv.includes("--server")) return [];
   const E = sceneDoc.entities;
   const pick = new Set<string>();
   for (const [id, e] of Object.entries(E)) {
@@ -731,6 +734,16 @@ async function clearView(spot: Spot): Promise<ClearViewRecord | null> {
   return { moved: true, from: camera, to: pick.camera, target: pick.target, dYawDeg: pick.dYawDeg, dElevDeg: pick.dElevDeg, pull: pick.pull, blockedBy: first?.what ?? "?", blockedAtM: first?.d ?? 0 };
 }
 
+/** Put the body at p: the dev app's local travel, or (--server) the dedicated server's admin teleport for this peer. */
+async function travelTo(p: V3): Promise<string> {
+  if (!arg("server")) return (await H_((h, q: V3) => h.travelTo(q[0], q[1], q[2]), p)) as string;
+  const id = (await H_((h) => h.playerId())) as string | null;
+  if (!id) return "no player";
+  const admin = arg("server").replace(/^ws/, "http").replace(/\/$/, "") + "/admin/teleport";
+  const r = await fetch(admin, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ peerId: id.replace(/^player:/, ""), position: p }) }).catch((e: Error) => ({ ok: false, statusText: e.message }) as Response);
+  return r.ok ? "ok" : `server teleport refused (${r.statusText})`;
+}
+
 async function shootSpot(spot: Spot): Promise<void> {
   const ts = Date.now(), tm: Record<string, number | string> = {};
   // a fixed-camera spot holds the rig off; every spot first gives it back
@@ -740,7 +753,7 @@ async function shootSpot(spot: Spot): Promise<void> {
   const [dx, dz] = lookDir(facing);
   const groundGuess = spot.y ?? (field ? field.height(spot.x, spot.z) : spawnAt[1] - 0.9);
   step(`${spot.name}: travel`);
-  const travel = await H_((h, p: V3) => h.travelTo(p[0], p[1], p[2]), [spot.x, groundGuess + 1.5, spot.z] as V3);
+  const travel = await travelTo([spot.x, groundGuess + 1.5, spot.z]);
   if (travel !== "ok") { console.warn(`  ${spot.name}: travel refused (${travel})`); return; }
   await sleep(1500);
   step(`${spot.name}: settle after travel`);
@@ -755,7 +768,7 @@ async function shootSpot(spot: Spot): Promise<void> {
   let arrived = await bodyAt();
   if (offBy(arrived) > ARRIVE_TOL_M) {
     console.warn(`  ${spot.name}: body ${offBy(arrived).toFixed(1)} m from the spot after travel (object ${JSON.stringify(arrived.obj?.map(Math.round))}, physics ${JSON.stringify(arrived.sim?.map(Math.round))}, travelling ${arrived.travelling}); travelling again`);
-    await H_((h, p: V3) => h.travelTo(p[0], p[1], p[2]), [spot.x, groundGuess + 1.5, spot.z] as V3);
+    await travelTo([spot.x, groundGuess + 1.5, spot.z]);
     await sleep(1500); await settle(4000);
     arrived = await bodyAt();
     if (offBy(arrived) > ARRIVE_TOL_M) throw new Error(`body ${offBy(arrived).toFixed(1)} m from the spot after two travels (object ${JSON.stringify(arrived.obj?.map(Math.round))}, physics ${JSON.stringify(arrived.sim?.map(Math.round))}): not shooting someone else's place`);
@@ -883,20 +896,24 @@ async function shootSpot(spot: Spot): Promise<void> {
     await page.screenshot({ path: file });
     watchdog.frame();
     // every standing fire's light, projected (the wash gate's far-read: does each far fire read by its flame)
-    const fires = await H_((h) => {
+    const fires = await H_((h, clear: number) => {
       const sc = h.scene?.(); const cam = h.camera; if (!sc || !cam) return [];
       cam.updateMatrixWorld(true);
       const cp = cam.position.clone(), out: any[] = [], v = cam.position.clone();
       const on = (o: any) => { let c = o.parent; while (c) { if (!c.visible && !c.isScene) return false; c = c.parent; } return o.userData?.runtimeEnabled !== false; };
       sc.traverse((o: any) => {
         if (!o.isPointLight || !(o.userData?.vfx || o.userData?.lightFlicker) || !on(o)) return;
-        o.getWorldPosition(v); const d = v.distanceTo(cp); v.project(cam);
+        o.getWorldPosition(v); const d = v.distanceTo(cp); const world: [number, number, number] = [v.x, v.y, v.z]; v.project(cam);
         if (v.z < -1 || v.z > 1 || Math.abs(v.x) > 1 || Math.abs(v.y) > 1) return;
-        out.push({ x: Math.round((v.x * 0.5 + 0.5) * innerWidth), y: Math.round((-v.y * 0.5 + 0.5) * innerHeight), d: Math.round(d), ...(o.color && o.color.b > o.color.r ? { cold: true } : {}) });
+        out.push({ x: Math.round((v.x * 0.5 + 0.5) * innerWidth), y: Math.round((-v.y * 0.5 + 0.5) * innerHeight), d: Math.round(d), ...(o.color && o.color.b > o.color.r ? { cold: true } : {}), world });
       });
       out.sort((a, b) => a.d - b.d);
-      return out.filter((f, i) => !out.slice(0, i).some((g) => Math.abs(g.x - f.x) < 4 && Math.abs(g.y - f.y) < 4));
-    }).catch(() => []) as FireSpot[];
+      const kept = out.filter((f, i) => !out.slice(0, i).some((g) => Math.abs(g.x - f.x) < 4 && Math.abs(g.y - f.y) < 4));
+      // occluded (the wash far-fire rule, tools/_light-wash.mts isFarFire): the ray from the camera to the light meets a drawn
+      // face more than clear m short of it — terrain, a pit wall, a rim; the fire's own logs and brazier sit within clear m
+      const hits = h.sightHits?.(kept.map((f) => ({ from: [cp.x, cp.y, cp.z], to: f.world })), clear) ?? [];
+      return kept.map(({ world: _w, ...f }, i) => (hits[i] ? { ...f, occluded: true } : f));
+    }, OCCLUDER_CLEAR_M).catch(() => []) as FireSpot[];
     const layerFiles: Record<string, string> = {};
     const layerShot = async (name: string, off: string[]) => {
       const bloom = off.includes("bloom"), light = off.filter((l) => l !== "bloom");
@@ -1051,7 +1068,7 @@ for (const s of shots) {
   washFrames.push(f);
 }
 const washVerdictRun = washRun(washFrames.filter(Boolean), shots.some((s) => !s.review && (s.fires ?? []).some(isFarFire)));
-for (const f of washFrames.filter(Boolean)) console.log(`  wash ${f.washOk ? "ok  " : "FAIL"} ${(f.spot + "@" + (f.time ?? "-")).padEnd(26)} ${f.washWhy}${f.fires ? ` · far fires ${f.fires.read}/${f.fires.far}` : ""}${f.layers ? " · " + Object.entries(f.layers).map(([k, d]: any) => `${k} -${d.luma} (${(d.lit * 100).toFixed(1)} %)`).join(" ") : ""}`);
+for (const f of washFrames.filter(Boolean)) console.log(`  wash ${f.washOk ? "ok  " : "FAIL"} ${(f.spot + "@" + (f.time ?? "-")).padEnd(26)} ${f.washWhy}${f.fires ? ` · far fires ${f.fires.read}/${f.fires.far}` : ""}${f.firesHidden ? ` · ${f.firesHidden} hidden from the camera` : ""}${f.layers ? " · " + Object.entries(f.layers).map(([k, d]: any) => `${k} -${d.luma} (${(d.lit * 100).toFixed(1)} %)`).join(" ") : ""}`);
 console.log(`wash: ${washVerdictRun.ok ? "ok" : "FAIL"} — ${washVerdictRun.ok ? washVerdictRun.fireLine : washVerdictRun.faults.slice(0, 4).join(" | ")}`);
 const sheetFile = path.join(OUT, `${stem}-sheet.png`);
 fs.writeFileSync(sheetFile, Buffer.from(result.png.split(",")[1]!, "base64"));

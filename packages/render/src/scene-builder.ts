@@ -71,6 +71,7 @@ import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { applyFoliageNormals } from "./foliage-normals.js";
 import { applyLodFade } from "./lod-fade.js";
 import { waterWakeUniforms } from "./water-wake.js";
+import { waterExclusionMask } from "./water-exclusion.js";
 import { seaAbyss, seaBreakers, seaGlint, seaSkyReflection, seaSwell, seaWhitecaps, type SeaParams } from "./water-sea.js";
 import { applyModelBrightness } from "./model-brightness.js";
 import { applyFoliageWind, type FoliageWindOptions } from "./foliage-wind.js";
@@ -104,7 +105,7 @@ import { ClusteredMesh, clusterDagFromGeometry } from "./clustered-mesh.js";
 import { polyMeshGeometry } from "./poly-mesh-geometry.js";
 import { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
 import { horizonTint } from "./atmosphere.js";
-import { buildTerrainSplatMaterial, SPLAT_ATTRIBUTES, type MacroNoiseData } from "./terrain-splat.js";
+import { buildTerrainSplatMaterial, SPLAT_ATTRIBUTES, SPLAT_INDEX_ATTRIBUTE, SPLAT_TOP_ATTRIBUTE, type MacroNoiseData } from "./terrain-splat.js";
 import { mergeModelSubmeshes, prepareStaticModel } from "./static-batch.js";
 import { applyModelPartMask, applyModelEmissive } from "./ubermesh.js";
 import type { MovingInstanceEntry } from "./moving-instances.js";
@@ -176,6 +177,9 @@ export function loadGltf(url: string): Promise<LoadedModel> {
             const weights = mesh.geometry.getAttribute(`_${SPLAT_ATTRIBUTES[i]!.toLowerCase()}`);
             if (weights) mesh.geometry.setAttribute(SPLAT_ATTRIBUTES[i]!, weights);
           }
+          // the indexed splat (four layer ids + their weights), what an indexed terrain material reads
+          const ids = mesh.geometry.getAttribute(`_${SPLAT_INDEX_ATTRIBUTE.toLowerCase()}`), top = mesh.geometry.getAttribute(`_${SPLAT_TOP_ATTRIBUTE.toLowerCase()}`);
+          if (ids && top) { mesh.geometry.setAttribute(SPLAT_INDEX_ATTRIBUTE, ids); mesh.geometry.setAttribute(SPLAT_TOP_ATTRIBUTE, top); }
         });
         shareNamedTextures(gltf.scene);
         applyWindowGlass(gltf.scene);
@@ -2022,7 +2026,7 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // and a half-transparent ceiling shows the sky through it at every angle,
   // which is the "I cannot see the top of the water" report.
   const faceOpacity = mix(float(Math.min(1, data.opacity + 0.35)), float(data.opacity), facing);
-  material.opacityNode = mul(mul(faceOpacity, edgeFade), curtainBody);
+  material.opacityNode = mul(mul(mul(faceOpacity, edgeFade), curtainBody), waterExclusionMask(positionWorld));
   // fully faded fragments (a curtain's edge, the far fade) are dropped outright
   material.alphaTestNode = float(0.01);
   // drawn from both sides now (a scene may still force one with material.side)

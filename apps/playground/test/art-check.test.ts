@@ -410,6 +410,12 @@ test("texel: a stretched coping fails though its median texels/m is on the stand
   const cap = mat({ id: "cap", stretch: { share: 0.3, worst: 6.2 } });
   assert.deepEqual(rules(base({ pieces: [{ id: "p", kind: "landmark", at: [0, 0], materials: [cap, mat({ id: "b" })] }] })), ["texel:cap"]);
   assert.deepEqual(rules(base({ pieces: [{ id: "p", kind: "landmark", at: [0, 0], materials: [{ ...cap, stretch: { share: 0.01, worst: 1.4 } }, mat({ id: "b" })] }] })), []);
+  // a non-square picture laid once at its own aspect (a 512 x 128 crown panel on a 4 x 1 m face) is square in TEXELS:
+  // judged in UV units it read 4:1 stretched (rustgut-entrance 2026-11-09); with the texture's pixel size it is clean
+  const panel = quad((x, z) => [x, z * 4], "panel");
+  assert.ok(uvStretchByMaterial(panel).panel!.worst > 3.9);
+  const px = uvStretchByMaterial(panel, 1.3, (id) => (id === "panel" ? [512, 128] : undefined)).panel!;
+  assert.ok(px.share === 0 && px.worst < 1.01);
 });
 
 test("value judges a UV-laid atlas by the texels a piece samples, not the whole page (PLACES-FIX: every poi-props piece read 46.1)", () => {
@@ -425,6 +431,16 @@ test("value judges a UV-laid atlas by the texels a piece samples, not the whole 
   assert.ok(whole > 0.4 && whole < 0.6, String(whole));
   // a transparent texel is not sampled; no UVs -> null
   assert.equal(uvFootprintMean([{ a: [0, 0, 0], b: [1, 0, 0], c: [0, 1, 0] }], img), null);
+});
+
+test("value samples a town-atlas triangle inside its page rectangle, however often its UVs repeat (fort-keep: a part-filled page read as white)", () => {
+  // a 2x1 page: left half black (the tile), right half white (blank page); UVs repeat 9 times across the tile
+  const img = { width: 2, height: 1, data: new Uint8Array([0, 0, 0, 255, 255, 255, 255, 255]) };
+  const rect: [number, number, number, number] = [0, 0, 0.5, 1];
+  const raw: [number, number][] = [[0, 0], [9, 0], [9, 9]];
+  const tri = { a: [0, 0, 0], b: [1, 0, 0], c: [1, 1, 0], uv: raw.map(([u, v]): [number, number] => [rect[0] + u * rect[2], rect[1] + v * rect[3]]), atlas: { rect, uv: raw } };
+  assert.ok(uvFootprintMean([tri], img, false)![1] < 0.01);
+  assert.ok(uvFootprintMean([{ ...tri, atlas: undefined }], img, false)![1] > 0.2);   // the old read: the blank page counted
 });
 
 test("value: an accent (palette builtStone.accent) may stand up to accentExtra over the band on <= accentShare of the piece", () => {

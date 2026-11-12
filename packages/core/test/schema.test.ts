@@ -210,6 +210,7 @@ describe("ComponentRegistry", () => {
       "visibility",
       "voxelWorld",
       "water",
+      "waterExclusion",
     ]);
     const transform = schemas["transform"] as { properties: Record<string, unknown> };
     expect(transform.properties).toHaveProperty("position");

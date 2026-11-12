@@ -51,6 +51,7 @@ import {
 import { digest, digestMatches, exists, readJson, writeJson, type Ctx, type Finding } from "../lib.mts";
 import { HABITATS, castSchema, type Bestiary, type Creature } from "../schemas.mts";
 import { loadZonePlan, type ZonePlan } from "./_zone.mts";
+import { exteriorRefusal } from "../../_exterior.mts";
 import { DISPOSITIONS, fodderLevel, starterDisposition, starterMixFindings, type Shares, WANDER_RULES, loadWanderers, longestRun, nameSlug, offsetLine, resample, routeLength, wandererFindings, wanderersFile, type WandererArea } from "./_wanderers.mts";
 import { checkHumanSubtree, dressFor, humanConfigFile, humanTemplateOps, loadHumanKit, type HumanDress, type HumanKit } from "./_human-template.mts";
 import {loadPopulationLoot,mergePopulationLoot,populationLootFile} from './_population-loot.mts';
@@ -117,6 +118,8 @@ export interface Area {
   territory?: number;
   /** spawnArea.rares rows: a site pack's named leader behind its members' slots (placeholder rare). */
   rares?: Record<string, unknown>[];
+  /** spawnArea.patrol: a site pack's idle walk (points relative to the area origin, y from the ground). */
+  patrol?: number[][];
 }
 export interface Template {
   /** combat-actor loot spec ('item:qty:chance,...'): the plan's items whose source is this creature. */
@@ -189,7 +192,8 @@ interface SitePack {
   y?: number;
   faction: string;
   level: number;
-  members: { creature: string; theme?: string; role: Role; count: number; scale?: number; behaviorArchetype?: MobBehaviorArchetype }[];
+  /** `level`: a member at its own level (a pack's hyena flankers one under its ogres); default the pack's. */
+  members: { creature: string; theme?: string; role: Role; count: number; level?: number; scale?: number; behaviorArchetype?: MobBehaviorArchetype }[];
   /** The pack's mob-brain temperament (default hostile): a camp by a road that only fights who comes in is territorial. */
   temperament?: "hostile" | "territorial" | "passive";
   behaviorArchetype?: MobBehaviorArchetype;
@@ -197,6 +201,10 @@ interface SitePack {
    *  never always up (RARE_RULES); without it the leader stands with the pack. L (o-small2 dropped-hour 2026-10-30: a site
    *  pack could only name an always-up leader). */
   named?: { id: string; name: string; base: string; theme?: string; level: number; scale?: number; title?: string; chance?: number; lockout?: [number, number] };
+  /** World x,z points the pack walks out and back while idle (spawnArea.patrol), instead of wandering its roam disc: a
+   *  ghost keeper between his cottage and the graves. L (n-yard 2026-11-10, Derek: the keeper walks between the cottage and
+   *  the graves). */
+  patrol?: [number, number][];
 }
 
 /** The files whose content decides the population: the status row re-digests them. */
@@ -659,7 +667,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   };
   // human families: dressed and armed from the declared pattern (none declared -> capsules, as before)
   const kit = loadHumanKit(p.projectDir, f);
-  const templateFor = (creatureId: string, themeIn: string, role: Role, level: number, faction: string, rare?: { id: string; name: string; level: number; title?: string }, scaleIn = 1, nameAs?: string): Template | null => {
+  const templateFor = (creatureId: string, themeIn: string, role: Role, level: number, faction: string, rare?: { id: string; name: string; level: number; title?: string }, scaleIn = 1, nameAs?: string, ceiling?: number): Template | null => {
     const scale = Math.round(scaleIn * 100) / 100;
     const c = creatures.get(creatureId);
     if (!c) {
@@ -667,7 +675,9 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       return null;
     }
     const theme = themeIn || c.themes[0]?.id || "base";
-    const band: [number, number] = rare ? [rare.level, rare.level] : [Math.max(lo, c.level[0]), Math.min(hi, c.level[1])];
+    // `ceiling`: a site pack is filled as written, so its level may stand above the zone band (party content: elite ogres
+    // at L11-12 in a 1-10 zone); the creature's own band still bounds it
+    const band: [number, number] = rare ? [rare.level, rare.level] : [Math.max(lo, c.level[0]), Math.min(Math.max(hi, ceiling ?? hi), c.level[1])];
     if (band[0] > band[1]) band[1] = band[0]; // a creature whose band misses the zone's keeps its own floor
     const lv = Math.max(band[0], Math.min(band[1], level));
     const tier = rare ? band : (tiers.find((t) => lv >= t[0] && lv <= t[1]) ?? [lv, lv]);
@@ -996,12 +1006,17 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
 
   // 2. each group at the places it holds, and nowhere else (relaxed out of the reservation's own exclusion)
   const groupRows: Record<string, { areas: number; creatures: number; locations: string[]; unplaced: string[] }> = {};
+  // a reserved place whose owner wrote site packs for it (zones/<z>/site-packs.json `site` = the location) is held by
+  // those packs as written: its holder group gets no generic area there (rustgut 2026-11-10: the group area stood one
+  // level-3 hyena where the premise has three elite packs)
+  const packedSites = new Set<string>(exists(sitePacksFile(ctx, zone)) ? (readJson(sitePacksFile(ctx, zone)) as { packs: SitePack[] }).packs.map((sp) => sp.site) : []);
   for (const g of zb.groups) {
     const row = (groupRows[g.id] = { areas: 0, creatures: 0, locations: [], unplaced: [] } as { areas: number; creatures: number; locations: string[]; unplaced: string[] });
     const locs = groupLocations.get(g.id) ?? [];
     if (!locs.length) f.push({ level: "warn", code: "group-homeless", message: `group ${g.id} holds no reserved location (where: "${g.where}"): not placed` });
     for (const l of locs) {
       row.locations.push(l.location);
+      if (packedSites.has(l.location)) continue;
       const want = Math.max(1, Math.round((l.radius * l.radius) / (90 * 90)));
       const spreadMax = Math.max(...g.members.map((m) => PACK[m.role as Role].spread));
       const reach = Math.max(...g.members.map((m) => reachOf(m.role as Role)));
@@ -1103,6 +1118,14 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   const siteRows: Record<string, { areas: number; creatures: number; named: string[] }> = {};
   if (exists(sitePacksFile(ctx, zone))) {
     for (const sp of (readJson(sitePacksFile(ctx, zone)) as { packs: SitePack[] }).packs) {
+      // EXTERIOR CHAIN (tools/_exterior.mts, Derek 2026-11-10 Rustgut): a door's / painted place's site packs are placed
+      // only after its chain is complete (or an owner --no-concept-ruling); never placed otherwise. The zone fails
+      // (error) unless --skip-unready-packs leaves them out on purpose (warn) so the rest of the zone can go in
+      const refused = sp.site ? exteriorRefusal(ctx.project, ctx.world, sp.site, `zonegen populate (site pack ${sp.id})`) : null;
+      if (refused) {
+        f.push({ level: ctx.flag("skip-unready-packs") ? "warn" : "error", code: "site-pack-exterior", message: `site pack ${sp.id} not placed: ${refused}${ctx.flag("skip-unready-packs") ? "" : "\n  (--skip-unready-packs populates the rest of the zone without it)"}` });
+        continue;
+      }
       const near = areas.find((a) => Math.hypot(a.x - sp.at[0], a.z - sp.at[1]) < 12 && Math.abs(a.y - (sp.y ?? a.y)) < 6);
       if (near) {
         f.push({ level: "warn", code: "site-pack-crowded", message: `site pack ${sp.id}: ${near.id} already stands ${Math.round(Math.hypot(near.x - sp.at[0], near.z - sp.at[1]))} m away; not placed` });
@@ -1113,7 +1136,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       let leash = 0;
       let roam = 0;
       for (const m of sp.members) {
-        const t = templateFor(m.creature, m.theme ?? "", m.role, sp.level, sp.faction, undefined, m.scale);
+        const t = templateFor(m.creature, m.theme ?? "", m.role, m.level ?? sp.level, sp.faction, undefined, m.scale, undefined, m.level ?? sp.level);
         if (!t) continue;
         const pk = PACK[m.role];
         // a pack in a clearing of 8 m (or a cave chamber) keeps to it: half the open-ground spread
@@ -1135,6 +1158,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
       }
       if (!spawns.length) continue;
       const a = addArea({ id: `pop-${zone}-site-${sp.id}`, kind: sp.members.length ? "group" : "rare", x: sp.at[0], z: sp.at[1], yAt: sp.y, level: sp.level, creature: sp.members[0]?.creature ?? sp.named!.id, location: sp.site, habitats: i >= 0 ? habitatsOf(i) : [], leash: leash || PACK.elite.leash, roam, spawns, ...(sp.temperament ? { temperament: sp.temperament } : {}), ...(sp.behaviorArchetype?{behaviorArchetype:sp.behaviorArchetype}:{}), ...(rares.length ? { rares } : {}) });
+      if (sp.patrol?.length) a.patrol = sp.patrol.map(([x, z]) => [r2(x - a.x), r2((field.surfaceCast(x, z) ?? field.height(x, z)) - a.y), r2(z - a.z)]);
       row.areas += 1;
       row.creatures += a.spawns.reduce((n, x) => n + x.count, 0);
     }
@@ -1940,7 +1964,7 @@ export function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Templ
     if (t.scale) sizeOps(t.id, ops.slice(capsuleStart) as never, t.scale);
   }
   for (const a of areas) {
-    const spawnArea = { radius: a.radius, sleepRadius: a.sleepRadius, idleSeconds: a.idleSeconds, spawns: a.spawns, leash: a.leash, roam: a.roam, ...(a.temperament ? { temperament: a.temperament } : {}), ...(a.behaviorArchetype?{behaviorArchetype:a.behaviorArchetype}:{}), ...(a.territory ? { territory: a.territory } : {}), ...(a.rares?.length ? { rares: a.rares } : {}), ...(a.life ?? {}) };
+    const spawnArea = { radius: a.radius, sleepRadius: a.sleepRadius, idleSeconds: a.idleSeconds, spawns: a.spawns, leash: a.leash, roam: a.roam, ...(a.temperament ? { temperament: a.temperament } : {}), ...(a.behaviorArchetype?{behaviorArchetype:a.behaviorArchetype}:{}), ...(a.territory ? { territory: a.territory } : {}), ...(a.rares?.length ? { rares: a.rares } : {}), ...(a.patrol?.length ? { patrol: a.patrol } : {}), ...(a.life ?? {}) };
     const tags = ["populate", `zone:${zone}`, `pop:${a.kind}`, `creature:${a.creature}`, ...(a.group ? [`group:${a.group}`] : []), ...(a.location ? [`location:${a.location}`] : []), `level:${a.level}`];
     if (a.camp) {
       const prev = doc.entities[a.camp]?.tags ?? ["camp", `zone:${zone}`];

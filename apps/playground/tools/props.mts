@@ -70,7 +70,7 @@ import { fileURLToPath } from "node:url";
 import { applyOps, ComponentRegistry, registerCoreComponents, dressingSchema, dressingSetSchema, dressingOrigin, isLooseClutter, placeRuleSchema, type DressingData } from "@hitreg/core";
 import { mergeVocabulary, scaleFits, cultureFits, dressingPlanSchema, type DressingVocabulary } from "@hitreg/core";
 import { socketMapSchema, placeableFloor, roomBudget, standStretches, describeSetShape, HEAD_STEP, expandRoomRoles, ROOM_ROLE_ALIASES, type DressingSet } from "@hitreg/core";
-import { locate, prefabGeometry, measure, findSurfaces, supportBelow, surfaceTopUnder, readJson, prefabFile, type PropGeometry, type Measure, type V3 } from "./_prop-geometry.mts";
+import { locate, prefabGeometry, measure, findSurfaces, supportBelow, surfaceTopUnder, readJson, prefabFile, thinParts, type PropGeometry, type Measure, type V3 } from "./_prop-geometry.mts";
 import { closure, firstExisting, PROJECTS } from "./_closure.mjs";
 import { kindSizes, realSizeIssue, standsAgainstWall, type KindSize } from "./_prop-real-size.mts";
 import { addRequest, closeRequest, reopenRequest, compositeFaults, readRequests, requestsFile } from "./_prop-composite-guard.mts";
@@ -1271,6 +1271,14 @@ async function main() {
     if (STANDARD) {
       const n = (s: string) => [...dens.values()].filter((d) => d.s === s).length;
       console.log(`texel density (median texels/m; target ${STANDARD.target}, min ${STANDARD.min}): ${n("ok")} ok, ${n("LOW")} LOW, ${n("HIGH")} HIGH, ${n("n/a")} n/a  (LOW and HIGH are findings, not a gate: LOW -> props reskin-plan; HIGH -> rescale the UVs or use a town role tile)`);
+    }
+    {
+      // modelled thin detail (rope, lacing, cords, thin rods under 8 cm across): a FINDING. House rule (texture-led PSX):
+      // rope, lacing, ties, straps and stitching are painted on flat cards / alpha planes; geometry carries silhouette only
+      const thin: string[] = [];
+      for (const r of rows) { if (r.state === "MISSING" || r.exempt?.startsWith("BLOCKED")) continue; try { const t = thinParts(geometry(r.id).geo); if (t.count) thin.push(`${r.id} (${t.count} part(s), ${t.length} m)`); } catch { /* unreadable: other rows report it */ } }
+      if (thin.length) console.log(`THIN   ${thin.length} prop(s) with modelled rope/lacing/cords (round parts under 8 cm across): texture them (paint on a card or a flush sleeve; docs/art-direction.md texture-led): ${(flags.all ? thin : thin.slice(0, 12)).join(", ")}${thin.length > 12 && !flags.all ? ", ... (--all lists them)" : ""}`);
+      else console.log("THIN   0 props with modelled rope/lacing/cords");
     }
     if (!flag("catalog")) {
       // every prefab is either a catalogued row or inside a registered exempt folder: nothing is invisible by accident

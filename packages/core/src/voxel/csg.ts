@@ -1045,7 +1045,7 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
 // ---------------------------------------------------------------------------
 
 /** Cells per meshing block. Bounds peak memory; block boundaries share vertices. */
-const BLOCK = 24;
+const BLOCK = 24; // = VOLUME_MESH_BLOCK
 const PAD = 2;
 
 /**
@@ -1058,8 +1058,16 @@ const PAD = 2;
  * had to solve the neighbour-agreement problem for streamed terrain: two
  * blocks compute a shared cell's vertex identically and exactly one of them
  * emits each face, so concatenating the pieces is the whole join.
+ *
+ * `options.blocks` meshes only the blocks whose X / Z block index lies in the
+ * given half-open ranges (block = {@link VOLUME_MESH_BLOCK} cells). Because the
+ * blocks are the SAME blocks of the same lattice whichever range is asked for,
+ * the meshes of neighbouring ranges meet exactly as the blocks inside one mesh
+ * do: identical boundary vertices, each face emitted once. That is how a
+ * volume too big for one mesh is baked in chunks with no seam.
  */
-export function buildVolumeMesh(volume: Volume, lodStep = 1): VoxelMesh {
+export const VOLUME_MESH_BLOCK = 24;
+export function buildVolumeMesh(volume: Volume, lodStep = 1, options: { blocks?: { x: readonly [number, number]; z: readonly [number, number] } } = {}): VoxelMesh {
   const step = volume.doc.voxelSize * Math.max(1, Math.floor(lodStep));
   // Evaluation clips nodes to their AABBs. Its sign is valid there, but its
   // magnitude outside a cut is NOT a conservative distance to that cut.
@@ -1093,9 +1101,12 @@ export function buildVolumeMesh(volume: Volume, lodStep = 1): VoxelMesh {
     },
   };
 
+  const range = options.blocks;
   for (let bz = 0; bz < cells[2]!; bz += BLOCK) {
+    if (range && (bz / BLOCK < range.z[0] || bz / BLOCK >= range.z[1])) continue;
     for (let by = 0; by < cells[1]!; by += BLOCK) {
       for (let bx = 0; bx < cells[0]!; bx += BLOCK) {
+        if (range && (bx / BLOCK < range.x[0] || bx / BLOCK >= range.x[1])) continue;
         const cx = Math.min(BLOCK, cells[0]! - bx);
         const cy = Math.min(BLOCK, cells[1]! - by);
         const cz = Math.min(BLOCK, cells[2]! - bz);

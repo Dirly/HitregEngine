@@ -10,6 +10,86 @@ they matter, strong architecture, readable encounters and deliberate empty space
 Carry forward the quality of the decisions, not Weeping Sun's layout, religious
 motifs, exact light values, prop inventory or room-specific creature rules.
 
+## A style guide and image review for each dungeon
+
+Before choosing dressing, keep a concise `authoring/style-guide.md` in the
+owning dungeon. Record its materials and palette, surface finish and texel
+reference, cultural shapes/motifs, prop scale, fixture/effect language, density
+and explicit exclusions. Include actual images, not only adjectives or palette
+hex values. Weeping Sun's sandstone crypts use warm stone, funerary niches,
+aged bronze/iron and restrained solar/blood accents; a generic dark coffin does
+not become appropriate merely because its catalog category says "crypt".
+Keep rejected examples and reasons useful to the selection decision. A dark
+metal gate can still have a functional place; that is not permission to add
+black coffin furniture throughout the sandstone rooms.
+
+Build a short usable-prop shortlist from catalogued candidates. **Inspect their
+rendered images** at intended scale, alongside the room's materials and a real
+character. Review a neutral/unlit view for intrinsic color/texture/silhouette
+and an in-room lit view for actual fit. A name, tag, description, successful
+catalog import or color histogram cannot pass this check. Record the asset
+and variant, dimensions, image paths, source hashes and a keep/rework/reject
+decision with a reason. A changed mesh/material/texture or proposed scale
+invalidates that visual decision. Rework or replace a mismatched useful prop;
+omit an unnecessary one. Respect existing catalog curation exclusions.
+
+After the layout and scale are established, capture the actual rooms from the
+entrance, combat position and reverse. Use those screenshots as references for
+an **in-room prop/effect concept pass** through `docs/image-generation.md`:
+"What few props or effects belong here, where, at what size, and what should
+stay empty?" Keep the walls, openings, floors and camera fixed; show the usable
+space and include the style guide's visual references. Preserve prompt and
+source-image provenance through the image-request workflow. A generated picture
+is a proposal, not a placement instruction or evidence of collision clearance.
+Reconcile it with the measured plan and catalogue; reject attractive additions
+that compete with the room or obstruct play. Repeat at changed/focal rooms,
+rather than inventing one unrelated decorative recipe per camera angle.
+
+Effects are part of that design pass, not a fixed library afterthought. Author
+or generate theme-appropriate effect assets where they earn their place: roof
+light rays, motes, sparks, ash, steam or a substantial fire assembly. Request
+sprite/texture/flipbook art when needed, then build and catalogue the runtime
+VFX/prefab with its source, bounds, light and attachments. A concept image is
+not a working effect. Review a real moving sequence for size, motion, opacity,
+looping, light spill, culling and floor/telegraph visibility. Keep quiet areas
+quiet; particle effects consume the same visual attention as solid props.
+Plain existing fire is not automatically the right fire for every scale or
+culture, and generic sparkles are not mandatory dungeon decoration.
+
+After installation, compare the real room to the selected proposal, then run
+the removal pass. Store the accepted/rejected decisions with the dungeon so
+another agent can refine them. This guidance establishes an image-review stage;
+it does not claim a new automatic style classifier has been implemented.
+
+## Height and scale in the plan
+
+There is already a shared **concept-to-build scale verifier**:
+`tools/dungeon-pipeline/concept-scale.mjs`. Its `measure` command uses annotated
+concept images, a figure of known height (normally 1.8 m) and camera geometry
+to produce `authoring/concept-sizes.json` and mark overlays. Its `gate` compares
+those sizes to `authoring/built-sizes.mjs`, derived from the actual plan/build
+data. The current tolerance is 15%; missing gated dimensions fail. This is a
+standard stage before export for painted dungeons. Inspect the mark overlays:
+wrong figure/floor/edge marks can produce a precise but wrong measurement.
+Do not use an unknown giant or a stylized figure as an assumed human ruler.
+
+Include room height/width, openings, column height/spacing and important floor
+changes in that measured plan. Show a real character in blockout and vertical
+sections. The shared `stairs` gate separately checks the built walking surface
+and ceiling across the centre and edge lanes; its current human headroom
+minimum is 2.6 m. Use the active actor contract for giant creatures and special
+spaces. A plan-only measurement cannot prove final collision or headroom.
+
+Prop and actor fit need another scale pass: record transformed dimensions and
+support footprints, statue/pedestal and corpse/player ratios, shelf clearance,
+fixture size and actual posed equipped boss bounds. Existing catalog intake
+measures asset dimensions and texel density; `dress`, float/support, traversal
+and equipped-envelope audits cover parts of fit. There is **not yet one shared
+automatic verifier covering all prop/character/pedestal relationships**. Use
+those checks plus image review before repeating a group, and list missing
+coverage honestly. Do not make every body the same height: intentional boss
+and statue scale must be declared, fitted and checked with attached gear.
+
 ## Placement decisions before adding objects
 
 For each significant room, record its purpose, focal feature, combat and travel

@@ -94,7 +94,7 @@ import { assetIds, findAsset, PROJECTS } from "./_closure.mjs";
 import {
   sinkToBase, seatPad, mergeSeatPads, type SeatPadRaw, padPatch, applySets, silhouetteHeight, SILHOUETTE_RATIO, arrangeFirstPlan, DENIED_PROPS, approachLines, nearestOnApproach, featureCoverage, burnsAtDusk, forTier, newZfightClusters, approachReadAny, fillOk, installGuard, RESEAT_MAX_M, routeOnTrack, hull, readBand, pickArchetype, roomFill, placeArchetypeSchema, planPlace, primitiveMeshes, siteSearch, staleEntities, unclearedStructures, uniqueItemIds, usableArea, footprintRim, type PlaceArchetype, type PlaceGround, type PlaceTier, type SiteBlockers, type SiteChoice,
   caveWalkRoute, type CaveWalk, ribbonsDeclared, footpathTrackId, FOOTPATH_WIDTH_M, approachForBuilt, trackId, trimTrack, TRACK_CUT_M, TRACK_FILL_M, type ApproachTrack, type PlacePlan,
-  fillerFor, requestedShortfall, type PlanDrop, placeLayoutSchema, withLayout, expandFields, expandCrops, campLayout, campRuleFaults, stoneFamilyFaults, stonePieceFaults, STONE_PIECE_RE, placeFacing, layoutCoverage, layoutSizeWarn, type PlaceLayout, toWorld, gradePatch,
+  fillerFor, requestedShortfall, type PlanDrop, placeLayoutSchema, withLayout, expandFields, expandCrops, campLayout, campRuleFaults, stoneFamilyFaults, stonePieceFaults, standardFaults, STONE_PIECE_RE, placeFacing, layoutCoverage, layoutSizeWarn, type PlaceLayout, toWorld, gradePatch, hollowPatch,
   SHELTER_LEVEL_M,
   placeSceneRemoves, placeWorldRebase,
 } from "./_place-archetype.mts";
@@ -349,6 +349,8 @@ function noFloor(p: string, id: string): string | null {
 }
 /** A prefab's declared dressing footing (m below its base plane; 0 when none). */
 function footingOf(prefab: unknown): number { if (typeof prefab !== "string") return 0; try { const pf = findAsset(project, `prefabs/${prefab}.json`); return Number((Object.values(read(pf!).entities ?? {}).map((x: any) => x?.components?.dressing).find(Boolean) as any)?.footing) || 0; } catch { return 0; } }
+/** A prefab's catalogue dressing contact (embed, base, ...), "" when it declares none. */
+function contactOf(prefab: unknown): string { if (typeof prefab !== "string") return ""; try { const pf = findAsset(project, `prefabs/${prefab}.json`); return String((Object.values(read(pf!).entities ?? {}).map((x: any) => x?.components?.dressing).find(Boolean) as any)?.contact ?? ""); } catch { return ""; } }
 /** A structure prefab's base outline from its triangles (cached): the planner seats on it, the seated gate measures it. */
 const baseCache = new Map<string, BaseOutline | null>();
 /** A prefab's up-facing layers (cached), for the thin-prop seat. */
@@ -466,11 +468,13 @@ function redress() {
  *  object's prop (a Codex stand-in swap: the gibbet cage, the kelp pit) and the named pieces a dresser or a prop round added
  *  that the archetype does not list (net frames, a tar boiler, a coffin bier). Denied pieces, boulders and top-up fill are
  *  not carried (the density loop re-tops). The merged plan is laid out again in vignettes. */
-function carryLive(d: any, pocket: { id: string; structures: { id: string; role: string }[] } | undefined, questOnly = false): { doc: any; carried: string[] } {
+function carryLive(d: any, pocket: { id: string; structures: { id: string; role: string }[] } | undefined, questOnly = false, layoutQuests: Set<string> = new Set()): { doc: any; carried: string[] } {
   const f = path.join(PROJECTS, project, "authoring", "dressing", "plans", `${d.id}.json`);
   if (!fs.existsSync(f)) return { doc: d, carried: [] };
   const live = read(f), room = Object.keys(d.rooms ?? {})[0] ?? "core", role = d.rooms?.[room]?.role ?? "yard", carried: string[] = [];
-  const items = (d.items as any[]).map((it) => { const q = it.quest?.entity && (live.items as any[]).find((x) => x.quest?.entity === it.quest.entity);
+  // L (widows-cairn n-cairn2 2026-11-10: every plan put the old live tally prop back over the layout's): a quest slot the
+  // owner's layout.json places (piece `quest`) keeps the layout's prop; the live swap is carried only for slots the layout leaves to the plan
+  const items = (d.items as any[]).map((it) => { const q = it.quest?.entity && !layoutQuests.has(it.quest.entity) && (live.items as any[]).find((x) => x.quest?.entity === it.quest.entity);
     if (q && q.prop !== it.prop && !DENIED_PROPS[q.prop]) { carried.push(`${it.id} -> ${q.prop} (quest)`); return { ...it, prop: q.prop }; } return it; });
   const have = new Set(items.map((it) => it.prop));
   for (const x of live.items as any[]) {
@@ -557,7 +561,7 @@ function plan() {
   const roam = +(opt("roam") ?? 1.5), sites: Record<string, SiteChoice | null> = {};
   const planAt = (size: PlaceTier) => {
     const at0 = forTier(a, size, heightOf), at_ = layout ? withLayout(at0, layout, propInfo) : at0; // L (weepmouth 2026-10-21): a pinpoint is the core pocket only
-    const base = { world, zone, project, place: { id: poi, name: place.name, size, at, faces, text: briefText, ...(culture ? { culture } : {}) }, reservation: { center: res.center, radius: res.radius, approaches }, propInfo, texelsOf, topOf, bottomOf, markerOf, doorsOf, questObjects, waters, builtStone, builtKinds, structureBase, placeRuleOf: (pf: string) => placeRuleFor(project, pf), solver: !LEGACY_SEAT /* the legacy seat founds declared-foundation pieces too (r-found 2026-10-30: legacyFounds) */, flatsOf, materialExists: (m: string) => !!findAsset(project, `materials/${m}.json`), ...(layout ? { layout, catalogued: (id: string) => !!findAsset(project, `prefabs/${id}.json`), surfaces: ((recipe.surfaces ?? []) as any[]).map((x) => x.name as string), surfaceColors: Object.fromEntries(((recipe.surfaces ?? []) as any[]).filter((x) => typeof x.color === "string").map((x) => [x.name as string, x.color as string])), zoneGround: zoneGroundAt(recipe, at, zone) } : {}), scatterRules: ((recipe.scatter ?? []) as any[]).map((s) => s.id as string), roads: existingRoads(recipe), kitBuildings: assetIds(project, "prefabs/wfc-ruins").size > 0 };
+    const base = { world, zone, project, place: { id: poi, name: place.name, size, at, faces, text: briefText, ...(culture ? { culture } : {}) }, reservation: { center: res.center, radius: res.radius, approaches }, propInfo, texelsOf, topOf, bottomOf, markerOf, doorsOf, questObjects, waters, builtStone, builtKinds, structureBase, placeRuleOf: (pf: string) => placeRuleFor(project, pf), solver: !LEGACY_SEAT /* the legacy seat founds declared-foundation pieces too (r-found 2026-10-30: legacyFounds) */, flatsOf, materialExists: (m: string) => !!findAsset(project, `materials/${m}.json`), ...(layout ? { layout, catalogued: (id: string) => !!findAsset(project, `prefabs/${id}.json`), surfaces: ((recipe.surfaces ?? []) as any[]).map((x) => x.name as string), surfaceColors: Object.fromEntries(((recipe.surfaces ?? []) as any[]).filter((x) => typeof x.color === "string").map((x) => [x.name as string, x.color as string])), zoneGround: zoneGroundAt(recipe, at, zone) } : {}), scatterRules: ((recipe.scatter ?? []) as any[]).map((s) => s.id as string), roads: existingRoads(recipe), kitBuildings: assetIds(project, "prefabs/wfc-ruins").size > 0, worldSeed: Number(recipe.seed ?? 0), seaLevel: Number(recipe.seaLevel ?? 0) };
     const site = sites[size] = siteSearch(at_, base, g, { needM2: tierFor(size).minUsableAreaM2, roam, pinned, blockers, read: { band: readBand(size, a.read.band) } });
     const p = planPlace(at_, site ? { ...base, place: { ...base.place, at: site.at }, pocketAt: site.pockets } : base, g);
     const bcn = [...at_.pockets[0]!.structures, ...at_.pockets[0]!.walls].find((x) => x.id === "beacon");
@@ -599,8 +603,14 @@ function plan() {
   // L (Red Dial 2026-10-30): a layout road's FIXED-PROFILE grade (roads[].grade) is a height patch on the ground BEFORE the
   // pieces seat: the plan runs again on the graded ground (pillars, plinth and walls seat on the cut), the patch leads world-ops
   const gradeOps: any[] = [], gradeFaults: string[] = [];
-  if (layout?.roads.some((r) => r.grade)) {
+  if (layout?.roads.some((r) => r.grade) || layout?.ground.some((q) => q.kind === "hollow")) {
     const centre0 = p.centre as V2;
+    // L (r-go2 north-flat 2026-11-11): an impact HOLLOW (layout ground kind hollow) is ground too: pit + broken rim, seated on
+    for (const q of layout.ground) if (q.kind === "hollow") {
+      const hp = hollowPatch(`${PREFIX}hollow-${q.id}`, toWorld(p.centre as V2, p.front as V2, q.at as V2), { radius: q.radius, depth: q.depth, rim: q.rim, rimWidth: q.rimWidth, ...(q.feather !== undefined ? { feather: q.feather } : {}) }, g);
+      gradeOps.push(hp.op);
+      console.log(`  HOLLOW: ${q.id} floor ${hp.floorY} m (cut ${hp.cut} m), rim crest +${hp.crest} m at ${q.radius} m, reach ${hp.reach} m, profile slope ${hp.profileSlope}`);
+    }
     for (const r of layout.roads) if (r.grade) {
       const gp = gradePatch(`${PREFIX}grade-${r.id}`, r.points.map((q) => toWorld(p.centre as V2, p.front as V2, q as V2)), r as any, g);
       gradeOps.push(gp.op); gradeFaults.push(...gp.faults.map((f) => `LAYOUT: ${f}`));
@@ -663,11 +673,27 @@ function plan() {
     const founds = (layout?.pieces ?? []).filter((q) => q.kind === "structure").map((q) => ({ id: q.id, prefab: q.prefab, material: (placeRuleFor(project, q.prefab) as any)?.foundation?.material ?? null }));
     p.faults.push(...stoneFamilyFaults(family, [...p.operators, ...layoutStairs], founds));
     // the landmark / centrepiece STONE shows the zone's stone too (stonePieceFaults: its drawn texels vs the zone cliff tile)
-    const stones = (layout?.pieces ?? []).filter((q) => !q.prefab.startsWith("rock-kit/") && STONE_PIECE_RE.test(q.prefab.split("/").pop()!) && (q.role === "landmark" || !!q.landmark || !!propInfo(q.prefab)?.centrepiece));
-    if (stones.length) p.faults.push(...stonePieceFaults(stones.map((q) => ({ id: q.id, prefab: q.prefab, rgb: drawnColour(q.prefab) })), zoneCliffColour(recipe, (layout?.origin ?? at) as number[], zone))); }
+    // L (Derek 2026-11-10, the Widows' Cairn): an archetype standard with `stone: "every"` judges EVERY stone piece (headstones,
+    // cairn-graves, statues), one row per prefab
+    const every = a.standard?.stone === "every";
+    const stones = (layout?.pieces ?? []).filter((q) => !q.prefab.startsWith("rock-kit/") && STONE_PIECE_RE.test(q.prefab.split("/").pop()!) && (every || q.role === "landmark" || !!q.landmark || !!propInfo(q.prefab)?.centrepiece));
+    const byPrefab = [...new Map(stones.map((q) => [q.prefab, q])).values()].map((q) => { const n = stones.filter((x) => x.prefab === q.prefab).length; return { id: n > 1 ? `${q.id} (+${n - 1} more)` : q.id, prefab: q.prefab, rgb: drawnColour(q.prefab) }; });
+    if (byPrefab.length) p.faults.push(...stonePieceFaults(byPrefab, zoneCliffColour(recipe, (layout?.origin ?? at) as number[], zone))); }
+  // L (Derek 2026-11-10, THE graveyard standard): the archetype's measured standard (standardFaults): boundary wall numbers,
+  // railing sections lining every boundary wall, a gate piece in a wall gap, denied pieces; walls and pieces in world x,z
+  if (a.standard) {
+    const pks = (layout ? withLayout(forTier(a, size, heightOf), layout, propInfo) : forTier(a, size, heightOf)).pockets;
+    const walls = pks.flatMap((pk) => pk.walls.filter((wl) => (wl.kind ?? "wall") === "wall").map((wl) => {
+      const ops = p.operators.filter((o: any) => o.op === "wall" && String(o.id).startsWith(`${PREFIX}${pk.id}-${wl.id}`) && Array.isArray(o.points));
+      return { id: `${pk.id}.${wl.id}`, height: wl.height, thickness: wl.thickness, runs: ops.map((o: any) => o.points as V2[]) };
+    }));
+    const o = (layout?.origin ?? p.centre) as V2;
+    const pieces = (layout?.pieces ?? []).map((q) => ({ id: q.id, prefab: q.prefab, at: toWorld(o, p.front as V2, q.at as V2), width: (propInfo(q.prefab)?.size?.[0] ?? 0) * (q.scale ?? 1) }));
+    p.faults.push(...standardFaults(a.standard, walls, pieces));
+  }
   if (layout) { const df = path.join(JOB, "design.json"); for (const f of layoutCoverage(fs.existsSync(df) ? read(df) : null, layout, { catalogued: (id) => !!findAsset(project, `prefabs/${id}.json`), questProps: Object.values(a.quest) })) p.faults.push(`LAYOUT: ${f}`); }
   const tierPockets = (layout ? withLayout(forTier(a, size, heightOf), layout, propInfo) : forTier(a, size, heightOf)).pockets;
-  for (const d0 of p.plans) { const { doc: d, carried } = carryLive(d0, tierPockets.find((k) => d0.id === `${poi}-${k.id}`), !!layout); if (carried.length) p.notes.push(`${d.id}: carried from the live plan: ${carried.join(", ")}`); write(path.join(JOB, "dressing", `${d.id}.json`), { ...d, items: uniqueItemIds(d.items) }); }
+  for (const d0 of p.plans) { const { doc: d, carried } = carryLive(d0, tierPockets.find((k) => d0.id === `${poi}-${k.id}`), !!layout, new Set((layout?.pieces ?? []).flatMap((q) => (q.quest ? [q.quest] : [])))); if (carried.length) p.notes.push(`${d.id}: carried from the live plan: ${carried.join(", ")}`); write(path.join(JOB, "dressing", `${d.id}.json`), { ...d, items: uniqueItemIds(d.items) }); }
   const views = [...p.handoff.viewpoints, { name: "aerial-150", x: p.aerial[0], z: p.aerial[1], facing: Math.round(((Math.atan2(-p.front[0], p.front[1]) * 180) / Math.PI + 360) % 360), pitch: 0.6, distance: 150 }];
   // L (HERO-BRIDGE discipline, LANDMARKS 2026-10-21): <job>/contract.json { idea, mustRead[], views[] } is written by the
   // owner BEFORE the grey box; its fixed cameras (camera + target, light-shots' contract shot list) ride every plan's views
@@ -827,7 +853,9 @@ function makeLab() {
   const cs = box ? cropScene(s0, box, { x: spawn!.position[0], z: spawn!.position[2], groundY: spawn!.ground, target: spawn!.target }) : null;
   const s = cs ? cs.scene : s0, own = new Set(Object.entries(s.entities).filter(([id, e]: any) => (e.tags ?? []).includes(`poi:${poi}`) || id.startsWith(`dress-${poi}-`)).map(([id]) => id));
   if (cs) cropNote += `; scene ${cs.kept} entities kept, ${cs.dropped} outside the box`;
-  for (const id of [...own]) for (const [k, e] of Object.entries(s.entities) as any) if (e.parent === id) own.add(k);
+  // every DESCENDANT, not only children: a town building's interior dressing hangs under its rooms, which hang under the
+  // house piece (r-go-farms 2026-11-11: the ninth-furrow lab kept 69 orphaned room dressings and site-sockets refused it)
+  for (let grew = true; grew;) { grew = false; for (const [k, e] of Object.entries(s.entities) as any) if (e.parent && own.has(e.parent) && !own.has(k)) { own.add(k); grew = true; } }
   for (const id of own) delete s.entities[id];
   // L (gates on the lab): populated creatures are left out of the lab: the walk judges the place's ground and pieces, and
   // an aggroed ghost knight on a route turns it into a fight (encounters are gated by populate/encounter tools)
@@ -915,7 +943,7 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
     // L (o-sunwine3 2026-10-31): a piece HELD at its layout `y` (tag `held`: a pier deck over the bed, a pillar on a cave hall floor) and
     // every piece in a layout cave (tag `cave:<id>`) keep the plan's height: re-seated on the walked ground they went to the sea bed
     // and the cliff top 80 m over the hall
-    const d0 = read(SF), ids = new Set(Object.keys(d0.entities).filter((id) => (d0.entities[id].tags ?? []).includes(`poi:${poi}`) && !(d0.entities[id].tags ?? []).includes("solver") && !(d0.entities[id].tags ?? []).some((t: string) => /^(lean|cave):/.test(t) || t === "held")));
+    const d0 = read(SF), ids = new Set(Object.keys(d0.entities).filter((id) => (d0.entities[id].tags ?? []).includes(`poi:${poi}`) && !(d0.entities[id].tags ?? []).includes("solver") && !(d0.entities[id].tags ?? []).some((t: string) => /^(lean|cave):/.test(t) || t === "held" || t === "wall-cap" /* on a boundary wall cap (layout onWall): never re-seated on the ground */)));
     const st = seatPlaced(p, d0, ids), fb = walkField(createWorldField(worldRecipeSchema.parse(read(WF))));
     let dg: ((x: number, z: number) => number) | undefined; const thinRows: string[] = []; // the drawn ground (thin props only: built on first use)
     // a piece the tread was raised OVER is buried (float never re-seats those): sink it to the lowest built ground round its foot (1.4 m ring: seated wants no daylight on its low side)
@@ -936,7 +964,9 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
       if ((e.tags ?? []).some((g: string) => /^(on|lift):/.test(g))) continue; // up on another piece or lifted on purpose: not the ground's
       // L (o-smalls 2026-10-30: a layout rock-kit lookout rock was embedded by seatPlaced above, then this pass lifted it back to
       // its lowest ground and float failed "embedded 3% (< 10%)"): a rock keeps the embed seatPlaced gives it (rocks embed, never sink to a base)
-      if (String(prefab).startsWith("rock-kit/")) continue;
+      // L (r-go-crown3 2026-11-11, Ribcrown: 16 dragon-bones pieces, catalogue contact embed, lifted back to their base and
+      // failed float "embedded 2% (< 10%)"): every piece whose catalogue contact is embed keeps seatPlaced's embed, not only rock-kit
+      if (String(prefab).startsWith("rock-kit/") || contactOf(prefab) === "embed") continue;
       const root = e.parent ? d0.entities[e.parent]?.components?.transform?.position ?? [0, 0, 0] : [0, 0, 0];
       const prior = st.ops.find((o: any) => o.op === "set-component" && o.id === id) as any, t = prior?.data ?? t0, q = t.position ?? [0, 0, 0];
       const r = { id, x: root[0] + q[0], z: root[2] + q[2] };
@@ -956,12 +986,17 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
           const data = { ...t, rotation: ts.rotation, position: [q[0], Math.round((q[1] + ts.y - y) * 1000) / 1000, q[2]] };
           if (prior) prior.data = data; else st.ops.push({ op: "set-component", id: r.id, component: "transform", data }); continue;
         } }
-      let ny = sinkToBase({ x: r.x, y, z: r.z, yaw: 2 * Math.atan2(rot[1], rot[3]) }, [(size[0] * k) / 2, (size[2] * k) / 2], Math.max(footing * k, 0.6 /* the plan's own SINK_MAX_M */), (x, z) => fb.height(x, z));
+      // L (r-go-scarp3 2026-11-11, south-scarp salt-vent: a BEDDED mound on 1.35 m of fall, sunk to its lowest ground by the
+      // plan, was raised here to the 0.6 m cap and float failed "bedded piece hovers"): a bedded piece is sunk on purpose, so
+      // the cap never lifts it (float holds it to its lowest ground)
+      const bedded = (e.tags ?? []).includes("bedded");
+      let ny = sinkToBase({ x: r.x, y, z: r.z, yaw: 2 * Math.atan2(rot[1], rot[3]) }, [(size[0] * k) / 2, (size[2] * k) / 2], bedded ? 6 : Math.max(footing * k, 0.6 /* the plan's own SINK_MAX_M */), (x, z) => fb.height(x, z));
       // L (o-fill4 2026-10-31, Noon Stone: a toppled stele resting on its flared base and cap stood 0.19 m clear along its
       // shaft): the catalogue box assumes a FLAT bottom. A piece whose base outline is not flat (a lying stele, a heap) is
       // sunk until no outline cell shows daylight (the seated gate's measure), at most 0.6 m under its highest ground
       const b0 = isLeaned(rot) ? null : structureBase(prefab);
       let outlineG: number[] = [];
+      let outlineWant: number | null = null; // the outline sink a raised base cell asked for (the thin seat below keeps it)
       if (b0) {
         const base = scaleBase(b0, k), yawR = 2 * Math.atan2(rot[1], rot[3]), at0 = ny ?? y;
         const per = base.perimeter.map(([x, z, yb]) => { const w = toWorldYaw([r.x, r.z], yawR, x, z), g = fb.height(w[0], w[1]); return { need: g - yb, g }; });
@@ -972,7 +1007,7 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
         // is read cell by cell like a solid base (the seated gate judges it there)
         if (b0.fill >= SKIRT_MIN_FILL || Math.min(...base.cells.map((q) => q[2])) > FLAT_BASE_M) outlineG = base.cells.map(([x, z, yb]) => { const w = toWorldYaw([r.x, r.z], yawR, x, z); return fb.height(w[0], w[1]) - yb; });
         const gap = Math.max(...per.map((p) => at0 - p.need));
-        if (gap > SEAT_GAP_M) { const want = Math.max(Math.min(...per.map((p) => p.need)) - 0.02, Math.max(...per.map((p) => p.g)) - 0.6); if (want < at0 - 0.01) ny = Math.round(want * 1000) / 1000; }
+        if (gap > SEAT_GAP_M) { const want = Math.max(Math.min(...per.map((p) => p.need)) - 0.02, Math.max(...per.map((p) => p.g)) - 0.6); if (want < at0 - 0.01) { ny = Math.round(want * 1000) / 1000; outlineWant = ny; } }
       }
       // L (r1 2026-10-31, Drinking Stone): a flat bottom seated flush on flat ground z-fights it, so every piece seated here
       // stands at least FLUSH_SINK_M under the LOWEST ground of its box; a thin piece (bedroll, cage floor, trough) is never
@@ -984,7 +1019,7 @@ function applyPlace(p: string, w: string, { remove = false, dry = false } = {}) 
         let want = Math.min(ny ?? y, lo - FLUSH_SINK_M);
         // a THIN piece is layered (a bedroll: faces at 0, 0.04 and 0.1 m): it sinks FLUSH_SINK_M under its MEDIAN ground, so
         // each face clears the ground by ~0.03 m on the ground it mostly stands on, never past half its height at its high side,
-        if (hgt <= THIN_PIECE_M) { const gs = outlineG.length ? [...outlineG].sort((m, n) => m - n) : [lo, hi]; want = Math.min(Math.max(gs[Math.floor(gs.length / 2)]! - FLUSH_SINK_M, hi - hgt / 2), lo + SEAT_GAP_M - 0.01); } // and never more daylight on its low side than the seated gate allows
+        if (hgt <= THIN_PIECE_M) { const gs = outlineG.length ? [...outlineG].sort((m, n) => m - n) : [lo, hi]; want = Math.min(Math.max(gs[Math.floor(gs.length / 2)]! - FLUSH_SINK_M, hi - hgt / 2), lo + SEAT_GAP_M - 0.01); if (outlineWant !== null) want = Math.min(want, outlineWant); } // L (r-go-crown3 2026-11-11, Ribcrown chain-coil: a coil whose base outline has a link 0.12 m over its mesh foot was re-lifted by this thin seat and the seated gate saw 0.12 m of daylight): the outline sink stands // and never more daylight on its low side than the seated gate allows
         ny = Math.abs(want - y) < 0.002 ? null : Math.round(want * 1000) / 1000; }
       if (ny === null) continue;
       const data = { ...t, position: [q[0], Math.round((q[1] + ny - y) * 1000) / 1000, q[2]] };
@@ -1726,7 +1761,7 @@ async function shotsMerge(port: string) {
   try {
     fs.writeFileSync(spots, JSON.stringify(all.filter((x) => views.includes(x.name)), null, 1));
     const out = path.join(tmp, "out"), timeout = opt("spot-timeout") ?? "600";
-    const r = await toolTimed("shots", opt("shots-timeout") ? +opt("shots-timeout")! * 60_000 : Math.max(shotsCapMs(views.length), views.length * 2 * (+timeout + 30) * 1000), ["tools/light-shots.mts", "--scene", labWorld, "--spots", spots, "--times", "12,20", "--no-refs", "--wash", "--weather-settle", "4", "--out", out, "--port", port, "--spot-timeout", timeout]);
+    const r = await toolTimed("shots", opt("shots-timeout") ? +opt("shots-timeout")! * 60_000 : Math.max(shotsCapMs(views.length), views.length * 2 * (+timeout + 30) * 1000), ["tools/light-shots.mts", "--scene", labWorld, "--spots", spots, "--times", "12,20", "--no-refs", "--wash", "--weather-settle", "4", "--out", out, "--port", port, ...urlArg(), "--spot-timeout", timeout]);
     const addFile = path.join(out, `${labWorld}.json`);
     if (r.status || !fs.existsSync(addFile)) { console.log(`shots --merge FAILED: ${r.timedOut ? `TIMEOUT after ${r.s} s` : `exit ${r.status}`} (reports/shots.log); the evidence run is unchanged`); process.exitCode = 1; return; }
     // the frames (and their layer frames) overwrite the old ones in place
@@ -1754,6 +1789,10 @@ function ensureIsoViews() {
   const r = withIsoViews(read(f), jobIsoViews(JOB)); if (r.changed) write(f, r.views);
 }
 
+/** `--url http://localhost:<p>`: shoot through a RUNNING dev app (the orchestrator's own server on the owner's port)
+ *  instead of starting a vite on --port (light-shots --url). L (r-go-farms 2026-11-11: r-go's dev server held :5394, the
+ *  only render port its owners may use, and every shots run stopped on "port already in use"). */
+function urlArg(): string[] { return opt("url") ? ["--url", opt("url")!] : []; }
 async function shots() {
   const port = opt("port") ?? "5291";
   if (has("merge")) return shotsMerge(port);
@@ -1766,7 +1805,7 @@ async function shots() {
   // tree (vite, the browser) killed on expiry and the stage FAILED with the reason; --shots-timeout <min> (default
   // max(15, spots x 2 x 50 s): the cap grows with the views, shotsCapMs); one stalled spot is skipped after 90 s (light-shots --spot-timeout)
   const nViews = (() => { try { return (read(path.join(JOB, "views.json")) as unknown[]).length; } catch { return 0; } })();
-  const r = await toolTimed("shots", opt("shots-timeout") ? +opt("shots-timeout")! * 60_000 : shotsCapMs(nViews), ["tools/light-shots.mts", "--scene", labWorld, "--spots", path.join(JOB, "views.json"), "--times", "12,20", "--no-refs", "--wash", "--weather-settle", "4", "--out", path.join(JOB, "evidence"), "--port", port, ...(opt("spot-timeout") ? ["--spot-timeout", opt("spot-timeout")!] : [])]); // --spot-timeout <s>: far read spots stream a lot of world (Wristgate 2026-10-28: 90 s timed out every trail view)
+  const r = await toolTimed("shots", opt("shots-timeout") ? +opt("shots-timeout")! * 60_000 : shotsCapMs(nViews), ["tools/light-shots.mts", "--scene", labWorld, "--spots", path.join(JOB, "views.json"), "--times", "12,20", "--no-refs", "--wash", "--weather-settle", "4", "--out", path.join(JOB, "evidence"), "--port", port, ...urlArg(), ...(opt("spot-timeout") ? ["--spot-timeout", opt("spot-timeout")!] : [])]); // --spot-timeout <s>: far read spots stream a lot of world (Wristgate 2026-10-28: 90 s timed out every trail view)
   const errLine = r.out.split("\n").map((l) => l.trim()).filter((l) => /^(\w*Error|STOP):/.test(l)).slice(-1).join(" | ");
   const reason = r.timedOut ? `TIMEOUT after ${r.s} s (--shots-timeout <min>; the run and its vite/browser killed)` : r.status ? (errLine || r.out.trim().split("\n").slice(-1)[0] || `exit ${r.status}`).slice(0, 300) : "";
   write(path.join(JOB, "reports", "shots.json"), { ok: !r.status, at: new Date().toISOString(), seconds: r.s, reason, log: "reports/shots.log" });
@@ -2231,6 +2270,9 @@ else if (ID_CMDS.has(cmd ?? "")) {
   const orderGate = gateOf.stage;
   // a --job COPY (a tools proof in a scratch lab) is outside the place's order: it never installs and never moves a stage
   if (orderGate && !opt("job")) { const refused = requirePlaceStage(path.join(PROJECTS, project), poi, orderGate, `place-build ${cmd}`, world); if (refused) { console.error(refused); process.exit(3); } }
+  // EXTERIOR CHAIN (tools/_exterior.mts, Derek 2026-11-10 Rustgut): a live install (a --draft too) of a door / painted place
+  // waits on its location, unedited grab, concepts and concept check, whatever the world order says (or an owner ruling)
+  if (cmd === "install" && !has("dry-run") && !has("uninstall") && !opt("job")) { const { exteriorOrExit } = await import("./_exterior.mts"); exteriorOrExit(project, world, poi, `place-build install${has("draft") ? " --draft" : ""}`); }
   if (cmd === "survey") survey();
   if (cmd === "bridge") bridgeJob();
   if (cmd === "approach") { approachOnly = true; plan(); }

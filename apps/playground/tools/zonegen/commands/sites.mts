@@ -325,7 +325,9 @@ async function siteNeeds(ctx: Ctx, recipe: J, region: J, candidates: (Candidate 
     return f && typeof f.numbers.faces === "number" ? f.numbers.faces : fallback;
   };
   for (const c of candidates) {
-    if (c.kind === "empty-land" || c.usedBy) continue;
+    // an empty disc is measured too (n-fill 2026-11-10: the empty-land gate asks for a place on an empty flat landform,
+    // and with the disc left out no candidate stood ON it, so no pick could put a place there)
+    if (c.usedBy) continue;
     const rep = measureNeeds(g, role, c.at[0], c.at[1], radius, overrides, self);
     c.needs = rep;
     rows.push({ id: c.id, kind: c.kind, at: c.at, y: c.y, radius, view: viewOf(rep, c.approach.faces), needs: rep, score: c.score });

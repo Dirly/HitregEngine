@@ -74,6 +74,41 @@ Resolution never installs anything. Entry modules are trusted host code (see
 above), so fetching one is a human decision, not a side effect of opening a
 project.
 
+## Generated scenes: write by diff, keep deliberate edits
+
+A script that generates a scene (a dungeon's build-scene, an install stage) hands its whole output to
+`syncScene` in `apps/playground/tools/_scene-sync.mts` (pure logic: `packages/core/src/scene-sync.ts`) instead of
+writing the file. Adoption is four lines:
+
+```ts
+import { syncScene } from "../../../tools/_scene-sync.mts";      // stableId / idCounter from "@hitreg/core"
+const ops: Op[] = [];                                             // add-entity ops, ids from stableId(...)
+// ...generate...
+syncScene({ scene: sceneFile, builder: "build-scene", target: ops, registry, dry: process.argv.includes("--dry") });
+```
+
+- **Ownership**: every entity of the target gets `built:<builder>`; a sync changes only those (several builders share
+  a scene). It is not a permission boundary. A stage that sets components or tags on another builder's entity passes
+  them as `attach`; they are marked `attach:<builder>/<component>` and every other sync keeps them.
+- **Ids**: from what a thing is and its generator key (`stableId("camp", "floor-5", "tent", 1)`,
+  `camp--floor-5--tent-1`), never a counter over the build. The sync fails on a duplicate id and warns on id churn.
+- **First sync** off a whole-file rewrite: `claim: (id, e) => ...` names the untagged entities the script made before;
+  it applies only while the scene has none of the builder's tag yet.
+- **Edit record** (`projects/<p>/authoring/owner-overrides/<scene>.json`, schema `owner-overrides` in the spec): the
+  owner's editor edits of any entity in a scene that has `built:*` entities, and agents' `editScene` edits. Precedence
+  is owner > agent > generator: a sync never overrides a record; `ownerProps` lists what the owner holds, and an agent
+  edit or `releaseEdits` touching it is refused unless it passes `answers` (his note), which is printed and kept as
+  `overrodeOwner`; his next edit holds again. Every sync lays the record on top: moves, turns, scales, prefab swaps,
+  deletes (with the entity's subtree and anything tagged `with:<id>`), other components held whole (a light's colour),
+  hand-added entities restored. A record matches by id, else by kind + place (same prefab, or name + component kinds,
+  within 1.5 m of where it was); one found by place is re-keyed; one that matches nothing is printed STALE.
+- **Agent working**: `syncScene` and `editScene` declare themselves while they run, and an agent declares a longer
+  session with `tools/agent-activity.mts` (heartbeat with a ttl; GET/POST `/__hitreg/agent-activity`). The owner's
+  editor shows a warning for that scene and never blocks him. Notes (pins) are never touched by any of this.
+- **Not held**: renames, tag and parent changes of a generated entity; field-level merges inside one component (the
+  record holds the whole component, so a later generator change to that component is masked until `releaseEdits`).
+  Terrain, canyon and other generated meshes are regenerated whole, not diffed: hand-sculpting them does not survive.
+
 ## Adding a tool
 
 Create a folder below `tools/` containing a complete `tool.json` and an ES

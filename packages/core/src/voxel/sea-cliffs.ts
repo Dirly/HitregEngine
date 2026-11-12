@@ -269,7 +269,7 @@ export interface SeaCliffs {
   weight(col: SeaColumn): number;
   /** Column mask for the planar path (a little wider than {@link weight}'s support). */
   mask(col: SeaColumn): number;
-  /** Rock paint 0..1 at a surface point: the platform, the wall's foot and the stack bases (no beach). */
+  /** Rock paint 0..1 at a surface point: the platform, the wall's foot and the stack bases at the water line (no beach); 0 from 5 m under the sea down. */
   rock(x: number, y: number, z: number): number;
   /** Highest rock (y) the profile can put at or near (x, z) — the planar band's top. */
   ceiling(col: SeaColumn): number;
@@ -896,7 +896,10 @@ export function createSeaCliffs(docs: readonly SeaCliffDoc[], ctx: SeaCliffConte
       if (x < bx0 || x > bx1 || z < bz0 || z > bz1) return 0;
       const col = colScratch;
       if (evalColumn(x, z, col) <= 0) return 0;
-      const low = 1 - smoothstep(sea + 2.5, sea + 7, y);
+      // a band round the water line only: below it the bed is the sea bed's own ground (sand), and a wall or stack
+      // face that dives under is rock by its own slope. Without the lower edge the whole bed seaward of a wall, out
+      // to the stretch's reach and at any depth, painted as cliff.
+      const low = (1 - smoothstep(sea + 2.5, sea + 7, y)) * smoothstep(sea - 5, sea - 2, y);
       if (low <= 0) return 0;
       let r = 1 - smoothstep(-1.5, 2.5, col.q);
       if (col.stackOut < 4) r = Math.max(r, 1 - smoothstep(-1, 3, col.stackOut));

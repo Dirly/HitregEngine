@@ -92,6 +92,12 @@ silk across mesh joins, without atlas borders, separate face offsets or obvious
 triangle lighting seams. Judge infestation density and consistency in the assembled
 player view, not from sheet counts or a silhouette against the sky alone.
 
+Owner refinement (2026-11-09): hanging human prey gets a web-textured,
+pyramid-like shoulder shroud. Its sides rise from the shoulders to one centred
+point above the head; the suspension thread begins at that point and reaches a
+real structural support. Fit the volume around the head, keep the shoulder joins
+and apex visible, and review it from the side as well as the front.
+
 Placement workflow, reusable sources and future indoor adaptations:
 [spider-habitats.md](spider-habitats.md). Read it for spider dressing in woods,
 abandoned buildings, caves and dungeons.

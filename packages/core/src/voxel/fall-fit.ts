@@ -215,3 +215,46 @@ export function groundAtProfile(col: { from: number; step: number; g: Float64Arr
   const i = Math.floor(t);
   return col.g[i]! + (col.g[i + 1]! - col.g[i]!) * (t - i);
 }
+
+/**
+ * The solid as marching cubes DRAWS it, for the curtain's face hug: the density read only at the mesher's lattice
+ * corners (`step` m, world-aligned) and interpolated between them, which is the surface MC puts triangles on. The
+ * exact field and the drawn mesh disagree by up to a lattice square on a steep face (a rib or a rounded corner between
+ * samples is bridged straight across), and a sheet hung FALL_FACE_CLEAR off the exact face then stands BEHIND the
+ * drawn rock: the cliff shows through the falling water in a wedge that widens downward (redstrand river-7,
+ * 2026-11-10: drawn rock up to 1.4 m in front of the sheet). `ground` is the higher of the field's own top and the
+ * drawn one, so the hug clears both. MC cells only: a DC cell draws the exact planar faces.
+ */
+export function meshedFallField(field: FallFitField, step: number): FallFitField {
+  const corners = new Map<number, number>();
+  const corner = (i: number, j: number, k: number): number => {
+    const key = ((i + 32768) * 65536 + (k + 32768)) * 4096 + (j + 2048);
+    let v = corners.get(key);
+    if (v === undefined) corners.set(key, (v = field.density(i * step, j * step, k * step)));
+    return v;
+  };
+  const density = (x: number, y: number, z: number): number => {
+    const fx = x / step, fy = y / step, fz = z / step;
+    const i = Math.floor(fx), j = Math.floor(fy), k = Math.floor(fz);
+    const tx = fx - i, ty = fy - j, tz = fz - k;
+    const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+    const low = lerp(lerp(corner(i, j, k), corner(i + 1, j, k), tx), lerp(corner(i, j, k + 1), corner(i + 1, j, k + 1), tx), tz);
+    const high = lerp(lerp(corner(i, j + 1, k), corner(i + 1, j + 1, k), tx), lerp(corner(i, j + 1, k + 1), corner(i + 1, j + 1, k + 1), tx), tz);
+    return lerp(low, high, ty);
+  };
+  const base = field.ground?.bind(field);
+  return {
+    // rock where either the field or the drawn mesh has it
+    density: (x, y, z) => Math.min(field.density(x, y, z), density(x, y, z)),
+    ...(base
+      ? {
+          ground: (x: number, z: number): number => {
+            let top = base(x, z);
+            // climb the DRAWN solid above the field's top (a steep face: a short way out is a long way up)
+            for (let n = 0; n < 240 && density(x, top + COLUMN_CLIMB, z) < 0; n++) top += COLUMN_CLIMB;
+            return top;
+          },
+        }
+      : {}),
+  };
+}

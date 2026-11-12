@@ -18,8 +18,11 @@ const SCENE = arg("--scene"), PORTAL = arg("--portal"), EXIT = arg("--exit");
 if (!SCENE || !PORTAL || !EXIT) { console.error("usage: portal-trip --scene <world scene> --portal <portal id> --exit <exit anchor id>"); process.exit(2); }
 import { spawnSync } from "node:child_process";
 import { loadContent, playgroundRoots, PortalHarness } from "../../../packages/server/src/index.ts";
-const content = loadContent(playgroundRoots("."));
-const world = content.scenes.get(SCENE)!;
+// both scenes' project closures only, as the dedicated server loads them: a scratch copy of a world in another
+// project (a lab with its own <world>.json) registers over the real recipe when every project is loaded
+const world = loadContent(playgroundRoots(".", SCENE)).scenes.get(SCENE)!;
+const destOf = (world.entities[PORTAL]?.components["script"] as { params?: { scene?: string } } | undefined)?.params?.scene;
+const content = loadContent([...new Set([...playgroundRoots(".", SCENE), ...(destOf ? playgroundRoots(".", destOf) : [])])]);
 if (!process.argv.includes("--no-cover")) {
   const destScene = (world.entities[PORTAL]!.components["script"] as { params: { scene: string } }).params.scene;
   for (const [scene, id] of [[SCENE, PORTAL], [destScene, EXIT]] as const) {

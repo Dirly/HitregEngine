@@ -32,3 +32,17 @@ test("lips counts a patch's faults; listed cells are excepted, others still coun
 test("lipsExceptionsFile sits beside the fine-legacy list", () => {
   assert.equal(lipsExceptionsFile(path.join("projects", "w", "assets", "worlds", "w.json")), path.resolve("projects", "w", "authoring", "terrain", "w.lips-exceptions.json"));
 });
+
+test("a cliff need's own rock may draw sawtooth as it may step (rustgut-face 2026-11-10); off the rock the 0.5 m rule holds", () => {
+  // the same block, written as a solved cliff-face need's patch: with the need's rock reach declared, the lattice's
+  // misses on the block are the rock's; without it (the same patch, no solved need) they are sawtooth faults
+  // a 5 m block (a 15 m one 3 m wide is narrower than the lattice can draw at all: past even the rock's 6 m)
+  const needPatch = { ...recipe.features.heightPatches[0]!, id: "need-t", heights: heights.map((h) => (h > g ? g + 5 : h)) };
+  const off = { ...recipe, features: { ...recipe.features, heightPatches: [needPatch] } } as typeof recipe;
+  const on = { ...off, needs: [{ id: "t", kind: "cliff-face", for: "x", near: [0, 0], solved: { at: [0, 10], faces: 180, height: 5, patch: "need-t", raised: 5, rock: [24, 24], ran: "" } }] } as unknown as typeof recipe;
+  const without = runLipsGate(off, { near: [0, 0, 30] });
+  assert.ok(without.totals.alias > 0, `sawtooth off the rock: ${without.totals.alias}`);
+  const withRock = runLipsGate(worldRecipeSchema.parse(on), { near: [0, 0, 30] });
+  assert.equal(withRock.totals.alias, 0, "the rock's sawtooth is allowed");
+  assert.equal(withRock.totals.step, 0, "as its steps are");
+});

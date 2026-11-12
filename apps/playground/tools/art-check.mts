@@ -285,7 +285,7 @@ for (const o of worldOps) {
         geo.tris = visibleTris(geo.tris, piece.position, (x, z) => field.height(x, z));
         // ... and a built bake's faces buried inside its own solids (treads in treads, a face body under its coping) neither
         if (o.op === "wall" || o.kind === "built") geo.tris = unburiedTris(geo.tris, prefabGeometry(ASSETS, piece.prefab).tris);
-        const d = texelDensity(geo, { projected: proj }), stretch = uvStretchByMaterial(geo.tris, T.texel.stretch);
+        const d = texelDensity(geo, { projected: proj }), stretch = uvStretchByMaterial(geo.tris, T.texel.stretch, (id) => { const md = matJson(id); const img = md?.map ? texImage(md.map) : null; return img ? [img.width, img.height] : undefined; });
         for (const [id, m] of Object.entries(d.byMaterial ?? {})) {
           const md = matJson(id) ?? {};
           const natural = m.projected || id.startsWith("landmarks/") || md.shader === "terrain-splat" || md.shader === "rock-cap";

@@ -100,6 +100,17 @@ export function firstHit(meshes: readonly THREE.Mesh[], from: V3, to: V3, far: n
   return { d: Math.round(best.distance * 10) / 10, what: nameOf(best.object) };
 }
 
+/** For each ray, the first face between `from` and a point `clearM` short of `to` (null = `to` is seen). The wash gate's
+ *  far-fire rule asks this of every fire light: a flame behind a pit wall, a rim or a hill does not count as a fire the
+ *  camera sees (tools/_light-wash.mts isFarFire). The fire's own logs and brazier sit within `clearM` of it. */
+export function sightHits(scene: THREE.Object3D, rays: readonly { from: V3; to: V3 }[], clearM: number, opts: Pick<SightOptions, "ignore"> = {}): (SightHit | null)[] {
+  const meshes = occluders(scene, opts.ignore), ray = new THREE.Raycaster();
+  return rays.map(({ from, to }) => {
+    const len = Math.hypot(to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+    return firstHit(meshes, from, to, len - clearM, ray);
+  });
+}
+
 /** Test poses in order and return the first whose view is clear (see SightOptions). */
 export function firstClearPose(scene: THREE.Object3D, poses: readonly SightPose[], opts: SightOptions = {}): SightVerdict {
   const meshes = occluders(scene, opts.ignore);

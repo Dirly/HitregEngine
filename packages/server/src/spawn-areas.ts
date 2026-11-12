@@ -545,7 +545,7 @@ export class SpawnAreaManager {
         const at: [number, number, number] = p ? [p[0], p[1] + 1.2, p[2]]
           : ground ? [area.position[0], area.position[1] + 1.2, area.position[2]]
           : (() => { const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * spawn.spread; return [area.position[0] + Math.cos(a) * r, area.position[1], area.position[2] + Math.sin(a) * r] as [number, number, number]; })();
-        const params: Record<string, unknown> = { home: area.position, leash: area.data.leash, roam: area.data.roam, spawnArea: area.id, ...(route.length ? { patrol: route } : {}), ...mood };
+        const params: Record<string, unknown> = { home: area.position, leash: area.data.leash, roam: area.data.roam, spawnArea: area.id, ...(area.data.pack ? { pack: area.data.pack } : {}), ...(route.length ? { patrol: route } : {}), ...mood };
         // the slot's first fill rolls too: a rare is never guaranteed up when its camp is first placed
         const rare = this.pickRare(area, spawn.template, this.server.world.tick);
         const template = rare ? rare.template : spawn.template;
@@ -728,11 +728,11 @@ export class SpawnAreaManager {
       let leash: number;
       if (route.length) {
         leash = area.data.leash;
-        params = { home, leash, roam: area.data.roam, spawnArea: area.id, patrol: route, patrolDir, ...(area.data.loop && route.length > 3 ? { patrolLoop: true } : {}), ...mood };
+        params = { home, leash, roam: area.data.roam, spawnArea: area.id, ...(area.data.pack ? { pack: area.data.pack } : {}), patrol: route, patrolDir, ...(area.data.loop && route.length > 3 ? { patrolLoop: true } : {}), ...mood };
       } else {
         const roam = Math.min(rlo, rhi) + this.rand() * Math.abs(rhi - rlo);
         leash = Math.max(area.data.leash, roam + 20);
-        params = { home, leash, roam, spawnArea: area.id, ...mood };
+        params = { home, leash, roam, spawnArea: area.id, ...(area.data.pack ? { pack: area.data.pack } : {}), ...mood };
       }
       // every spawn of a slot is a placeholder roll: the rare comes up in this member's place
       const rare = this.pickRare(area, members[i]!, this.server.world.tick);

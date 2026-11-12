@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { waterExclusionSchema } from "../water-exclusion.js";
 import { mobBehaviorArchetypeSchema } from "../mob.js";
 import type { ComponentRegistry } from "./registry.js";
 import { prefabInstanceSchema } from "../prefab.js";
@@ -3238,7 +3239,8 @@ export const grassSchema = z.object({
         .describe(
           "`shore` = grow on ground near water, in the band `level` relative to the water line (cattails, reeds). " +
             "`surface` = float ON the water where the depth is inside `depth` (lily pads, duckweed; use orient flat). " +
-            "`bed` = grow on the lake/river BED under water where the depth is inside `depth` (eelgrass, pondweed).",
+            "`bed` = grow on the lake/river BED under water where the depth is inside `depth` (eelgrass, pondweed); " +
+            "with `kinds: [\"sea\"]`, on the sea bed (kelp, seagrass).",
         ),
       level: z
         .tuple([z.number(), z.number()])
@@ -3610,6 +3612,13 @@ export const spawnAreaSchema = z
       .default(25)
       .describe("Metres from home an enemy may chase before it must turn back. Handed to each NPC's root script as the `leash` param (with `home`, `roam`, `spawnArea`); the server also fences at 1.5× as a backstop."),
     roam: z.number().min(0).default(10).describe("Idle wander radius around home, passed as the `roam` param."),
+    pack: z
+      .string()
+      .default("")
+      .describe(
+        "Linked-pack id handed to each NPC as mob-brain's `pack` param. Every body with the same pack (across areas: give one camp's " +
+          "slots the same id) answers a pull of any of them, without sight and out to its deaggroRange, never across a storey. Empty = off.",
+      ),
     patrol: z
       .array(z.tuple([z.number(), z.number(), z.number()]))
       .default([])
@@ -3754,6 +3763,7 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("billboard", billboardSchema);
   registry.register("grass", grassSchema);
   registry.register("water", waterSchema);
+  registry.register("waterExclusion", waterExclusionSchema);
   registry.register("netObject", netObjectSchema);
   registry.register("portalAnchor", portalAnchorSchema);
   registry.register("loadingScreen", loadingScreenSchema);

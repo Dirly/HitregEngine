@@ -114,6 +114,7 @@ import {
 
 import { controllerLimits } from "./dress-steps.mts";
 import { applyBatchesToSceneFile, applyOpsToSceneFile } from "./_scene-write.mts";
+import { exteriorOrExit } from "./_exterior.mts";
 import { fieldOfScene, seatPlaced } from "./float.mts";
 import { repeatsInOps, solveLine, solveScenePieces, spreadSpots, type SolveRow } from "./_place-solve.mts";
 import { skinPlacedOps } from "./rock-skins.mts";
@@ -490,6 +491,7 @@ function sceneContext(proj: string, plan: DressingPlan, map: SocketMap): { decal
   const lo = Math.min(...map.levels.map((l) => l.floorY)) - 1, hi = Math.max(...map.levels.map((l) => l.floorY)) + 12;
   const levelOf = (y: number): number => map.levels.reduce((best, l) => (l.floorY <= y + 0.5 && l.floorY >= (map.levels.find((x) => x.level === best)?.floorY ?? -Infinity) ? l.level : best), map.levels[0]!.level);
   const own = `dress-${idPart(plan.id)}-`;
+  const shellModel = ((map as { source?: { model?: string } }).source?.model ?? "").split("\\").join("/");
   const decals: DressingDecal[] = [], obstacles: DressingObstacle[] = [];
   const measured = new Map<string, [number, number, number] | null>();
   const assets = path.join(proj, "assets");
@@ -504,6 +506,9 @@ function sceneContext(proj: string, plan: DressingPlan, map: SocketMap): { decal
     }
     const pf = e.components.prefab?.prefabId as string | undefined;
     if (!pf || id.startsWith(own) || (e.tags ?? []).includes(`dress:${plan.id}`)) continue; // own instances, quest objects included, are removed by apply: never obstacles
+    // the building this map was MEASURED from (its shell prefab placed as a structure: a keep in a fort) is the room, not a
+    // thing standing in it: its whole footprint refused every ground-floor spot (fort-keep 2026-11-11)
+    if (shellModel && shellModel.endsWith(`/models/${pf}.glb`)) continue;
     let size: [number, number, number] | null | undefined = src0(proj)(pf)?.size as [number, number, number] | undefined;
     if (!size && (e.tags ?? []).includes("statue")) {
       if (!measured.has(pf)) { try { measured.set(pf, measure(prefabGeometry(assets, pf)).size as [number, number, number]); } catch { measured.set(pf, null); } }
@@ -805,6 +810,8 @@ function apply(): void {
   const poi = dressPoiId({ planId: plan.id, mapSource: (map as { source?: { model?: string } }).source?.model ?? null, flag: opt("poi") ?? null, jobIds: poiJobIds(proj) });
   const poiTags = poi ? [`poi:${poi}`] : [];
   if (!poi) console.log(`poi: no POI job matches plan ${plan.id} (no --poi, no site socket source, no <poi>-<area> id): its entities carry no poi:<id> tag`);
+  // EXTERIOR CHAIN (tools/_exterior.mts, Derek 2026-11-10 Rustgut): a door's / painted place's dressing waits on its chain
+  if (poi && !flag("dry")) exteriorOrExit(path.basename(proj), path.basename(sceneFile).replace(/\.scene\.json$/, ""), poi, `dress apply ${plan.id}`);
   const ownerIds = new Set((owner?.overrides ?? []).filter((o) => o.added && o.entity).map((o) => o.entity!));
   const ops: Op[] = [];
   // The tag check keeps plan "a/b" from removing plan "a/b-2"'s entities, which share the id prefix.

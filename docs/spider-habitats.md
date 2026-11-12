@@ -35,6 +35,40 @@ before reuse. Some older raw spider props contain the rejected free web cards or
 single strands. Remove unsuitable attached web geometry in the owning producer,
 retain useful eggs or prey, and regenerate/catalog the changed asset.
 
+### Shoulder shrouds for hanging bodies
+
+Owner direction (2026-11-09): fit a pyramid-like web shroud to the body's shoulders.
+Its lower perimeter surrounds and contacts the shoulder/upper-torso envelope;
+the sides taper to one centred apex above the head. Give those sides the shared
+webbing appearance, then run the suspension thread from that apex to the actual
+branch, beam or ceiling support. The visible load path is shoulders, tapered
+shroud, apex, thread, structure.
+
+Measure the actual body in its placed transform. Fit the taper around the head
+without slicing through it, and join the lower rim to the existing cocoon rather
+than leaving a hovering hood. Use a real three-dimensional form so it works from
+front, side and rear. Keep the silk porous and consistent with the habitat while
+retaining visible coverage at the apex and shoulder contacts. A generic whole-card
+edge fade must not erase those joins. The thread starts at the same point where
+the sides converge, not directly at the scalp, neck or an unrelated prefab pivot.
+Remove obsolete suspension cords or knots from the visible source variant when
+replacing them with this assembly; enclosing them in an oversized cap leaves
+unexplained floating pieces. Preserve the anatomical body and its painted UVs.
+
+Keep the body pose, scale and established placement while fitting the shroud.
+Record shoulder contacts, the common apex and the finite structural anchor in the
+producer. Review a representative close front/side view and the complete hanging
+assembly before repeating it. Different body shapes need their own measured fit.
+
+The reusable [shroud fitter](../apps/playground/projects/world-kit/authoring/spider-webs/shroud.mts)
+and the toolkit README carry the implementation. Compare the corrected
+[front](../apps/playground/projects/redstrand/authoring/zonegen/redstrand/zones/zone-1/pois/webbed-wood/repair/shroud/evidence/shroud-front.png),
+[side](../apps/playground/projects/redstrand/authoring/zonegen/redstrand/zones/zone-1/pois/webbed-wood/repair/shroud/evidence/shroud-side.png)
+and [integrated](../apps/playground/projects/redstrand/authoring/zonegen/redstrand/zones/zone-1/pois/webbed-wood/repair/shroud/evidence/shroud-integrated.png)
+reference views. Its current anatomical fit targets the existing hanging human
+model; adapt and verify the fit for another victim rather than reusing those
+local body measurements blindly.
+
 ## Find supports before generating webs
 
 Measure surrounding trees' transformed height, crown width, trunk diameter and

@@ -61,6 +61,20 @@ merge them by *what they look like* (atlas tiles):
      through the sheet (eelgrass, pondweed). The gate also demands the
      tallest card fit under the surface (`bladeHeight * scaleRange[1] + 0.15`),
      or weed tips poke out of the shallows like reeds.
+     With `kinds: ["sea"]` the bed is the SEA bed (everything under sea level that no lake or
+     river sheet covers): seagrass, kelp, coral. A world's own sea layers live in its own rules
+     file and page (Redstrand: `authoring/cover-sea-rules.json`, `cover/cover-sea.png`) and go in
+     with `npx tsx tools/cover-upsert.mts <recipe.json> <rules.json>` — an upsert by id that
+     validates before writing, because `--apply` replaces the whole list. To put coral on the
+     reefs, give the layer the same `clump` (frequency, octaves, threshold, seed) as the
+     `water.mode: "bed"` scatter rule that places the reef rocks. The same tool upserts scatter
+     rules (`{ "scatter": [...] }` in the rules file): Redstrand's reef pinnacles and ledges
+     (`authoring/sea-rock-rules.json`) and its coral heads and anemones
+     (`authoring/sea-coral-rules.json`: catalogued `sea-life/*` pieces drawn by `model` + a
+     `material`; the brain-coral domes and the tube sponges with an anemone crown are built by
+     `authoring/sea-life/build-models.mjs`). A sea rule sets `water.bedWaters: "sea"`, or a
+     bed rule also fills lakes and rivers. Sunken wrecks are scene
+     entities: `npx tsx tools/sea-wrecks.mts --project <p> --scene <id> --world <id>`.
    - Keep water layers PATCHY: Derek found lily pads at 0.5/m² "almost too
      much" and a cattail ring on every shore monotonous. Lily pads are now
      0.22/m² in `floor: 0` patches (11% of shallows), reeds clump with

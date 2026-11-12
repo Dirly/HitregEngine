@@ -1,5 +1,6 @@
 /**
- * A baked DC volume mesh as a GLB: POSITION, NORMAL, COLOR_0 (tint) and _SPLATWEIGHT[2|3] — the terrain-splat
+ * A baked DC volume mesh as a GLB: POSITION, NORMAL, COLOR_0 (tint), _SPLATWEIGHT[2|3] and (when reduced) _SPLATINDEX /
+ * _SPLATTOP — the terrain-splat
  * material's contract, as the DC dungeon bakes write it. One primitive: one draw with the world's terrain material.
  * Used by rock-formations.mts (fall sites) and ledge-landmark.mts (ledge landmarks).
  */
@@ -29,6 +30,11 @@ export function writeVolumeGlb(mesh: VoxelMesh, file: string): number {
     const a = new Float32Array(count * 4);
     for (let i = 0; i < count; i++) for (let j = 0; j < 4; j++) a[i * 4 + j] = k * 4 + j < S ? mesh.splat[i * S + k * 4 + j]! : 0;
     attributes["_SPLATWEIGHT" + (k ? String(k + 1) : "")] = b.pushAccessor(a, "VEC4");
+  }
+  // the indexed splat (reduceSplatTop4): an indexed terrain material (a deep palette) reads these, not the dense weights
+  if (mesh.layerIndex?.length === count * 4 && mesh.layerWeight?.length === count * 4) {
+    attributes._SPLATINDEX = b.pushAccessor(mesh.layerIndex, "VEC4", { normalized: true });
+    attributes._SPLATTOP = b.pushAccessor(mesh.layerWeight, "VEC4", { normalized: true });
   }
   b.pushNode({ mesh: b.pushMesh({ primitives: [{ attributes, indices: b.pushAccessor(mesh.indices, "SCALAR") }] }) }, true);
   return writeGlbDoc(b.finish(), file);

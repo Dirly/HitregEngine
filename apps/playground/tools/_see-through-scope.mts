@@ -34,14 +34,18 @@ export const ROPE_RAIL = /rope[\s_.-]*rail/i;
  *  make rope): the hand ropes, their lashing and the rags hung on them are the rail. Its `:mesh-tar` stringers and the bare segment
  *  (the wood: deck, posts, lintel) are NOT, so a seam touching them stays a hole. */
 export const ROPE_SPAN_PART = /\/bs_[^/:]+_\d+:mesh-(rope|rag)$/;
+/** An IRON RAILING section's or iron gate's alpha card (the graveyard standard, Derek 2026-11-10: "ONE alpha-tested plane per
+ *  section"; composite-props/iron-railing-section part `p00-railing`, composite-props/iron-gate-ajar part `p04-gate-leaf`): the
+ *  gaps between its painted bars are the design, so a CUTOUT site on such cards alone is an allowed opening like a rope rail. */
+export const IRON_GRILLE_PART = /:p\d+-(railing|gate-leaf)$/;
 
 /**
  * A site whose every entity is a rope rail part (by its id/label or its scene name) is an ALLOWED opening: the gaps between
  * a rope's strands are deliberate. Narrow on purpose: one non-rail entity, or no entity, keeps it a hole; hidden colliders
  * in general are not covered.
  */
-export function ropeRailOpening(site: { entities: readonly string[] }, nameOf: (id: string) => string = (id) => id): boolean {
-  return site.entities.length > 0 && site.entities.every((e) => ROPE_RAIL.test(e) || ROPE_SPAN_PART.test(e) || ROPE_RAIL.test(nameOf(e)) || ROPE_RAIL.test(nameOf(e.split(":")[0]!)));
+export function ropeRailOpening(site: { entities: readonly string[]; cause?: string }, nameOf: (id: string) => string = (id) => id): boolean {
+  return site.entities.length > 0 && site.entities.every((e) => ROPE_RAIL.test(e) || ROPE_SPAN_PART.test(e) || ROPE_RAIL.test(nameOf(e)) || ROPE_RAIL.test(nameOf(e.split(":")[0]!)) || (site.cause === "cutout" && IRON_GRILLE_PART.test(e)));
 }
 
 export function outOfPlace(site: { at: V3 | null; entities: readonly string[]; cause?: string; causes?: Record<string, number> }, samples: ReadonlyArray<{ at: V3 }>, sceneIds: ReadonlySet<string>, withinM = OUT_OF_PLACE_M): boolean {

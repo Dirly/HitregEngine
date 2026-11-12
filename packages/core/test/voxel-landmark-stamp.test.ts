@@ -85,6 +85,18 @@ describe("landmark stamp", () => {
     expect(at(10, 60)).toBe(120); // inside the area (world = at + local): level
   });
 
+  it("pad with a `floor` surface follows it (a trench floor rising to its door is terrain, not a flat pad under a slab)", () => {
+    // the same area; the floor rises 0.5 m per metre of spec -Z, turned by yaw 90 (spec +Z = world +X)
+    const area = [[-20, 30], [20, 30], [20, 50], [-20, 50]];
+    const floor = { origin: [-24, 24] as [number, number], step: 2, columns: 25, rows: 15, heights: Array.from({ length: 25 * 15 }, (_, k) => 0.5 * (30 - (24 + Math.floor(k / 25) * 2))) };
+    const out = compileOperator(doc({ at: [0, 0], yaw: 90, y: 120, blend: { mode: "pad", apron: 6, feather: 6, area, floor } }), flat);
+    const patch = out.pieces.find((p) => p.kind === "heightPatches")!.feature as { origin: [number, number]; columns: number; heights: number[] };
+    const at = (x: number, z: number) => patch.heights[Math.round((z - patch.origin[1]) / 2) * patch.columns + Math.round((x - patch.origin[0]) / 2)]!;
+    // spec (0, 32) -> world (32, 0): 0.5 * (30 - 32) = -1 -> 119; spec (0, 46) -> world (46, 0): -8 -> 112
+    expect(at(32, 0)).toBeCloseTo(119, 1);
+    expect(at(46, 0)).toBeCloseTo(112, 1);
+  });
+
   it("applies with an inverse that restores the recipe", () => {
     const base: WorldRecipe = defaultWorldRecipe({ cellSize: 48 });
     const first = applyOperator(base, doc(), flat);

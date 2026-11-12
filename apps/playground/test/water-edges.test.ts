@@ -110,6 +110,15 @@ test("water-edges: only a sea-level body gets the world-edge horizon, and only p
   assert.equal(seaHorizon(null, { surfaceY: 0, ...plane }), undefined, "nor a dungeon's pool");
 });
 
+test("a stain sheet lying a few cm over the sea rests on the sea where the bed is under it, not over a beach (n-chapel2)", () => {
+  const field = { recipe: { seaLevel: 0 }, height: (x: number) => (x > 0 ? -3 : 1) } as never;
+  const slick = seaHorizon(field, { surfaceY: 0.27, world: [-5, 0.27, -5, 5, 0.27, 5] })!;
+  assert.ok(slick, "a sheet 0.27 m over the sea");
+  assert.equal(slick(4, 0), true, "its edge over the sea bed rests on the sea");
+  assert.equal(slick(-4, 0), false, "its edge over the dry beach is still judged");
+  assert.equal(seaHorizon(field, { surfaceY: 0.8, world: [-5, 0.8, -5, 5, 0.8, 5] }), undefined, "a sheet 0.8 m up is no slick");
+});
+
 test("an internal seam (a wall face's top under its coping's underside) is no boundary, in either triangle order (RETTING)", () => {
   // a 1 m wall body 0..1 high under a coping 1..1.3: the body's top (up) and the coping's underside (down) meet at y = 1
   const quad = (y: number, up: boolean) => (up ? [0, y, 0, 0, y, 1, 1, y, 1, 0, y, 0, 1, y, 1, 1, y, 0] : [0, y, 0, 1, y, 1, 0, y, 1, 0, y, 0, 1, y, 0, 1, y, 1]);

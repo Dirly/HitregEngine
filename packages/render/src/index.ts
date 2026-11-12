@@ -337,4 +337,5 @@ export {
   type HorizonOptions,
 } from "./horizon.js";
 export { FirstDrawWarm } from "./first-draw-warm.js";
+export { setWaterExclusions, waterExclusionMask } from "./water-exclusion.js";
 export { asyncPipelines, SHADER_BUILD_BUDGET_MS } from "./async-pipelines.js";

@@ -398,6 +398,12 @@ export const landmarkBlendSchema = z.object({
     .describe("pad: steepest bank (rise/run) the blended ground keeps; feet of steeper banks are filled up to it (default 1). A deep cut whose bank a built wall covers (a quarry floor under its face) takes a steep value, e.g. 8; at 1 the fill climbs back over the floor."),
   area: z.array(z.tuple([z.number().finite(), z.number().finite()])).min(3).max(128).optional()
     .describe("Explicit footprint outline [x, z] in the SPEC frame (turned by yaw/scale like the parts) that the ground blend uses INSTEAD of the solid's own footprint: `pad` then levels e.g. a quarry floor or forecourt in front of a built wall without lowering the hill behind it. Keep it >= 6 m across (FINE_MIN)."),
+  floor: z.object({
+    origin: z.tuple([z.number().finite(), z.number().finite()]).describe("Spec-frame [x, z] of sample (0, 0)."),
+    step: z.number().min(0.5).max(8).describe("Metres between samples (spec frame)."),
+    columns: z.number().int().min(2).max(256), rows: z.number().int().min(2).max(256),
+    heights: z.array(z.number().finite()).min(4).max(65536).describe("columns*rows spec-local heights above spec y 0, row-major with x fastest; bilinear, clamped at the edges."),
+  }).optional().describe("pad: a NOT level floor. The pad follows this surface (spec y 0 + height) instead of one flat level, so a trench whose floor rises to its door, or a ramp, is TERRAIN under the landmark's own floor and a body never falls under a slab whose collider has not streamed in yet (Rustgut 2026-11-10). Sample it from the spec's floor a little (0.1 m) under the slab's top."),
 });
 export type LandmarkBlend = z.infer<typeof landmarkBlendSchema>;
 
@@ -421,7 +427,23 @@ export function landmarkAreaCells(area: readonly (readonly [number, number])[], 
 }
 
 /** Foot level (world y of spec y 0) and the terrain height patch for the blend (null for `none`). */
-export function landmarkGround(cells: [number, number][], at: [number, number], blend: LandmarkBlend, reader: OperatorFieldReader, y?: number): { footY: number; patch: OperatorPiece | null; ground: { min: number; median: number } } {
+/** The pad's level at world (x, z): footY, or footY + the blend's `floor` surface (spec frame, turned by yaw/scale). */
+export function landmarkPadLevel(blend: LandmarkBlend, at: readonly [number, number], footY: number, place: { yaw: number; scale: number } = { yaw: 0, scale: 1 }): (x: number, z: number) => number {
+  const f = blend.floor;
+  if (!f) return () => footY;
+  const c = Math.cos((place.yaw * Math.PI) / 180), s = Math.sin((place.yaw * Math.PI) / 180);
+  const H = (i: number, j: number) => f.heights[Math.max(0, Math.min(f.rows - 1, j)) * f.columns + Math.max(0, Math.min(f.columns - 1, i))] ?? 0;
+  return (x, z) => {
+    const dx = (x - at[0]) / place.scale, dz = (z - at[1]) / place.scale;
+    const lx = dx * c - dz * s, lz = dx * s + dz * c;
+    const u = Math.max(0, Math.min(f.columns - 1, (lx - f.origin[0]) / f.step)), v = Math.max(0, Math.min(f.rows - 1, (lz - f.origin[1]) / f.step));
+    const i = Math.min(f.columns - 2, Math.floor(u)), j = Math.min(f.rows - 2, Math.floor(v)), a = u - i, b = v - j;
+    const h = (H(i, j) * (1 - a) + H(i + 1, j) * a) * (1 - b) + (H(i, j + 1) * (1 - a) + H(i + 1, j + 1) * a) * b;
+    return footY + h * place.scale;
+  };
+}
+
+export function landmarkGround(cells: [number, number][], at: [number, number], blend: LandmarkBlend, reader: OperatorFieldReader, y?: number, place?: { yaw: number; scale: number }): { footY: number; patch: OperatorPiece | null; ground: { min: number; median: number } } {
   const gs = cells.length ? cells.map(([x, z]) => reader.height(x, z)).sort((a, b) => a - b) : [reader.height(at[0], at[1])];
   const ground = { min: r3(gs[0]!), median: r3(gs[gs.length >> 1]!) };
   const footY = r3(y ?? (blend.mode === "bury" ? ground.min - blend.depth : blend.mode === "pad" ? ground.median : reader.height(at[0], at[1])));
@@ -441,11 +463,12 @@ export function landmarkGround(cells: [number, number][], at: [number, number], 
   };
   const sm = (a: number, b: number, t: number) => { const u = Math.max(0, Math.min(1, (t - a) / (b - a))); return u * u * (3 - 2 * u); };
   const heights: number[] = [], weights: number[] = [];
+  const level = landmarkPadLevel(blend, at, footY, place);
   for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
     const x = x0 + c * g, z = z0 + r * g, s = dist(x, z), h0 = reader.height(x, z);
     let hgt = h0, w = 0;
     if (blend.mode === "bury") { const u = 1 - sm(0, blend.feather, s); hgt = h0 + blend.mound * u; w = s <= blend.feather + g ? 1 : 0; }
-    else { const u = sm(blend.apron, blend.apron + blend.feather, s); hgt = footY + (h0 - footY) * u; w = s <= blend.apron + blend.feather + g ? 1 : 0; }
+    else { const u = sm(blend.apron, blend.apron + blend.feather, s), lv = level(x, z); hgt = lv + (h0 - lv) * u; w = s <= blend.apron + blend.feather + g ? 1 : 0; }
     heights.push(Math.round(hgt * 100) / 100); weights.push(w);
   }
   const patch: OperatorPiece = { id: "ground", origin: [x0, z0], size: [(cols - 1) * g, (rows - 1) * g], columns: cols, rows, heights, weights, blend: 2 * g, ...(blend.mode === "pad" ? { maxSlope: blend.maxSlope ?? 1 } : {}) };

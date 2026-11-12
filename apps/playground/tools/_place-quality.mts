@@ -396,7 +396,7 @@ export function legacyFounds(legacySeat: Seat | null, base: BaseOutline | null, 
   return true;
 }
 
-export function seatStructure(base: BaseOutline, at: V2, yaw: number, ground: (x: number, z: number) => number, opts: { rock?: boolean; sinkMax?: number } = {}): Seat {
+export function seatStructure(base: BaseOutline, at: V2, yaw: number, ground: (x: number, z: number) => number, opts: { rock?: boolean; sinkMax?: number; levelOver?: number } = {}): Seat {
   const r2_ = (n: number) => Math.round(n * 100) / 100;
   const per = base.perimeter.map(([x, z, yb]) => { const w = toWorldYaw(at, yaw, x, z); return { w, need: ground(w[0], w[1]) - yb }; });
   const all = base.cells.map(([x, z, yb]) => { const w = toWorldYaw(at, yaw, x, z); return ground(w[0], w[1]) - yb; });
@@ -404,7 +404,11 @@ export function seatStructure(base: BaseOutline, at: V2, yaw: number, ground: (x
   // L (Red Dial 2026-10-30: open-court ruins (fill < SKIRT_MIN_FILL) on 1.5-4.4 m of fall were sunk to their lowest ground,
   // their uphill walls buried to the coping, then raised by the build's backfill and standing 0.4-3.5 m clear): a wide piece
   // on legs or an open court past `sinkMax` of fall stands at the middle of its fall on LEVELLED ground (cut + fill, `level`)
-  if (!opts.rock && Math.max(...base.extent) >= LEVEL_MIN_EXTENT_M && Math.min(...base.extent) >= SKIRT_MIN_EXTENT_M && base.fill < SKIRT_MIN_FILL && relief > (opts.sinkMax ?? 0)) {
+  // L (r-go2-flat north-flat 2026-11-11: a layout lean-to on 1.13 m of fall was sunk, buried on its uphill side and failed
+  // the shelters gate; a layout piece gets no pocket pad): a catalogue SHELTER (`levelOver` = SHELTER_LEVEL_M) of any
+  // size on more fall than that is levelled the same way, its own level shelf
+  const shelterShelf = opts.levelOver !== undefined && relief > opts.levelOver && Math.min(...base.extent) >= SKIRT_MIN_EXTENT_M;
+  if (!opts.rock && (shelterShelf || (Math.max(...base.extent) >= LEVEL_MIN_EXTENT_M && Math.min(...base.extent) >= SKIRT_MIN_EXTENT_M && base.fill < SKIRT_MIN_FILL && relief > (opts.sinkMax ?? 0)))) {
     const y = r2_((hi + lo) / 2);
     // the levelled ground stands 3 cm under the base's highest OUTLINE cell (the seated gate's measure; a declared footing
     // below it goes into the ground; a floor slab on ground at its top cell z-fought it, arcade-court)

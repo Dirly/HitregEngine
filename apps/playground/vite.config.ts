@@ -23,7 +23,9 @@ import {
 } from "../../packages/core/src/project.ts";
 import { projectClosure, readAssetJsonBatch, resolveAssetFile, sceneOwnerProject } from "./tools/_asset-resolve.mts";
 import { ownerCatalog, ownerInfo, recordOwnerEdits, sceneProject } from "./tools/_owner-edit-bridge.mts";
+import { activeAgents, declareActivity, endActivity } from "./tools/_agent-activity.mts";
 import { voxelCodeKey } from "./tools/_voxel-code-key.mts";
+import { mergePins, type MergePin } from "./src/pin-merge.ts";
 import { writeAssetGuarded } from "./tools/_scene-write.mts";
 import { assetChangePublisher, binaryAssetChangePublisher, assetSourceProject, scopedAssetChange } from "./tools/_asset-watch.mts";
 import { assertPlayerModules } from "./tools/_player-boundary.mjs";
@@ -74,8 +76,10 @@ const BRIDGE_ENDPOINTS = [
   { method: "GET", path: "/__hitreg/context", purpose: "What the user currently sees: scene, selection, camera, in-view entities, play mode, diagnostics, plus `focus` — where their attention is, ranked (focus.strongest names which of manipulating/hover/selection/asset to resolve \"this\" against, and focus.mode says what they are doing: edit, graybox, terrain-sculpt, editing-prefab:<id>, playing, …). Keyed per browser tab (bridgeSessionId) — with exactly one tab connected this just returns its data; with more than one, returns { multipleClients: true, clients: [...] } instead of guessing, pass ?id=<id> from that list to pick one." },
   { method: "GET", path: "/__hitreg/camera", purpose: "Where the editor camera is: { id, scene, playMode, mode, camera: { position:[x,y,z], target:[x,y,z] }, lastSeen } — the camera block of /__hitreg/context without the rest of the payload. Same per-tab keying as /__hitreg/context (?id=<id>; { multipleClients, clients } when several tabs are live)." },
   { method: "POST", path: "/__hitreg/camera", purpose: "Aim the editor camera — this is how an agent looks at its own work (screenshots, \"show me what you mean\"). Body: { position:[x,y,z], target?:[x,y,z] } or { frame: \"<entityId>\" } (or frame:\"selection\"), plus transitionMs (default 0 = snap this frame, which is what a screenshot tool wants; >0 eases over roughly that long and holds the request open until the camera actually comes to rest). Returns the pose the camera ACTUALLY reached: { ok, id, cmdId, camera:{position,target}, playMode }. FOOTGUN: this drives the EDITOR camera. In play mode that camera is often not what is on screen — a follow/chase rig re-aims it every frame, and a scene camera or a script's active camera replaces it outright — so the move can be instantly overwritten or simply not rendered. Trust the returned `camera` over the one you asked for; if it snapped back, something else owns the view. Same per-tab keying as /__hitreg/context: pass ?id=<id>, and with several tabs live and no id this answers 409 { ok:false, multipleClients, clients } rather than aiming somebody else's window." },
-  { method: "POST", path: "/__hitreg/owner-edit", purpose: "The editor reports the OWNER's hand edits of placed props ({ scene, edits: [{ entity, tags, name, parent, before, after }] }, scene frame; after:null = deleted). Each is written as an owner override on what placed it: a dressed prop (tag dress:<plan>) -> <plan>.owner.json in the plan's map frame; any other catalogued prop -> projects/<p>/authoring/owner-overrides/<scene>.json. Agents never POST here: owner overrides are the owner's. Schema: spec dataAssets['owner-overrides']; read them with `dress overrides <project>`." },
+  { method: "POST", path: "/__hitreg/owner-edit", purpose: "The editor reports the OWNER's hand edits ({ scene, edits: [{ entity, tags, name, parent, kind, before, after }] }, scene frame; after:null = deleted): of placed props, and of ANY entity in a generated scene (one with `built:<builder>` entities; before/after then carry its other components, e.g. a light). Each is written on what placed it: a dressed prop (tag dress:<plan>) -> <plan>.owner.json in the plan's map frame; anything else -> the scene's edit record projects/<p>/authoring/owner-overrides/<scene>.json (by: owner), which every scene-sync re-run keeps. Agents do not POST here: an agent's deliberate edit goes through editScene in tools/_scene-sync.mts (same record, by: agent). Precedence owner > agent > generator: the owner's edit always wins and is recorded as what he holds (ownerProps); an agent edit of what he set is refused unless it names the note it answers. Schema: spec dataAssets['owner-overrides']; list with `dress overrides <project>`." },
   { method: "GET", path: "/__hitreg/owner-edit?scene=<s>&entity=<id>&tags=<a,b>&name=<n>", purpose: "Who placed this prop (plan item or scene), the place's scale/cultures and the owner override on it, for the editor's Prop panel. ?catalog=<project> instead returns the swap catalogue (the closure's prop index) and the real-size kinds table." },
+  { method: "GET", path: "/__hitreg/agent-activity?scene=<s>", purpose: "Who is working in this scene right now: { active: [{ agent, what, since, beat, expires, source: declared|lock }] }. A heartbeat an agent declared (lapses at `expires`, so a crashed agent never leaves it up) or a tool holding the scene file's lock (syncScene / editScene declare themselves while they run). The editor shows a warning for the open scene; it never blocks the owner's edits." },
+  { method: "POST", path: "/__hitreg/agent-activity", purpose: "An agent declares it is working in a scene ({ scene, agent, what, ttlSec? default 600 }); POST again within ttlSec to keep the warning up, { scene, agent, done: true } to take it down. Node tools use tools/agent-activity.mts (same files). Declare before working on the owner's notes in a scene he has open." },
   { method: "GET", path: "/__hitreg/assets-index", purpose: "Every asset file on disk, bucketed by kind (scenes, prefabs, materials, models, chunks, …). Optional revisions=1 returns {index,revisions} with scoped binary file versions for live reload." },
   { method: "GET", path: "/__hitreg/asset-file?file=<rel>", purpose: "Read one asset file fresh from disk (bypasses Vite's cache)." },
   { method: "POST", path: "/__hitreg/asset-json?project=<owner>", purpose: "Read up to 64 JSON assets fresh in one request: { files: [relative paths] }. Returns [{data} | {error}] in request order, resolving in the project's dependency closure." },
@@ -87,7 +91,7 @@ const BRIDGE_ENDPOINTS = [
   { method: "POST", path: "/__hitreg/tools/:id/run", purpose: "Run a registered tool with { inputs }. Inputs are schema-validated; returns { assets, previews, warnings, report, log }." },
   { method: "GET", path: "/__hitreg/projects", purpose: "Installed projects and their declared tool dependencies: { installedTools, projects: [{ project, satisfied, installed, missing, missingOptional }] }. A project is its own git repo checked out into projects/<name>/, so it declares what it needs in project.json — read this before concluding a project's generator is broken, because \"the tool was never installed\" and \"the tool did nothing\" look identical from the outside." },
   { method: "GET", path: "/__hitreg/pins?scene=<name>", purpose: "World-anchored notes for a scene: [{ id, point:[x,y,z], entityId, text, author, createdAt, resolved }]. A pin is a human (or agent) comment left AT a place — read them to find what someone flagged and where. Stored beside the scene (.hitreg/pins/), never inside it." },
-  { method: "POST", path: "/__hitreg/pins", purpose: "Replace a scene's notes ({scene, pins}) — post the full array. Agents may add pins to answer or to flag something for the human; set resolved:true rather than deleting, so the exchange stays readable." },
+  { method: "POST", path: "/__hitreg/pins", purpose: "Write a scene's notes ({scene, pins, deleted?}): MERGED into the file per note id (the later updatedAt wins, a tie goes to the post; a note left out is kept; only ids named in deleted are removed) and the merged array comes back as `pins`. Post the notes you changed, or the full array. Agents may add pins to answer or to flag something for the human; set resolved:true rather than deleting, so the exchange stays readable." },
   { method: "GET", path: "/__hitreg/agent-inbox?scene=<name>&wait=<sec>", purpose: "Notes the human pressed \"send to AI\" on and that are not yet resolved — the requests actually addressed to you, each carrying the pinned entity's full component JSON so you can act without a second fetch. `wait` LONG-POLLS: the request is held open until a note arrives or the deadline passes (max 120s), so an idle agent wakes within ~0.5s of the click instead of polling on a timer. Answer by POSTing the scene's pins back with your `reply` and `resolved: true`. Also returns `profiles: [...]` — frame-profiler snapshots the human sent, each with its `.hitreg/profiles/` file path, their note, and the plain-English verdict; answer those via POST /__hitreg/profile." },
   { method: "GET", path: "/__hitreg/player-data", purpose: "Read experience-scoped player-data records (dev backend)." },
   { method: "GET", path: "/__hitreg/net-debug", purpose: "Multiplayer signaling rooms + a ring buffer of relayed traffic." },
@@ -507,6 +511,42 @@ function hitregBridge(): Plugin {
           });
       });
 
+      // AGENT ACTIVITY: who is working in a scene right now (tools/_agent-activity.mts); the editor warns, never blocks
+      server.middlewares.use("/__hitreg/agent-activity", (req, res) => {
+        res.setHeader("content-type", "application/json");
+        res.setHeader("cache-control", "no-store");
+        const sceneFileOf = (scene: string): string | null => {
+          const p = sceneProject(projectsRoot, scene);
+          return p ? path.join(projectsRoot, p, "assets", "scenes", `${scene}.scene.json`) : null;
+        };
+        if (req.method === "GET") {
+          try {
+            const scene = new URL(req.url ?? "", "http://x").searchParams.get("scene") ?? "";
+            if (!scene) throw new Error("?scene=<name> is required");
+            res.end(JSON.stringify({ ok: true, scene, active: activeAgents(scene, sceneFileOf(scene)) }));
+          } catch (error) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ ok: false, error: String(error) }));
+          }
+          return;
+        }
+        if (req.method !== "POST") { res.statusCode = 405; res.end(); return; }
+        let body = "";
+        req.on("data", (chunk: Buffer) => (body += chunk));
+        req.on("end", () => {
+          try {
+            const r = JSON.parse(body) as { scene?: string; agent?: string; what?: string; ttlSec?: number; done?: boolean };
+            if (!r.scene) throw new Error("scene is required");
+            if (r.done) endActivity(r.scene, r.agent);
+            else declareActivity({ scene: r.scene, agent: r.agent, what: r.what, ttlMs: Math.min(3600, Math.max(5, r.ttlSec ?? 600)) * 1000, session: true });
+            res.end(JSON.stringify({ ok: true, active: activeAgents(r.scene, sceneFileOf(r.scene)) }));
+          } catch (error) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ ok: false, error: String(error) }));
+          }
+        });
+      });
+
       // OWNER EDITS: the owner's hand edits of placed props, kept on what placed them (tools/_owner-edit-bridge.mts)
       server.middlewares.use("/__hitreg/owner-edit", (req, res) => {
         res.setHeader("content-type", "application/json");
@@ -754,8 +794,15 @@ function hitregBridge(): Plugin {
                 if (!Array.isArray(parsed.pins)) throw new Error("pins must be an array");
                 const file = pinsPath(parsed.scene ?? "");
                 fs.mkdirSync(path.dirname(file), { recursive: true });
-                fs.writeFileSync(file, JSON.stringify(parsed.pins, null, 2) + "\n", "utf8");
-                res.end(JSON.stringify({ ok: true, count: parsed.pins.length }));
+                // MERGED into the file, never a blind replace (src/pin-merge.ts): the tab and agents both post whole
+                // arrays, and the older copy used to erase the other side's notes / replies. A note is removed only
+                // when its id is named in `deleted`.
+                let onDisk: MergePin[] = [];
+                try { const cur = JSON.parse(fs.readFileSync(file, "utf8")); if (Array.isArray(cur)) onDisk = cur; } catch { /* no file yet */ }
+                const gone = (parsed as { deleted?: unknown }).deleted;
+                const merged = mergePins(onDisk, parsed.pins as MergePin[], Array.isArray(gone) ? (gone as string[]) : []);
+                fs.writeFileSync(file, JSON.stringify(merged, null, 2) + "\n", "utf8");
+                res.end(JSON.stringify({ ok: true, count: merged.length, pins: merged }));
               } catch (error) {
                 res.statusCode = 400;
                 res.end(JSON.stringify({ ok: false, error: String(error) }));

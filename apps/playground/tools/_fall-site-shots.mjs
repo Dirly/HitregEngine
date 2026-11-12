@@ -1,40 +1,32 @@
 // Full-window review shots of one fall site in the mmo scene (edit mode, orbit camera, no editor chrome).
-//   node tools/_fall-site-shots.mjs <baseUrl> <outDir> [river]      (run from apps/playground)
+//   node tools/_fall-site-shots.mjs <baseUrl> <outDir> [river] [--scene mmo] [--recipe <world recipe.json>]   (run from apps/playground)
 // Needs Playwright: the apps/playground devDependency (PLAYWRIGHT_MODULE / HITREG_PLAYWRIGHT override; tools/_playwright.mjs).
-// Views: the 5 from tools/_site-views.mts + 2 from tools/_site-shot-extra.mts (pool eye level, 3/4 hero),
+// Views: the 8 from tools/_site-views.mts (5 framing, pool eye level, 3/4 hero, close on the curtain),
 // then a 2x4 contact sheet sheet.png. The editor panels/stats are hidden by CSS injection and the canvas is
 // forced to the full 1280x800 window (main.ts onResize sizes the renderer from canvas.clientWidth/Height).
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 const { chromium } = await (await import("./_playwright.mjs")).loadPlaywright();
 
-const base = (process.argv[2] ?? "http://localhost:5199/").replace(/\/?$/, "/");
-const outDir = path.resolve(process.argv[3] ?? "shots/latest");
-const river = process.argv[4] ?? "river-15";
-const PLAYGROUND = "D:/Users/Derek/Desktop/HitRegStudios/Engine/apps/playground";
+const argv = process.argv.slice(2);
+const opt = (k, d) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1] : d; };
+const pos = argv.filter((a, i) => !a.startsWith("--") && !argv[i - 1]?.startsWith("--"));
+const base = (pos[0] ?? "http://localhost:5199/").replace(/\/?$/, "/");
+const outDir = path.resolve(pos[1] ?? "shots/latest");
+const river = pos[2] ?? "river-15";
+const scene = opt("scene", "mmo");
+const recipeFile = opt("recipe", "projects/proving/assets/worlds/mmo.json");
+const PLAYGROUND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const W = 1280, H = 800;
 fs.mkdirSync(outDir, { recursive: true });
 
-// ---- views -> explicit cameras {name, cam:[x,y,z], target:[x,y,z]}
+// ---- views: tools/_site-views.mts prints cameras [name, cx, cy, cz, tx, ty, tz], already lifted clear of the ground
 const run = (cmd) => execSync(cmd, { cwd: PLAYGROUND, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, NODE_OPTIONS: "--max-old-space-size=8192" } });
 const lastJson = (s) => JSON.parse(s.trim().split("\n").filter((l) => l.startsWith("[")).pop());
-const views = [];
-// _site-views tuple: [name, tx, ty, tz, dirX, dirZ, up, back] -> camera `back` m along dir, `up` m over the target;
-// then _site-shot-extra lifts any of those cameras that sit inside the ground and appends views 6 and 7
-const baseCams = lastJson(run(`npx tsx tools/_site-views.mts ${river}`)).map(([name, tx, ty, tz, dx, dz, up = 30, back = 28]) => {
-  const l = Math.hypot(dx, dz) || 1;
-  return [name, tx + (dx / l) * back, ty + up, tz + (dz / l) * back, tx, ty, tz];
-});
-const baseFile = path.join(outDir, "views-base.json");
-fs.writeFileSync(baseFile, JSON.stringify(baseCams));
-const all = lastJson(run(`npx tsx tools/_site-shot-extra.mts ${river} "${baseFile.replace(/\\/g, "/")}"`));
-for (const [name, cx, cy, cz, tx, ty, tz] of all) views.push({ name, cam: [cx, cy, cz], target: [tx, ty, tz] });
+const views = lastJson(run(`npx tsx tools/_site-views.mts ${river} "${recipeFile}"`)).map(([name, cx, cy, cz, tx, ty, tz]) => ({ name, cam: [cx, cy, cz], target: [tx, ty, tz] }));
 fs.writeFileSync(path.join(outDir, "views.json"), JSON.stringify(views, null, 1));
-for (const [i, b] of baseCams.entries()) {
-  const c = views[i].cam;
-  if (Math.hypot(b[1] - c[0], b[2] - c[1], b[3] - c[2]) > 0.01) console.log(`${b[0]}: camera was inside the ground, moved ${Math.hypot(b[1] - c[0], b[3] - c[2]).toFixed(1)} m toward the target and ${(c[1] - b[2]).toFixed(1)} m up`);
-}
 console.log(`${views.length} views`);
 
 // ---- browser
@@ -87,7 +79,7 @@ async function ensureReady() {
   const size = await page.evaluate(() => { const c = document.getElementById("app"); return [c.clientWidth, c.clientHeight, c.width, c.height]; });
   console.log("(re)booted; canvas css / backing size", size.join(" x "));
 }
-await page.goto(base + "?scene=mmo", { waitUntil: "load" });
+await page.goto(base + "?scene=" + encodeURIComponent(scene), { waitUntil: "load" });
 await ensureReady();
 
 async function settle() {

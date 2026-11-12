@@ -71,11 +71,23 @@ export type MobMove = z.output<typeof mobMoveSchema>;
 const DEG = Math.PI / 180;
 
 /**
+ * The way a body faces, as a yaw about +Y (0 = +Z). Read from the quaternion, not `rotation.y`: an authored facing past
+ * ±90° decomposes to Euler (π, π - yaw, π), so `rotation.y` alone points it the opposite way, and its sight cone with it.
+ */
+function headingOf(o: { rotation?: { y: number }; quaternion?: { x: number; y: number; z: number; w: number } } | null | undefined): number | undefined {
+  const q = o?.quaternion;
+  if (!q) return o?.rotation?.y;
+  return Math.atan2(2 * (q.x * q.z + q.w * q.y), 1 - 2 * (q.x * q.x + q.y * q.y));
+}
+
+/**
  * A shout is not heard across a storey. An answer from further above or below
  * the shouter than this (metres) is refused outright: stacked terraces and
  * galleries in a multi-level dungeon are separate pulls.
  */
 export const ALERT_MAX_HEIGHT_GAP = 3;
+/** Metres above a target's origin that sight is traced TO (its torso; the game's casters use the same 1.0). */
+const TARGET_TORSO = 1.0;
 /**
  * Seconds a mob that only HEARD of its target (a packmate's shout) has to see
  * it for itself. No sight by then and no hit from it: it lets the target go.
@@ -112,6 +124,7 @@ interface AlertPayload {
   faction?: string;
   cause?: "acquisition" | "defense";
   spawnArea?: string;
+  pack?: string;
 }
 import { TerrainSteering, groundHeightAt, LAYER_WORLD, LAYER_PROP, LAYER_TERRAIN } from "./steering.js";
 
@@ -239,6 +252,29 @@ export class MobBrain extends Script {
       description: "Comma-separated entity tags it treats as enemies. Faction rules are the game's; this is the engine's blunt version.",
     },
     aggroRange: { default: 16, min: 0, max: 300, description: "Metres at which it notices a target." },
+    homeUnstick: {
+      default: 0,
+      min: 0,
+      max: 120,
+      description:
+        "Seconds a leashing body may go without getting closer to home before it is put back there (the evade reset of " +
+        "an MMO boss: one that drops off a dais or a ledge to fight cannot always climb back). 0 = never; it walks.",
+    },
+    pack: {
+      default: "",
+      description:
+        "Linked-pack id. Bodies sharing a nonempty pack answer each other's pull whatever the distance (up to deaggroRange) " +
+        "and without sight: one pull brings the whole pack (a camp round a fire, a pack spread across a hall). Empty = off.",
+    },
+    aggroHeight: {
+      default: 0,
+      min: 0,
+      max: 300,
+      description:
+        "Largest height difference (metres, body origin to body origin) at which it notices a NEW target; 0 = any. Aggro is " +
+        "measured flat, so on stacked storeys, over a grate or across an open pit a mob otherwise picks fights it cannot walk " +
+        "to. A grudge (it was struck) and a target it already has are kept whatever the height.",
+    },
     deaggroRange: {
       default: 26,
       min: 0,
@@ -567,7 +603,7 @@ export class MobBrain extends Script {
       this.moves = [];
     }
     this.moveReadyAt = this.moves.map(() => 0);
-    this.yaw = this.body?.rotation?.y ?? 0;
+    this.yaw = headingOf(this.body) ?? 0;
     // Hashed off the entity id rather than Math.random: a respawned mob keeps
     // its own rhythm, and a test gets the same fight twice.
     this.phase = hash01(this.actorId);
@@ -681,6 +717,17 @@ export class MobBrain extends Script {
     }
     const me = this.bodyPosition();
     if (!me || !p.at) return;
+    // A linked pack (same nonempty `pack`): one pull brings all of it — no sight test, out to its deaggroRange, and
+    // still never across a storey. Sitting round a fire, the far side cannot see past the flames but comes all the same.
+    const pack = this.param<string>("pack");
+    if (pack && p.pack === pack) {
+      const dyl = me[1] - p.at[1];
+      if (Math.abs(dyl) > ALERT_MAX_HEIGHT_GAP) return;
+      if (Math.hypot(me[0] - p.at[0], me[2] - p.at[2]) > this.param<number>("deaggroRange")) return;
+      if (!this.hostile(p.targetId, this.taggedTargets())) return;
+      this.threat.add(p.targetId, 1, this.ctx.now() / 1000);
+      return;
+    }
     // In 3D, and never across a storey: a pack one terrace down is its own pull.
     const dy = me[1] - p.at[1];
     if (Math.abs(dy) > ALERT_MAX_HEIGHT_GAP) return;
@@ -831,7 +878,7 @@ export class MobBrain extends Script {
       this.sayEngaged(false);
       return;
     }
-    if (this.faceGoal === null) this.yaw = this.body?.rotation?.y ?? this.yaw; // nothing claimed yet: it faces what the body faces
+    if (this.faceGoal === null) this.yaw = headingOf(this.body) ?? this.yaw; // nothing claimed yet: it faces what the body faces
 
     const target = this.pickTarget(me);
     // Aware = a target, or a grudge still on the table (a target that stepped
@@ -879,6 +926,7 @@ export class MobBrain extends Script {
           faction: this.faction,
           cause: this.struckBy.has(target.id) || this.defensiveTargets.has(target.id) ? "defense" : "acquisition",
           spawnArea: this.param<string>("spawnArea"),
+          ...(this.param<string>("pack") ? { pack: this.param<string>("pack") } : {}),
         });
       }
     }
@@ -951,7 +999,7 @@ export class MobBrain extends Script {
     const anchor: [number, number, number] = order === "stay" && pet?.at ? [pet.at[0], pet.at[1], pet.at[2]] : owner;
     this.home = anchor;
     const fromAnchor = Math.hypot(me[0] - anchor[0], me[2] - anchor[2]);
-    if (this.faceGoal === null) this.yaw = this.body?.rotation?.y ?? this.yaw;
+    if (this.faceGoal === null) this.yaw = headingOf(this.body) ?? this.yaw;
 
     // left far behind (a fall, a mount, a portal on the same layer): beside the owner at once
     if (order !== "stay" && Math.hypot(me[0] - owner[0], me[2] - owner[2]) > this.param<number>("catchUp")) {
@@ -1004,7 +1052,7 @@ export class MobBrain extends Script {
 
   /** Where a following pet settles: `followDistance` behind its owner, a little to one side (each pet its own side). */
   private followPoint(owner: readonly [number, number, number]): [number, number] {
-    const yaw = this.ctx.getObject(this.owner)?.rotation?.y ?? 0;
+    const yaw = headingOf(this.ctx.getObject(this.owner)) ?? 0;
     const back = this.param<number>("followDistance");
     const side = (this.phase < 0.5 ? -1 : 1) * back * 0.6;
     const f: [number, number] = [Math.sin(yaw), Math.cos(yaw)];
@@ -1052,6 +1100,10 @@ export class MobBrain extends Script {
       if (move.weight <= 0 || now < this.moveReadyAt[index]!) return;
       const target = this.targetFor(move, enemies, main.id);
       if (!target) return;
+      // A move that reaches past arm's length (a shot, a bolt, a leap) needs the target in sight: one fired over or into
+      // dressing it cannot pass lands in the air. It closes instead (the steer toward the target goes on).
+      const reaching = (move.range?.[1] ?? 0) > this.param<number>("attackRange") + 1;
+      if (reaching && this.param<boolean>("requireLineOfSight") && !this.canSee(me, target.at, target.id)) return;
       usable.push({ index, target });
       total += move.weight;
     });
@@ -1200,6 +1252,7 @@ export class MobBrain extends Script {
     const now = nowMs / 1000;
     const aggro = this.param<number>("aggroRange");
     const deaggro = Math.max(this.param<number>("deaggroRange"), aggro);
+    const hGap = this.param<number>("aggroHeight");
     const tagged = this.taggedTargets();
     const seen = new Map<string, [number, number, number] | null>();
 
@@ -1230,6 +1283,7 @@ export class MobBrain extends Script {
       const d = Math.hypot(at[0] - me[0], at[2] - me[2]);
       const kept = id === this.targetId;
       if (!kept && !this.wouldStart(me, at)) continue;
+      if (!kept && hGap > 0 && Math.abs(at[1] - me[1]) > hGap && !this.struckBy.has(id)) continue;
       const range = kept ? deaggro : aggro * this.noticeScale(id);
       if (d > range || d >= best) continue;
       // A target it already has is kept all round; a NEW one has to be in
@@ -1402,6 +1456,24 @@ export class MobBrain extends Script {
   }
   private eyeCache: { at: [number, number, number]; eye: number; value: number } | null = null;
 
+  /**
+   * The eye, metres above the body's origin: `eyeHeight`, but never above the top of its own collider. A capsule
+   * body's origin is its CENTRE, so an eyeHeight measured from the feet (a 4.4 m ogre's 3.87) put the eye 2 m over
+   * its head: it saw, and shot, over dressing that its own shots and swings could not pass.
+   */
+  private eyeAboveOrigin(): number {
+    const eye = this.param<number>("eyeHeight");
+    if (this.eyeCapCache === undefined) {
+      const col = (this.ctx.getEntity?.(this.actorId)?.components as { collider?: { size?: number[]; offset?: number[]; shape?: string } } | undefined)?.collider;
+      const h = Array.isArray(col?.size) ? Number(col!.size![1]) : NaN, scale = this.body?.scale?.y ?? 1;
+      this.eyeCapCache = col && (col.shape === "capsule" || col.shape === "cylinder") && Number.isFinite(h) && h > 0
+        ? ((col.offset?.[1] ?? 0) + h * 0.45) * scale
+        : null;
+    }
+    return this.eyeCapCache === null ? eye : Math.min(eye, this.eyeCapCache);
+  }
+  private eyeCapCache: number | null | undefined = undefined;
+
   /** Eye-to-torso ray against the things that actually block vision. */
   private canSee(
     me: readonly [number, number, number],
@@ -1410,9 +1482,11 @@ export class MobBrain extends Script {
   ): boolean {
     const raycast = this.ctx.sim?.raycast;
     if (!raycast) return true; // no physics queries: sight is not a thing here
-    const eye = this.param<number>("eyeHeight");
+    const eye = this.eyeAboveOrigin();
     const from: [number, number, number] = [me[0], me[1] + this.eyeUnderCeiling(me, eye), me[2]];
-    const to: [number, number, number] = [at[0], at[1] + eye * 0.6, at[2]];
+    // the target's torso, not a point scaled by OUR eye: a 4 m ogre traced to 2.3 m over a player's centre, so it
+    // saw players over walls their own blows could not reach past
+    const to: [number, number, number] = [at[0], at[1] + Math.min(eye * 0.6, TARGET_TORSO), at[2]];
     const dx = to[0] - from[0];
     const dy = to[1] - from[1];
     const dz = to[2] - from[2];
@@ -1437,6 +1511,8 @@ export class MobBrain extends Script {
   /** Walk home, and arrive healed. */
   private returnHome(me: readonly [number, number, number], fromHome: number, dt: number, now: number): void {
     if (this.state !== "leash") {
+      this.homeBest = Infinity;
+      this.homeBestAt = 0;
       this.transition("leash");
       this.targetId = "";
       this.alertedFor = "";
@@ -1457,8 +1533,21 @@ export class MobBrain extends Script {
       return;
     }
     const back = this.anchorFor(me);
+    const unstick = this.param<number>("homeUnstick");
+    if (unstick > 0) {
+      if (fromHome < this.homeBest - 0.5 || this.homeBestAt === 0) { this.homeBest = fromHome; this.homeBestAt = now; }
+      else if (now - this.homeBestAt > unstick && this.ctx.sim?.setPosition) {
+        this.ctx.sim.setPosition(this.actorId, [back[0], back[1] + 0.2, back[2]]);
+        this.ctx.sim.setLinvel?.(this.actorId, [0, 0, 0]);
+        this.homeBestAt = 0;
+        return;
+      }
+    }
     this.steer(me, [back[0] - me[0], back[2] - me[2]], this.param<number>("roamSpeed"), dt, now);
   }
+  /** homeUnstick: the closest it has got to home on this walk back, and when. */
+  private homeBest = Infinity;
+  private homeBestAt = 0;
 
   /** Where the leash is measured from: home, or the nearest point of the patrol route. */
   private anchorFor(p: readonly number[]): readonly [number, number, number] {
@@ -1499,6 +1588,9 @@ export class MobBrain extends Script {
     }
     const roam = this.param<number>("roam");
     if (roam <= 0) {
+      // a stander that lost its fight goes back to its post (and heals there) instead of standing where the fight ended
+      const fromHome = Math.hypot(me[0] - this.home[0], me[2] - this.home[2]);
+      if (fromHome > 1.5 && this.state !== "idle") { this.returnHome(me, fromHome, dt, now); return; }
       if (this.state !== "idle") this.transition("idle");
       this.dir = [0, 0];
       this.moveSpeed = 0;

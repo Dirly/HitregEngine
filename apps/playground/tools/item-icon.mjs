@@ -80,8 +80,26 @@ const BACKDROP = args["no-backdrop"] !== true;
 // which says nothing, so common items take a tint that contrasts with the object.
 const RARITY_TINT = { uncommon: "#5fd07a", rare: "#5b8cff", epic: "#b07cff", legendary: "#ffb454" };
 
-const presetsFile = path.join(PLAYGROUND, "projects", project, "authoring", "item-icons.json");
-const presets = fs.existsSync(presetsFile) ? JSON.parse(fs.readFileSync(presetsFile, "utf8")) : { models: {}, items: {} };
+// The project's closure (itself, then project.json `dependsOn`, depth-first): a world's item drawn from a foundation
+// model (redstrand's rare longsword on weapons/longsword-uber.glb) finds the model, its texture and its framing there.
+const closure = [];
+const walk = (p) => {
+  if (closure.includes(p)) return;
+  closure.push(p);
+  const pj = path.join(PLAYGROUND, "projects", p, "project.json");
+  for (const d of fs.existsSync(pj) ? JSON.parse(fs.readFileSync(pj, "utf8")).dependsOn ?? [] : []) walk(d);
+};
+walk(project);
+/** The first project in the closure holding assets/<rel> (else the item's own project, so the error names it). */
+const assetPath = (rel) => closure.map((p) => path.join(PLAYGROUND, "projects", p, "assets", rel)).find((f) => fs.existsSync(f)) ?? path.join(assets, rel);
+const presets = { models: {}, items: {} };
+for (const p of [...closure].reverse()) {
+  const f = path.join(PLAYGROUND, "projects", p, "authoring", "item-icons.json");
+  if (!fs.existsSync(f)) continue;
+  const j = JSON.parse(fs.readFileSync(f, "utf8"));
+  Object.assign(presets.models, j.models ?? {});
+  Object.assign(presets.items, j.items ?? {});
+}
 
 const readItem = (id) => JSON.parse(fs.readFileSync(path.join(itemsDir, `${id}.json`), "utf8"));
 let ids = [];
@@ -195,7 +213,7 @@ function renderItem(model, look, frame) {
     shown = tris.filter((t) => want.has(t.part));
   }
   if (!shown.length) throw new Error("no triangles left after the part filter");
-  const tex = look.texture ? decodePng(fs.readFileSync(path.join(assets, "textures", look.texture))) : embedded;
+  const tex = look.texture ? decodePng(fs.readFileSync(assetPath(path.join("textures", look.texture)))) : embedded;
 
   // camera: looks FROM `from`, i.e. along -from
   const from = norm(frame.from ?? [1, 0, 0]);
@@ -280,7 +298,7 @@ for (const id of ids) {
       continue;
     }
     const frame = { ...(presets.models?.[look.model] ?? {}), ...(presets.items?.[id] ?? {}) };
-    icon = renderItem(path.join(assets, "models", look.model), look, frame);
+    icon = renderItem(assetPath(path.join("models", look.model)), look, frame);
   }
   if (BACKDROP) {
     const seed = seedOf(id);

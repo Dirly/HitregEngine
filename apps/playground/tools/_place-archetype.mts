@@ -10,7 +10,7 @@
  */
 import { z } from "zod";
 import { facesDir } from "./_compass.mts";
-import { caveOperatorSchema, foundationEntity, regionVegetationSchema, REMOVED_RIBBON_OPS, RIBBONS_REMOVED, solvePlacement, type PlaceRule } from "@hitreg/core";
+import { buildWall, caveOperatorSchema, foundationEntity, operatorParams, regionVegetationSchema, REMOVED_RIBBON_OPS, RIBBONS_REMOVED, solvePlacement, type PlaceRule } from "@hitreg/core";
 import { densityNeed, floorPadY, heightForPx, leanQuat, legacyFounds, orientBase, POCKET_FLOOR_M, READ_PX_MIN, readPixels, SEAT_GAP_M, scaleBase, seatStructure, solverRaise, solverSeats, SINK_MAX_M, SKIRT_BURY_M, toWorldYaw, wearsCliffTile, type BaseOutline } from "./_place-quality.mts";
 /** Skirt wall thickness (m): its outer face stands ~0.15 m past the structure's base edge (a plinth). */
 export const SKIRT_THICK_M = 0.8;
@@ -85,7 +85,7 @@ export const placeStructureSchema = z.object({
   marker: z.string().regex(/^[a-z0-9-]+$/).optional().describe("With `on`: the host's named marker (its <model>.markers.json, e.g. `fire-1`) the piece stands on: its spot and seat come from the marker, never from `at`. Without it the piece snaps to the centre of the host's top face under it when that face is a pedestal (SUPPORT_SNAP_FACE x its footprint or less). L (Red Dial 2026-10-30, Derek: braziers on pillars \"not centred, hanging off edges and clipping\")."),
   stone: z.string().optional().describe("A stone piece of a BUILT structure (a weighting stone in a basin): the material it draws with instead of the zone's rock skin (a material id, or `@wall:<id>` = that wall's face stone); written as the entity tag `stone:<material>`, read by rock-skins. Set by the planner on a basin's rock-kit contents."),
   lean: leanSchema.optional(),
-  onWall: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of a level-topped built wall (kind tower / keep / gatehouse) in the same pocket: the piece stands on its wall walk (the coping top), not on the ground, and is not seated. `at` must lie on the wall line (a tower's ring: [0, size] = its front). L (LANDMARKS 2026-10-21): a wizard's tower is read at dusk by the fire ON its top."),
+  onWall: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of a level-topped built wall (kind tower / keep / gatehouse) in the same pocket: the piece stands on its wall walk (the coping top), not on the ground, and is not seated. A BOUNDARY wall (kind wall: a graveyard's low wall under its iron railing cards) also hosts: the piece's base stands on that wall's own cap top along the slope (the wall operator's station tops under the piece's span, lowest, set 0.03 m in), never on the ground beside it. L (n-yard2 widows-cairn 2026-11-10: railing cards set 0.65 m inside the wall on the ground read buried on the slope and stood behind the wall). `at` must lie on the wall line (a tower's ring: [0, size] = its front). L (LANDMARKS 2026-10-21): a wizard's tower is read at dusk by the fire ON its top."),
 }).strict();
 
 /** BUILT structure kinds made by the wall operator (LANDMARKS 2026-10-21, Derek: "castles, wizard towers ... something big
@@ -97,6 +97,19 @@ export const WALL_KINDS = ["wall", "curtain", "tower", "keep", "gatehouse"] as c
 export const WINDOW_LIGHT = "giant-camp/window-glow";
 /** The openings a body walks through: gates and doors, never a raised window (sill > 0). */
 export const walkGaps = <T extends { sill?: number }>(o: T[] | undefined): T[] => (o ?? []).filter((x) => !(x.sill! > 0));
+/**
+ * A WALK-THROUGH piece (placeRule opening of kind `gate`: a lych gate, an arch, a giant rib) as route obstacles: its two
+ * sides only, one capsule each along its local z, the opening (`width`, already scaled to the piece) left free on its
+ * centre. `hx` / `hz` are the piece's scaled half sizes, `ang` its yaw (radians). null when the opening leaves no side.
+ */
+export function walkThroughSegs(at: V2, ang: number, hx: number, hz: number, width: number): [V2, V2, number][] | null {
+  if (!(hx > width / 2 + 0.05)) return null;
+  const ow = width / 2, r = r2((hx - ow) / 2), X: V2 = [Math.cos(ang), -Math.sin(ang)], Z: V2 = [Math.sin(ang), Math.cos(ang)], e = Math.max(0, hz - r);
+  return [-1, 1].map((k) => {
+    const c: V2 = [at[0] + X[0] * k * (ow + r), at[1] + X[1] * k * (ow + r)];
+    return [[r2(c[0] - Z[0] * e), r2(c[1] - Z[1] * e)], [r2(c[0] + Z[0] * e), r2(c[1] + Z[1] * e)], r] as [V2, V2, number];
+  });
+}
 /** A tower's windows as wall-operator openings (sill > 0): on face centres counted round from the door's station. */
 export function towerWindows(wl: { kind: string; sides: number; size: number; gate: number; windows?: { face: number; sill: number; height: number; width: number; light: string }[] }, pts: V2[], gf: number | null): { name: string; at: number; width: number; height: number; sill: number; arch: boolean; light: string }[] {
   if (wl.kind !== "tower" || !wl.windows?.length) return [];
@@ -142,6 +155,7 @@ export const placeWallSchema = z.object({
   size: z.number().min(1.5).max(60).default(12).describe("ring: radius; square: half-width (x)."),
   depth: z.number().min(1).max(60).optional().describe("square only: half-depth (z) for an oblong shell; omitted = `size` (a true square)."),
   gateSide: z.enum(["front", "back"]).default("front").describe("ring/square: the side the gate opens on (front = +z, toward the approach; back = -z: a byre or fold across the yard from a row facing it)."),
+  breach: z.object({ at: z.number().describe("Metres along x from the back side's centre (+ = +x)."), width: z.number().min(1).max(8).describe("Gap width, metres.") }).strict().optional().describe("square only: a slumped GAP in the back (-z) side, cut like a gate (a low wall < 3.2 m becomes runs either side of it); lay tumbled rubble in and round it from the layout. L (widows-cairn n-cairn2 2026-11-10: the east breach the dead came over read as a continuous dyke from every frame)."),
   row: z.object({
     nouns: z.array(z.string()).min(1).describe("Words naming ONE shell in the brief (hut, croft, house): the count is the number (word or digit) just before one of them in the place's read/landmark/features (`five turf-roofed stone huts` -> 5)."),
     count: z.number().int().min(1).max(8).default(3).describe("Shells when the brief names no number."),
@@ -220,6 +234,33 @@ export const placePocketSchema = z.object({
     .describe("A worked FLOOR painted on the ground (a groundPaints disc, data, no geometry): a scutching floor, a threshing floor, a flagged yard. L (RETTING 2026-10-23): the brief's flagged floor was open moor."),
 }).strict();
 
+/** L (Derek 2026-11-10, the Widows' Cairn: "no one builds that thick of a graveyard"; THE STANDARD for every graveyard): an
+ *  archetype's measured rules for every place it builds, checked on the plan (standardFaults) and on the stone colours
+ *  (place-build: `stone: "every"` runs stonePieceFaults on every stone piece, not only the landmark). Each rule is data the
+ *  plan measures; a fault names the piece and the number. */
+export const placeStandardSchema = z.object({
+  about: z.string().min(1).describe("The owner ruling the standard encodes (dated), printed with every fault."),
+  walls: z.object({
+    maxThickness: z.number().min(0.3).max(3).describe("Thickest a boundary wall (pocket wall of kind `wall`) may be, metres (graveyard 0.6: a low thin wall, never a dyke)."),
+    minHeight: z.number().min(0).max(6).default(0).describe("Lowest boundary wall, metres (graveyard 0.45: knee)."),
+    maxHeight: z.number().min(0.3).max(12).describe("Highest boundary wall, metres (graveyard 1.1: waist)."),
+    piers: z.boolean().default(true).describe("false: a low wall's runs END PLAIN at its gate and breach gaps (no 1.3 m pier blocks): the gate piece brings its own two posts (graveyard: the iron gate's posts close the gap). L (n-yard2 widows-cairn 2026-11-10: the piers read as 1.2 m-thick slabs with no railing beside the gate)."),
+  }).strict().optional().describe("Boundary walls: every pocket wall of kind `wall` (after --set) within these numbers."),
+  railing: z.object({
+    match: z.string().min(1).describe("RegExp source matched against a layout piece's prefab id: the railing section (graveyard: one alpha-tested iron-railing card per section)."),
+    cover: z.number().min(0.1).max(1).default(0.75).describe("Share of EACH LEG (straight stretch >= 2 m of a boundary wall run) its railing sections must line: the sum of the catalogue width x scale of the sections whose centres stand within `near` of that leg."),
+    near: z.number().min(0.1).max(3).default(0.6).describe("Metres a railing section's centre may stand off the wall's centre line."),
+  }).strict().optional().describe("Every boundary wall is topped / lined with railing sections (layout pieces)."),
+  gate: z.object({
+    match: z.string().min(1).describe("RegExp source on a layout piece's prefab id: the gate (graveyard: a one-plane iron gate between two posts)."),
+    near: z.number().min(0.5).max(6).default(2.5).describe("Metres the gate piece may stand from a gap between two boundary wall run ends."),
+  }).strict().optional().describe("A gate piece stands in a gap of the boundary wall."),
+  deny: z.array(z.object({ match: z.string().min(1).describe("RegExp source on a layout piece's prefab id."), why: z.string().min(1) }).strict()).default([])
+    .describe("Pieces the standard forbids in the layout (graveyard: burst graves, earth mounds and heaps, dragged-up coffins, roofed timber lych gates)."),
+  stone: z.enum(["landmark", "every"]).default("landmark").describe("Which stone-by-name pieces (STONE_PIECE_RE) must show the zone's stone (stonePieceFaults): `landmark` = the landmark / centrepiece only (every place); `every` = every one (graveyard: headstones, cairn-graves, statues, posts)."),
+}).strict();
+export type PlaceStandard = z.infer<typeof placeStandardSchema>;
+
 export const placeArchetypeSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/),
   title: z.string(),
@@ -248,6 +289,7 @@ export const placeArchetypeSchema = z.object({
       .describe("The core's tall element for the 300 m read (one catalogued structure OR one wall: a drystone beacon tower is a small `ring`), carrying `landmark`. Added by the plan when every read target of the archetype (landmark, smoke columns) is shorter than the tier's read needs (READ_PX_MIN px at the far end of the read window: medium 7.7 m, small 3.9 m); it then is the landmark. L (Hagsheer 2026-10-21): 1.8-5 m landmarks showed 0-10 px at 300 m."),
   }).strict().prefault({}),
   pockets: z.array(placePocketSchema).min(1).max(5).describe("The core (`core`, holding the landmark) first, then up to 4 more."),
+  standard: placeStandardSchema.nullable().default(null).describe("The owner's STANDARD for every place built from this archetype, enforced as plan `STANDARD:` faults (standardFaults; the graveyard: thin low boundary walls lined with one-plane iron railings, an iron gate, no burst graves or earth mounds, every stone piece in the region's stone). null = none."),
   deny: z.array(z.string()).default([]).describe("Prefabs this archetype never places (on top of DENIED_PROPS, the catalogue pieces the art/zfight gates reject): a denied slot prefab is swapped for its first allowed choice, a denied dressing or fill prop is skipped."),
   ring: z.object({
     when: z.array(z.string()).default([]).describe("Brief words that switch the ring on (any one in the place's read/landmark/features); empty = always. Name the ring's MATERIAL (\"ring of salt\", \"salt ring\"), never a bare \"ring of\" / \"ringed\". L (redstrand noon-stone 2026-10-31: \"the ring of a sun-priest wayshrine\" switched on a salt crust and a boulder ring on dry snow)."),
@@ -295,7 +337,7 @@ export type PlaceArchetype = z.infer<typeof placeArchetypeSchema>;
 export const LAYOUT_KINDS = ["structure", "prop", "fire", "decal"] as const;
 /** A catalogue shelter (tent, lean-to, hut) stands on ground falling at most this much under its footprint (place-build `shelters` gate). */
 export const SHELTER_LEVEL_M = 0.3;
-export const GROUND_KINDS = ["wear", "mud", "ash", "paving", "rubble"] as const;
+export const GROUND_KINDS = ["wear", "mud", "ash", "paving", "rubble", "hollow"] as const;
 /** L (Exiles' Bell 2026-10-24: 2-3 m discs with a 2 m feather did not read from a walking camera): every ground disc is at
  *  least this wide (radius, metres) with a 1 m feather. */
 export const GROUND_MIN_RADIUS_M = 4, GROUND_FEATHER_M = 1;
@@ -358,6 +400,7 @@ const layoutPieceSchema = z.object({
   lift: z.number().min(0).max(2).default(0).describe("Metres the piece stands above its seat (raised foundations: a kit building whose floor slab is at y=0 stands 0.6 m up, like town buildings, so the slab never shares the pad surface — Ashen Vow 2026-10-24: a 410 m2 z-fight)."),
   on: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of an EARLIER piece of the layout: this piece stands on that piece's own mesh top at its `at` (a ring on its plinth, a fire bowl on a pillar cap or a tower top), never on the ground; list it with `over` when the footprints overlap. L (Red Dial 2026-10-29: the ring stands on a 2.4 m plinth, lift caps at 2 m)."),
   marker: z.string().regex(/^[a-z0-9-]+$/).optional().describe("With `on`: the host's named marker (`fire-1`, `fire-2`: its <model>.markers.json) this piece stands on; `at` is then ignored (a beacon on a tower or gate fire marker). Without it, a piece `on` a pedestal (a pillar cap) snaps to its top-face centre. The `support` gate fails any piece that overhangs its host's top face or that the host's mesh rises into. L (Red Dial 2026-10-30)."),
+  onWall: z.string().regex(/^[a-z0-9-]+$/).optional().describe("Id of a core-pocket BOUNDARY wall (the brief's `core.walls` entry, kind wall): this piece stands ON that wall's cap, its base at the wall operator's own top under its span (lowest station top, 0.03 m in) wherever the wall follows the slope; `at` must lie on the wall's centre line, `yaw` along it. For railing cards and gate furniture that belong on the wall, never on the ground behind it. L (n-yard2 widows-cairn 2026-11-10)."),
   lean: leanSchema.optional().describe("Tilt the WHOLE piece from its foot (leanSchema): yaw turns it, lean tips it (also on top of an `on` piece). L (KNUCKLECROWN 2026-10-29)."),
   overrides: z.array(z.object({ path: z.string().min(1), value: z.unknown() }).strict()).max(8).default([]).describe("Prefab-instance overrides on the placed piece (the engine prefab `overrides`: `<local entity>/components/<component>/<field>`; a nested instance is reached through its `<entity>/components/prefab/overrides` array). For a per-place tweak of a catalogued piece that is not a new prop: a camp fire whose light burns at night only. L (o-small2 dropped-hour 2026-10-30)."),
   belowGrade: z.boolean().default(false).describe("The piece stands BELOW the grade it is seen from, its top at or under the open ground round it (a door at the foot of a stair cut down into the flat): it is no rival to the landmark, so the silhouette floor (2 x the tallest other piece) leaves it out. Its seat and gates are unchanged. L (d-stair Weeping Stair 2026-10-31: the 8.4 m sun door at the foot of a 6.4 m sunk stair set the floor at 16.8 m, over the coordinator's 12-15 m hero pillar, though nothing of it shows above the grass)."),
@@ -401,10 +444,13 @@ export const placeLayoutSchema = z.object({
   ground: z.array(z.object({
     id: z.string().regex(/^[a-z0-9-]+$/),
     element: z.string().optional().describe("The design element the patch belongs to (checked like a piece's)."),
-    kind: z.enum(GROUND_KINDS).describe("`wear` trodden earth (the DARKEST of the zone's road / ground / dirt surfaces, never the paving-like road tile), `mud`, `ash`, `paving`: a groundPaints disc (1 m feather, edge noise) in the surface WEAR_SURFACES finds for the kind (zone surface first), or `texture`. No surface = a plan refusal naming the kind. `rubble`: 6-10 small catalogued rock-kit stones (RUBBLE_STONES) scattered inside the disc, seated on the ground, worn in the zone's small-rock skin (rock-skins)."),
+    kind: z.enum(GROUND_KINDS).describe("`wear` trodden earth (the DARKEST of the zone's road / ground / dirt surfaces, never the paving-like road tile), `mud`, `ash`, `paving`: a groundPaints disc (1 m feather, edge noise) in the surface WEAR_SURFACES finds for the kind (zone surface first), or `texture`. No surface = a plan refusal naming the kind. `rubble`: 6-10 small catalogued rock-kit stones (RUBBLE_STONES) scattered inside the disc, seated on the ground, worn in the zone's small-rock skin (rock-skins). `hollow`: an IMPACT HOLLOW in the ground itself (hollowPatch): a pit `depth` m deep at `at`, a broken raised rim `rim` m over the natural ground at `radius`, falling back to the ground over `rimWidth` m; one feathered masked height patch `pb-<poi>-hollow-<id>` applied BEFORE the pieces seat (the plan runs again on it, like a road grade). L (r-go2 north-flat 2026-11-11: the world `crater` landform is an 18-35 m pit that buries a 22 m blade below its own rim; a place-scale strike hollow is place ground)."),
     at: xz.describe("Place frame centre."),
     radius: z.number().min(0.5).max(30).default(GROUND_MIN_RADIUS_M).describe("Metres; raised to GROUND_MIN_RADIUS_M (4) when smaller (a smaller disc does not read)."),
     texture: z.string().optional().describe("A recipe surface name (recipe.surfaces[].name) instead of the kind's default."),
+    depth: z.number().min(0.5).max(8).default(3.5).describe("`hollow`: metres the pit floor at `at` sits under the natural ground."),
+    rim: z.number().min(0).max(4).default(2).describe("`hollow`: metres the highest stretch of the rim crest stands over the natural ground (the crest breaks to ~half of it in places)."),
+    rimWidth: z.number().min(4).max(20).default(10).describe("`hollow`: metres outside `radius` over which the rim falls back to the natural ground."),
     poly: z.array(xz).min(3).max(24).optional().describe("PLACE-FRAME polygon painted INSTEAD of the disc (at/radius then only locate it for the coverage and size checks): a field strip, a track, a threshing floor with corners. Sides narrower than STREAK_MIN_WIDTH_M (2 m, the splat's vertex spacing on a 48/24 world) do not draw. L (o-fields 2026-11-02: a farm's strips painted as 6 m discs read as blobby pale patches, not fields)."),
     faces: z.boolean().default(false).describe("Also paint the steep faces in the disc (groundPaints `faces`): a pad's cut bank otherwise draws the zone cliff tile at its 20 m scale beside 40 tx/m work (art gate texel). L (KNUCKLECROWN 2026-10-28)."),
     strength: z.number().min(0).max(1).default(0.85),
@@ -565,7 +611,7 @@ export const placeLayoutSchema = z.object({
 export type PlaceLayout = z.infer<typeof placeLayoutSchema>;
 export type LayoutPiece = PlaceLayout["pieces"][number];
 /** Surface candidates per ground kind, first the recipe has wins: `{w}-{z}` = <world>-<zone> (the zone's own skin), then generic. */
-export const WEAR_SURFACES: Record<Exclude<(typeof GROUND_KINDS)[number], "rubble">, string[]> = {
+export const WEAR_SURFACES: Record<Exclude<(typeof GROUND_KINDS)[number], "rubble" | "hollow">, string[]> = {
   wear: ["{w}-{z}-road", "{w}-{z}-ground", "{w}-{z}-dirt", "dirt"],
   mud: ["{w}-{z}-mud", "mud"],
   ash: ["{w}-{z}-ash", "ash"],
@@ -579,7 +625,7 @@ const luma = (hex: string | undefined): number => { const m = /^#?([0-9a-f]{6})$
  *  2026-10-31, Derek: "why is the ground greenish under the camp?"): `{w}-{z}-road` is `redstrand-zone-1-road`, which no
  *  recipe names (zone skins are `redstrand-road`, `redstrand-highland-ground`), so every camp's wear fell to the generic
  *  olive `dirt`, also the darkest candidate. */
-export function wearSurface(kind: Exclude<(typeof GROUND_KINDS)[number], "rubble">, surfaces: string[], world: string, zone: string, colors?: Record<string, string>, zoneGround?: Record<string, string> | null): string | null {
+export function wearSurface(kind: Exclude<(typeof GROUND_KINDS)[number], "rubble" | "hollow">, surfaces: string[], world: string, zone: string, colors?: Record<string, string>, zoneGround?: Record<string, string> | null): string | null {
   const own = (kind === "wear" ? [zoneGround?.ground, zoneGround?.road, zoneGround?.accent] : kind === "paving" ? [zoneGround?.paving] : []).filter((s): s is string => !!s && surfaces.includes(s));
   const have = own.length ? own : WEAR_SURFACES[kind].map((s) => s.replace("{w}", world).replace("{z}", zone)).filter((s) => surfaces.includes(s));
   if (kind === "wear" && colors && have.some((s) => colors[s])) {
@@ -649,9 +695,10 @@ export function boxesOverlap(a: { at: [number, number]; half: [number, number]; 
  *  placed; planPlace pins the core on the plan centre and places them exactly. Apply AFTER forTier (spreadToFloor never
  *  moves a piece). Pure. */
 export function withLayout(a: PlaceArchetype, l: PlaceLayout, info?: (prefab: string) => { size?: number[] } | null): PlaceArchetype {
-  const pieces = l.pieces.filter((p) => p.kind !== "decal" && !p.quest).map((p) => {
+  // a piece that HOSTS a quest piece (`on`) goes into the dressing plan with it (questHost), never a structure
+  const pieces = l.pieces.filter((p) => p.kind !== "decal" && !p.quest && !questHost(l, p.id)).map((p) => {
     const half = pieceHalf(p, info?.(p.prefab)?.size);
-    return { id: p.id, role: pieceRole(p), prefab: p.prefab, choices: [], at: p.at, yaw: p.yaw, footprint: Math.min(20, Math.max(0.5, half ? Math.round(Math.hypot(half[0], half[1]) * 100) / 100 : 1)), scale: p.scale, lift: p.lift ?? 0, landmark: p.landmark ?? null, ...(p.on ? { on: p.on, ...(p.sink ? { sink: p.sink } : {}), ...(p.marker ? { marker: p.marker } : {}) } : {}), ...(p.lean && p.lean.deg > 0 ? { lean: p.lean } : {}), ...(p.bedded ? { bedded: true } : {}), ...(p.belowGrade ? { belowGrade: true } : {}), ...(p.wet ? { wet: true } : {}), ...(p.y !== undefined ? { heldY: p.y } : {}), ...(p.cave ? { cave: p.cave } : {}), overrides: p.overrides ?? [] } as PlaceArchetype["pockets"][number]["structures"][number];
+    return { id: p.id, role: pieceRole(p), prefab: p.prefab, choices: [], at: p.at, yaw: p.yaw, footprint: Math.min(20, Math.max(0.5, half ? Math.round(Math.hypot(half[0], half[1]) * 100) / 100 : 1)), scale: p.scale, lift: p.lift ?? 0, landmark: p.landmark ?? null, ...(p.on ? { on: p.on, ...(p.sink ? { sink: p.sink } : {}), ...(p.marker ? { marker: p.marker } : {}) } : {}), ...(p.onWall ? { onWall: p.onWall } : {}), ...(p.lean && p.lean.deg > 0 ? { lean: p.lean } : {}), ...(p.bedded ? { bedded: true } : {}), ...(p.belowGrade ? { belowGrade: true } : {}), ...(p.wet ? { wet: true } : {}), ...(p.y !== undefined ? { heldY: p.y } : {}), ...(p.cave ? { cave: p.cave } : {}), overrides: p.overrides ?? [] } as PlaceArchetype["pockets"][number]["structures"][number];
   });
   // L (Exiles' Bell 2026-10-24): spreadToFloor had multiplied the core walls' `at` by floor / fit (x1.8), so a chapel the
   // owner drew at [28,-4] stood 51 m out while the pieces beside it stood exactly: under a layout the walls stand where
@@ -667,6 +714,13 @@ export function withLayout(a: PlaceArchetype, l: PlaceLayout, info?: (prefab: st
     // "exactly one" holds before the layout applies — Ashen Vow 2026-10-24: a 1.1 m dyke declared 16 m) is dropped
     structures: k === 0 ? pieces : [], walls: [...p.walls.filter((w) => w.id !== "beacon").map((w) => (k === 0 ? exact(p, w) : w)).map((w) => (l.pieces.some((q) => q.landmark) && w.landmark ? { ...w, landmark: null } : w)), ...(k === 0 ? l.walls ?? [] : [])],
     dressing: p.dressing ? { ...p.dressing, props: [] } : null })) };
+}
+/** The quest piece standing `on` this layout piece, if any. L (r-go-flat north-flat 2026-11-11): the reward sword laid on the
+ *  anvil and the book on its slab were written as quest pieces `on` their hosts, and the plan emitted them as FLOOR items
+ *  (dress check: mount-mismatch, a surface prop on the floor); the host now joins the dressing plan as an item and the
+ *  quest item goes `on` it (the host prop needs a surface socket in its declaration). */
+export function questHost(l: { pieces: readonly { id: string; quest?: string; on?: string }[] }, id: string) {
+  return l.pieces.find((q) => q.quest && q.on === id);
 }
 /** Coverage both ways (gate 16 meets the layout): every design element made of a catalogue prop has a piece (or a ground
  *  patch); every piece / patch names an element that exists. structure:/creature:/terrain:/decal:/water:/text:/light:
@@ -919,6 +973,10 @@ export interface PlaceInput {
   surfaces?: string[];
   /** recipe.surfaces[].color by name: `wear` ground takes the darkest candidate. */
   surfaceColors?: Record<string, string>;
+  /** The world's seed and sea level (recipe.seed / seaLevel): a piece ON a boundary wall's cap reads that wall's tops from the wall
+   *  operator itself (buildWall seeds its jitter with the world seed). Omitted = 0. */
+  worldSeed?: number;
+  seaLevel?: number;
   /** The place's region ground skin (recipe regions[].ground on the chain place -> zone): layout wear / paving use it (wearSurface). */
   zoneGround?: Record<string, string> | null;
 }
@@ -1081,7 +1139,9 @@ export function cropEdge(C: NonNullable<PlaceLayout["crops"]>[number]): { points
  *  palette names) resolves the strip paint (CROP_SURFACES); without it the strips show only the tilled field. */
 export function expandCrops(L: PlaceLayout, origin: V2, front: V2, poi: string, notes: string[], opts: { surfaces?: string[]; world?: string } = {}): { layout: PlaceLayout; fields: CropField[] } {
   if (!L.crops?.length) return { layout: L, fields: [] };
-  const pieces = [...L.pieces], ground = [...L.ground], walls = [...(L.walls ?? [])], fields: CropField[] = [];
+  // the crop paint is the BASE layer: the layout's own ground entries paint over it (r-go-farms 2026-11-11: a red stain round a
+  // torn socket in a strip was painted first and the strip paint covered it)
+  const pieces = [...L.pieces], ground: PlaceLayout["ground"] = [], walls = [...(L.walls ?? [])], fields: CropField[] = [];
   const pick = (kind: keyof typeof CROP_SURFACES, named?: string): string | null => {
     if (named) return named; // a named surface the palette lacks is the ground compile's refusal (naming it)
     if (!opts.surfaces) return null;
@@ -1131,7 +1191,7 @@ export function expandCrops(L: PlaceLayout, origin: V2, front: V2, poi: string, 
     notes.push(`LAYOUT: crop ${C.id}: ${C.strips} strips (${s} sown${painted.sown ? ` ${painted.sown}` : ""}, ${C.strips - s - (C.bare ?? []).length} stubble${painted.stubble ? ` ${painted.stubble}` : ""}, ${(C.bare ?? []).length} bare${painted.bare ? ` ${painted.bare}` : ""}), ${stooks} stooks, ${edge ? `dyke ${C.edge!.height} m` : "no dyke"}${tracked ? " + track" : ""}, ${C.size[0]} x ${C.size[1]} m at yaw ${C.yaw}`);
     if (!opts.surfaces || Object.values(painted).some((x) => !x)) notes.push(`WARN: crop ${C.id}: strip paint unresolved (${Object.entries(painted).filter(([, x]) => !x).map(([k]) => k).join(", ") || "no palette given"}): those strips show only the tilled field`);
   }
-  return { layout: { ...L, pieces, ground, walls, crops: [] }, fields };
+  return { layout: { ...L, pieces, ground: [...ground, ...L.ground], walls, crops: [] }, fields };
 }
 
 /** CAMP RULES on a layout (Derek 2026-10-31; the same rules `dress check` holds plans to, packages/core dressing resolve.ts
@@ -1280,6 +1340,41 @@ export function stoneFamilyFaults(family: readonly string[] | null | undefined, 
     }
   }
   for (const f of foundations) if (f.material && !ok.has(f.material)) out.push(`STONE: building ${f.id} (${f.prefab}) stands on ${f.material}, not the place's stone family (${family.join(", ")})`);
+  return out;
+}
+
+/** A boundary wall as built: its runs (the same frame as the pieces), height and thickness. */
+export type StandardWall = { id: string; height: number; thickness: number; runs: V2[][] };
+/** A layout piece as the standard sees it: prefab, centre (same frame as the walls) and catalogue width x scale. */
+export type StandardPiece = { id: string; prefab: string; at: V2; width: number };
+/** STANDARD faults (placeStandardSchema): boundary wall numbers, railing cover per wall leg, a gate piece in a wall gap, denied
+ *  pieces. Pure: place-build passes the planned boundary walls and the layout pieces (stone colours are judged there). */
+export function standardFaults(std: PlaceStandard | null | undefined, walls: readonly StandardWall[], pieces: readonly StandardPiece[]): string[] {
+  if (!std) return [];
+  const out: string[] = [], tag = (s: string) => `STANDARD: ${s} (${std.about})`;
+  if (std.walls) for (const w of walls) {
+    if (w.thickness > std.walls.maxThickness + 1e-6) out.push(tag(`wall ${w.id} is ${w.thickness} m thick, the standard's most is ${std.walls.maxThickness} m: a low thin boundary wall`));
+    if (w.height > std.walls.maxHeight + 1e-6 || w.height < std.walls.minHeight - 1e-6) out.push(tag(`wall ${w.id} is ${w.height} m high, the standard wants ${std.walls.minHeight}-${std.walls.maxHeight} m`));
+  }
+  if (std.railing) {
+    const re = new RegExp(std.railing.match), rails = pieces.filter((q) => re.test(q.prefab));
+    for (const w of walls) {
+      // per LEG (each straight stretch of each run, >= 2 m): a bare side fails even when the wall's total is lined
+      for (const [ri, r] of w.runs.entries()) for (let i = 0; i + 1 < r.length; i++) {
+        const a = r[i]!, b = r[i + 1]!, len = Math.hypot(b[0] - a[0], b[1] - a[1]); if (len < 2) continue;
+        const lined = rails.filter((q) => segDist(q.at, a, b) <= std.railing!.near).reduce((n, q) => n + q.width, 0), share = Math.min(1, lined / len);
+        if (share < std.railing.cover) out.push(tag(`wall ${w.id} run ${ri + 1} leg ${i + 1} (${a.map((v) => Math.round(v * 10) / 10).join(",")} -> ${b.map((v) => Math.round(v * 10) / 10).join(",")}, ${Math.round(len * 10) / 10} m): railing sections (${std.railing.match}) line ${Math.round(share * 100)} %, the standard wants ${Math.round(std.railing.cover * 100)} %: railing sections end to end on the wall's centre line`));
+      }
+    }
+  }
+  if (std.gate) {
+    const re = new RegExp(std.gate.match), gates = pieces.filter((q) => re.test(q.prefab));
+    const ends = walls.flatMap((w) => w.runs.flatMap((r) => (r.length ? [r[0]!, r[r.length - 1]!] : [])));
+    const gaps: V2[] = []; for (let i = 0; i < ends.length; i++) for (let j = i + 1; j < ends.length; j++) { const d = Math.hypot(ends[i]![0] - ends[j]![0], ends[i]![1] - ends[j]![1]); if (d > 0.5 && d < 8) gaps.push([(ends[i]![0] + ends[j]![0]) / 2, (ends[i]![1] + ends[j]![1]) / 2]); }
+    if (!gates.length) out.push(tag(`no gate piece (${std.gate.match}) in the layout`));
+    else if (gaps.length && !gates.some((g) => gaps.some((c) => Math.hypot(g.at[0] - c[0], g.at[1] - c[1]) <= std.gate!.near))) out.push(tag(`gate ${gates.map((g) => g.id).join(", ")} stands in no gap of the boundary wall (within ${std.gate.near} m of the gap between two run ends)`));
+  }
+  for (const d of std.deny) { const re = new RegExp(d.match); for (const q of pieces) if (re.test(q.prefab)) out.push(tag(`${q.id} (${q.prefab}) is not allowed: ${d.why}`)); }
   return out;
 }
 
@@ -1486,7 +1581,10 @@ export const inGate = (gt: RouteGate, q: V2) => { const L = dist(gt.a, gt.b) || 
 export const GATE_LINE_M = 0.3;
 /** Distance from q to a wall run's footprint: the segment as a box `hw` either side, ending 0.2 m past each end (the
  *  wall operator's end pier spans -0.2 .. pierWidth - 0.2 along the line), so a gate gap keeps its square edges. */
-const boxDist = (q: V2, a: V2, b: V2, hw: number) => { const dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz) || 1, ux = dx / L, uz = dz / L, t = (q[0] - a[0]) * ux + (q[1] - a[1]) * uz, side = Math.abs((q[0] - a[0]) * -uz + (q[1] - a[1]) * ux);
+// L (n-chapel3 tide-chapel 2026-11-10): a zero-length run (a gate piece's side block, depth under its own radius) is a
+// disc of radius hw; with no direction its "side" was 0 everywhere, and every grid cell of every leg was blocked
+const boxDist = (q: V2, a: V2, b: V2, hw: number) => { if (!(Math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-9)) return Math.max(0, Math.hypot(q[0] - a[0], q[1] - a[1]) - hw);
+  const dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz) || 1, ux = dx / L, uz = dz / L, t = (q[0] - a[0]) * ux + (q[1] - a[1]) * uz, side = Math.abs((q[0] - a[0]) * -uz + (q[1] - a[1]) * ux);
   return Math.hypot(Math.max(0, t < 0 ? -t - 0.2 : t - L - 0.2), Math.max(0, side - hw)); };
 /** L (walk): a route leg is PLANNED over the ground, never drawn straight: A* on a 1 m grid round the leg, blocked by
  *  water, structures (footprint + 0.8 m), wall runs (their pier-wide footprint + 0.5 m: a body passes gates, never walls) and ground
@@ -1703,6 +1801,37 @@ export function gradePatch(id: string, pts: V2[], road: { width: number; maxGrad
   return { op, startY: r2(y0), levelY: r2(yF), grade: Math.round(grade * 1000) / 1000, cut: r2(cut), fill: r2(fill), lengthM: r2(L), faults };
 }
 
+/** A layout ground `hollow` (an impact hollow): ONE masked height patch over the natural ground, offset by a strike profile:
+ *  the floor `depth` m under the natural ground, level over HOLLOW_FLOOR of the radius, a smoothstep up, rising to a rim crest at `radius`
+ *  that stands `rim` m over the ground on its high stretches and breaks to ~45% of it elsewhere (seeded by the id), the crest
+ *  line wandering +-9% in radius, then falling back to the ground over `rimWidth` (smoothstep); weights fade over `feather`
+ *  beyond. Heights are absolute (natural + offset): slopes are the ground's own plus the profile's (inner face <= ~1.9 x
+ *  (depth + rim) / radius rise/run). Pure. L (r-go2 north-flat 2026-11-11). */
+/** Fraction of a hollow's radius that is level pit floor (the struck thing stands on it). */
+export const HOLLOW_FLOOR = 0.2;
+export function hollowPatch(id: string, c: V2, h: { radius: number; depth: number; rim: number; rimWidth: number; feather?: number }, g: Pick<PlaceGround, "height">) {
+  let seed = 0; for (const ch of id) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
+  const ph = [0, 1, 2, 3].map((i) => ((seed >>> (i * 7)) % 628) / 100);
+  const ss = (t: number) => { const u = Math.min(1, Math.max(0, t)); return u * u * (3 - 2 * u); };
+  const rimAt = (a: number) => h.rim * (0.45 + 0.55 * Math.min(1, Math.max(0, 0.5 + 0.3 * Math.sin(3 * a + ph[0]!) + 0.25 * Math.sin(5 * a + ph[1]!))));
+  const radAt = (a: number) => h.radius * (1 + 0.06 * Math.sin(2 * a + ph[2]!) + 0.03 * Math.sin(7 * a + ph[3]!));
+  const offset = (dx: number, dz: number) => {
+    const d = Math.hypot(dx, dz), a = Math.atan2(dz, dx), r = radAt(a), top = rimAt(a);
+    return d <= r ? -h.depth + (h.depth + top) * ss((d - HOLLOW_FLOOR * r) / ((1 - HOLLOW_FLOOR) * r)) : top * (1 - ss((d - r) / h.rimWidth));
+  };
+  const feather = h.feather ?? 4, reach = h.radius * 1.09 + h.rimWidth, R = Math.ceil((reach + feather + 2) / 2) * 2, step = 2, cols = Math.round((2 * R) / step) + 1;
+  const heights: number[] = [], weights: number[] = [];
+  let crest = 0, floor = 0, steep = 0;
+  for (let j = 0; j < cols; j++) for (let i = 0; i < cols; i++) {
+    const dx = -R + i * step, dz = -R + j * step, d = Math.hypot(dx, dz), o = offset(dx, dz);
+    crest = Math.max(crest, o); floor = Math.min(floor, o);
+    steep = Math.max(steep, Math.abs(offset(dx + 0.5, dz) - offset(dx - 0.5, dz)), Math.abs(offset(dx, dz + 0.5) - offset(dx, dz - 0.5)));
+    heights.push(r2(g.height(c[0] + dx, c[1] + dz) + o)); weights.push(r2(1 - ss((d - reach) / feather)));
+  }
+  const op = { edit: "add-feature", kind: "heightPatches", feature: { id, origin: [r2(c[0] - R), r2(c[1] - R)] as V2, size: [2 * R, 2 * R] as V2, columns: cols, rows: cols, heights, weights, blend: 2, edgeSlope: 0.6, filter: 2, calm: true } };
+  return { op, floorY: r2(g.height(c[0], c[1]) - h.depth), cut: r2(-floor), crest: r2(crest), profileSlope: r2(steep), reach: r2(reach) };
+}
+
 /** Plan a place: fit every pocket, level pads, place structures (catalogued prefabs), walls (wall operator), footpaths
  *  (path operator), clearings (L: cover cleared under every structure), creature clearings, a first dressing plan per
  *  pocket and the handoff (routes for poi-walk, siteDressing, measured size, viewpoints). Pure. */
@@ -1799,7 +1928,8 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       if (dist(w, keepIn.center) > keepIn.radius) why(q.id, `at ${q.at.join(",")} lies outside the usable area (${Math.round(dist(w, keepIn.center))} m from the reservation centre, ${Math.round(keepIn.radius)} m allowed)`);
       else if (!q.wet && (st.wet > 0 || g.wet(w[0], w[1]))) why(q.id, `at ${q.at.join(",")} stands in water (wet ground under its ${r2(r)} m footprint; wet: true on the piece if it is meant to)`);
       // a piece CUT INTO a slope or cliff (placeRule seat `set-in`: a temple front) has its back in the rock by design (o-gates 2026-10-30)
-      else if (q.kind !== "decal" && !q.on && !q.bedded && q.y === undefined && st.steep > USABLE_SLOPE && inp.placeRuleOf?.(q.prefab)?.seat !== "set-in") why(q.id, `at ${q.at.join(",")} stands on ground steeper than the usable slope (${r2(st.steep)} > ${USABLE_SLOPE} rise/run under its footprint)`);
+      // a piece ON a wall's cap (onWall) stands on the wall, never on the slope beside it (n-yard2 widows-cairn 2026-11-10)
+      else if (q.kind !== "decal" && !q.on && !q.onWall && !q.bedded && q.y === undefined && st.steep > USABLE_SLOPE && inp.placeRuleOf?.(q.prefab)?.seat !== "set-in") why(q.id, `at ${q.at.join(",")} stands on ground steeper than the usable slope (${r2(st.steep)} > ${USABLE_SLOPE} rise/run under its footprint)`);
       // the hero-prop size band: WARN, never a refusal (TOOLS-LAYOUT 5: a 4.8 m "bonfire" in a human camp)
       const sw = layoutSizeWarn(q, size); if (sw) notes.push(`WARN: piece ${q.id}: ${sw}`);
     }
@@ -1812,6 +1942,8 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
     notes.push(`LAYOUT: ${L.pieces.length} pieces placed as drawn (frame origin ${core.at.map(r2).join(",")}${L.origin ? ", pinned" : ", the site search's core"}), ${L.ground.length} ground patches; archetype structures, read.beacon and listed dressing props not added`);
   }
   const worldOps: unknown[] = [], operators: any[] = [], clearings: any[] = [], encounters: any[] = [], plans: any[] = [], areas: any[] = [];
+  /** pieces ON a boundary wall's cap (layout `onWall`): their y is set from the built wall's station tops before the plan returns */
+  const capPieces: { op: string; wall: string; w: V2; ang: number; half: number; ground: (x: number, z: number) => number; label: string }[] = [];
   const ops: any[] = [{ op: "add-entity", id: `poi-${poi}`, entity: { name: place.name, parent: null, tags, components: { transform: { position: [core.at[0], padY, core.at[1]] } } } }];
   const features: any[] = [], keepClear: any[] = [];
   let landmark: { at: V2; foot: number; top: number; fogReach: number } | null = null;
@@ -1872,8 +2004,10 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       // (seatStructure); a rock or a post is sunk instead. Fires and boats keep the ground at their centre.
       const planned = pocketGround;
       // a piece ON a built wall's walk (onWall: a brazier on a tower top) stands on the coping, never seated on the ground
-      const host = s.onWall ? p.walls.find((x) => x.id === s.onWall && ((x.kind !== "wall" && x.kind !== "curtain") || x.basin)) : undefined;
-      if (s.onWall && !host) faults.push(`structure ${p.id}.${s.id}: onWall ${s.onWall} is no tower / keep / gatehouse / basin kerb of the pocket`);
+      const host = s.onWall ? p.walls.find((x) => x.id === s.onWall && (x.kind !== "curtain" || x.basin)) : undefined;
+      if (s.onWall && !host) faults.push(`structure ${p.id}.${s.id}: onWall ${s.onWall} is no boundary wall / tower / keep / gatehouse / basin kerb of the pocket`);
+      // a BOUNDARY wall (kind wall) follows the ground: its cap is read from the wall operator once the walls are built (capPieces, below)
+      const capWall = host && host.kind === "wall" && !host.basin ? host : null;
       // a basin's kerb is written level at its basin's top (basinWater): a piece on it lies on the coping
       const kerbTop = host?.basin ? basinWater(host, toWorld(pk.at, front, host.at), front, pocketGround).topY : null;
       let w = toWorld(pk.at, front, s.at); const ang = yaw + (s.yaw * Math.PI) / 180;
@@ -1904,7 +2038,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       // where the ground falls past its footing), never by seatStructure, a seat pad or a hand `lift`; a spot it refuses is a fault
       // an OPEN base the legacy seat LEVELS (yards, courts, slabs: walk goals stand on them) keeps the legacy cut + fill: the
       // solver cannot level ground and would leave the slab up on the high side (coordinator 2026-10-30: walk MISS 1.38 m)
-      const legacySeat = base ? seatStructure(base, w, lean ? 0 : ang, planned, { rock: /^rock-kit\//.test(s.prefab) || !!lean || !!(s as { bedded?: boolean }).bedded /* a BEDDED piece sinks to its lowest ground like a rock (float holds it to that) */, sinkMax: s.role === "dwelling" ? 0 : SINK_MAX_M }) : null;
+      const legacySeat = base ? seatStructure(base, w, lean ? 0 : ang, planned, { rock: /^rock-kit\//.test(s.prefab) || !!lean || !!(s as { bedded?: boolean }).bedded /* a BEDDED piece sinks to its lowest ground like a rock (float holds it to that) */, sinkMax: s.role === "dwelling" ? 0 : SINK_MAX_M, ...(inp.propInfo?.(s.prefab)?.shelter ? { levelOver: SHELTER_LEVEL_M } : {}) }) : null;
       // a piece CUT INTO a slope (seat `set-in`) is always the solver's, and no legacy pad raises the plaza to the rock behind it (o-gates 2026-10-30)
       const setIn = inp.placeRuleOf?.(s.prefab)?.seat === "set-in";
       // L (r-found 2026-10-30, Derek: "a lot of the ruins are still hovering"): on the LEGACY seat a piece with a declared
@@ -1920,9 +2054,10 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       if (solved?.status === "dropped") faults.push(`structure ${p.id}.${s.id}: refused by the placement solver at its spot: ${solved.reason}`);
       else if (solved) { if (solved.status === "moved") w = [solved.x!, solved.z!]; for (const n of solved.notes) notes.push(`SOLVER: ${s.id} ${n}`);
         if (s.lift) notes.push(`SOLVER: ${s.id} layout lift ${s.lift} m ignored (the solver owns y: declare placeRule.grade on the prefab)`); }
-      const seat = base && !solved ? legacySeat : null, sy0 = r2(heldY !== undefined ? heldY : kerbTop != null ? kerbTop : host ? y + host.height + 0.3 : onY != null ? onY : solved && solved.status !== "dropped" ? solved.y! : seat ? seat.y : planned(w[0], w[1]));
+      const seat = base && !solved ? legacySeat : null, sy0 = r2(heldY !== undefined ? heldY : kerbTop != null ? kerbTop : capWall ? planned(w[0], w[1]) + capWall.height : host ? y + host.height + 0.3 - (s.sink ?? 0) : onY != null ? onY : solved && solved.status !== "dropped" ? solved.y! : seat ? seat.y : planned(w[0], w[1]));
       const sy = r2(sy0 + (solved ? 0 : s.lift ?? 0)); // raised foundations for a piece that asks for it (`lift`); a solver piece's grade is its own
       placed.set(s.id, { w, ang, y: sy, prefab: s.prefab, k: s.scale }); placedAll.set(s.id, placed.get(s.id)!);
+      if (capWall) capPieces.push({ op: `${poi}-${p.id}-${s.id}`, wall: `pb-${poi}-${p.id}-${capWall.id}`, w, ang, half: phalf ? phalf[0] : 0.5, ground: planned, label: `${p.id}.${s.id}` });
       // a FLOORED piece's legacy raise pad stands just under its floor slab (lift included): floorPadY (r-found 2026-10-31)
       const grade0 = Number((rule0 as { grade?: number } | null)?.grade ?? 0) * (s.scale ?? 1), raiseY = seat?.raise && !seat.level ? (grade0 > 0 ? floorPadY(sy, grade0, (inp.flatsOf?.(s.prefab) ?? []).filter((f) => f <= 1).map((f) => f * (s.scale ?? 1))) : seat.raise.y) : null;
       // DOOR STEPS (L Marrow's Farm 2026-10-30): a door raised over its ground gets a stone flight up to its sill (a ramp
@@ -1980,7 +2115,19 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       // approach had "no walkable way"
       const sz = inp.propInfo?.(s.prefab)?.size, hx = sz ? (sz[0]! * (s.scale ?? 1)) / 2 : 0, hz = sz ? (sz[2]! * (s.scale ?? 1)) / 2 : 0, longH = Math.max(hx, hz), shortH = Math.min(hx, hz);
       const footed = !!(inp.propInfo?.(s.prefab) as { footing?: number } | null)?.footing;
-      if (!host && !under && sz && longH > 6 && longH > 2.5 * shortH) {
+      // L (n-cairn widows-cairn 2026-11-10): a WALK-THROUGH gate structure (a lych gate, an arch: its placeRule declares an
+      // opening of kind `gate` through its local z) blocks only its two sides; its half-diagonal disc closed the dyke's gate
+      // and every route into the kirkyard had "no walkable way"
+      const gateOpen = !host && !under && sz ? ((inp.placeRuleOf?.(s.prefab) as { openings?: { kind: string; width: number }[] } | null)?.openings ?? []).find((o) => o.kind === "gate") : undefined;
+      // L (r-go-crown2 crown-hill 2026-11-11): the opening is prop-local metres and scales with the piece, like the solver's
+      // keep-outs (keepOutsFromOpenings): a dragon rib arch at x2 kept its x1 opening and sealed the belly with 1.5 m posts
+      const gateSg = gateOpen ? walkThroughSegs(w, ang, hx, hz, gateOpen.width * (s.scale ?? 1)) : null;
+      if (gateSg) {
+        for (const sg of gateSg) { solidSegs.push(sg); bareSeg.set(sg, sg); }
+      } else if (!host && !under && sz && longH >= 2.5 && longH > 2.5 * shortH) {
+        // L (n-chapel3 tide-chapel 2026-11-10): a 12 m kit wall run (half 6.0, was `> 6`) and a 5 m nave wall bay are long
+        // pieces too: their half-diagonal discs filled a walled churchyard and closed a nave of butted bays to every route.
+        // Like a long one, only a footed piece carries the grade band on its capsule.
         const ax: V2 = hx >= hz ? [Math.cos(ang), -Math.sin(ang)] : [Math.sin(ang), Math.cos(ang)], e = longH - shortH;
         const sg: [V2, V2, number] = [[r2(w[0] - ax[0] * e), r2(w[1] - ax[1] * e)], [r2(w[0] + ax[0] * e), r2(w[1] + ax[1] * e)], r2(shortH + (footed ? PATH_GRADE_BAND_M : 0))];
         solidSegs.push(sg); bareSeg.set(sg, [sg[0], sg[1], r2(shortH)]);
@@ -2057,6 +2204,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       if (gf !== null && wl.gate) doc.openings = [{ name: "gate", at: r2(wl.gateSide === "back" && gb !== null ? gb : gf), width: Math.max(MIN_GATE_M, wl.gate), height: h }];
       // L (walk): a yard with pockets behind it gets a back gate, and its routes go through the gates
       if (gb !== null && wl.gate && wl.gateSide === "front" && yard && k === 0 && a.pockets.length > 1) doc.openings.push({ name: "back-gate", at: r2(gb), width: Math.max(MIN_GATE_M, Math.min(wl.gate, 3)), height: h });
+      if (wl.breach && wl.shape === "square" && gb !== null) (doc.openings ??= []).push({ name: "breach", at: r2(gb + wl.breach.at), width: wl.breach.width, height: h });
       if (wl.height > 3 && wl.shell !== "burnt" && !(wl.shape === "ring" && wl.size <= 4)) doc.buttresses = { every: 6, side: "both" }; // L: walls over 3 m get buttresses (a small round tower braces itself)
       if (doc.openings) doc.openings.sort((m: any, n: any) => m.at - n.at);
       // L (op-apply, shielings beacon 2026-10-21): a CLOSED smooth ring (no gate) fails the wall bake (its collider solids
@@ -2066,7 +2214,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
       // low yard wall (< 3.2 m) is a 1.4 m slot nobody walks through. Low walls get real gaps: one run between gates.
       if (doc.openings?.length && wl.height < 3.2) {
         const runs = cutRing(doc.points, doc.openings);
-        runs.forEach((run, ri) => { const { openings: _o, fog, ...rest } = doc; operators.push({ ...rest, ...(ri === 0 && fog ? { fog } : {}), id: `${doc.id}-${ri + 1}`, points: run, smooth: false, ends: { start: "pier", end: "pier" } }); });
+        runs.forEach((run, ri) => { const { openings: _o, fog, ...rest } = doc; operators.push({ ...rest, ...(ri === 0 && fog ? { fog } : {}), id: `${doc.id}-${ri + 1}`, points: run, smooth: false, ends: a.standard?.walls?.piers === false ? { start: "none", end: "none" } : { start: "pier", end: "pier" } }); });
       } else operators.push(doc);
     });
     if (p.dressing) {
@@ -2130,6 +2278,7 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
         }
         continue;
       }
+      if (q.kind === "hollow") continue; // the ground itself: a height patch place-build applies before the pieces seat (hollowPatch)
       const surface = q.texture ? (inp.surfaces && !inp.surfaces.includes(q.texture) ? null : q.texture) : inp.surfaces ? wearSurface(q.kind, inp.surfaces, inp.world, inp.zone, inp.surfaceColors, inp.zoneGround) : WEAR_SURFACES[q.kind].at(-1)!;
       if (!surface) { faults.push(`LAYOUT: ground ${q.id}: no ${q.kind} surface in the world palette (${q.texture ? `texture ${q.texture} is not a recipe surface` : `tried ${WEAR_SURFACES[q.kind].map((x) => x.replace("{w}", inp.world).replace("{z}", inp.zone)).join(", ")}`})`); continue; }
       if (q.streaks) { // narrow strips down the fall line from the seep line, faces painted (never a disc)
@@ -2389,14 +2538,22 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
     // a layout piece naming the slot (`pieces[].quest`) puts the quest entity at its own spot (Exiles' Bell 2026-10-24: the
     // mending board landed at the plan's auto spot, not where the owner drew it)
     const piece = L?.pieces.find((x) => x.quest === q.id && !refused.has(x.id));
-    const prop = a.quest[q.id] ?? piece?.prefab, plan = plans.find((d) => d.id === `${poi}-core`) ?? plans[0];
+    // a quest piece `on` a host goes into the host's pocket's plan (one floor band per plan: a host on a slope 10 m from the
+    // core's centre fell outside the core map's +-0.9 m band)
+    const hostOf = piece?.on ? L?.pieces.find((x) => x.id === piece.on) : undefined;
+    const prop = a.quest[q.id] ?? piece?.prefab, plan = plans.find((d) => d.id === `${poi}-${hostOf?.pocket ?? piece?.pocket ?? "core"}`) ?? plans.find((d) => d.id === `${poi}-core`) ?? plans[0];
     if (!prop) { faults.push(`quest object ${q.id} (${q.kind}${q.what ? `: ${q.what}` : ""}) has no prop: --set quest.${q.id}=<catalogued prop>`); continue; }
     if (!plan) { faults.push(`quest object ${q.id}: the place has no dressing plan to hold it`); continue; }
     // FIRST in the plan: the quest entity claims its room before the loose dressing (RETTING 2026-10-23: appended last, the
     // quest stook was the item dropped `no room on the socket map` and the binding had no entity)
     const w = piece ? layoutWorld.get(piece.id)!.w : null, deg = piece ? ((((yaw * 180) / Math.PI + piece.yaw) % 360) + 360) % 360 : 0;
-    plan.items.unshift({ id: q.id, prop, place: w ? { kind: "floor", level: 0, at: [r2(w[0]), r2(w[1])], yaw: r2(deg) } : { kind: "auto", room: Object.keys(plan.rooms)[0], prefer: "open" }, quest: { entity: q.id } });
-    notes.push(`quest object ${q.id} = ${prop} (plan ${plan.id}${piece ? `, at layout piece ${piece.id}` : ""})`);
+    const host = piece?.on ? L!.pieces.find((x) => x.id === piece.on && !x.quest && !refused.has(x.id)) : undefined;
+    if (host) {
+      const hw = layoutWorld.get(host.id)!.w, hdeg = ((((yaw * 180) / Math.PI + host.yaw) % 360) + 360) % 360;
+      plan.items.unshift({ id: q.id, prop, place: { kind: "on", item: host.id, socket: "", yaw: r2((((deg - hdeg) % 360) + 360) % 360) }, quest: { entity: q.id } });
+      plan.items.unshift({ id: host.id, prop: host.prefab, place: { kind: "floor", level: 0, at: [r2(hw[0]), r2(hw[1])], yaw: r2(hdeg) } });
+    } else plan.items.unshift({ id: q.id, prop, place: w ? { kind: "floor", level: 0, at: [r2(w[0]), r2(w[1])], yaw: r2(deg) } : { kind: "auto", room: Object.keys(plan.rooms)[0], prefer: "open" }, quest: { entity: q.id } });
+    notes.push(`quest object ${q.id} = ${prop} (plan ${plan.id}${piece ? `, at layout piece ${piece.id}` : ""}${host ? `, on ${host.id} (a dressing item of the plan)` : ""})`);
   }
   for (const x of L?.pieces ?? []) if (x.quest && !(inp.questObjects ?? []).some((q) => q.id === x.quest)) notes.push(`LAYOUT: piece ${x.id}: quest ${x.quest}: the quest plan declares no object ${x.quest} here (placed nowhere)`);
   for (const id of Object.keys(a.quest)) if (!(inp.questObjects ?? []).some((q) => q.id === id)) notes.push(`quest.${id}: the quest plan declares no object ${id} here (ignored)`);
@@ -2468,6 +2625,23 @@ export function planPlace(a: PlaceArchetype, inp: PlaceInput, g: PlaceGround): P
     landmark: lm ? { at: [r2(lm.at[0]), r2(lm.at[1])], foot: r2(lm.foot), top: r2(lm.top), fogReach: lm.fogReach } : null, smoke: smokes,
     read: { ...a.read, band, approachLine: near && near.d > core.radius + 6 ? near.line : null }, viewpoints: views, populateClearings: encounters.map((e) => e.id),
   };
+  // CAP PIECES (layout `onWall` on a boundary wall): the base stands on the wall's own cap, read from the wall operator's
+  // station tops (buildWall on the planned ground, the world seed) under the piece's span: the LOWEST top there, 0.03 m in, so
+  // no end hovers; the higher end runs into the wall body (a railing card's bars run down into the wall)
+  for (const cp of capPieces) {
+    const runs = operators.filter((o: any) => o.op === "wall" && (o.id === cp.wall || String(o.id).startsWith(`${cp.wall}-`)));
+    const reader = { height: (x: number, z: number) => cp.ground(x, z), voxelSize: 2, seaLevel: inp.seaLevel ?? 0, seed: inp.worldSeed ?? 0 };
+    const ax: V2 = [Math.cos(cp.ang), -Math.sin(cp.ang)], reach = cp.half + 0.3;
+    const under: number[] = [];
+    for (const o of runs) { let tops: [number, number, number][] = []; try { tops = ((buildWall(operatorParams(o), reader as never, { id: String(o.id) }).report as { tops?: [number, number, number][] }).tops) ?? []; } catch (e) { faults.push(`structure ${cp.label}: onWall: the wall ${o.id} did not build for its cap (${(e as Error).message})`); }
+      for (const t of tops) { const dx = t[0] - cp.w[0], dz = t[1] - cp.w[1], along = dx * ax[0] + dz * ax[1], off = Math.abs(dx * -ax[1] + dz * ax[0]); if (Math.abs(along) <= reach && off <= 0.6) under.push(t[2]); } }
+    const op = ops.find((o: any) => o.op === "add-entity" && o.id === cp.op);
+    if (!under.length) { faults.push(`structure ${cp.label}: onWall: no cap of ${cp.wall} under it (stand it on the wall's centre line, yaw along the wall)`); continue; }
+    const capY = Math.min(...under) - 0.03, spread = Math.max(...under) - Math.min(...under);
+    if (op) { op.entity.components.transform.position[1] = r2(capY - padY); if (!op.entity.tags.includes("wall-cap")) op.entity.tags.push("wall-cap"); } // `wall-cap`: the lab re-seat keeps it on the cap
+    if (spread > 0.6) notes.push(`WARN: ${cp.label} on ${cp.wall}: the cap rises ${r2(spread)} m along its span (a shorter section or a stepped wall reads better)`);
+  }
+  if (capPieces.length) notes.push(`CAP: ${capPieces.length} piece(s) stand on boundary wall caps (onWall)`);
   notes.push(`TIER: built ${place.size}${a.spreadMax !== undefined ? `; pockets within ${a.spreadMax} m of the core's pad (spreadMax)` : ""}`);
   return { centre: core.at, padY, front, yaw, faults, notes, pockets, worldOps, operators, clearings, encounters, ops, plans, handoff, propRequests, aerial, track, footpaths, requested, setViews, support };
 }

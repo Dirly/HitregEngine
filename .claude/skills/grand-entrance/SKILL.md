@@ -10,6 +10,7 @@ One owner, about 1% of the week's target. Pair with `site-standards` (the site),
 "Landmark stamp" and "Built landmarks".
 
 ## 1. Concept first
+- The exterior chain is enforced (`tools/poi-review/exterior-chain.mjs`): location -> `zonegen concept --renders-only` (bare render of the UNEDITED ground: the place's needs, patches, operators, clearings left out) -> `--paint-only` -> `zonegen concept-check <world> --project <p> --zone <z> --poi <id> --target <frame>`; until then `worldgen needs`/`op`, landmark bakes, installs, `dress apply`, site packs and any world write of the place refuse. Status: `zonegen exterior <world> --project <p>`. Only an owner ruling bypasses it: `--no-concept-ruling "YYYY-MM-DD <Derek's words, verbatim>"`.
 - Paint the concept frames ON THE SITE before any geometry: `node node_modules/tsx/dist/cli.mjs tools/zonegen.mts concept <world> --project <p> --zone <z> --poi <id>` (apps/playground)
   renders the bare site (approach at player height, far view from >= 300 m), Codex repaints each with the ground fixed,
   and the sheet prints the face height under the door, the apron and the read distance. A front taller than the

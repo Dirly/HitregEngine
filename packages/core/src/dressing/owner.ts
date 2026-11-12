@@ -29,11 +29,23 @@ export const ownerTransformSchema = z
     yaw: z.number().finite().optional().describe("Degrees about +Y the prop faces, in the same frame."),
     scale: z.number().positive().optional().describe("Uniform scale of the placed instance (1 = as catalogued)."),
     prop: z.string().min(1).optional().describe("Prefab id: set = swapped for this catalogue prop."),
+    rot: z
+      .tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()])
+      .optional()
+      .describe("Full rotation quaternion [x,y,z,w], present only when the entity is tilted (not turned about +Y alone); it wins over `yaw` when applied."),
+    scale3: xyz.optional().describe("Non-uniform scale [x,y,z], present only when the axes differ; it wins over `scale` when applied."),
+    components: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe(
+        "Other components as whole data (light, collider, vfx, script…). Under `set`: only the components the owner changed (each held whole). " +
+          "Under `from`: the entity's components when the owner first touched it. Owner-added entities keep all of theirs here.",
+      ),
   })
-  .describe("A placed prop's state as the owner left it (or as the agent had placed it, under `from`).");
+  .describe("An entity's state as the owner left it (or as the agent had placed it, under `from`): transform, prefab and, for any entity, its other components.");
 export type OwnerTransform = z.infer<typeof ownerTransformSchema>;
 
-export const OWNER_REASONS = ["floating", "sunk", "moved", "rotated", "scaled", "swapped", "deleted", "added"] as const;
+export const OWNER_REASONS = ["floating", "sunk", "moved", "rotated", "scaled", "swapped", "edited", "deleted", "added"] as const;
 export type OwnerReason = (typeof OWNER_REASONS)[number];
 
 export const ownerOverrideSchema = z
@@ -48,13 +60,33 @@ export const ownerOverrideSchema = z
     entity: z.string().optional().describe("Scene entity id an owner-added prop is installed under (kept so the editor's id survives a re-apply)."),
     room: z.string().optional().describe("Plan file, owner-added: the map room it belongs to (its culling group); \"\" or omitted = outdoors."),
     from: ownerTransformSchema.optional().describe("What the agent had placed before the owner's first edit: the learning signal compares the two."),
-    reasons: z.array(z.enum(OWNER_REASONS)).default([]).describe("Reason classes (ownerReasons): floating = moved down, sunk = moved up, moved, rotated, scaled, swapped, deleted, added."),
+    reasons: z.array(z.enum(OWNER_REASONS)).default([]).describe("Reason classes (ownerReasons): floating = moved down, sunk = moved up, moved, rotated, scaled, swapped, edited (a component other than transform/prefab), deleted, added."),
+    ownerProps: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Scene file: the properties the OWNER set and still holds (pos, rot, scale, prop, component:<name>; `*` = the whole entity: he added or deleted it). " +
+          "Precedence is owner > agent > generator: an agent edit touching one of these is refused unless it names the note it answers (editScene `answers`).",
+      ),
+    overrodeOwner: z
+      .array(z.string())
+      .optional()
+      .describe("Scene file: owner-held properties the latest AGENT edit overrode on purpose, answering `note`. The owner's next edit of the entity wins again."),
+    builder: z
+      .string()
+      .optional()
+      .describe("Scene file: the builder that owned the entity at the first edit (its `built:<builder>` tag). Only that builder's scene-sync applies it; none = any builder may match it."),
+    name: z.string().optional().describe("Scene file: the entity's name at the first edit (matching a non-prop entity by kind + place when its id changed)."),
+    kind: z.array(z.string()).optional().describe("Scene file: the entity's component names at the first edit (sorted): its kind when it has no prefab."),
+    parent: z.string().nullable().optional().describe("Scene file, owner-added: the parent entity the owner put it under."),
+    tags: z.array(z.string()).optional().describe("Scene file, owner-added: the entity's tags (re-added with them)."),
     by: z.string().default("owner"),
     at: z.string().default("").describe("ISO time of the last edit."),
     note: z.string().default("").describe("Why, in the owner's words, when given."),
   })
   .superRefine((o, ctx) => {
-    if (o.added && (!o.set.prop || !o.set.pos)) ctx.addIssue({ code: "custom", path: ["set"], message: "an owner-added prop needs set.prop and set.pos" });
+    if (o.added && !o.deleted && (!o.set.pos || (!o.set.prop && !o.set.components)))
+      ctx.addIssue({ code: "custom", path: ["set"], message: "an owner-added entity needs set.pos and set.prop (a prop) or set.components (anything else)" });
   });
 export type OwnerOverride = z.infer<typeof ownerOverrideSchema>;
 
@@ -112,9 +144,27 @@ export function ownerReasons(o: { set: OwnerTransform; from?: OwnerTransform; de
     else if (dy > MOVE_EPS) out.push("sunk");
     if (Math.hypot(s.pos[0] - f.pos[0], s.pos[2] - f.pos[2]) > MOVE_EPS) out.push("moved");
   }
-  if (s.yaw !== undefined && f?.yaw !== undefined && angleDiff(s.yaw, f.yaw) > YAW_EPS) out.push("rotated");
-  if (s.scale !== undefined && Math.abs(s.scale - (f?.scale ?? 1)) > SCALE_EPS) out.push("scaled");
+  if ((s.yaw !== undefined && f?.yaw !== undefined && angleDiff(s.yaw, f.yaw) > YAW_EPS) || (f && !sameRot(s.rot, f.rot, 0.0005))) out.push("rotated");
+  if ((s.scale !== undefined && Math.abs(s.scale - (f?.scale ?? 1)) > SCALE_EPS) || (s.scale3 && f && !sameXyz(s.scale3, f.scale3 ?? [f.scale ?? 1, f.scale ?? 1, f.scale ?? 1], SCALE_EPS)))
+    out.push("scaled");
+  if (s.components && Object.keys(s.components).some((k) => !sameJson(s.components![k], f?.components?.[k]))) out.push("edited");
   return out;
+}
+
+const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+const sameXyz = (a: readonly number[] | undefined, b: readonly number[] | undefined, eps: number): boolean =>
+  !a || !b ? !a === !b : a.every((v, i) => Math.abs(v - (b[i] ?? 0)) <= eps);
+/** Same rotation (q and -q are the same turn); both absent = same; one absent = the other must be a pure yaw, so different. */
+function sameRot(a: readonly number[] | undefined, b: readonly number[] | undefined, eps: number): boolean {
+  if (!a || !b) return !a === !b;
+  const dot = Math.abs(a[0]! * b[0]! + a[1]! * b[1]! + a[2]! * b[2]! + a[3]! * b[3]!);
+  return dot >= 1 - eps;
+}
+/** Same component set and data; undefined and {} are the same. */
+function sameComponents(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+  const ka = Object.keys(a ?? {}), kb = Object.keys(b ?? {});
+  if (ka.length !== kb.length) return false;
+  return ka.every((k) => k in (b ?? {}) && sameJson(a![k], b![k]));
 }
 
 /** True when `set` is the same state as `from` (an edit undone back to what the agent placed). */
@@ -124,6 +174,10 @@ export function sameOwnerTransform(a: OwnerTransform, b: OwnerTransform | undefi
   if (a.pos && b.pos && a.pos.some((v, i) => Math.abs(v - b.pos![i]!) > 0.005)) return false;
   if (a.yaw !== undefined && b.yaw !== undefined && angleDiff(a.yaw, b.yaw) > 0.25) return false;
   if (Math.abs((a.scale ?? 1) - (b.scale ?? 1)) > 0.001) return false;
+  if ((a.rot || b.rot) && !sameRot(a.rot, b.rot, 1e-5)) return false;
+  if ((a.scale3 || b.scale3) && !sameXyz(a.scale3, b.scale3, 0.001)) return false;
+  // components are compared only when both sides carry them (a prop-only state never says anything about lights)
+  if (a.components !== undefined && b.components !== undefined && !sameComponents(a.components, b.components)) return false;
   return true;
 }
 
@@ -140,6 +194,55 @@ export interface OwnerEdit {
   /** True when the item is not the plan's / installer's own (a duplicate, a prop dropped in by the owner). */
   ownerAdded?: boolean;
   note?: string;
+  /** Scene file: the entity's `built:<builder>` owner, its name, component kinds (sorted), and (owner-added) parent + tags. */
+  builder?: string;
+  name?: string;
+  kind?: string[];
+  parent?: string | null;
+  tags?: string[];
+  /** An agent edit: the owner-held properties it overrides on purpose (ownerConflicts), answering `note`. */
+  overrideOwner?: string[];
+}
+
+// ---- precedence: owner > agent > generator ------------------------------------------------------
+
+/** The properties two states differ in: pos, rot, scale, prop, component:<name>; `*` when one side does not exist. */
+export function changedProps(before: OwnerTransform | null | undefined, after: OwnerTransform | null | undefined): string[] {
+  if (!before || !after) return before === after ? [] : ["*"];
+  const out: string[] = [];
+  if (before.pos && after.pos && before.pos.some((v, i) => Math.abs(v - after.pos![i]!) > 0.005)) out.push("pos");
+  if ((before.yaw !== undefined && after.yaw !== undefined && angleDiff(before.yaw, after.yaw) > 0.25) || ((before.rot || after.rot) && !sameRot(before.rot, after.rot, 1e-5))) out.push("rot");
+  if (Math.abs((before.scale ?? 1) - (after.scale ?? 1)) > 0.001 || ((before.scale3 || after.scale3) && !sameXyz(before.scale3, after.scale3, 0.001))) out.push("scale");
+  if ((before.prop ?? "") !== (after.prop ?? "") && after.prop !== undefined) out.push("prop");
+  if (before.components && after.components)
+    for (const k of new Set([...Object.keys(before.components), ...Object.keys(after.components)])) if (!sameJson(before.components[k], after.components[k])) out.push(`component:${k}`);
+  return out;
+}
+
+/** What a record changes relative to what was there (`from`), as property names. */
+export function recordProps(o: Pick<OwnerOverride, "set" | "from" | "added" | "deleted">): string[] {
+  if (o.added || o.deleted) return ["*"];
+  const s = o.set, f = o.from;
+  if (!f) return [...(s.pos ? ["pos"] : []), ...(s.yaw !== undefined || s.rot ? ["rot"] : []), ...(s.scale !== undefined || s.scale3 ? ["scale"] : []), ...(s.prop ? ["prop"] : []), ...Object.keys(s.components ?? {}).map((k) => `component:${k}`)];
+  const props = changedProps(f, { ...f, ...s, components: f.components ? { ...f.components, ...s.components } : undefined });
+  for (const k of Object.keys(s.components ?? {})) if (!props.includes(`component:${k}`) && !sameJson(s.components![k], f.components?.[k])) props.push(`component:${k}`);
+  return props;
+}
+
+/** The properties the owner holds on a record (records made before `ownerProps` existed: everything an owner record changes). */
+export function ownerHeld(o: OwnerOverride | undefined): string[] {
+  if (!o) return [];
+  return o.ownerProps ?? (o.by === "owner" ? recordProps(o) : []);
+}
+
+/** The owner-held properties an edit (before -> after) would change: an agent may change them only on purpose. */
+export function ownerConflicts(o: OwnerOverride | undefined, before: OwnerTransform | null, after: OwnerTransform | null): string[] {
+  const held = ownerHeld(o);
+  if (!held.length) return [];
+  const changed = changedProps(before, after);
+  if (!changed.length) return [];
+  if (held.includes("*") || changed.includes("*")) return held;
+  return held.filter((p) => changed.includes(p));
 }
 
 /**
@@ -174,6 +277,29 @@ export function recordOwnerEdit(file: OwnerOverrides, edit: OwnerEdit, at = new 
     };
   }
   if (next) {
+    // components: the owner holds only those he changed (each whole); an owner-added entity keeps all of its own
+    if (!added && next.set.components) {
+      const kept = Object.fromEntries(Object.entries(next.set.components).filter(([k, v]) => !sameJson(v, from?.components?.[k])));
+      if (Object.keys(kept).length) next.set.components = kept;
+      else delete next.set.components;
+    }
+    // what identifies the entity when its id changes (scene-sync matches by kind + place), kept from the first edit
+    const keep = {
+      builder: prev?.builder ?? edit.builder,
+      name: prev?.name ?? edit.name,
+      kind: prev?.kind ?? edit.kind,
+      ...(added ? { parent: edit.parent !== undefined ? edit.parent : prev?.parent, tags: edit.tags ?? prev?.tags } : {}),
+    };
+    for (const [k, v] of Object.entries(keep)) if (v !== undefined) (next as Record<string, unknown>)[k] = v;
+    // precedence: the owner holds what he set (his newest edit wins again); an agent edit keeps his holdings except the
+    // ones it overrode on purpose (`overrideOwner`, answering `note`)
+    if (by === "owner") next.ownerProps = recordProps(next);
+    else {
+      const over = edit.overrideOwner ?? [];
+      const held = ownerHeld(prev).filter((p) => !over.includes(p) && !over.includes("*"));
+      if (held.length) next.ownerProps = held;
+      if (over.length) next.overrodeOwner = over;
+    }
     next.reasons = ownerReasons(next);
     if (!next.from) delete next.from;
     overrides.push(next);
@@ -320,7 +446,15 @@ export function mapToScene(frame: ApplyFrame, t: OwnerTransform): OwnerTransform
     out.pos = [frame.at[0] + lx * c + lz * s, frame.at[1] + ly, frame.at[2] - lx * s + lz * c];
   }
   if (t.yaw !== undefined) out.yaw = t.yaw + frame.yaw;
+  if (t.rot) out.rot = yawTimes(frame.yaw, t.rot);
   return out;
+}
+
+/** The quaternion of a turn by `deg` about +Y, times q (the turn applied after q). */
+function yawTimes(deg: number, q: readonly number[]): [number, number, number, number] {
+  const h = (deg * DEG) / 2, s = Math.sin(h), c = Math.cos(h);
+  const [x, y, z, w] = q as [number, number, number, number];
+  return [c * x + s * z, c * y + s * w, c * z - s * x, c * w - s * y].map((v) => +v.toFixed(6)) as [number, number, number, number];
 }
 
 /** Scene -> map-local: the inverse of mapToScene. */
@@ -332,6 +466,7 @@ export function sceneToMap(frame: ApplyFrame, t: OwnerTransform): OwnerTransform
     out.pos = [dx * c - dz * s, t.pos[1] - frame.at[1], dx * s + dz * c].map((v) => +v.toFixed(4)) as [number, number, number];
   }
   if (t.yaw !== undefined) out.yaw = +((((t.yaw - frame.yaw) % 360) + 540) % 360 - 180).toFixed(3);
+  if (t.rot) out.rot = yawTimes(-frame.yaw, t.rot);
   return out;
 }
 
@@ -396,16 +531,59 @@ interface SceneEntityLike {
 const yawOfQuat = (q: readonly number[] | undefined): number => (q ? (2 * Math.atan2(q[1] ?? 0, q[3] ?? 1)) / DEG : 0);
 const quatOfYaw = (deg: number): [number, number, number, number] => [0, +Math.sin((deg * DEG) / 2).toFixed(6), 0, +Math.cos((deg * DEG) / 2).toFixed(6)];
 
-/** A scene entity's owner-visible state (position, yaw degrees, uniform scale, prefab id). */
-export function entityOwnerState(e: SceneEntityLike): OwnerTransform {
+/**
+ * A scene entity's owner-visible state (position, yaw degrees, uniform scale, prefab id; `rot` / `scale3` only when it
+ * is tilted / non-uniformly scaled). `components: true` adds every other component whole (any-entity edits).
+ */
+export function entityOwnerState(e: SceneEntityLike, opts: { components?: boolean } = {}): OwnerTransform {
   const t = (e.components["transform"] ?? {}) as { position?: number[]; rotation?: number[]; scale?: number[] };
   const prefab = e.components["prefab"] as { prefabId?: string } | undefined;
-  return {
+  const q = t.rotation, sc = t.scale ?? [1, 1, 1];
+  const tilted = !!q && (Math.abs(q[0] ?? 0) > 1e-4 || Math.abs(q[2] ?? 0) > 1e-4);
+  const uneven = Math.abs((sc[1] ?? 1) - (sc[0] ?? 1)) > 1e-4 || Math.abs((sc[2] ?? 1) - (sc[0] ?? 1)) > 1e-4;
+  const out: OwnerTransform = {
     pos: (t.position ?? [0, 0, 0]).map((v) => +(+v).toFixed(4)) as [number, number, number],
     yaw: +yawOfQuat(t.rotation).toFixed(3),
-    scale: +(t.scale?.[0] ?? 1).toFixed(4),
+    scale: +(sc[0] ?? 1).toFixed(4),
     ...(prefab?.prefabId ? { prop: prefab.prefabId } : {}),
   };
+  if (tilted) out.rot = q!.map((v) => +(+v).toFixed(6)) as [number, number, number, number];
+  if (uneven) out.scale3 = sc.map((v) => +(+v).toFixed(4)) as [number, number, number];
+  if (opts.components) {
+    const rest = Object.fromEntries(Object.entries(e.components).filter(([k]) => k !== "transform" && k !== "prefab").map(([k, v]) => [k, structuredClone(v)]));
+    out.components = rest;
+  }
+  return out;
+}
+
+/**
+ * Put an owner/agent state onto an entity doc (mutates `e`): transform fields that are set, a swapped prefab (its
+ * props/overrides kept only when the prefab is the same), and every component the state holds.
+ */
+export function applyOwnerState(e: SceneEntityLike, s: OwnerTransform): void {
+  const t = { ...((e.components["transform"] ?? {}) as Record<string, unknown>) };
+  if (s.pos) t["position"] = [...s.pos];
+  if (s.rot) t["rotation"] = [...s.rot];
+  else if (s.yaw !== undefined) t["rotation"] = quatOfYaw(s.yaw);
+  if (s.scale3) t["scale"] = [...s.scale3];
+  else if (s.scale !== undefined) t["scale"] = [s.scale, s.scale, s.scale];
+  if (s.pos || s.rot || s.yaw !== undefined || s.scale3 || s.scale !== undefined) e.components["transform"] = t;
+  const pf = e.components["prefab"] as Record<string, unknown> | undefined;
+  if (s.prop && pf && pf["prefabId"] !== s.prop) e.components["prefab"] = { prefabId: s.prop, props: {}, overrides: [] };
+  for (const [k, v] of Object.entries(s.components ?? {})) e.components[k] = structuredClone(v);
+}
+
+/** The entity an owner-added record re-creates. */
+export function ownerAddedEntity(o: OwnerOverride, parentExists: (id: string) => boolean): SceneEntityLike {
+  const s = o.set;
+  const e: SceneEntityLike = {
+    name: o.name ?? (s.prop ? `${s.prop}` : o.item),
+    parent: o.parent && parentExists(o.parent) ? o.parent : null,
+    tags: o.tags ?? ["owner-added"],
+    components: { transform: { position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] }, ...(s.prop ? { prefab: { prefabId: s.prop } } : {}) },
+  };
+  applyOwnerState(e, s);
+  return e;
 }
 
 type SceneOp =
@@ -427,41 +605,29 @@ export function sceneOwnerOps(doc: { entities: Record<string, SceneEntityLike> }
       if (e && !(e.parent && file.overrides.some((p) => p.deleted && (p.entity ?? p.item) === e.parent))) ops.push({ op: "remove-entity", id });
       continue;
     }
-    const s = o.set;
     if (!e) {
       if (!o.added) continue; // the installer no longer places it: stale
-      ops.push({
-        op: "add-entity",
-        id,
-        entity: {
-          name: `${s.prop}`,
-          parent: null,
-          tags: ["owner-added"],
-          components: { transform: { position: [...s.pos!], rotation: quatOfYaw(s.yaw ?? 0), scale: [s.scale ?? 1, s.scale ?? 1, s.scale ?? 1] }, prefab: { prefabId: s.prop! } },
-        },
-      });
+      const parentOk = (p: string) => p in doc.entities || ops.some((x) => x.op === "add-entity" && x.id === p);
+      ops.push({ op: "add-entity", id, entity: ownerAddedEntity(o, parentOk) });
       continue;
     }
-    const cur = entityOwnerState(e);
-    if (sameOwnerTransform({ ...cur, ...s }, cur)) continue;
-    const t = (e.components["transform"] ?? {}) as Record<string, unknown>;
-    ops.push({
-      op: "set-component",
-      id,
-      component: "transform",
-      data: {
-        ...t,
-        ...(s.pos ? { position: [...s.pos] } : {}),
-        ...(s.yaw !== undefined ? { rotation: quatOfYaw(s.yaw) } : {}),
-        ...(s.scale !== undefined ? { scale: [s.scale, s.scale, s.scale] } : {}),
-      },
-    });
-    if (s.prop && s.prop !== cur.prop && e.components["prefab"]) {
-      const pf = e.components["prefab"] as Record<string, unknown>;
-      ops.push({ op: "set-component", id, component: "prefab", data: { prefabId: s.prop, ...(pf["props"] ? { props: pf["props"] } : {}) } });
-    }
+    ops.push(...entityStateOps(id, e, o.set));
   }
   return ops;
+}
+
+/** set-component ops that bring entity `e` to state `s` (nothing for what already matches). */
+export function entityStateOps(id: string, e: SceneEntityLike, s: OwnerTransform): SceneOp[] {
+  const next: SceneEntityLike = { ...e, components: { ...e.components } };
+  applyOwnerState(next, s);
+  const out: SceneOp[] = [];
+  for (const [k, v] of Object.entries(next.components)) {
+    if (v === e.components[k]) continue;
+    if (k === "transform" && sameOwnerTransform(entityOwnerState(next), entityOwnerState(e))) continue;
+    if (JSON.stringify(v) === JSON.stringify(e.components[k])) continue;
+    out.push({ op: "set-component", id, component: k, data: v });
+  }
+  return out;
 }
 
 // ---- scale range ---------------------------------------------------------------

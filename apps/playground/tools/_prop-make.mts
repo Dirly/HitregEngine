@@ -213,11 +213,17 @@ export function variant(ctx: MakeCtx, src: string, id: string, o: VariantOpts) {
     if (t && fs.existsSync(t)) texel = `${(pngSize(t)[0]! / o.triplanar).toFixed(1)} texels/m (triplanar ${o.triplanar} m per tile)`;
   } else matId = o.material!;
   for (const [, e] of hits) e.components.mesh.material = matId;
+  // a prefab PROP bound to a re-skinned mesh's material (ruin-props' `material`, default carved-stone) would re-apply its
+  // old default over the new skin at expand time: point its default at the variant's material too (r-go-scarp2
+  // 2026-11-11: variant-props/wall-plain-redstone drew in the grey source stone)
+  const hitIds = new Set(hits.map(([k]) => k));
+  const props = structuredClone(doc.props ?? {}) as Record<string, { default?: unknown; bindings?: string[] }>;
+  for (const p of Object.values(props)) if ((p.bindings ?? []).some((b) => { const [ent, , comp, field] = b.split("/"); return hitIds.has(ent!) && comp === "mesh" && field === "material"; })) p.default = matId;
   const root = ents[rootId];
   delete root.components.dressing;
   root.name = name;
   root.tags = [...new Set([...(root.tags ?? []), "prop-variant"])];
-  writeJson(prefabFile(ctx.assets, id), { ...doc, name, root: rootId, entities: ents });
+  writeJson(prefabFile(ctx.assets, id), { ...doc, name, root: rootId, entities: ents, ...(doc.props ? { props } : {}) });
   const size = sizeOf(ctx, id);
   const base = sourceDecl(ctx, src);
   const decl = { ...(base ?? { mount: "floor", against: "free" }), size, ...(o.decl ?? {}) };

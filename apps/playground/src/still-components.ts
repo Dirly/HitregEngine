@@ -22,6 +22,8 @@ export const STILL_COMPONENTS: ReadonlySet<string> = new Set([
   "placeStream",
   // scene-level data, never on a moving thing
   "cullingProfile", "loadingScreen", "pathScatter",
+  // finite dry interiors only mask water; they never move their owning hull
+  "waterExclusion",
 ]);
 
 /**

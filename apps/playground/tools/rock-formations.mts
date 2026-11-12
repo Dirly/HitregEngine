@@ -33,6 +33,7 @@ import {
   registerCoreComponents,
   meshDensity,
   rockFormations,
+  reduceSplatTop4,
   worldRecipeSchema,
   type Op,
   type VoxelMesh,
@@ -154,7 +155,7 @@ for (const [i, doc] of result.docs.entries()) {
   console.log(`wrote ${file}`);
   if (bake) {
     const glb = join(assets, "models", "rock-formations", `${ids[i]}.glb`);
-    writeGlb(baked[i]!, glb);
+    writeGlb(reduceSplatTop4(baked[i]!), glb); // + _SPLATINDEX/_SPLATTOP: an indexed terrain material (a deep palette) reads these
     console.log(`wrote ${glb} (${(statSync(glb).size / 1024).toFixed(0)} KB)`);
   }
 }

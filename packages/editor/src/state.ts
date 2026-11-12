@@ -418,6 +418,8 @@ export interface Pin {
   entityId: string | null;
   text: string;
   createdAt: string;
+  /** Last change (ISO). The notes file has two writers (the tab, agents): copies are merged per note, the later one wins. */
+  updatedAt?: string;
   /** Addressed. Kept rather than deleted so the exchange stays readable. */
   resolved: boolean;
   /** "human" | an agent's name — who left it. */

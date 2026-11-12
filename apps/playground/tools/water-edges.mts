@@ -37,6 +37,8 @@ import {
   fittedFalls,
   FALL_LIP_OFFSET,
   measureFallLip,
+  meshedFallField,
+  resolveCellMesher,
   meshOutline,
   solidAt,
   triangleSolidProbe,
@@ -228,10 +230,17 @@ export function sceneSolid(assets: string, doc: SceneDoc, field: WorldField | nu
  * everything is open ocean) or, in a world without one, on the body's own outer rim over ground well under the sea.
  * Null for any other body: a placed pond's open edge stays a fault however far out it is.
  */
+/** Metres over sea level within which a water sheet counts as lying ON the sea (seaHorizon). */
+export const SEA_SLICK_M = 0.5;
 export function seaHorizon(field: WorldField | null, b: Pick<SceneBody, "surfaceY" | "world">): ((x: number, z: number) => boolean) | undefined {
   if (!field) return undefined;
   const sea = field.recipe.seaLevel ?? 0;
-  if (Math.abs(b.surfaceY - sea) > 0.25) return undefined;
+  // A SHEET LYING ON THE SEA (a stain, a slick: n-chapel2 2026-11-10, the Tide Chapel's red weep, held a few cm over
+  // the sea so it does not flicker in it): where the ground under its edge is under the sea, that edge rests on the
+  // sea's own surface, not on air. Over dry ground (a beach) its edge is judged as any other.
+  const lift = b.surfaceY - sea;
+  if (lift > 0.05 && lift <= SEA_SLICK_M) return (x, z) => field.height(x, z) < sea - 0.3;
+  if (Math.abs(lift) > 0.25) return undefined;
   const limit = (field.recipe as any).bounds?.limit as number | undefined;
   if (limit) return (x, z) => Math.hypot(x, z) >= limit;
   let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
@@ -271,6 +280,10 @@ export function worldCurtains(field: WorldField, area: Area = {}, materialOf?: (
   const measures: any[] = [];
   const size = field.recipe.cellSize;
   const probe = fieldSolidProbe(field);
+  // an MC cell DRAWS its rock bridged between lattice samples, and the curtain hugs that (fall-fit.ts meshedFallField):
+  // the face gap is measured against the drawn rock there, the exact field in a DC cell
+  const drawn = meshedFallField(field, field.voxelSize);
+  const drawnProbe = fieldSolidProbe({ density: drawn.density, height: (x: number, z: number) => field.height(x, z), voxelSize: field.voxelSize, planarNear: () => true });
   const docs = new Map<string, { entities: Record<string, unknown> }>();
   const chunk = (cx: number, cz: number) => {
     const k = `${cx},${cz}`;
@@ -312,7 +325,7 @@ export function worldCurtains(field: WorldField, area: Area = {}, materialOf?: (
         }
       }
     }
-    const fit = curtainFit(probe, pos, fall, upper, { cols: curtainColumns(ent.components.mesh.source.uv1s) });
+    const fit = curtainFit(resolveCellMesher(field, cx, cz, "auto") === "mc" ? drawnProbe : probe, pos, fall, upper, { cols: curtainColumns(ent.components.mesh.source.uv1s) });
     measures.push({ fall: index, river: fall.river, lipShift: lip.shift, lipFound: lip.found, topGap: r2(fit.topGap), faceGap: r2(fit.faceGap), free: fit.free, inRock: fit.inRock, landed: fit.landed, landsAbovePool: r2(fit.landsAbovePool) });
     for (const f of fit.faults) {
       const at = fit.worstAt ?? [lx, fall.top, lz];

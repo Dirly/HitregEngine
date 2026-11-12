@@ -1083,7 +1083,7 @@ export class PostChain {
       // already has — so nothing here touches the MRT, and the {output,
       // emissive} split that fixed the bloom freeze-and-flare is untouched.
       if (options.volumetric.lights.length === 0 && options.volumetric.screenSun) {
-        this.screenShafts = new ScreenShafts(sceneColor, scenePass.getTextureNode("depth"), camera, options.volumetric.screenSun, options.volumetric.settings);
+        this.screenShafts = new ScreenShafts(sceneColor, scenePass.getTextureNode("depth"), camera, options.volumetric.screenSun, options.volumetric.settings, emissiveColor);
         color = this.screenShafts.outputNode as unknown as Tsl;
       }
       const shafts = options.volumetric.lights.length === 0 ? null : VolumetricShafts.create({

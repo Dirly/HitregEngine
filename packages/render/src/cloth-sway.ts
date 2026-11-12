@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
 import { add, float, mul, positionLocal, uniform, attribute } from "three/tsl";
 import { asNodeMaterial } from "./node-material.js";
+import { onMaterialMapsWired } from "./material-maps.js";
 
 /**
  * TSL nodes are structurally typed by their component count, and `uniform()`
@@ -369,8 +370,22 @@ function applySwayNode(mesh: THREE.Mesh, swayUniform: ReturnType<typeof uniform>
 
   const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
   const cloned = list.map((source) => {
-    const node = asNodeMaterial(source as THREE.Material).clone() as THREE.NodeMaterial;
-    node.positionNode = add(positionLocal, offset);
+    const make = (): THREE.NodeMaterial => {
+      const material = asNodeMaterial(source as THREE.Material).clone() as THREE.NodeMaterial;
+      material.alphaTest = source.alphaTest;
+      material.positionNode = add(positionLocal, offset);
+      return material;
+    };
+    const node = make();
+    // Material assets can finish loading after the character. Keep this
+    // per-character cloth copy in step with the source's arriving textures.
+    onMaterialMapsWired(source, () => {
+      const fresh = make();
+      node.copy(fresh);
+      node.alphaTest = fresh.alphaTest;
+      node.needsUpdate = true;
+      fresh.dispose();
+    });
     return node;
   });
   mesh.material = Array.isArray(mesh.material) ? cloned : cloned[0]!;

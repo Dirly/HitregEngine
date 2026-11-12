@@ -52,6 +52,17 @@ describe("boss-gate", () => {
     expect(o.position.y).toBeCloseTo(2, 3);
   });
 
+  it("slides aside by `slide` instead of sinking when one is given", () => {
+    const { o, netState, step } = run({ boss: "keeper", slide: [6, 0, -2], seconds: 2 });
+    step(1);
+    expect(o.position.x).toBeCloseTo(0, 5);
+    netState.set("combat/keeper.dead", true);
+    step(3);
+    expect(o.position.x).toBeCloseTo(6, 3);
+    expect(o.position.y).toBeCloseTo(10, 3);
+    expect(o.position.z).toBeCloseTo(-2, 3);
+  });
+
   it("is clock-driven (computed on every peer, never replicated)", () => {
     const registry = new ScriptRegistry(); registerBuiltinScripts(registry);
     expect(isClockDrivenScript(registry.get("boss-gate"))).toBe(true);

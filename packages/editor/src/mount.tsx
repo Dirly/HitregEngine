@@ -82,6 +82,8 @@ export interface MountOptions {
   onPinCreateForEntity?: (entityId: string) => void;
   onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
   onPinDelete?: (id: string) => void;
+  /** Send every written draft note to the agent inbox in one batch (the notes badge's button). */
+  onPinSendDrafts?: () => void;
   onFocusPoint?: (point: [number, number, number]) => void;
   saveAsset?: (file: string, content: string) => void;
   /** Installed engine/plugin tools. */
@@ -158,6 +160,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       onPinCreateForEntity={options.onPinCreateForEntity}
       onPinUpdate={options.onPinUpdate}
       onPinDelete={options.onPinDelete}
+      onPinSendDrafts={options.onPinSendDrafts}
       onFocusPoint={options.onFocusPoint}
       saveAsset={options.saveAsset}
       tools={options.tools}

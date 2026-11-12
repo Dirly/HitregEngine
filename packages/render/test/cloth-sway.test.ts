@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three/webgpu";
 import { markClothVertices, ClothSwaySystem, DEFAULT_CLOTH_SWAY } from "../src/cloth-sway.js";
+import { materialSchema } from "@hitreg/core";
+import { materialForId } from "../src/scene-builder.js";
+import { waitForMaterialMaps } from "../src/material-maps.js";
 
 /**
  * Build a mesh out of separate, non-touching boxes — the shape a character
@@ -32,6 +35,39 @@ function character(): THREE.Mesh {
 }
 
 const HEIGHT = 1.8;
+
+it("keeps late body textures and cutouts when cloth is registered before maps arrive", async () => {
+  let deliver!: (texture: THREE.Texture) => void;
+  const loader = vi.spyOn(THREE.TextureLoader.prototype, "loadAsync").mockImplementation(
+    () => new Promise(resolve => { deliver = resolve; }),
+  );
+  try {
+    const source = materialForId("cloth/late", {
+      resolveMaterial: () => materialSchema.parse({ map: "cloth-late.png", alphaTest: 0.5 }),
+      resolveTexture: () => "/cloth-late.png",
+    }, new Map()) as THREE.MeshStandardNodeMaterial;
+    const mesh = character();
+    mesh.material = source;
+    const system = new ClothSwaySystem();
+    expect(system.register("ogre", mesh, DEFAULT_CLOTH_SWAY)).toBe(1);
+    const cloth = mesh.material as THREE.MeshStandardNodeMaterial;
+    const position = cloth.positionNode;
+    expect(cloth).not.toBe(source);
+    expect(cloth.alphaTest).toBe(0.5);
+    expect(cloth.colorNode ?? null).toBeNull();
+    deliver(new THREE.DataTexture(new Uint8Array([180, 80, 40, 255]), 1, 1));
+    await waitForMaterialMaps([source]);
+    expect(cloth.colorNode).toBe(source.colorNode);
+    expect(cloth.positionNode).toBeTruthy();
+    expect(cloth.positionNode).not.toBeNull();
+    expect(cloth.alphaTest).toBe(0.5);
+    expect(source.positionNode ?? null).toBeNull();
+    expect(position).toBeTruthy();
+    system.update(1 / 60);
+    system.update(1 / 60);
+    expect(system.swayOf("ogre")).not.toBeNull();
+  } finally { loader.mockRestore(); }
+});
 
 describe("cloth panel selection", () => {
   it("finds the hanging panels and leaves the body alone", () => {

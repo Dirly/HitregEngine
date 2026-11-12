@@ -60,6 +60,7 @@ import {
 import { encodePng, decodePng } from "./_png.mjs";
 import { findAsset } from "./_closure.mjs";
 import { updateJsonFile } from "./_scene-write.mts";
+import { exteriorOrExit, placeOfFeature, projectDirOf } from "./_exterior.mts";
 import { paintPaletteFault } from "./_zone-palette.mts";
 
 export interface OpHost {
@@ -185,6 +186,12 @@ export function commandOp(host: OpHost): void {
   let current = recipe;
   const inverse: RecipeEdit[] = [];
   const batch = operatorDocs(recipe, apply!, fail, host.project);
+  // EXTERIOR CHAIN (tools/_exterior.mts, Derek 2026-11-10 Rustgut): an operator a place owns (pb-<place>-..., or named for
+  // it at its site) is that place's build — applied only after its chain is complete (or an owner --no-concept-ruling)
+  if (!argv.includes("--dry-run")) for (const doc of batch) {
+    const place = placeOfFeature(projectDirOf(host.project), path.basename(file, ".json"), recipe, doc as Record<string, unknown>);
+    if (place) exteriorOrExit(host.project, path.basename(file, ".json"), place, `worldgen op --apply ${String(doc.id ?? "")}`, recipe);
+  }
   // ids of this batch still to apply: the cascade leaves them to their own (new) doc instead of re-applying the old one
   const pending = new Set(batch.map((d) => String(d.id ?? "")));
   for (const doc of batch) {

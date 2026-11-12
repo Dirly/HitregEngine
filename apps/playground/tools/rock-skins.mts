@@ -212,7 +212,9 @@ function rockPrefab(project: string, id: string): { root: string; mesh: any; tag
     const mesh = e?.components?.mesh;
     const tags: string[] = e?.tags ?? [];
     const asset: string = mesh?.source?.assetId ?? "";
-    if (mesh && (tags.includes("rock-kit") || /^rock-kit\//.test(asset)) && !/^rock-kit\/shelf-/.test(asset)) out = { root, mesh, tags };
+    // a `props variant` of a rock-kit model (tag prop-variant) IS its own skin (a salt-crusted slab): never re-skinned
+    // to the zone rock or capped (r-go-scarp2 2026-11-11: the salt slabs drew as dark rock with snow caps)
+    if (mesh && (tags.includes("rock-kit") || /^rock-kit\//.test(asset)) && !/^rock-kit\/shelf-/.test(asset) && !tags.includes("prop-variant")) out = { root, mesh, tags };
   }
   prefabCache.set(key, out);
   return out;

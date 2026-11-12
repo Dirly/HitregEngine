@@ -47,3 +47,12 @@ test("world positions compose parent scale", () => {
   const at = worldPositions({ entities: { a: { components: { transform: { position: [1, 0, 0], scale: [2, 2, 2] } } }, b: { parent: "a", components: { transform: { position: [1, 1, 1] } } } } });
   assert.deepEqual(at("b"), [3, 2, 2]);
 });
+
+test("a draft-installed place and a planned (unbuilt) place carry their state for the draft colour", () => {
+  const draftScene = { entities: { "poi-yard": { name: "The Yard", tags: ["poi", "poi:yard", "draft"], components: { transform: { position: [0, 0, 0] } } }, ...scene.entities } };
+  const data = collectMapData(recipe, draftScene, { world: "t", places: [{ id: "rise", name: "The Rise", kind: "ruin", x: 5, z: 5 }] });
+  const place = (name: string) => data.markers.find((m) => m.kind === "place" && m.name === name)!;
+  assert.equal(place("The Yard").detail, "draft");
+  assert.equal(place("The Mound").detail, undefined);
+  assert.equal(place("The Rise").detail, "planned");
+});

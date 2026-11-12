@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fallColumn, fallFace, columnReachesPool, fieldSolidProbe, measureFallLip, fitFall, curtainFit, curtainColumns, shoreFoamOnBank, foamLinedBank, type RiverFall } from "../src/index.js";
+import { fallColumn, fallFace, columnReachesPool, meshedFallField, profileFace, fieldSolidProbe, measureFallLip, fitFall, curtainFit, curtainColumns, shoreFoamOnBank, foamLinedBank, type RiverFall } from "../src/index.js";
 
 /** A river at 10 m on a bed at 7 m, ending at a cliff at x = lip; the pool below at 1 m on a floor at 0. */
 function cliff(lip: number, overhang?: { below: number; back: number }) {
@@ -143,5 +143,32 @@ describe("fallColumn", () => {
     expect(at(-2)).toBe(10);
     expect(at(-0.5)).toBeGreaterThan(9.7); // within one climb step of the rock top
     expect(at(1)).toBe(0);
+  });
+});
+
+describe("meshedFallField (the hug reads the rock as marching cubes draws it)", () => {
+  // a face slanting across the lattice: rock where x < 20 + (10 - y) * 0.9, a rib the mesher bridges between 2 m samples
+  const slant = {
+    density: (x: number, y: number, _z: number): number => (y < 0 ? -1 : Math.round(x / 0.7) % 2 === 0 ? x - (19 + (10 - y) * 0.9) : x - (20.4 + (10 - y) * 0.9)),
+    ground: (x: number, _z: number): number => Math.max(0, 10 - (x - 20.4) / 0.9),
+  };
+  it("is never less solid than the field, and is solid where the lattice interpolation is", () => {
+    const meshed = meshedFallField(slant, 2);
+    for (let x = 18; x < 30; x += 0.37) for (let y = 0.5; y < 10; y += 0.61) {
+      if (slant.density(x, y, 0) < 0) expect(meshed.density(x, y, 0)).toBeLessThan(0);
+    }
+    // a lattice corner is the field itself
+    expect(meshed.density(22, 4, 0)).toBeCloseTo(slant.density(22, 4, 0), 9);
+  });
+  it("puts a column's face at or outside the exact one (the sheet never stands behind drawn rock)", () => {
+    const f = { dirX: 1, dirZ: 0 };
+    const exact = fallColumn(slant, f, 20, 0, 0, -4, 14);
+    const drawn = fallColumn(meshedFallField(slant, 2), f, 20, 0, 0, -4, 14);
+    for (let y = 1; y < 9; y += 1) {
+      const a = profileFace(exact, y, -4, 14).face, b = profileFace(drawn, y, -4, 14).face;
+      expect(b).not.toBeNull();
+      expect(b!).toBeGreaterThanOrEqual(a! - 1e-6);
+      expect(b! - a!).toBeLessThan(2.5); // within a lattice square
+    }
   });
 });

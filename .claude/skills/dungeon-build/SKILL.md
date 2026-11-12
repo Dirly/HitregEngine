@@ -11,6 +11,8 @@ test, exceptions, porting), `tools/dungeon-room-kit/README.md` (room JSON, stair
 Workflow skill: `hitreg-dungeon-authoring`. Design rules: `dungeon-standards`. Light: `dungeon-lighting`.
 Doors: `portals`.
 
+The pipeline's FIRST stage is `exterior` (`tools/dungeon-pipeline/exterior.mjs`): the world door's place must have its exterior chain (`zonegen exterior <world> --project <p> --poi <door>`), else every later stage reads BLOCKED. Build the door's location, unedited grab, concepts and `zonegen concept-check` before any interior.
+
 Placement quality and self-review: [the Weeping Sun lessons](../dungeon-standards/references/placement-review.md).
 The current recipe still has legacy minimum prop/type and built-piece counts. They are not placement targets:
 review purposeful sparse dressing and use scoped, justified exceptions for those count failures. Decals are
@@ -85,7 +87,8 @@ only (a tomb over the bone cap, an intended ice shine, a passage lit only by the
 - No floor you can fall through: `tools/fall-holes.mts <project> --eyes <floor grid>` floods the drawn floors a body can reach (floor grid, walk route, climbing out of the pools; walls block, wall cavities excluded) and fails every reached floor with no collider under it (FALL) and lists decor drawn without one (ghost: a plinth, a parapet, a sill). Natural rock (caverns) needs a mesh collider, not a box at its foot.
 - A placed point light with no flame of its own (fill, face, rim, stall, lava stand-in) sets `glow: 0`: its default halo hangs as a floating orange ball in mid-air. Dressing hugs corners and walls, the floor stays clear; candles at statue feet, not a brazier at every spot.
 - Scale to the creature: giant halls take a coarser voxel; ramps (<= 20 %) where risers would hit the autostep limit.
-- No stacked fight floors (combat finds ground with a ray straight down): storeys side by side, joined by stairs.
+- Stacked storeys are fine (2026-11-09: ground probes start at the body, `mob-brain` refuses shouts across 3 m of height): keep fight floors that overlap in plan >= 10 m apart. Derek wants verticality: a shared void (pit, shaft, grate) that shows one storey from another. Reference: projects/rustgut.
+- Giant creatures: no player-only pocket (a low ceiling, a gap between props, a recess) to fight them from. Rustgut's `prove.mts fit` floods 1 m cells with a player box and an ogre box and fails any player-reached cell with no ogre-reached cell within 3 m. Keep a clear lane in front of every doorway (its `build-scene.mts` moves set pieces out of them).
 - Noised caves have no straight wall spans: wall-backed props cannot go there; light them with posted lights.
 
 - Arrival safe zone: no pack, patrol point, named, miniboss or boss within 25 m (walked) of any entry-*/exit-* anchor, so a player is never pinned at the door by the fight lock. Encoded: `arrival` gate in tools/dungeon-pipeline (thresholds.json).

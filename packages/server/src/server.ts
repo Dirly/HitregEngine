@@ -48,6 +48,7 @@ import {
   WaterIndex,
   waterQuery,
   waterVolumes,
+  waterExclusions,
   type CharacterBuild,
   type StaffRole,
   type EntityDoc,
@@ -580,7 +581,7 @@ export class GameServer {
     // The same water the client swims in: authored volumes from the scene plus
     // the streaming world's own sea, lakes and rivers. Without it the
     // authority does not know water exists and hauls every swimmer to the bed.
-    const waterIndex = new WaterIndex(waterVolumes(this.world.expanded));
+    const waterIndex = new WaterIndex(waterVolumes(this.world.expanded), waterExclusions(this.world.expanded));
     const exactWater = waterQuery({
       index: waterIndex,
       field: () => this.terrain?.resolved.field ?? null,

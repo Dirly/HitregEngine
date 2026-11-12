@@ -414,6 +414,36 @@ describe("water rocks carry their waterline (cap wet)", () => {
   });
 });
 
+describe("bed rocks stand wholly under the water", () => {
+  it("places only inside bedDepth, never rescaled, tops at least half a metre under the surface", () => {
+    const base = defaultWorldRecipe();
+    const recipe = worldRecipeSchema.parse({
+      ...base, cellSize: 32, resolution: 16,
+      scatter: [{ id: "reef", model: "rock-kit/boulder-m-1.glb", density: 0.05, slopeMax: 0.9, collider: "box", colliderSize: [1.6, 1.1, 1.4], scale: [0.6, 1.4], yOffset: -0.15,
+        water: { mode: "bed", bedDepth: [3, 12] } }],
+    });
+    const real = createWorldField(recipe);
+    const run = (over: number) => {
+      // a still sheet `over` metres above the ground everywhere
+      const level = (x: number, z: number) => real.height(x, z) + over;
+      const field = { ...real, waterNear: () => true, lakeY: level, waterY: level,
+        waterSurface: (x: number, z: number, out: { y: number; kind: string; flowX: number; flowZ: number; floor: number }) => { out.y = level(x, z); out.kind = "lake"; out.flowX = 0; out.flowZ = 0; out.floor = -Infinity; return true; } } as typeof real;
+      const out = [];
+      for (let cz = -3; cz <= 3; cz++) for (let cx = -3; cx <= 3; cx++) out.push(...scatterCell(field, cx, cz));
+      return out;
+    };
+    const deep = run(6);
+    expect(deep.length).toBeGreaterThan(0);
+    for (const i of deep) {
+      expect(i.scale).toBeGreaterThanOrEqual(0.6);
+      expect(i.scale).toBeLessThanOrEqual(1.4);
+      expect(i.rockCap?.wet).toBe(1); // drowned to the top
+    }
+    expect(run(1.2).length).toBe(0); // too shallow: that is an "in" rock's water
+    expect(run(20).length).toBe(0); // deeper than the rule goes
+  });
+});
+
 describe("rock skins: the stone follows the place, the cap follows the ground", () => {
   const base = defaultWorldRecipe();
   // the base slope rock is the cliff role; one zone (all of x < 0) restyles it as slate
